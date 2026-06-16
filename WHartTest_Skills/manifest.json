@@ -1,0 +1,79 @@
+{
+  "version": "1",
+  "updated_at": "2026-05-21T14:38:43Z",
+  "skills": [
+    {
+      "id": "agent-browser-skill",
+      "name": "agent-browser-skill",
+      "description": "基于 agent-browser CLI 的浏览器自动化工具。提供快照获取、元素交互、截图等功能。推荐用于需要页面快照分析、通过 ref 引用交互元素的场景。",
+      "version": "1.0.0",
+      "author": "mgdaas-lab",
+      "tags": ["browser", "automation"],
+      "zip_path": "agent-browser-skill.zip"
+    },
+    {
+      "id": "api-automation",
+      "name": "api-automation",
+      "description": "WHartTest 接口自动化管理工具。用于管理接口模块、数据库配置、环境与变量、自定义函数、接口调试、测试用例、同步配置、任务套件与执行结果。当需要创建接口自动化资源、调试接口、编排用例、执行测试或排查同步问题时使用。",
+      "version": "1.0.0",
+      "author": "mgdaas-lab",
+      "tags": ["api", "automation", "wharttest"],
+      "zip_path": "api-automation-skill.zip"
+    },
+    {
+      "id": "drawio",
+      "name": "drawio",
+      "description": "生成 draw.io 原生 .drawio 图表文件，可选导出为 PNG / SVG / PDF 并内嵌图表 XML（导出后仍可在 draw.io 中继续编辑）。",
+      "description_en": "Generate draw.io diagrams as .drawio files, optionally export to PNG/SVG/PDF with embedded XML",
+      "version": "1.0.0",
+      "author": "mgdaas-lab",
+      "tags": ["diagram", "drawio"],
+      "zip_path": "draw-skill.zip"
+    },
+    {
+      "id": "playwright-skill",
+      "name": "playwright-skill",
+      "description": "浏览器自动化执行工具。用于执行 Web 页面测试、表单填写、登录验证、截图等浏览器操作。",
+      "version": "1.0.0",
+      "author": "mgdaas-lab",
+      "tags": ["playwright", "browser", "automation"],
+      "zip_path": "playwright-skill.zip"
+    },
+    {
+      "id": "playwright-cli",
+      "name": "playwright-cli",
+      "description": "基于微软官方 @playwright/cli 的交互式浏览器自动化技能。通过标准化命令行会话实现极高稳定性的浏览器操作，防止挂起超时。",
+      "version": "1.0.0",
+      "author": "Microsoft Corporation",
+      "tags": ["playwright", "browser", "automation"],
+      "zip_path": "playwright-cli.zip"
+    },
+    {
+      "id": "ui-automation",
+      "name": "ui-automation",
+      "description": "WHartTest UI 自动化管理工具。用于创建、编辑、删除 UI 测试模块、页面、元素、页面步骤和测试用例。支持执行记录查询和错误分析。当需要将浏览器技能获取到的页面元素保存到平台、创建 UI 自动化用例、执行测试或分析执行结果时使用。元素采集默认优先 agent-browser-skill，无法覆盖时再用 playwright-skill 兜底。",
+      "version": "1.0.0",
+      "author": "mgdaas-lab",
+      "tags": ["ui", "automation", "wharttest"],
+      "zip_path": "ui-automation-skill.zip"
+    },
+    {
+      "id": "weknora-kb",
+      "name": "weknora-kb",
+      "description": "WeKnora知识库查询工具。用于在WeKnora知识管理平台中搜索知识库文档片段。当用户需要检索知识库内容、搜索相关文档时使用。",
+      "version": "1.0.0",
+      "author": "mgdaas-lab",
+      "tags": ["kb", "weknora"],
+      "zip_path": "weknora-kb-skill.zip"
+    },
+    {
+      "id": "whart-test",
+      "name": "whart-test",
+      "description": "WHartTest 测试管理平台工具集。用于管理项目、模块、测试用例的增删改查，以及测试截图上传。当用户需要操作测试用例、查询项目信息或上传截图时使用。",
+      "version": "1.0.0",
+      "author": "mgdaas-lab",
+      "tags": ["wharttest", "test-management"],
+      "zip_path": "wharttest_skills.zip"
+    }
+  ]
+}
