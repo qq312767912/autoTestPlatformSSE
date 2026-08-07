@@ -1,64 +1,184 @@
-# WHartTest - AI驱动的智能测试用例生成平台
+# WHartTest - AI驱动的智能自动化测试平台
 
 中文 | [English](README_EN.md)
 
 ## 项目简介
 
-WHartTest 是基于 **Django 5.2 + DRF** 与现代大模型技术打造的 **AI 驱动智能测试平台**。平台采用前后端分离的 Monorepo 架构，由 6 个子项目组成（Django 后端、Vue 前端、UI 自动化执行器、MCP 工具服务、Agent 技能库、在线文档编辑器），聚合自然语言理解、知识库检索与嵌入搜索能力，结合 **LangChain/LangGraph** 与 **MCP（Model Context Protocol）** 工具调用，实现从需求到可执行测试用例的自动化生成、管理与执行，为测试团队提供完整的智能测试管理解决方案。
+WHartTest 是基于 **Django 5.2 + DRF** 与现代大模型技术打造的 **AI 驱动智能自动化测试平台**。平台采用前后端分离的 Monorepo 架构，包含 Django 后端、Vue 前端、UI 自动化执行器、MCP 工具服务、Agent 技能库和微信插件宿主服务，聚合自然语言理解、知识库检索与嵌入搜索能力，结合 **LangChain/LangGraph** 与 **MCP（Model Context Protocol）** 工具调用，实现从需求到可执行测试用例的自动化生成、管理与执行。
 
-## 文档
-详细文档请访问：https://docs.wharttest.mgdaas.cn:4430/
+## 操作手册
+https://docs.wharttest.mgdaas.com/
 
-## 快速开始
+## Windows 11 外网部署
 
-### Docker 部署（推荐 - 开箱即用）
+### 环境要求
+
+- Windows 11 64 位，建议至少 16 GB 内存和 30 GB 可用磁盘空间。
+- Docker Desktop，并启用 WSL 2 后端和 Docker Compose。
+- Git for Windows；推荐在 WSL 2 Ubuntu 或 Git Bash 中执行命令。
+- 可访问 GitHub、Docker Hub、GHCR、PyPI 和 npm Registry。
+
+### 首次部署
+
+本仓库的日常开发和部署分支为 `dev`：
 
 ```bash
-# 1. 克隆仓库
-git clone https://github.com/MGdaasLab/WHartTest.git
-cd WHartTest
-
-# 2. 准备配置（使用默认配置，包含自动生成的API Key）
+git clone -b dev https://github.com/qq312767912/autoTestPlatformSSE.git
+cd autoTestPlatformSSE
 cp .env.example .env
-
-# 3. 一键启动（以下两种方式二选一）
-# 方式一：使用部署脚本（推荐，支持镜像源择优）
-./run_compose.sh
-
-# 方式二：直接使用 docker-compose
-docker-compose up -d
-
-# 4. 访问系统
-# http://localhost:8913 (admin/admin123456)
 ```
 
-**就这么简单！** 系统会自动创建默认API Key，MCP服务开箱即用。
+请先修改 `.env` 中的数据库密码、Django Secret Key、管理员密码、API Key 和模型服务配置，不要将正式 `.env` 提交到 Git。
 
-### 统一部署脚本
-
-如果你使用仓库自带脚本部署，现在启动后会先让你在“远程拉镜像”和“本地构建镜像”之间二选一：
+当前推荐从源码构建并启动：
 
 ```bash
-./run_compose.sh
+./run_compose.sh local
 ```
 
+构建完成后访问：
 
-> ⚠️ **生产环境提示**：请登录后台删除默认API Key并创建新的安全密钥。
+- Web 前端：<http://localhost:8913>
+- Django 后端：<http://localhost:8912>
+- MCP 服务：<http://localhost:8914>
+- Playwright MCP：<http://localhost:8916>
+- Qdrant：<http://localhost:8918>
 
+如已发布可用的 GHCR 业务镜像，也可以使用远程镜像模式：
+
+```bash
+./run_compose.sh remote
+```
+
+### 日常升级
+
+升级前建议备份 `.env`、`data/` 和 PostgreSQL 数据库，然后执行：
+
+```bash
+git switch dev
+git pull --ff-only origin dev
+./run_compose.sh local
+```
+
+如果使用远程镜像模式：
+
+```bash
+git switch dev
+git pull --ff-only origin dev
+docker compose pull
+docker compose up -d --remove-orphans
+docker compose ps
+```
+
+Compose 更新容器时会保留 PostgreSQL、Redis 和 Qdrant 命名卷以及项目下的 `data/` 目录。不要执行 `docker compose down -v`，该命令会删除命名卷中的持久化数据。
+
+### 回滚
+
+先在升级前记录当前提交：
+
+```bash
+git rev-parse HEAD
+```
+
+需要回滚时切换到之前确认可用的提交并重新启动：
+
+```bash
+git checkout <previous-commit>
+./run_compose.sh local
+```
+
+确认问题解决后再切回 `dev`。如果新版本包含数据库迁移，回滚前应先恢复对应版本的数据库备份。
+
+### 常用运维命令
+
+```bash
+# 查看服务状态
+docker compose ps
+
+# 查看最近日志
+docker compose logs --tail=200
+
+# 重启服务
+docker compose restart
+
+# 停止服务但保留数据卷
+docker compose down
+```
+
+## 核心功能
+
+### 1. AI 智能用例生成
+- 支持基于需求文档、业务描述、知识库上下文自动生成测试用例。
+- 结合 LangChain/LangGraph 编排多轮推理流程，支持上下文补全、用例优化与结果追踪。
+- 支持 Prompt 模板、用例模板与生成策略配置，便于沉淀团队测试规范。
+
+### 2. 需求管理与智能评审
+- 支持需求文档上传、解析、查看与在线编辑，覆盖需求导入到评审报告的完整流程。
+- 支持需求拆分、专项分析、上下文检查与版本化报告查看。
+- 可基于需求内容联动知识库与大模型能力，辅助发现需求遗漏、歧义和测试关注点。
+
+### 3. 测试用例管理
+- 支持按项目、模块维护功能测试用例，包含用例名称、等级、类型、前置条件、步骤、预期结果、备注等信息。
+- 提供列表视图与思维导图视图，支持模块/用例的快速创建、编辑、复制、粘贴、拖拽整理与导入导出。
+- 支持 AI 全自动编写测试用例，可基于需求文档、业务上下文、知识库和已有用例自动生成完整用例结构与测试步骤。
+- 支持 AI 全自动编辑、优化和修复用例内容，包括补全前置条件、改写步骤、完善预期结果、修复不规范用例与提升覆盖度。
+- 支持 AI 全自动运行用例与记录执行过程，结合执行日志、截图和报告自动分析失败原因并生成修复建议。
+- 支持测试套件管理、用例选择、批量组织与执行历史查看。
+
+### 4. 接口自动化测试
+- 支持接口模块、接口定义、环境变量、全局 Header、数据库配置、函数与标签等接口测试资产管理。
+- 支持接口用例编排、测试任务创建、任务执行、结果明细与测试报告查看。
+- 支持 AI 全自动编写接口测试用例，可根据接口定义、请求参数、响应结构和业务上下文自动生成测试步骤、断言、变量提取与前后置脚本。
+- 支持 AI 全自动编辑和修复接口测试配置，包括请求参数、Header、环境变量、数据库校验、函数脚本、断言规则与依赖变量。
+- 支持接口调试运行、用例运行和任务批量运行，并可由 AI 自动分析失败结果、执行日志和响应内容，定位问题并生成修复方案。
+- 支持接口同步、环境切换与多项目隔离，便于统一管理 API 自动化测试流程。
+
+### 5. UI 自动化测试
+- 内置 UI 自动化执行器能力，支持执行机管理、环境配置、页面对象、页面步骤、公共数据、元素定位与用例步骤管理。
+- 支持 AI 全自动编写 UI 自动化用例和脚本，可根据页面、元素、业务流程和测试目标自动生成页面操作步骤、元素定位、断言与测试数据。
+- 支持 AI 全自动编辑和修复 UI 自动化步骤，对元素定位失效、等待时机不稳定、页面状态异常、断言失败等问题进行自动分析与修复建议生成。
+- 支持 AI 全自动运行 UI 用例、调试执行和批量执行，执行过程中可采集日志、截图、视频与 Trace，便于回放和定位问题。
+- 可与测试用例、任务中心联动，实现 UI 自动化任务的统一调度与追踪。
+
+### 6. Agent 对话与 MCP 工具调用
+- 提供基于 LangGraph 的智能对话入口，支持在项目上下文中进行测试分析、用例生成和工具调用。
+- 支持远程 MCP 配置管理，让 Agent 调用外部工具服务扩展测试、分析和自动化能力。
+- 支持工具审批、系统提示词、Token 用量展示与多模型配置，提升 AI 调用的可控性与安全性。
+
+### 7. 知识库与检索增强
+- 支持知识库创建、文档上传、文档分块、向量化处理、检索查询与统计查看。
+- 支持嵌入模型、Reranker、全局知识库配置与连接测试。
+- 可将产品文档、接口文档、业务规则等沉淀为项目知识，为 AI 生成和评审提供 RAG 上下文。
+
+### 8. Skills 技能库
+- 支持 Skills 安装、管理与技能商店来源配置，用于扩展 Agent 的专项能力。
+- 可沉淀 Playwright 等自动化技能，让 AI 具备更贴近实际测试场景的执行能力。
+- Skills 具备较高系统权限，建议仅在内网或可信环境中部署使用。
+
+### 9. 任务中心与执行追踪
+- 提供统一任务中心，用于创建、执行和查看自动化任务。
+- 支持任务日志查看、UI 用例选择、执行状态追踪与失败问题排查。
+- 结合功能用例、接口测试与 UI 自动化，形成统一的测试执行入口。
+
+### 10. 项目、团队与系统管理
+- 支持项目管理、用户管理、组织管理、权限管理与 API Key 管理。
+- 支持 LLM 配置管理、多模型接入、版本更新提示、深色/浅色主题与中英文切换。
+- 支持操作日志记录与清理配置，便于审计平台关键操作。
 
 ## 联系方式
 
 如有问题或建议，请通过以下方式联系：
 - 提交 Issue
 - 项目讨论区
-- 添加微信时请备注   github   ，拉你进微信群聊。
-- 加群获取最新更新信息及SKill。
+- 微信群聊。
+- 加群获取最新更新信息。
 
-<img width="400" alt="image" src="docs/public/img/wx.jpg" />
+ 
+## 添加群聊
 
-qq群：
-1. 8xxxxxxxx0（已满）
-2. 1017708746
+<img width="400" alt="image" src="img/wx.png" />
+
+
 ---
 ## 【重要安全警示】关于 v1.4.0 以及后续版本 Skills 权限及部署安全的声明
 鉴于 Skills 模块具备较高的系统执行权限，为了保障您的数据与环境安全，我们做出以下严正提示：
