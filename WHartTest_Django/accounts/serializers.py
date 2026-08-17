@@ -5,7 +5,12 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework_simplejwt.serializers import (
     TokenObtainPairSerializer as BaseTokenObtainPairSerializer,
 )
-from .login_crypto import LoginCredentialError, decrypt_credentials
+from .login_crypto import (
+    LoginCredentialError,
+    decrypt_credentials,
+    decrypt_password,
+    is_encrypted_password,
+)
 
 # 权限名称翻译映射
 # 您可以根据实际的权限名称进行扩展
@@ -1286,6 +1291,13 @@ class MyTokenObtainPairSerializer(BaseTokenObtainPairSerializer):
                 )
             except LoginCredentialError as exc:
                 raise serializers.ValidationError({"encrypted_payload": str(exc)}) from exc
+        elif is_encrypted_password(attrs.get("password", "")):
+            decrypted_password = decrypt_password(attrs["password"])
+            if decrypted_password is None:
+                raise serializers.ValidationError(
+                    {"password": "密码解密失败，请刷新页面后重试。"}
+                )
+            attrs["password"] = decrypted_password
         elif not attrs.get("username") or not attrs.get("password"):
             raise serializers.ValidationError({"encrypted_payload": "请提供加密的登录凭据。"})
 

@@ -40,7 +40,28 @@ def public_key_payload():
         "public_key": public_pem,
         "key_id": hashlib.sha256(public_pem.encode("ascii")).hexdigest()[:16],
         "expires_in": 300,
+        # JSEncrypt 使用 PKCS#1 v1.5；保留 algorithm 字段供旧版 OAEP 客户端使用。
+        "password_padding": "PKCS1_v1_5",
     }
+
+
+def is_encrypted_password(value: str) -> bool:
+    """判断是否为 JSEncrypt 生成的 2048-bit RSA Base64 密文。"""
+    if not isinstance(value, str) or len(value) < 100:
+        return False
+    try:
+        return len(base64.b64decode(value, validate=True)) == 256
+    except (ValueError, TypeError):
+        return False
+
+
+def decrypt_password(ciphertext: str):
+    """解密 JSEncrypt 密码字段，失败时返回 None。"""
+    try:
+        encrypted = base64.b64decode(ciphertext, validate=True)
+        return _private_key().decrypt(encrypted, padding.PKCS1v15()).decode("utf-8")
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return None
 
 
 def decrypt_credentials(ciphertext: str, key_id: str):

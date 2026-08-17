@@ -66,6 +66,33 @@ class EncryptedLoginTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('已使用', str(response.json()))
 
+    def test_jsencrypt_password_field_can_obtain_token(self):
+        key_response = self.client.get('/api/auth/login-key/')
+        key_data = key_response.json()['data']
+        public_key = serialization.load_pem_public_key(key_data['public_key'].encode('ascii'))
+        ciphertext = public_key.encrypt(b'Secret123!', padding.PKCS1v15())
+
+        response = self.client.post(
+            '/api/token/',
+            {
+                'username': self.user.username,
+                'password': base64.b64encode(ciphertext).decode('ascii'),
+            },
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertIn('access', response.json()['data'])
+
+    def test_plaintext_password_remains_compatible(self):
+        response = self.client.post(
+            '/api/token/',
+            {'username': self.user.username, 'password': 'Secret123!'},
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+
 
 class MyTokenObtainPairViewTests(SimpleTestCase):
     def setUp(self):

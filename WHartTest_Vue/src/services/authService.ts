@@ -1,7 +1,7 @@
 // 认证服务
 import axios from 'axios';
 import { request } from '@/utils/request';
-import { encryptLoginCredentials } from '@/utils/loginEncryption';
+import { encryptPassword } from '@/utils/crypto';
 
 // 用户信息结构
 interface UserInfo {
@@ -72,11 +72,11 @@ export const login = async (username: string, password: string): Promise<AuthSer
   const CSRF_TOKEN = 'kMNlyN2uN6c2QRr9r2rDQbfxBGsVzjPFY1h1as93VNMRTjo5kRpDbVq5ii8FFcKW';
 
   try {
-    const encryptedCredentials = await encryptLoginCredentials(username, password);
+    const encryptedPassword = await encryptPassword(password);
     const response = await request<ApiTokenResponseData>({
       url: API_URL,
       method: 'POST',
-      data: encryptedCredentials,
+      data: { username, password: encryptedPassword },
       headers: {
         'Content-Type': 'application/json',
         'X-CSRFTOKEN': CSRF_TOKEN,
@@ -129,8 +129,9 @@ export const login = async (username: string, password: string): Promise<AuthSer
         // 请求已发出，但没有收到响应 (例如网络错误)
         errorMessage = '认证服务暂未就绪，请稍后重试。';
       }
+    } else if (error instanceof Error) {
+      errorMessage = error.message;
     }
-    // 对于其他类型的错误，保留通用消息
     return {
       success: false,
       error: errorMessage,
