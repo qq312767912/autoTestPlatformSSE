@@ -172,7 +172,7 @@ services:
       context: ./WHartTest_MCP
       dockerfile: Dockerfile
       args:
-        PYTHON_BASE_IMAGE: ${DOCKER_PYTHON_BASE_IMAGE:-python:3.11-slim}
+        PYTHON_BASE_IMAGE: ${DOCKER_MCP_PYTHON_BASE_IMAGE:-python:3.11-alpine}
         APT_BASE_URL: ${DOCKER_APT_BASE_URL:-http://deb.debian.org}
         PIP_INDEX_URL: ${DOCKER_PIP_INDEX_URL:-https://pypi.org/simple}
         PIP_INDEX_FALLBACKS: ${DOCKER_PIP_INDEX_FALLBACKS:-}
