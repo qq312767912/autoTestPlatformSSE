@@ -75,8 +75,8 @@
         </button>
         <!-- 版本号显示 -->
         <a-popover v-if="hasUpdate" position="bottom" trigger="hover" content-class="version-popover">
-          <a 
-            class="version-badge update-available" 
+          <a
+            class="version-badge update-available"
             :href="versionInfo?.releaseUrl || 'https://github.com/mgdaaslab/WHartTest/releases'"
             target="_blank"
           >
@@ -92,7 +92,7 @@
               <div class="version-update-notes" v-if="releaseNotesPreview">
                 {{ releaseNotesPreview }}
               </div>
-              <a 
+              <a
                 class="version-update-footer"
                 :href="versionInfo?.releaseUrl || 'https://github.com/mgdaaslab/WHartTest/releases'"
                 target="_blank"
@@ -103,7 +103,7 @@
           </template>
         </a-popover>
         <span v-else class="version-badge">{{ tl('当前版本:') }} {{ currentVersion }}</span>
-        
+
         <a-avatar class="avatar">
           <span>{{ userInitial }}</span>
         </a-avatar>
@@ -206,10 +206,19 @@
             <a href="#" @click="checkProjectAndNavigate($event, '/langgraph-chat')">{{ chatMenuLabel }}</a>
           </a-menu-item>
 
-          <a-menu-item key="knowledge-management" v-if="hasKnowledgePermission">
+          <!-- 知识库管理子菜单 -->
+          <a-sub-menu key="knowledge-management" v-if="hasKnowledgeMenuItems">
             <template #icon><icon-book /></template>
-            <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-management')">{{ knowledgeMenuLabel }}</a>
-          </a-menu-item>
+            <template #title>{{ knowledgeMenuLabel }}</template>
+            <a-menu-item key="knowledge-list" v-if="hasKnowledgePermission">
+              <template #icon><icon-book /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-management')">{{ knowledgeListLabel }}</a>
+            </a-menu-item>
+            <a-menu-item key="document-anonymization" v-if="hasAnonymizationPermission">
+              <template #icon><icon-safe /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/document-anonymization')">{{ anonymizationMenuLabel }}</a>
+            </a-menu-item>
+          </a-sub-menu>
 
           <!-- 系统管理子菜单 -->
           <a-sub-menu key="settings" v-if="hasSystemMenuItems">
@@ -374,6 +383,7 @@ const automationMenuLabel = computed(() => (locale.value === 'en-US' ? 'Automati
 const tasksMenuLabel = computed(() => (locale.value === 'en-US' ? 'Tasks' : tl('任务中心')));
 const fileManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Files' : tl('文件管理')));
 const knowledgeMenuLabel = computed(() => (locale.value === 'en-US' ? 'RAG' : tl('知识库管理')));
+const knowledgeListLabel = computed(() => (locale.value === 'en-US' ? 'Knowledge List' : tl('知识库列表')));
 const apiKeysMenuLabel = computed(() => (locale.value === 'en-US' ? 'Keys' : tl('KEY管理')));
 const testManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Testing' : tl('测试管理')));
 const caseManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Cases' : tl('用例管理')));
@@ -388,6 +398,7 @@ const operationLogsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Logs'
 const modelsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Models' : tl('LLM配置')));
 const mcpMenuLabel = computed(() => (locale.value === 'en-US' ? 'MCP' : tl('MCP配置')));
 const skillsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Skills' : tl('Skills管理')));
+const anonymizationMenuLabel = computed(() => (locale.value === 'en-US' ? 'Anonymize' : tl('文档脱敏')));
 
 // 更新说明预览（显示完整内容）
 const releaseNotesPreview = computed(() => {
@@ -444,7 +455,8 @@ const activeMenu = computed(() => {
   if (path.startsWith('/langgraph-chat')) return 'langgraph-chat';
   if (path.startsWith('/task-center')) return 'task-center';
   if (path.startsWith('/file-management')) return 'file-management';
-  if (path.startsWith('/knowledge-management')) return 'knowledge-management';
+  if (path.startsWith('/knowledge-management')) return 'knowledge-list';
+  if (path.startsWith('/document-anonymization')) return 'document-anonymization';
   if (path.startsWith('/api-keys')) return 'api-keys';
   if (path.startsWith('/remote-mcp-configs')) return 'remote-mcp-configs';
   // 其他路由对应的菜单项
@@ -543,6 +555,15 @@ const hasMcpConfigsPermission = computed(() => {
 
 const hasSkillsPermission = computed(() => {
   return authStore.hasPermission('skills.view_skill');
+});
+
+const hasAnonymizationPermission = computed(() => {
+  return authStore.hasPermission('knowledge.anonymize_document');
+});
+
+// 检查是否有知识库管理菜单项的权限
+const hasKnowledgeMenuItems = computed(() => {
+  return hasKnowledgePermission.value || hasAnonymizationPermission.value;
 });
 
 // 检查是否有测试管理菜单项的权限
@@ -712,7 +733,7 @@ onMounted(async () => {
 
   // 加载项目列表
   await projectStore.fetchProjects();
-  
+
   // 检查版本更新（后台执行，不阻塞页面）
   checkVersion();
 });

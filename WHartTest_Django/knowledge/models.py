@@ -86,7 +86,7 @@ class KnowledgeGlobalConfig(models.Model):
 
     chunk_size = models.PositiveIntegerField(_('默认分块大小'), default=1000)
     chunk_overlap = models.PositiveIntegerField(_('默认分块重叠'), default=200)
-    
+
     updated_at = models.DateTimeField(_('更新时间'), auto_now=True)
     updated_by = models.ForeignKey(
         User,
@@ -103,12 +103,12 @@ class KnowledgeGlobalConfig(models.Model):
 
     def __str__(self):
         return f"知识库全局配置 ({self.get_embedding_service_display()})"
-    
+
     def save(self, *args, **kwargs):
         """确保只有一条记录（单例模式）"""
         self.pk = 1
         super().save(*args, **kwargs)
-    
+
     @classmethod
     def get_config(cls):
         """获取全局配置，如果不存在则创建默认配置"""
@@ -140,7 +140,7 @@ class KnowledgeBase(models.Model):
     is_active = models.BooleanField(_('是否启用'), default=True)
     created_at = models.DateTimeField(_('创建时间'), auto_now_add=True)
     updated_at = models.DateTimeField(_('更新时间'), auto_now=True)
-    
+
     # 文档处理配置（可覆盖全局默认值）
     chunk_size = models.PositiveIntegerField(_('分块大小'), default=1000)
     chunk_overlap = models.PositiveIntegerField(_('分块重叠'), default=200)
@@ -150,6 +150,9 @@ class KnowledgeBase(models.Model):
         verbose_name_plural = _('知识库')
         ordering = ['-created_at']
         unique_together = ['project', 'name']
+        permissions = [
+            ("anonymize_document", "Can anonymize documents in knowledge base"),
+        ]
 
     def __str__(self):
         return f"{self.project.name} - {self.name}"
@@ -234,6 +237,10 @@ class Document(models.Model):
     )
     uploaded_at = models.DateTimeField(_('上传时间'), auto_now_add=True)
     processed_at = models.DateTimeField(_('处理时间'), null=True, blank=True)
+
+    # 脱敏状态
+    is_anonymized = models.BooleanField(_('已脱敏'), default=False)
+    anonymized_at = models.DateTimeField(_('脱敏时间'), null=True, blank=True)
 
     class Meta:
         verbose_name = _('文档')

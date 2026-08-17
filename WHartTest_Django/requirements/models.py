@@ -102,6 +102,10 @@ class RequirementDocument(models.Model):
     # 拆分层级
     last_split_level = models.IntegerField(_('最近拆分层级'), default=0)
 
+    # 脱敏状态
+    is_anonymized = models.BooleanField(_('已脱敏'), default=False)
+    anonymized_at = models.DateTimeField(_('脱敏时间'), null=True, blank=True)
+
     class Meta:
         verbose_name = _('需求文档')
         verbose_name_plural = _('需求文档')
@@ -302,7 +306,7 @@ class ReviewReport(models.Model):
     # 评审内容
     summary = models.TextField(_('评审摘要'), blank=True)
     recommendations = models.TextField(_('改进建议'), blank=True)
-    
+
     # 专项分析详细结果（存储完整的issues, strengths, recommendations等）
     specialized_analyses = models.JSONField(
         _('专项分析详情'),

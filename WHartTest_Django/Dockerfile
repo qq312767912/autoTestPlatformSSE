@@ -62,7 +62,8 @@ RUN set -eux; \
       for index in "${PIP_INDEX_URL}" ${PIP_INDEX_FALLBACKS}; do \
         [ -n "$index" ] || continue; \
         echo "uv pip install via $index"; \
-        if uv pip install --python /opt/venv/bin/python --no-cache \
+        if UV_CONCURRENT_DOWNLOADS=1 UV_CONCURRENT_INSTALLS=1 \
+          uv pip install --python /opt/venv/bin/python --no-cache \
           --default-index "$index" \
           -r requirements.txt; then \
           return 0; \
@@ -78,7 +79,6 @@ RUN set -eux; \
 # 通过 specific_model_path 直接离线加载，避免构建期依赖网络；
 # 仅当本地模型缺失时，才回退到联网下载（多 Hugging Face 端点轮询）。
 ENV HOME=/root
-
 COPY bm25_model /opt/bm25_model
 COPY docker/verify_bm25.py /tmp/verify_bm25.py
 COPY docker/download_bm25.py /tmp/download_bm25.py
@@ -209,7 +209,14 @@ RUN set -eux; \
 # agent-browser 是 AI Agent 专用的浏览器自动化工具
 RUN npm config set registry "${NPM_REGISTRY}" && \
     npm install -g agent-browser && \
-    agent-browser install
+    case "$(uname -m)" in \
+      aarch64|arm64) \
+        echo "Skipping agent-browser install on Linux ARM64; Chrome for Testing is not available for this platform."; \
+        ;; \
+      *) \
+        agent-browser install; \
+        ;; \
+    esac
 
 # 复制随仓库提交的 BM25 平铺模型目录（运行时通过 specific_model_path 离线加载）
 COPY bm25_model /app/bm25_model
@@ -252,6 +259,7 @@ COPY ui_automation/ /app/ui_automation/
 COPY weixin_integration/ /app/weixin_integration/
 COPY testcase_templates/ /app/testcase_templates/
 COPY testcases/ /app/testcases/
+COPY utils/ /app/utils/
 COPY wharttest_django/ /app/wharttest_django/
 
 # 清理不必要的文件

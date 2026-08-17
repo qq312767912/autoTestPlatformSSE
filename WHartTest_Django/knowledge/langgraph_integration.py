@@ -382,11 +382,10 @@ class LangGraphKnowledgeIntegration:
         return graph_builder.compile()
 
     def get_project_knowledge_bases(self, project_id: str) -> List[Dict[str, Any]]:
-        """获取项目的知识库列表"""
+        """获取所有可用的知识库列表（全局共享，不按项目过滤）"""
         try:
-            from projects.models import Project
-            project = Project.objects.get(id=project_id)
-            knowledge_bases = project.knowledge_bases.filter(is_active=True)
+            from .models import KnowledgeBase
+            knowledge_bases = KnowledgeBase.objects.filter(is_active=True)
 
             return [{
                 "id": str(kb.id),

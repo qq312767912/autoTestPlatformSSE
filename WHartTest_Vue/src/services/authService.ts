@@ -1,6 +1,7 @@
 // 认证服务
 import axios from 'axios';
 import { request } from '@/utils/request';
+import { encryptLoginCredentials } from '@/utils/loginEncryption';
 
 // 用户信息结构
 interface UserInfo {
@@ -71,13 +72,11 @@ export const login = async (username: string, password: string): Promise<AuthSer
   const CSRF_TOKEN = 'kMNlyN2uN6c2QRr9r2rDQbfxBGsVzjPFY1h1as93VNMRTjo5kRpDbVq5ii8FFcKW';
 
   try {
+    const encryptedCredentials = await encryptLoginCredentials(username, password);
     const response = await request<ApiTokenResponseData>({
       url: API_URL,
       method: 'POST',
-      data: {
-        username,
-        password,
-      },
+      data: encryptedCredentials,
       headers: {
         'Content-Type': 'application/json',
         'X-CSRFTOKEN': CSRF_TOKEN,

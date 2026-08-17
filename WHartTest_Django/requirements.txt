@@ -10,6 +10,9 @@ djangorestframework==3.16.0
 # https://github.com/jazzband/djangorestframework-simplejwt/blob/master/LICENSE
 djangorestframework-simplejwt==5.3.1
 
+# 登录凭据 RSA-OAEP 加密
+cryptography>=46.0.0,<47.0.0
+
 # API文档生成 - BSD许可证 (当前版本: 0.28.0)
 # https://github.com/tfranzel/drf-spectacular/blob/master/LICENSE
 drf-spectacular==0.28.0
@@ -108,6 +111,8 @@ psycopg[binary]==3.3.1
 # LangChain MCP适配器 - MIT许可证 (v1.x 重大升级)
 # https://github.com/langchain-ai/langchain-mcp-adapters/blob/main/LICENSE
 langchain-mcp-adapters==0.2.1
+# mcp: langchain-mcp-adapters依赖，限制2.0.0b版本（不兼容RequestContext）
+mcp>=1.0.0,<2.0.0
 
 # Excel文件处理 - MIT许可证 (当前版本: 3.1.5)
 # https://github.com/theorchard/openpyxl/blob/master/LICENCE.rst
@@ -229,19 +234,19 @@ unstructured==0.17.2
 # HuggingFace模型依赖（已弃用 - 现使用CustomAPIEmbeddings通过API调用嵌入模型）
 # 如需使用本地嵌入模型，请取消注释以下依赖包：
 # 注意：以下依赖包总计约1GB+，会显著增加镜像体积和安装时间
-# 
+#
 # # 句子嵌入模型 - Apache 2.0许可证 (当前版本: 4.1.0)
 # # https://github.com/UKPLab/sentence-transformers/blob/master/LICENSE
 # sentence-transformers==4.1.0  # ~90MB模型，需要网络下载
-# 
+#
 # # PyTorch深度学习框架 - BSD许可证 (当前版本: 2.7.1)
 # # https://github.com/pytorch/pytorch/blob/main/LICENSE
 # torch==2.7.1  # 修复CVE-2025-32434安全漏洞，约800MB+
-# 
+#
 # # HuggingFace transformers库 - Apache 2.0许可证 (当前版本: 4.52.4)
 # # https://github.com/huggingface/transformers/blob/main/LICENSE
 # transformers==4.52.4
-# 
+#
 # # HuggingFace模型中心 - Apache 2.0许可证 (当前版本: 0.32.4)
 # # https://github.com/huggingface/huggingface_hub/blob/main/LICENSE
 # huggingface-hub==0.32.4  # HuggingFace模型下载
@@ -316,3 +321,12 @@ loguru>=0.4.1
 # Sentry Python SDK - MIT许可证 (httprunner 可选错误上报依赖)
 # https://github.com/getsentry/sentry-python/blob/master/LICENSE
 sentry-sdk==2.57.0
+
+# === 文档脱敏 (Microsoft Presidio) 依赖 ===
+
+# PII 分析器 - MIT许可证 (检测文本中的敏感信息)
+# https://github.com/microsoft/presidio/blob/main/LICENSE
+presidio-analyzer>=0.0.2
+
+# PII 匿名化器 - MIT许可证 (执行敏感信息替换/脱敏)
+presidio-anonymizer>=0.0.2

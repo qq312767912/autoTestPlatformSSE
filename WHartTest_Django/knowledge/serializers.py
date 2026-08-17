@@ -55,13 +55,7 @@ class KnowledgeBaseSerializer(serializers.ModelSerializer):
         return DocumentChunk.objects.filter(document__knowledge_base=obj).count()
 
     def validate_project(self, value):
-        """验证项目权限"""
-        # 创建时验证项目权限
-        user = self.context['request'].user
-        if not user.is_superuser:
-            # 检查用户是否是项目成员
-            if not value.members.filter(user=user).exists():
-                raise serializers.ValidationError("您没有权限在此项目中创建知识库")
+        """验证项目存在即可（知识库全局共享，不检查项目成员身份）"""
         return value
 
     def update(self, instance, validated_data):
@@ -126,12 +120,15 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         return data
 
     def validate_knowledge_base(self, value):
-        """验证知识库权限"""
-        user = self.context['request'].user
-        if not user.is_superuser:
-            # 检查用户是否是项目成员
-            if not value.project.members.filter(user=user).exists():
-                raise serializers.ValidationError("您没有权限向此知识库上传文档")
+        """验证用户是该知识库所属项目的成员"""
+        from projects.models import ProjectMember
+        request = self.context.get('request')
+        if request and request.user and not request.user.is_superuser:
+            if not ProjectMember.objects.filter(
+                user=request.user,
+                project=value.project
+            ).exists():
+                raise serializers.ValidationError("您没有权限操作此知识库")
         return value
 
 
@@ -149,7 +146,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             'document_type', 'file', 'url', 'content', 'status',
             'error_message', 'file_size', 'page_count', 'word_count',
             'file_extension', 'chunk_count', 'uploader', 'uploader_name',
-            'uploaded_at', 'processed_at'
+            'uploaded_at', 'processed_at', 'is_anonymized', 'anonymized_at'
         ]
         read_only_fields = [
             'id', 'uploader', 'file_size', 'page_count', 'word_count',
@@ -201,14 +198,9 @@ class KnowledgeQuerySerializer(serializers.Serializer):
     include_metadata = serializers.BooleanField(default=True, help_text="是否包含元数据")
 
     def validate_knowledge_base_id(self, value):
-        """验证知识库是否存在且有权限访问"""
-        user = self.context['request'].user
+        """验证知识库存在即可（全局共享，不检查项目成员身份）"""
         try:
-            kb = KnowledgeBase.objects.get(id=value)
-            if not user.is_superuser:
-                # 检查用户是否是项目成员
-                if not kb.project.members.filter(user=user).exists():
-                    raise serializers.ValidationError("您没有权限访问此知识库")
+            KnowledgeBase.objects.get(id=value)
             return value
         except KnowledgeBase.DoesNotExist:
             raise serializers.ValidationError("知识库不存在")

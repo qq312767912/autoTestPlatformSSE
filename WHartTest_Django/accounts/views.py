@@ -31,6 +31,16 @@ from .serializers import (
     UpdateGroupPermissionsSerializer,
     MyTokenObtainPairSerializer,
 )
+from .login_crypto import public_key_payload
+
+
+class LoginPublicKeyView(APIView):
+    """返回登录凭据加密所需的短期公钥。"""
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response(public_key_payload())
 
 
 class UserCreateAPIView(generics.CreateAPIView):

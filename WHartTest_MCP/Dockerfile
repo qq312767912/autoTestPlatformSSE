@@ -1,8 +1,8 @@
-# 使用 Python 3.11 官方镜像作为基础镜像
-ARG PYTHON_BASE_IMAGE=python:3.11-slim
+# 使用 Python 3.11 Alpine 官方镜像作为基础镜像
+# Alpine (musl libc) 兼容 ARM64 64KB 页大小（麒麟 V10 / 统信等国产系统）
+ARG PYTHON_BASE_IMAGE=python:3.11-alpine
 FROM ${PYTHON_BASE_IMAGE}
 
-ARG APT_BASE_URL=http://deb.debian.org
 ARG PIP_INDEX_URL=https://pypi.org/simple
 ARG PIP_INDEX_FALLBACKS=
 
@@ -13,17 +13,11 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_INDEX_FALLBACKS=${PIP_INDEX_FALLBACKS}
 
-# 安装系统依赖
-RUN if [ "$APT_BASE_URL" != "http://deb.debian.org" ]; then \
-        sed -i "s|http://deb.debian.org/debian|${APT_BASE_URL}/debian|g; s|http://deb.debian.org/debian-security|${APT_BASE_URL}/debian-security|g" /etc/apt/sources.list.d/debian.sources; \
-    fi && \
-    apt-get -o Acquire::Retries=10 update && apt-get -o Acquire::Retries=10 install -y --fix-missing --no-install-recommends \
-    supervisor \
-    && rm -rf /var/lib/apt/lists/*
+# 安装系统依赖（Alpine 使用 apk）
+RUN apk add --no-cache supervisor
 
 # 安装 uv（主镜像失败时自动切换到后备源）
 RUN set -eux; \

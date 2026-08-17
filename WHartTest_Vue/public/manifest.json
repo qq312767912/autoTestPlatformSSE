@@ -1,7 +1,7 @@
 {
-  "name": "WHartTest - 小麦智测管理平台",
+  "name": "WHartTest - AI自动化测试管理平台",
   "short_name": "WHartTest",
-  "description": "小麦智测管理平台 - 智能测试用例管理与自动化执行系统",
+  "description": "AI自动化测试管理平台 - 智能测试用例管理与自动化执行系统",
   "theme_color": "#1890FF",
   "background_color": "#0F1419",
   "display": "standalone",

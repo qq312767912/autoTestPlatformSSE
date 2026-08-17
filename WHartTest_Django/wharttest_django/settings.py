@@ -72,6 +72,9 @@ SECRET_KEY = os.environ.get(
     "django-insecure-jsto-5oth_9(a_xfy#zg@$i$0w47h9a$rw0s&(v#1o5t+s-!*7",  # 开发环境兜底值
 )
 
+# Web 登录 RSA 私钥（PEM）。多 worker/生产环境必须配置同一份密钥。
+LOGIN_RSA_PRIVATE_KEY = os.environ.get("LOGIN_RSA_PRIVATE_KEY", "")
+
 # 安全警告：生产环境禁止开启 DEBUG！
 # 从环境变量加载 DEBUG 开关；生产环境默认应为 False。
 # 开发环境可设置 DJANGO_DEBUG=True。

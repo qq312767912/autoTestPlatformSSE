@@ -217,7 +217,7 @@ const brandBadgeEnabled = computed(() => systemConfigStore.getBrandBadgeEnabled)
 const brandBadgeUrl = computed(() => systemConfigStore.getBrandBadgeUrl)
 const brandTitle = computed(() => systemConfigStore.getLoginTitle)
 const brandSubtitle = computed(() => {
-  return systemConfigStore.config.login_subtitle || (isEnglish.value ? 'Wheat intelligence test automation platform' : '小麦智测自动化平台')
+  return systemConfigStore.config.login_subtitle || (isEnglish.value ? 'Wheat intelligence test automation platform' : 'AI自动化测试平台')
 })
 const featureTags = computed(() => {
   const configTags = systemConfigStore.getLoginTags
@@ -730,7 +730,7 @@ onBeforeUnmount(() => {
   border: 1px solid rgba(14, 165, 233, 0.15);
   border-radius: 24px;
   background: rgba(255, 255, 255, 0.72);
-  box-shadow: 
+  box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.8),
     0 8px 32px -4px rgba(14, 165, 233, 0.06),
     0 20px 48px -8px rgba(30, 41, 59, 0.08);
@@ -863,7 +863,7 @@ onBeforeUnmount(() => {
 .form-input:focus {
   border-color: rgba(14, 165, 233, 0.6);
   background: #ffffff;
-  box-shadow: 
+  box-shadow:
     0 0 0 3px rgba(14, 165, 233, 0.08),
     inset 0 1px 2px rgba(14, 165, 233, 0.05);
 }

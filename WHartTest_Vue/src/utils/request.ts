@@ -125,6 +125,11 @@ async function refreshToken() {
 // 响应拦截器
 service.interceptors.response.use(
   (response: AxiosResponse) => {
+    // 如果是 blob 响应（文件下载），直接返回原始响应，不做包装
+    if (response.config.responseType === 'blob') {
+      return response;
+    }
+
     // 后端返回的完整响应
     const res = response.data;
 

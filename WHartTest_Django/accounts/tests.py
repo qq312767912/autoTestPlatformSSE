@@ -1,12 +1,70 @@
+import base64
+import json
+import secrets
+import time
 from unittest.mock import patch
 from types import SimpleNamespace
 
 from django.db.utils import OperationalError
-from django.test import SimpleTestCase
+from django.contrib.auth.models import User
+from django.test import SimpleTestCase, TestCase
 from rest_framework.test import APIRequestFactory
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 
 from accounts.serializers import ContentTypeSerializer
 from accounts.views import MyTokenObtainPairView
+
+
+class EncryptedLoginTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='encrypted-user', password='Secret123!')
+
+    def _encrypted_credentials(self, nonce=None):
+        # Redis 缓存不会随 Django 测试数据库清理；每个测试使用独立 nonce，
+        # 仅重放测试复用同一份已生成密文。
+        nonce = nonce or secrets.token_hex(16)
+        key_response = self.client.get('/api/auth/login-key/')
+        key_data = key_response.json()['data']
+        public_key = serialization.load_pem_public_key(key_data['public_key'].encode('ascii'))
+        plaintext = json.dumps({
+            'username': self.user.username,
+            'password': 'Secret123!',
+            'timestamp': int(time.time() * 1000),
+            'nonce': nonce,
+        }).encode('utf-8')
+        ciphertext = public_key.encrypt(
+            plaintext,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None,
+            ),
+        )
+        return {
+            'encrypted_payload': base64.b64encode(ciphertext).decode('ascii'),
+            'key_id': key_data['key_id'],
+        }
+
+    def test_encrypted_credentials_can_obtain_token(self):
+        response = self.client.post('/api/token/', self._encrypted_credentials(), content_type='application/json')
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertIn('access', response.json()['data'])
+
+    def test_encrypted_credentials_cannot_be_replayed(self):
+        credentials = self._encrypted_credentials()
+        first_response = self.client.post('/api/token/', credentials, content_type='application/json')
+
+        self.assertEqual(
+            first_response.status_code,
+            200,
+            first_response.content,
+        )
+        response = self.client.post('/api/token/', credentials, content_type='application/json')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('已使用', str(response.json()))
 
 
 class MyTokenObtainPairViewTests(SimpleTestCase):

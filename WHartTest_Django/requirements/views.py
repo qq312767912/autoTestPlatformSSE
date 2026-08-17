@@ -6,6 +6,7 @@ from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.urls import reverse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 import logging
 import os
 
@@ -891,6 +892,95 @@ class RequirementDocumentViewSet(BaseModelViewSet):
                     )
             else:
                 return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=["post"], url_path="anonymize-preview")
+    def anonymize_preview(self, request, pk=None):
+        """预览脱敏效果：返回检测到的 PII 列表和脱敏后的文本"""
+        # 校验脱敏权限
+        if not request.user.is_superuser and not request.user.has_perm('knowledge.anonymize_document'):
+            return Response(
+                {"error": "您没有脱敏操作权限"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        if not document.content:
+            return Response(
+                {"error": "文档内容为空，无法进行脱敏分析"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if document.is_anonymized:
+            return Response(
+                {"error": "文档已经脱敏，无需重复操作"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            from utils.anonymization import DocumentAnonymizer
+
+            anonymizer = DocumentAnonymizer()
+            entities = request.data.get("entities")
+            result = anonymizer.anonymize(document.content, entities=entities)
+
+            return Response({
+                "document_id": str(document.id),
+                "entities_found": result.entities_found,
+                "anonymized_text": result.anonymized_text,
+                "total_pii_count": len(result.entities_found),
+            })
+        except Exception as e:
+            logger.error(f"脱敏预览失败: {e}")
+            return Response(
+                {"error": f"脱敏预览失败: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(detail=True, methods=["post"])
+    def anonymize(self, request, pk=None):
+        """执行脱敏：修改文档 content，标记脱敏状态"""
+        # 校验脱敏权限
+        if not request.user.is_superuser and not request.user.has_perm('knowledge.anonymize_document'):
+            return Response(
+                {"error": "您没有脱敏操作权限"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        if not document.content:
+            return Response(
+                {"error": "文档内容为空，无法执行脱敏"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if document.is_anonymized:
+            return Response(
+                {"error": "文档已经脱敏，无需重复操作"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            from utils.anonymization import DocumentAnonymizer
+
+            anonymizer = DocumentAnonymizer()
+            entities = request.data.get("entities")
+            result = anonymizer.anonymize(document.content, entities=entities)
+
+            # 更新文档内容并标记脱敏状态
+            document.content = result.anonymized_text
+            document.is_anonymized = True
+            document.anonymized_at = timezone.now()
+            document.save(update_fields=["content", "is_anonymized", "anonymized_at"])
+
+            return Response({
+                "document_id": str(document.id),
+                "is_anonymized": True,
+                "anonymized_at": document.anonymized_at,
+                "entities_removed": len(result.entities_found),
+                "message": f"脱敏完成，共处理 {len(result.entities_found)} 处敏感信息",
+            })
+        except Exception as e:
+            logger.error(f"执行脱敏失败: {e}")
+            return Response(
+                {"error": f"脱敏失败: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class RequirementModuleViewSet(BaseModelViewSet):

@@ -316,7 +316,7 @@ const fetchKnowledgeBases = async () => {
       page_size: pagination.value.pageSize,
     };
 
-    // 如果有选中的项目，只显示该项目的知识库
+    // 按当前项目过滤，只展示自己项目下的知识库
     if (projectStore.currentProjectId) {
       params.project = projectStore.currentProjectId;
     }
@@ -460,25 +460,18 @@ watch(() => projectStore.currentProjectId, (newProjectId, oldProjectId) => {
 }, { immediate: false });
 
 // 生命周期
-onMounted(async () => {
-  // 等待项目store初始化完成
-  if (projectStore.loading) {
-    await new Promise((resolve) => {
-      const unwatch = watch(() => projectStore.loading, (loading) => {
-        if (!loading) {
-          unwatch();
-          resolve(void 0);
-        }
-      });
-    });
-  }
-  
-  // 如果项目store没有项目列表，主动获取一次
+onMounted(() => {
+  // 加载项目列表
   if (projectStore.projectList.length === 0) {
-    await projectStore.fetchProjects();
+    projectStore.fetchProjects().then(() => {
+      // 项目初始化完成后加载知识库
+      if (projectStore.currentProjectId) {
+        fetchKnowledgeBases();
+      }
+    });
+  } else if (projectStore.currentProjectId) {
+    fetchKnowledgeBases();
   }
-  
-  fetchKnowledgeBases();
 });
 </script>
 

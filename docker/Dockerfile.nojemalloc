@@ -1,0 +1,25 @@
+# Dockerfile.nojemalloc
+# Multi-stage build: clone qdrant, apply small patch to remove jemallocator usage (if present), build release, produce runtime image
+
+FROM --platform=$BUILDPLATFORM rust:1.70-slim AS builder
+ARG QDRANT_VERSION=main
+WORKDIR /usr/src
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git build-essential pkg-config libssl-dev cmake ca-certificates wget && rm -rf /var/lib/apt/lists/*
+
+# Clone repo
+RUN git clone --depth 1 --branch ${QDRANT_VERSION} https://github.com/qdrant/qdrant.git qdrant
+WORKDIR /usr/src/qdrant
+
+# Copy patch helper (will be provided in build context)
+COPY scripts/patch_no_jemalloc.sh ./scripts/patch_no_jemalloc.sh
+RUN chmod +x ./scripts/patch_no_jemalloc.sh && ./scripts/patch_no_jemalloc.sh || true
+
+# Build release (workspace)
+RUN cargo build --release --locked --workspace
+
+# Final runtime image
+FROM debian:bookworm-slim
+COPY --from=builder /usr/src/qdrant/target/release/qdrant /usr/bin/qdrant
+EXPOSE 6333
+ENTRYPOINT ["/usr/bin/qdrant"]

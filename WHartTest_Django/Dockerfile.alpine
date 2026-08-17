@@ -1,0 +1,202 @@
+# ============================================
+# Backend Alpine 版多阶段构建
+# 兼容 ARM64 64KB 页大小（麒麟 V10 / 统信等国产系统）
+# ============================================
+
+ARG PYTHON_BASE_IMAGE=python:3.11-alpine
+
+# ============================================
+# 第一阶段：构建阶段
+# ============================================
+FROM ${PYTHON_BASE_IMAGE} AS builder
+
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_INDEX_FALLBACKS=
+ARG HF_ENDPOINT=https://huggingface.co
+
+WORKDIR /build
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_INDEX_FALLBACKS=${PIP_INDEX_FALLBACKS} \
+    FASTEMBED_CACHE_PATH=/root/.cache/fastembed \
+    HF_ENDPOINT=${HF_ENDPOINT}
+
+# 安装构建依赖
+RUN apk add --no-cache \
+    build-base \
+    gcc \
+    musl-dev \
+    linux-headers \
+    python3-dev \
+    postgresql16-dev \
+    libffi-dev \
+    openssl-dev \
+    libjpeg-turbo-dev \
+    zlib-dev \
+    libgomp \
+    cargo \
+    git \
+    sqlite-dev
+
+# 安装 uv
+RUN set -eux; \
+    install_uv() { \
+      for index in "${PIP_INDEX_URL}" ${PIP_INDEX_FALLBACKS}; do \
+        [ -n "$index" ] || continue; \
+        echo "pip install uv via $index"; \
+        if python -m pip install --no-cache-dir --retries 5 --timeout 30 -i "$index" uv; then \
+          return 0; \
+        fi; \
+        echo "pip install uv failed via $index, trying next index..." >&2; \
+      done; \
+      return 1; \
+    }; \
+    install_uv
+
+COPY requirements.txt .
+
+# 安装依赖（Alpine 上用 psycopg2 替代 psycopg2-binary）
+RUN set -eux; \
+    uv venv /opt/venv; \
+    sed -i 's/psycopg2-binary/psycopg2/g' requirements.txt; \
+    # 排除无 musllinux wheel 的包
+    sed -i '/^playwright/d' requirements.txt; \
+    # langgraph-checkpoint-sqlite 依赖 sqlite-vec（无 musllinux 支持），生产环境用 postgres checkpoint 替代
+    sed -i '/^langgraph-checkpoint-sqlite/d' requirements.txt; \
+    # fastembed 依赖 onnxruntime（无 musllinux ARM64 wheel），Alpine 版知识库仅支持纯向量检索
+    sed -i '/^fastembed/d' requirements.txt; \
+    install_requirements() { \
+      for index in "${PIP_INDEX_URL}" ${PIP_INDEX_FALLBACKS}; do \
+        [ -n "$index" ] || continue; \
+        echo "uv pip install via $index"; \
+        if uv pip install --python /opt/venv/bin/python --no-cache \
+          --prerelease=allow \
+          --default-index "$index" \
+          -r requirements.txt; then \
+          return 0; \
+        fi; \
+        echo "uv pip install failed via $index, trying next index..." >&2; \
+      done; \
+      return 1; \
+    }; \
+    install_requirements
+
+# 创建 fastembed 缓存目录（Alpine 版无 BM25 模型，仅保留目录结构避免运行时错误）
+ENV HOME=/root
+RUN mkdir -p /root/.cache/fastembed
+
+# ============================================
+# 第二阶段：运行阶段
+# ============================================
+FROM ${PYTHON_BASE_IMAGE}
+
+ARG HF_ENDPOINT=https://huggingface.co
+ARG NPM_REGISTRY=https://registry.npmjs.org
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    PYTHONPATH="/app" \
+    FASTEMBED_CACHE_PATH=/root/.cache/fastembed \
+    HF_ENDPOINT=${HF_ENDPOINT}
+
+# 运行时依赖
+RUN apk add --no-cache \
+    bash \
+    supervisor \
+    curl \
+    git \
+    nodejs \
+    npm \
+    libgomp \
+    libpq \
+    libjpeg-turbo \
+    # Playwright 系统依赖
+    nss \
+    nspr \
+    libatk-1.0 \
+    libatk-bridge-2.0 \
+    at-spi2-core \
+    cups-libs \
+    libdrm \
+    libxkbcommon \
+    libxcomposite \
+    libxdamage \
+    libxext \
+    libxfixes \
+    libxrandr \
+    mesa-gbm \
+    pango \
+    cairo \
+    alsa-lib \
+    # 中文字体
+    font-noto-cjk \
+    # 文档解析
+    antiword
+
+# 复制虚拟环境
+COPY --from=builder /opt/venv /opt/venv
+# Alpine 版无 BM25 模型缓存，运行时创建空目录即可
+RUN mkdir -p /root/.cache/fastembed
+
+# 复制项目文件
+COPY THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
+COPY entrypoint.sh /app/entrypoint.sh
+COPY supervisord.conf /app/supervisord.conf
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+
+# 复制 Django 代码
+COPY manage.py /app/
+COPY accounts/ /app/accounts/
+COPY api_database_configs/ /app/api_database_configs/
+COPY api_environments/ /app/api_environments/
+COPY api_functions/ /app/api_functions/
+COPY api_interfaces/ /app/api_interfaces/
+COPY api_keys/ /app/api_keys/
+COPY api_modules/ /app/api_modules/
+COPY api_sync/ /app/api_sync/
+COPY api_testcases/ /app/api_testcases/
+COPY api_testtasks/ /app/api_testtasks/
+COPY httprunner/ /app/httprunner/
+COPY knowledge/ /app/knowledge/
+COPY langgraph_integration/ /app/langgraph_integration/
+COPY mcp_tools/ /app/mcp_tools/
+COPY operation_logs/ /app/operation_logs/
+COPY orchestrator_integration/ /app/orchestrator_integration/
+COPY projects/ /app/projects/
+COPY prompts/ /app/prompts/
+COPY requirements/ /app/requirements/
+COPY skills/ /app/skills/
+COPY task_center/ /app/task_center/
+COPY ui_automation/ /app/ui_automation/
+COPY weixin_integration/ /app/weixin_integration/
+COPY testcase_templates/ /app/testcase_templates/
+COPY testcases/ /app/testcases/
+COPY utils/ /app/utils/
+COPY wharttest_django/ /app/wharttest_django/
+
+# Playwright 在 Alpine ARM64 上不可用，UI 自动化由独立的 playwright-mcp 服务提供
+# agent-browser 在 ARM64 上跳过浏览器安装
+RUN npm config set registry "${NPM_REGISTRY}" 2>/dev/null && \
+    npm install -g agent-browser 2>/dev/null && \
+    case "$(uname -m)" in \
+      aarch64|arm64) echo "Skipping agent-browser browser install on ARM64" ;; \
+      *) agent-browser install 2>/dev/null || true ;; \
+    esac || echo "WARN: agent-browser not available"
+
+# 清理
+RUN find /app -type f \( -name "*.sqlite*" -o -name "*.db" -o -name "*.sql" \) -delete 2>/dev/null; \
+    find /app -type d \( -name ".venv" -o -name "venv" -o -name "__pycache__" -o -name ".git" -o -name "*.egg-info" \) -exec rm -rf {} + 2>/dev/null; \
+    find /opt/venv -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null; \
+    find /opt/venv -type f -name "*.pyc" -delete 2>/dev/null; \
+    true
+
+RUN mkdir -p media static nltk_data /var/log
+
+EXPOSE 8000
+ENTRYPOINT ["/app/entrypoint.sh"]

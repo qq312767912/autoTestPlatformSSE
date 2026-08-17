@@ -27,6 +27,7 @@ import ApiTestingView from '@/features/api-testing/views/ApiTestingView.vue'; //
 import TraceDetailView from '@/features/ui-automation/views/TraceDetail.vue'; // 导入 UI 自动化 Trace 详情页面组件。
 import TaskCenterView from '@/features/task-center/views/TaskCenterView.vue'; // 导入任务中心视图
 import FileManagementView from '@/features/file-management/views/FileManagementView.vue'; // 导入文件管理页面组件。
+import DocumentAnonymizationView from '@/views/DocumentAnonymizationView.vue'; // 导入文档脱敏管理页面组件。
 
 const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束为 RouteRecordRaw。
   {
@@ -239,6 +240,11 @@ const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束�
         path: 'operation-logs', // 定义操作日志路径。
         name: 'OperationLogs', // 定义操作日志路由名称。
         component: () => import('../views/OperationLogView.vue'), // 动态导入操作日志页面。
+      },
+      {
+        path: 'document-anonymization', // 定义文档脱敏管理子路径。
+        name: 'DocumentAnonymization', // 定义文档脱敏管理路由名称。
+        component: DocumentAnonymizationView, // 指定文档脱敏管理页面组件。
       },
       // 其他受保护的子路由可以加在这里
     ]

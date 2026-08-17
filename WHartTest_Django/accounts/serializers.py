@@ -5,6 +5,7 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework_simplejwt.serializers import (
     TokenObtainPairSerializer as BaseTokenObtainPairSerializer,
 )
+from .login_crypto import LoginCredentialError, decrypt_credentials
 
 # 权限名称翻译映射
 # 您可以根据实际的权限名称进行扩展
@@ -93,6 +94,7 @@ PERMISSION_NAME_TRANSLATIONS = {
     "Can change 知识库文档": "修改知识库文档",
     "Can delete 知识库文档": "删除知识库文档",
     "Can view 知识库文档": "查看知识库文档",
+    "Can anonymize documents in knowledge base": "文档脱敏",
     # 需求管理权限
     "Can add 需求文档": "添加需求文档",
     "Can change 需求文档": "修改需求文档",
@@ -444,6 +446,10 @@ class ContentTypeSerializer(serializers.ModelSerializer):
             if model_name in ["chatsession", "chatmessage"]:
                 return "LLM对话"
 
+        # 脱敏规则归入知识库管理菜单
+        if app_label == "operation_logs" and model_name == "anonymizationrule":
+            return "知识库管理"
+
         # 提示词配置统一归类到 LLM 对话菜单，避免系统管理菜单过载。
         if app_label == "prompts":
             return "LLM对话"
@@ -495,6 +501,10 @@ class ContentTypeSerializer(serializers.ModelSerializer):
                 return "System Settings"
             if model_name in ["chatsession", "chatmessage"]:
                 return "LLM Chat"
+
+        # 脱敏规则归入知识库管理
+        if app_label == "operation_logs" and model_name == "anonymizationrule":
+            return "Knowledge Base"
 
         if app_label == "prompts":
             return "LLM Chat"
@@ -1247,6 +1257,17 @@ class UpdateGroupPermissionsSerializer(serializers.Serializer):
 class MyTokenObtainPairSerializer(BaseTokenObtainPairSerializer):
     # 覆盖默认的错误消息，使其更友好
     default_error_messages = {"no_active_account": "账号或密码错误"}
+    username = serializers.CharField(required=False, write_only=True)
+    password = serializers.CharField(required=False, write_only=True, style={"input_type": "password"})
+    encrypted_payload = serializers.CharField(required=False, write_only=True)
+    key_id = serializers.CharField(required=False, write_only=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # SimpleJWT 会在初始化时重新创建用户名和密码字段并设为必填。
+        # 加密登录请求只携带密文，因此把字段级必填校验延后到 validate。
+        self.fields[self.username_field].required = False
+        self.fields["password"].required = False
 
     @classmethod
     def get_token(cls, user):
@@ -1256,6 +1277,18 @@ class MyTokenObtainPairSerializer(BaseTokenObtainPairSerializer):
         return token
 
     def validate(self, attrs):
+        encrypted_payload = attrs.pop("encrypted_payload", None)
+        key_id = attrs.pop("key_id", None)
+        if encrypted_payload:
+            try:
+                attrs["username"], attrs["password"] = decrypt_credentials(
+                    encrypted_payload, key_id or ""
+                )
+            except LoginCredentialError as exc:
+                raise serializers.ValidationError({"encrypted_payload": str(exc)}) from exc
+        elif not attrs.get("username") or not attrs.get("password"):
+            raise serializers.ValidationError({"encrypted_payload": "请提供加密的登录凭据。"})
+
         # 先走父类认证校验，再附加用户信息以减少前端二次请求。
         data = super().validate(attrs)
 

@@ -139,13 +139,13 @@ class KnowledgeBaseViewSet(BaseModelViewSet):
         return super().get_permissions()
 
     def get_queryset(self):
-        """只返回用户有权限访问的知识库"""
+        """只返回当前用户所在项目的知识库"""
+        from projects.models import ProjectMember
         user = self.request.user
         if user.is_superuser:
             return KnowledgeBase.objects.all()
-
-        # 普通用户只能看到自己是成员的项目的知识库
-        return KnowledgeBase.objects.filter(project__members__user=user).distinct()
+        project_ids = ProjectMember.objects.filter(user=user).values_list('project_id', flat=True)
+        return KnowledgeBase.objects.filter(project_id__in=project_ids)
 
     def perform_create(self, serializer):
         """创建知识库时自动设置创建人"""
@@ -384,15 +384,13 @@ class DocumentViewSet(BaseModelViewSet):
         return DocumentSerializer
 
     def get_queryset(self):
-        """只返回用户有权限访问的文档"""
+        """只返回当前用户所在项目下的文档"""
+        from projects.models import ProjectMember
         user = self.request.user
         if user.is_superuser:
             return Document.objects.all()
-
-        # 普通用户只能看到自己是成员的项目的文档
-        return Document.objects.filter(
-            knowledge_base__project__members__user=user
-        ).distinct()
+        project_ids = ProjectMember.objects.filter(user=user).values_list('project_id', flat=True)
+        return Document.objects.filter(knowledge_base__project_id__in=project_ids)
 
     def perform_create(self, serializer):
         """创建文档时自动设置上传人"""
@@ -574,6 +572,95 @@ class DocumentViewSet(BaseModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+    @action(detail=True, methods=["post"], url_path="anonymize-preview")
+    def anonymize_preview(self, request, pk=None):
+        """预览脱敏效果：返回检测到的 PII 列表和脱敏后的文本"""
+        # 校验脱敏权限
+        if not request.user.is_superuser and not request.user.has_perm('knowledge.anonymize_document'):
+            return Response(
+                {"error": "您没有脱敏操作权限"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        if not document.content:
+            return Response(
+                {"error": "文档内容为空，无法进行脱敏分析"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if document.is_anonymized:
+            return Response(
+                {"error": "文档已经脱敏，无需重复操作"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            from utils.anonymization import DocumentAnonymizer
+
+            anonymizer = DocumentAnonymizer()
+            entities = request.data.get("entities")  # 可选：指定实体类型
+            result = anonymizer.anonymize(document.content, entities=entities)
+
+            return Response({
+                "document_id": str(document.id),
+                "entities_found": result.entities_found,
+                "anonymized_text": result.anonymized_text,
+                "total_pii_count": len(result.entities_found),
+            })
+        except Exception as e:
+            logger.error(f"脱敏预览失败: {e}")
+            return Response(
+                {"error": f"脱敏预览失败: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(detail=True, methods=["post"])
+    def anonymize(self, request, pk=None):
+        """执行脱敏：修改文档 content，标记脱敏状态"""
+        # 校验脱敏权限
+        if not request.user.is_superuser and not request.user.has_perm('knowledge.anonymize_document'):
+            return Response(
+                {"error": "您没有脱敏操作权限"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        if not document.content:
+            return Response(
+                {"error": "文档内容为空，无法执行脱敏"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if document.is_anonymized:
+            return Response(
+                {"error": "文档已经脱敏，无需重复操作"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            from utils.anonymization import DocumentAnonymizer
+
+            anonymizer = DocumentAnonymizer()
+            entities = request.data.get("entities")
+            result = anonymizer.anonymize(document.content, entities=entities)
+
+            # 更新文档内容并标记脱敏状态
+            document.content = result.anonymized_text
+            document.is_anonymized = True
+            document.anonymized_at = timezone.now()
+            document.save(update_fields=["content", "is_anonymized", "anonymized_at"])
+
+            return Response({
+                "document_id": str(document.id),
+                "is_anonymized": True,
+                "anonymized_at": document.anonymized_at,
+                "entities_removed": len(result.entities_found),
+                "message": f"脱敏完成，共处理 {len(result.entities_found)} 处敏感信息",
+            })
+        except Exception as e:
+            logger.error(f"执行脱敏失败: {e}")
+            return Response(
+                {"error": f"脱敏失败: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
 
 class DocumentChunkViewSet(BaseModelViewSet):
     """文档分块视图集"""
@@ -596,15 +683,13 @@ class DocumentChunkViewSet(BaseModelViewSet):
         return super().get_permissions()
 
     def get_queryset(self):
-        """只返回用户有权限访问的分块"""
+        """只返回当前用户所在项目下的文档分块"""
+        from projects.models import ProjectMember
         user = self.request.user
         if user.is_superuser:
             return DocumentChunk.objects.all()
-
-        # 普通用户只能看到自己是成员的项目的分块
-        return DocumentChunk.objects.filter(
-            document__knowledge_base__project__members__user=user
-        ).distinct()
+        project_ids = ProjectMember.objects.filter(user=user).values_list('project_id', flat=True)
+        return DocumentChunk.objects.filter(document__knowledge_base__project_id__in=project_ids)
 
 
 class QueryLogViewSet(BaseModelViewSet):
@@ -628,15 +713,13 @@ class QueryLogViewSet(BaseModelViewSet):
         return super().get_permissions()
 
     def get_queryset(self):
-        """只返回用户有权限访问的查询日志"""
+        """只返回当前用户所在项目下的查询日志"""
+        from projects.models import ProjectMember
         user = self.request.user
         if user.is_superuser:
             return QueryLog.objects.all()
-
-        # 普通用户只能看到自己是成员的项目的查询日志
-        return QueryLog.objects.filter(
-            knowledge_base__project__members__user=user
-        ).distinct()
+        project_ids = ProjectMember.objects.filter(user=user).values_list('project_id', flat=True)
+        return QueryLog.objects.filter(knowledge_base__project_id__in=project_ids)
 
 
 @api_view(["GET"])

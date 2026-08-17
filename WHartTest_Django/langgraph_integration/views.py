@@ -3527,19 +3527,16 @@ class KnowledgeRAGAPIView(APIView):
                         {"error": "项目不存在"}, status=status.HTTP_404_NOT_FOUND
                     )
 
-            # 验证知识库权限
+            # 验证知识库存在并检查项目权限
             try:
                 knowledge_base = KnowledgeBase.objects.get(id=knowledge_base_id)
-                if (
-                    not knowledge_base.project.members.filter(
-                        user=request.user
-                    ).exists()
-                    and not request.user.is_superuser
-                ):
-                    return Response(
-                        {"error": "您没有权限访问此知识库"},
-                        status=status.HTTP_403_FORBIDDEN,
-                    )
+                # 检查用户是否是知识库所属项目的成员
+                if not request.user.is_superuser:
+                    if not knowledge_base.project.members.filter(user=request.user).exists():
+                        return Response(
+                            {"error": "您没有权限访问此知识库"},
+                            status=status.HTTP_403_FORBIDDEN,
+                        )
             except KnowledgeBase.DoesNotExist:
                 return Response(
                     {"error": "知识库不存在"}, status=status.HTTP_404_NOT_FOUND

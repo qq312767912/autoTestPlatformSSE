@@ -19,7 +19,8 @@ class RequirementDocumentSerializer(serializers.ModelSerializer):
             'status', 'version', 'is_latest', 'parent_document',
             'uploader', 'uploader_name', 'project', 'project_name',
             'uploaded_at', 'updated_at', 'word_count', 'page_count',
-            'has_images', 'image_count', 'modules_count'
+            'has_images', 'image_count', 'modules_count',
+            'is_anonymized', 'anonymized_at'
         ]
         read_only_fields = ['id', 'uploader', 'uploaded_at', 'updated_at']
 

@@ -644,10 +644,10 @@ const fetchPrompts = async () => {
 };
 
 const fetchKnowledgeBases = async () => {
-  if (!projectStore.currentProjectId) return;
   isKbLoading.value = true;
   try {
-    const response = await KnowledgeService.getKnowledgeBases({ project: projectStore.currentProjectId });
+    // 知识库全局共享，不再按项目过滤
+    const response = await KnowledgeService.getKnowledgeBases({});
     knowledgeBases.value = toArray<KnowledgeBase>((response as any)?.results ?? response);
   } catch (error) {
     Message.error(pageText.value.loadKnowledgeBasesFailed);

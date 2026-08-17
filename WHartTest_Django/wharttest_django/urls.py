@@ -31,7 +31,7 @@ from rest_framework_nested.routers import NestedSimpleRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 
 # 导入自定义 token 获取视图。
-from accounts.views import MyTokenObtainPairView
+from accounts.views import LoginPublicKeyView, MyTokenObtainPairView
 
 # 导入项目视图集。
 from projects.views import ProjectViewSet
@@ -145,6 +145,7 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     # 挂载 JWT 获取接口。
     path("api/token/", MyTokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("api/auth/login-key/", LoginPublicKeyView.as_view(), name="login_public_key"),
     # 挂载 JWT 刷新接口。
     path("api/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     # 挂载账户模块路由。

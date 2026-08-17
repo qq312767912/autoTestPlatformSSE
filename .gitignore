@@ -5,6 +5,21 @@
 .env.*.local
 *.env.*
 !*.env.example
+proxy.env
+
+# Local virtual environments and runtime data
+**/.venv/
+data-parallel/
+output/
+
+# Offline images, release archives, and local build worktrees
+offline-images/
+offline-images-arm64/
+qdrant-v1.16.0-arm64-64k-offline/
+*.zip
+*.tar.gz
+*.tar.gz.*
+*.tar.gz.sha256
 
 # IDE / Editor
 .vscode/
@@ -72,4 +87,3 @@ AGENTS.md
 WHartTest_IDEA_Plugin/
 WHartTest_VSCode_Extension/
 docx-editor/
-

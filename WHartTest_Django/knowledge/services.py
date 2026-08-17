@@ -275,6 +275,7 @@ class CustomAPIEmbeddings(Embeddings):
         """嵌入单个文本查询"""
         return self._call_api(text)
 
+
     def embed_image(
         self, image_base64: str, mime_type: str = "image/png"
     ) -> List[float]:
@@ -1574,6 +1575,13 @@ class VectorStoreManager:
             logger.error(f"添加文档到向量存储失败: {e}")
             raise
 
+    @staticmethod
+    def _sanitize_text(text: str) -> str:
+        """清洗字符串：移除 PostgreSQL text 字段不支持的 \x00（null byte）"""
+        if not isinstance(text, str):
+            return text
+        return text.replace("\x00", "")
+
     def _save_chunks_to_db(
         self,
         chunks: List[LangChainDocument],
@@ -1583,13 +1591,16 @@ class VectorStoreManager:
         """保存分块信息到数据库"""
         chunk_objects = []
         for i, (chunk, vector_id) in enumerate(zip(chunks, vector_ids)):
-            # 计算内容哈希
-            content_hash = hashlib.md5(chunk.page_content.encode()).hexdigest()
+            # 清洗 PDF 等来源可能携带的 \x00，PostgreSQL text 字段不允许 null byte
+            clean_content = self._sanitize_text(chunk.page_content)
+
+            # 计算内容哈希（基于清洗后的内容，与入库内容保持一致）
+            content_hash = hashlib.md5(clean_content.encode()).hexdigest()
 
             chunk_obj = DocumentChunk(
                 document=document_obj,
                 chunk_index=i,
-                content=chunk.page_content,
+                content=clean_content,
                 vector_id=vector_id,
                 embedding_hash=content_hash,
                 start_index=chunk.metadata.get("start_index"),

@@ -70,7 +70,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch, computed } from 'vue';
+import { ref, onMounted, computed } from 'vue';
 import {
   Message,
   Select as ASelect,
@@ -86,7 +86,7 @@ import { useAppI18n } from '@/composables/useAppI18n';
 import { toArray } from '@/features/api-testing/services/responseHelpers';
 
 interface Props {
-  projectId: number | null;
+  projectId?: number | null;
   useKnowledgeBase: boolean;
   selectedKnowledgeBaseId: string | null;
   similarityThreshold: number;
@@ -130,12 +130,10 @@ const showAdvancedSettings = ref(false);
 
 // 方法
 const fetchKnowledgeBases = async () => {
-  if (!props.projectId) return;
-
   loading.value = true;
   try {
+    // 知识库全局共享，不再按项目过滤
     const response = await KnowledgeService.getKnowledgeBases({
-      project: props.projectId,
       is_active: true,
     });
 
@@ -174,24 +172,9 @@ const handleTopKChange = (value: number | undefined) => {
   }
 };
 
-// 监听项目变化
-watch(
-  () => props.projectId,
-  (newProjectId) => {
-    if (newProjectId) {
-      fetchKnowledgeBases();
-    } else {
-      knowledgeBases.value = [];
-      emit('update:selected-knowledge-base-id', null);
-    }
-  }
-);
-
 // 组件挂载时加载知识库列表
 onMounted(() => {
-  if (props.projectId) {
-    fetchKnowledgeBases();
-  }
+  fetchKnowledgeBases();
 });
 </script>
 
