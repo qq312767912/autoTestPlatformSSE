@@ -2,6 +2,8 @@ name: Build Actuator Release
 
 on:
   push:
+    branches:
+      - dev
     tags:
       - "v*"
   workflow_dispatch:
@@ -37,7 +39,15 @@ jobs:
 
       - name: Build Windows executable
         shell: pwsh
-        run: python build_exe.py
+        run: |
+          $output = python build_exe.py 2>&1
+          $exitCode = $LASTEXITCODE
+          $output | Tee-Object -FilePath build-exe.log
+          if ($exitCode -ne 0) {
+            $message = (($output | Select-Object -Last 30) -join "`n").Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            Write-Output "::error title=Actuator build failed::$message"
+            exit $exitCode
+          }
 
       - name: Name release asset
         shell: pwsh
