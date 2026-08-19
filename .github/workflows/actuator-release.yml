@@ -1,0 +1,65 @@
+name: Build Actuator Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        working-directory: WHartTest_Actuator
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: WHartTest_Actuator/requirements.txt
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build Windows executable
+        shell: pwsh
+        run: python build_exe.py
+
+      - name: Name release asset
+        shell: pwsh
+        run: |
+          $version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "dev-${{ github.run_number }}" }
+          Copy-Item dist/WHartTest_Actuator.exe "dist/WHartTest_Actuator-$version-windows-x64.exe"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WHartTest-Actuator-windows-x64
+          path: WHartTest_Actuator/dist/WHartTest_Actuator-*-windows-x64.exe
+
+      - name: Upload executable to GitHub Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $asset = Get-ChildItem "WHartTest_Actuator/dist/WHartTest_Actuator-*-windows-x64.exe" | Select-Object -First 1
+          gh release view "${{ github.ref_name }}" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create "${{ github.ref_name }}" --title "${{ github.ref_name }}" --generate-notes
+          }
+          gh release upload "${{ github.ref_name }}" $asset.FullName --clobber

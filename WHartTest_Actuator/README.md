@@ -103,6 +103,18 @@ python main.py \
 
 执行器支持打包成独立可执行文件，方便分发部署。
 
+构建产物不提交到源码分支。正式版本通过 GitHub Release 分发：推送
+`v*` 格式的 Git 标签后，GitHub Actions 会在 Windows 环境构建并上传
+`WHartTest_Actuator-<版本>-windows-x64.exe`。
+
+```bash
+git tag v2.6.1
+git push origin v2.6.1
+```
+
+日常开发也可以在 GitHub 的 Actions 页面手动运行 `Build Actuator Release`，
+生成的 exe 会作为工作流 Artifact 提供下载，但不会自动创建正式 Release。
+
 ### 安装打包依赖
 
 ```bash
