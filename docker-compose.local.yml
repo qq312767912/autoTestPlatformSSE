@@ -62,6 +62,8 @@ services:
         HF_ENDPOINT: ${DOCKER_HF_ENDPOINT:-https://huggingface.co}
         NPM_REGISTRY: ${DOCKER_NPM_REGISTRY:-https://registry.npmjs.org}
         PLAYWRIGHT_DOWNLOAD_HOST: ${DOCKER_PLAYWRIGHT_DOWNLOAD_HOST:-}
+        CHROME_FOR_TESTING_VERSION: ${DOCKER_CHROME_FOR_TESTING_VERSION:-152.0.7977.42}
+        CHROME_FOR_TESTING_DOWNLOAD_HOST: ${DOCKER_CHROME_FOR_TESTING_DOWNLOAD_HOST:-https://cdn.npmmirror.com/binaries/chrome-for-testing}
     container_name: wharttest-backend
     # 启动逻辑已移至 Dockerfile 的 ENTRYPOINT 和 supervisord.conf
     ports:

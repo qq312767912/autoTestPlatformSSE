@@ -105,6 +105,8 @@ ARG APT_BASE_URL=http://deb.debian.org
 ARG HF_ENDPOINT=https://huggingface.co
 ARG NPM_REGISTRY=https://registry.npmjs.org
 ARG PLAYWRIGHT_DOWNLOAD_HOST=
+ARG CHROME_FOR_TESTING_VERSION=152.0.7977.42
+ARG CHROME_FOR_TESTING_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/chrome-for-testing
 
 WORKDIR /app
 
@@ -156,6 +158,8 @@ RUN if [ "$APT_BASE_URL" != "http://deb.debian.org" ]; then \
     # 旧版Word文档(.doc)解析支持
     antiword \
     catdoc \
+    # Chrome for Testing 解压支持
+    unzip \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean \
     && fc-cache -fv
@@ -207,6 +211,8 @@ RUN set -eux; \
 
 # 安装 agent-browser CLI 工具及其浏览器
 # agent-browser 是 AI Agent 专用的浏览器自动化工具
+# 国内网络无法访问 storage.googleapis.com，Chrome for Testing 改用国内镜像下载后解压，
+# 并通过 AGENT_BROWSER_EXECUTABLE_PATH 让 agent-browser 直接使用该 Chrome。
 RUN npm config set registry "${NPM_REGISTRY}" && \
     npm install -g agent-browser && \
     case "$(uname -m)" in \
@@ -214,9 +220,16 @@ RUN npm config set registry "${NPM_REGISTRY}" && \
         echo "Skipping agent-browser install on Linux ARM64; Chrome for Testing is not available for this platform."; \
         ;; \
       *) \
-        agent-browser install; \
+        mkdir -p /opt/chrome && \
+        curl -fL --retry 5 --retry-delay 3 -o /tmp/chrome-linux64.zip \
+          "${CHROME_FOR_TESTING_DOWNLOAD_HOST}/${CHROME_FOR_TESTING_VERSION}/linux64/chrome-linux64.zip" && \
+        unzip -q /tmp/chrome-linux64.zip -d /opt/chrome && \
+        rm -f /tmp/chrome-linux64.zip; \
         ;; \
     esac
+
+# 指定 agent-browser 使用的 Chrome 可执行文件路径
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/opt/chrome/chrome-linux64/chrome
 
 # 复制随仓库提交的 BM25 平铺模型目录（运行时通过 specific_model_path 离线加载）
 COPY bm25_model /app/bm25_model

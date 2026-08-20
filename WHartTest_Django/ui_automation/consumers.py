@@ -316,6 +316,10 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             actuator_id = args.get("effective_runtime", {}).get("actuator_id")
         if not actuator_id and isinstance(args.get("environment"), dict):
             actuator_id = args.get("environment", {}).get("actuator_id")
+        if not actuator_id and getattr(self, "is_actuator", False):
+            # 结果消息由执行器连接上报，回退到该连接自身的执行器 ID，
+            # 否则执行器结果里不带 actuator_id 时槽位永远无法释放
+            actuator_id = self.user_id
         if not actuator_id:
             return
         try:

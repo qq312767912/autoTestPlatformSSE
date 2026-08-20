@@ -6,7 +6,7 @@ api_username = "admin"
 api_password = "admin123456"
 
 [actuator]
-name = "本地执行器0"
+name = "本地执行器2"
 
 [browser]
 browser_type = "chromium"
