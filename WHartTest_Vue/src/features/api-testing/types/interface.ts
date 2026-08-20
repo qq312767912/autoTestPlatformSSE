@@ -1,6 +1,7 @@
 import type { UserBrief } from './common';
 
 export type InterfaceType = 'http' | 'sql';
+export type InterfaceStatus = 'active' | 'inactive' | 'deprecated';
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
 export type SqlMethod = 'fetchone' | 'fetchmany' | 'fetchall' | 'insert' | 'update' | 'delete';
 export type ApiBodyType = 'none' | 'form-data' | 'x-www-form-urlencoded' | 'raw' | 'binary';

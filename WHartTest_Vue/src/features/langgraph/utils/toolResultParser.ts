@@ -6,6 +6,10 @@ export interface ToolFileAttachment {
   size?: number;
 }
 
+export interface TodoDisplayPayload {
+  [key: string]: unknown;
+}
+
 export interface ToolResultDisplayPayload {
   content: string;
   imageDataUrl?: string;
