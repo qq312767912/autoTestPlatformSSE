@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """UI 自动化视图"""
 
+import logging
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -10,6 +11,8 @@ from django.db.models.deletion import ProtectedError
 from django.db import transaction
 from copy import deepcopy
 from file_management.services import maybe_cleanup_unreferenced_files, sync_file_references
+
+logger = logging.getLogger('ui_automation')
 
 from .models import (
     UiModule, UiPage, UiElement, UiPageSteps, UiPageStepsDetailed,
@@ -884,10 +887,13 @@ class UiExecutionRecordViewSet(viewsets.ModelViewSet):
                 'status': 'error',
                 'message': 'Trace 文件解析失败'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
+
         # 保存解析结果
-        instance.trace_data = trace_data
-        instance.save(update_fields=['trace_data'])
+        try:
+            instance.trace_data = trace_data
+            instance.save(update_fields=['trace_data'])
+        except Exception as save_error:
+            logger.warning(f"Trace 数据保存到数据库失败，跳过缓存: {save_error}")
         
         return Response({
             'status': 'success',

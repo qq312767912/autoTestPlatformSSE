@@ -13,11 +13,39 @@ import json
 import logging
 import zipfile
 import base64
+import re
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, asdict
 
 logger = logging.getLogger('ui_automation')
+
+
+# PostgreSQL JSON/JSONB 不允许 \u0000 (null byte) 等字符
+# 编译正则：匹配 \x00-\x08, \x0B, \x0C, \x0E-\x1F 等控制字符
+_INVALID_CHARS_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+
+
+def _sanitize_text(value: str) -> str:
+    """清除 PostgreSQL JSON 字段不支持的空字节和控制字符"""
+    if not isinstance(value, str):
+        return value
+    # 移除 null byte 和其他控制字符（保留 \t \n \r）
+    cleaned = _INVALID_CHARS_RE.sub('', value)
+    # 移除 Unicode null character
+    cleaned = cleaned.replace('\u0000', '')
+    return cleaned
+
+
+def _sanitize_data(obj):
+    """递归清除 dict/list/str 中的 PostgreSQL JSON 不兼容字符"""
+    if isinstance(obj, str):
+        return _sanitize_text(obj)
+    elif isinstance(obj, dict):
+        return {k: _sanitize_data(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_sanitize_data(item) for item in obj]
+    return obj
 
 
 @dataclass
@@ -205,7 +233,7 @@ class TraceParser:
             network_summary['by_status'][status_group] = network_summary['by_status'].get(status_group, 0) + 1
             network_summary['total_size'] += req.get('response_size', 0)
         
-        return {
+        result = {
             'title': metadata.get('title', 'Trace'),
             'start_time': start_time,
             'end_time': end_time,
@@ -225,6 +253,9 @@ class TraceParser:
                 'metadata': metadata
             }
         }
+
+        # 清除所有字符串中的 PostgreSQL JSON 不兼容字符（null bytes 等）
+        return _sanitize_data(result)
     
     def _parse_trace_events(self, content: str) -> dict:
         """解析 trace.trace 事件内容"""
