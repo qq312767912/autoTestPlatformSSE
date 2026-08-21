@@ -153,12 +153,23 @@ INSTALLED_APPS = [
 # 指定 ASGI 入口，支持 WebSocket。
 ASGI_APPLICATION = "wharttest_django.asgi.application"
 
-# Channels Layer 配置（使用内存后端，生产环境建议使用 Redis）
+# Channels Layer 配置（使用 Redis 后端，支持多 worker 共享 WebSocket 状态）
 # 配置 Channels 通道层后端。
 CHANNEL_LAYERS = {
     "default": {
-        # 使用内存通道层（适合开发/单进程场景）。
-        "BACKEND": "channels.layers.InMemoryChannelLayer"
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [os.environ.get("CHANNEL_REDIS_URL", "redis://redis:6379/2")],
+        },
+    }
+}
+
+# Django 缓存配置（使用 Redis，db=1 避免与 Celery broker db=0 冲突）
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": os.environ.get("DJANGO_CACHE_REDIS_URL", "redis://redis:6379/1"),
+        "TIMEOUT": 300,  # 默认缓存超时 5 分钟
     }
 }
 
