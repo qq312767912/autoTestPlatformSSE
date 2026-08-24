@@ -1,0 +1,43 @@
+services:
+  vision-mcp:
+    build:
+      context: ../../vision-mcp-master
+      dockerfile: Dockerfile
+    container_name: wharttest-vision-mcp
+    environment:
+      - VISION_MCP_BASE_URL=${VISION_MCP_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      - VISION_MCP_CHAT_COMPLETIONS_PATH=${VISION_MCP_CHAT_COMPLETIONS_PATH:-/chat/completions}
+      - VISION_MCP_API_KEY=${VISION_MCP_API_KEY:-}
+      - VISION_MCP_MODEL=${VISION_MCP_MODEL:-glm-4.6v-flash}
+      - VISION_MCP_OCR_PROVIDER=${VISION_MCP_OCR_PROVIDER:-rapidocr}
+      - VISION_MCP_TRANSPORT=streamable-http
+      - VISION_MCP_HOST=0.0.0.0
+      - VISION_MCP_PORT=8010
+      - VISION_MCP_PATH=/mcp
+      - VISION_MCP_TIMEOUT_SECONDS=${VISION_MCP_TIMEOUT_SECONDS:-120}
+      - VISION_MCP_MAX_RETRIES=${VISION_MCP_MAX_RETRIES:-2}
+    ports:
+      - "8923:8010"
+    volumes:
+      # 与backend保持相同绝对路径，使模型传入的上传文档路径可直接被Vision MCP读取。
+      - ./data:/app/data
+      # 与Playwright MCP共享截图绝对路径，用于需求图与当前页面截图对比。
+      - ./data/playwright-screenshots:/tmp/playwright-output:ro
+    networks:
+      - wharttest-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,urllib.error; r=urllib.request.Request('http://127.0.0.1:8010/mcp', method='GET');\ntry: urllib.request.urlopen(r, timeout=5)\nexcept urllib.error.HTTPError as e: raise SystemExit(0 if e.code < 500 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  backend:
+    environment:
+      - VISION_MCP_URL=http://vision-mcp:8010/mcp
+    volumes:
+      - ./WHartTest_Django/mcp_tools/management/commands/configure_vision_mcp.py:/app/mcp_tools/management/commands/configure_vision_mcp.py:ro
+    depends_on:
+      vision-mcp:
+        condition: service_healthy
