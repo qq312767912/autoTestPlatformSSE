@@ -497,7 +497,7 @@ const handleGenerateCasesSubmit = async (formData: {
   useKnowledgeBase: boolean,
   knowledgeBaseId?: string | null,
   testCaseModuleId: number,
-  selectedModules: { title: string, content: string }[],
+  selectedModules: { title: string, content: string, confirmed_image_context?: string }[],
   selectedTestCaseIds: number[],
   selectedTestCases: TestCase[],
   testTypes: string[],
@@ -532,6 +532,7 @@ ${mod.title}
 ---
 [需求模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''}内容]
 ${mod.content}
+${mod.confirmed_image_context ? `\n---\n[用户已确认的需求图片上下文]\n${mod.confirmed_image_context}` : ''}
 ---`).join('\n\n')}
 
 请注意：生成的测试用例最终需要被保存在 **项目ID "${currentProjectId.value}"** 下的 **测试用例模块ID "${formData.testCaseModuleId}"** 中。
@@ -556,6 +557,7 @@ ${mod.title}
 ---
 [需求模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''}内容]
 ${mod.content}
+${mod.confirmed_image_context ? `\n---\n[用户已确认的需求图片上下文]\n${mod.confirmed_image_context}` : ''}
 ---`).join('\n\n')}
 
 请注意：
@@ -606,7 +608,7 @@ ${testTypePrompt}
 ${formData.selectedTestCases.map(tc => `- 用例ID: ${tc.id}, 名称: ${tc.name}, 优先级: ${tc.level}, 模块ID: ${tc.module_id ?? '未分配'}, 模块: ${tc.module_detail || '未分配'}`).join('\n')}
 
 [需求模块参考]
-${formData.selectedModules.length > 0 ? formData.selectedModules.map((mod, idx) => `模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''} 标题: ${mod.title}\n模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''} 内容: ${mod.content}`).join('\n\n') : '无'}
+${formData.selectedModules.length > 0 ? formData.selectedModules.map((mod, idx) => `模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''} 标题: ${mod.title}\n模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''} 内容: ${mod.content}${mod.confirmed_image_context ? `\n[用户已确认的需求图片上下文]\n${mod.confirmed_image_context}` : ''}`).join('\n\n') : '无'}
 
 项目ID: ${currentProjectId.value}
       `.trim();

@@ -98,6 +98,18 @@ class RequirementDocument(models.Model):
     # 图片信息
     has_images = models.BooleanField(_('包含图片'), default=False)
     image_count = models.IntegerField(_('图片数量'), default=0)
+    image_analysis_status = models.CharField(
+        _('图片分析状态'),
+        max_length=20,
+        choices=[
+            ('not_started', '未开始'),
+            ('processing', '分析中'),
+            ('user_reviewing', '用户调整中'),
+            ('confirmed', '已确认'),
+            ('failed', '分析失败'),
+        ],
+        default='not_started',
+    )
 
     # 拆分层级
     last_split_level = models.IntegerField(_('最近拆分层级'), default=0)
@@ -140,6 +152,14 @@ class DocumentImage(models.Model):
         related_name='images',
         verbose_name=_('所属文档')
     )
+    module = models.ForeignKey(
+        'RequirementModule',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='document_images',
+        verbose_name=_('所属需求模块'),
+    )
 
     # 图片文件
     image_file = models.ImageField(
@@ -160,8 +180,45 @@ class DocumentImage(models.Model):
     height = models.IntegerField(_('高度'), null=True, blank=True)
     file_size = models.IntegerField(_('文件大小'), default=0)
 
+    # Vision MCP 分析与人工确认结果
+    nearby_text = models.TextField(_('图片附近文字'), blank=True)
+    ocr_text = models.TextField(_('OCR文字'), blank=True)
+    page_title = models.CharField(_('页面名称'), max_length=255, blank=True)
+    change_type = models.CharField(
+        _('变更类型'),
+        max_length=20,
+        choices=[
+            ('add', '新增'),
+            ('change', '修改'),
+            ('remove', '删除'),
+            ('unknown', '无法判断'),
+        ],
+        default='unknown',
+    )
+    change_description = models.TextField(_('变更说明'), blank=True)
+    analysis_result = models.JSONField(_('结构化分析结果'), default=dict, blank=True)
+    table_markdown = models.TextField(_('表格Markdown'), blank=True)
+    suggested_test_points = models.JSONField(_('建议测试点'), default=list, blank=True)
+    confidence = models.FloatField(_('识别置信度'), null=True, blank=True)
+    user_notes = models.TextField(_('用户备注'), blank=True)
+    is_enabled = models.BooleanField(_('是否采用'), default=True)
+    review_status = models.CharField(
+        _('图片确认状态'),
+        max_length=20,
+        choices=[
+            ('pending', '待分析'),
+            ('analyzed', '待确认'),
+            ('confirmed', '已确认'),
+            ('ignored', '已忽略'),
+            ('error', '分析失败'),
+        ],
+        default='pending',
+    )
+    analysis_error = models.TextField(_('分析错误'), blank=True)
+
     # 时间戳
     created_at = models.DateTimeField(_('创建时间'), auto_now_add=True)
+    updated_at = models.DateTimeField(_('更新时间'), auto_now=True)
 
     class Meta:
         verbose_name = _('文档图片')

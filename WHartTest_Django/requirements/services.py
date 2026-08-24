@@ -2181,6 +2181,12 @@ class RequirementModuleService:
             document.status = "user_reviewing"
             document.save()
 
+            # DOCX image markers remain in module content after splitting, so bind images
+            # immediately instead of asking the vision model to rediscover document position.
+            from .image_analysis import assign_modules_from_document_markers
+
+            assign_modules_from_document_markers(document)
+
             logger.info(f"文档 {document.id} 模块拆分完成，生成 {len(modules)} 个模块")
             return modules
 
@@ -2555,7 +2561,7 @@ class RequirementReviewEngine:
         return re.sub(r"!\[.*?\]\(docimg://[^)]+\)\s*", "", content)
 
     def _prepare_analysis_content(
-        self, content: str, document: RequirementDocument = None
+        self, content: str, document: RequirementDocument = None, include_original_images: bool = False
     ) -> tuple:
         """
         准备分析内容，根据是否支持多模态返回不同格式
@@ -2569,7 +2575,7 @@ class RequirementReviewEngine:
         has_images = document and document.has_images if document else False
         supports_vision = self._supports_vision()
 
-        if has_images and supports_vision:
+        if has_images and supports_vision and include_original_images:
             # 多模态模式：返回图文交替的消息内容列表
             multimodal_parts = self._parse_content_with_images(content, document)
             logger.info(f"使用多模态分析，包含 {document.image_count} 张图片")
@@ -2581,7 +2587,7 @@ class RequirementReviewEngine:
             logger.warning(warning)
             return text_only, False, warning
         else:
-            # 无图片：直接返回原内容
+            # 默认使用已展开的结构化图片内容。原图仅在调用方明确要求时发送。
             return content, False, None
 
     def _get_user_prompt(self, prompt_type: str) -> str:
@@ -3078,7 +3084,10 @@ class RequirementReviewEngine:
                         f"文档包含 {document.image_count} 张图片，但当前模型不支持多模态，图片将被忽略"
                     )
 
-            # 使用线程池并发执行6个专项分析（每个都处理完整文档，充分利用200k上下文）
+            from .image_analysis import confirmed_document_content
+            analysis_content = confirmed_document_content(document)
+
+            # 使用线程池并发执行6个专项分析（每个都处理完整文档，充分利用上下文）
             from concurrent.futures import ThreadPoolExecutor, as_completed
             import threading
 
@@ -3108,7 +3117,7 @@ class RequirementReviewEngine:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # 提交所有任务 - 传递 document 而非 content
                 future_to_analysis = {
-                    executor.submit(task_func, document.content, document): (
+                    executor.submit(task_func, analysis_content, None): (
                         name,
                         display_name,
                     )
@@ -3366,11 +3375,13 @@ class RequirementReviewEngine:
             raise ValueError("用户未配置全局分析提示词，请先在提示词管理中配置")
 
         try:
+            from .image_analysis import confirmed_document_content
+            combined_document_content = confirmed_document_content(document)
             formatted_prompt = format_prompt_template(
                 global_prompt,
                 title=document.title,
                 description=document.description or "无描述",
-                content=document.content[:6000],
+                content=combined_document_content,
             )
             messages = [
                 SystemMessage(content="你是一位专业的需求分析师，擅长需求文档评审。"),
@@ -3424,11 +3435,13 @@ class RequirementReviewEngine:
             raise ValueError("用户未配置模块分析提示词，请先在提示词管理中配置")
 
         try:
+            from .image_analysis import confirmed_module_content
+            combined_module_content = confirmed_module_content(module)
             formatted_prompt = format_prompt_template(
                 module_prompt,
                 module_id=str(module.id),
                 module_title=module.title,
-                module_content=module.content[:3000],
+                module_content=combined_module_content,
                 business_flows=", ".join(global_context.get("business_flows", [])),
                 data_entities=", ".join(global_context.get("data_entities", [])),
                 global_rules=", ".join(global_context.get("global_rules", [])),

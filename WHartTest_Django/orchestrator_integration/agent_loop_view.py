@@ -373,6 +373,7 @@ async def _prepare_agent_loop_human_message(
     project: Project,
     supports_vision: bool,
     uploaded_images_base64: Optional[List[str]] = None,
+    include_requirement_images: bool = False,
 ) -> tuple[Any, Dict[str, Any], str]:
     """
     规范化 Agent Loop 的用户消息。
@@ -388,7 +389,11 @@ async def _prepare_agent_loop_human_message(
         display_message,
         requirement_doc_image_data_urls,
         requirement_document_id,
-    ) = await _extract_requirement_doc_images_for_message(display_message, project)
+    ) = await _extract_requirement_doc_images_for_message(
+        display_message,
+        project,
+        include_original_images=include_requirement_images,
+    )
 
     if requirement_doc_image_data_urls and not supports_vision:
         logger.warning(
@@ -854,6 +859,7 @@ class AgentLoopStreamAPIView(View):
         test_case_id: Optional[int] = None,
         use_pytest: bool = True,
         file_ids: Optional[List[int]] = None,
+        include_requirement_images: bool = False,
     ):
         """
         创建 SSE 流式生成器（LangChain v1 重构版）
@@ -1039,6 +1045,7 @@ class AgentLoopStreamAPIView(View):
                 project=project,
                 supports_vision=active_config.supports_vision,
                 uploaded_images_base64=uploaded_images_base64,
+                include_requirement_images=include_requirement_images,
             )
             user_msg = HumanMessage(
                 content=human_message_content,
@@ -1522,6 +1529,9 @@ class AgentLoopStreamAPIView(View):
         project_id = body_data.get("project_id")
         knowledge_base_id = body_data.get("knowledge_base_id")
         use_knowledge_base = body_data.get("use_knowledge_base", True)
+        include_requirement_images = str(
+            body_data.get("include_requirement_images", "false")
+        ).lower() in {"1", "true", "yes", "on"}
         prompt_id = body_data.get("prompt_id")
         file_ids = body_data.get("file_ids", [])
 
@@ -1603,6 +1613,7 @@ class AgentLoopStreamAPIView(View):
                     test_case_id,
                     use_pytest,
                     file_ids,
+                    include_requirement_images,
                 ):
                     yield chunk
 
@@ -1628,6 +1639,7 @@ class AgentLoopStreamAPIView(View):
                 test_case_id,
                 use_pytest,
                 file_ids,
+                include_requirement_images,
             )
 
     async def _handle_non_stream_request(
@@ -1645,6 +1657,7 @@ class AgentLoopStreamAPIView(View):
         test_case_id: Optional[int] = None,
         use_pytest: bool = True,
         file_ids: Optional[List[int]] = None,
+        include_requirement_images: bool = False,
     ) -> JsonResponse:
         """
         处理非流式请求，收集所有流式事件后返回统一 JSON 响应
@@ -1676,6 +1689,7 @@ class AgentLoopStreamAPIView(View):
                 test_case_id,
                 use_pytest,
                 file_ids,
+                include_requirement_images,
             ):
                 # 解析 SSE 数据
                 if isinstance(chunk, str) and chunk.startswith("data: "):

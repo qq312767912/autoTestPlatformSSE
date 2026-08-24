@@ -17,6 +17,7 @@ import type {
   SplitModulesResponse,
   ContextCheckResponse,
   DocumentStructureResponse,
+  DocumentImageAnalysis,
   DocxEditorSession,
   DocxEditorLaunchResult
 } from '../types';
@@ -358,6 +359,49 @@ export class RequirementDocumentService {
         errors: { detail: response.error }
       };
     }
+  }
+
+  static async prepareImages(id: string, force = false): Promise<ApiResponse<{ images: DocumentImageAnalysis[]; total: number }>> {
+    const response = await request<{ images: DocumentImageAnalysis[]; total: number }>({
+      url: `${BASE_URL}/documents/${id}/prepare-images/`,
+      method: 'POST',
+      data: { force }
+    });
+    return response.success
+      ? { status: 'success', code: 200, message: response.message || '图片提取完成', data: response.data!, errors: null }
+      : { status: 'error', code: 500, message: response.error || '图片提取失败', data: null, errors: { detail: response.error } };
+  }
+
+  static async analyzeImages(id: string, imageIds?: string[]): Promise<ApiResponse<{ task_id: string; queued: number; image_analysis_status: string }>> {
+    const response = await request<{ task_id: string; queued: number; image_analysis_status: string }>({
+      url: `${BASE_URL}/documents/${id}/analyze-images/`,
+      method: 'POST',
+      data: imageIds ? { image_ids: imageIds } : {}
+    });
+    return response.success
+      ? { status: 'success', code: 200, message: response.message || '图片分析完成', data: response.data!, errors: null }
+      : { status: 'error', code: 500, message: response.error || '图片分析失败', data: null, errors: { detail: response.error } };
+  }
+
+  static async updateImageAnalysis(documentId: string, imageId: string, data: Partial<DocumentImageAnalysis>): Promise<ApiResponse<DocumentImageAnalysis>> {
+    const response = await request<DocumentImageAnalysis>({
+      url: `${BASE_URL}/documents/${documentId}/image-analysis/${imageId}/`,
+      method: 'PATCH',
+      data
+    });
+    return response.success
+      ? { status: 'success', code: 200, message: response.message || '图片结果已保存', data: response.data!, errors: null }
+      : { status: 'error', code: 500, message: response.error || '保存图片结果失败', data: null, errors: { detail: response.error } };
+  }
+
+  static async confirmImageAnalysis(id: string): Promise<ApiResponse<{ confirmed: number }>> {
+    const response = await request<{ confirmed: number }>({
+      url: `${BASE_URL}/documents/${id}/confirm-image-analysis/`,
+      method: 'POST'
+    });
+    return response.success
+      ? { status: 'success', code: 200, message: response.message || '图片分析已确认', data: response.data!, errors: null }
+      : { status: 'error', code: 400, message: response.error || '确认图片分析失败', data: null, errors: { detail: response.error } };
   }
 
   /**

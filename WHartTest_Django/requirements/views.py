@@ -33,6 +33,7 @@ from .serializers import (
     ModuleAdjustmentSerializer,
     ReviewAnalysisRequestSerializer,
     ReviewProgressSerializer,
+    DocumentImageSerializer,
 )
 from .filters import (
     RequirementDocumentFilter,
@@ -58,6 +59,7 @@ from .services import (
     ModuleOperationService,
     RequirementReviewService,
 )
+from .image_analysis import RequirementImageAnalysisService
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +230,87 @@ class RequirementDocumentViewSet(BaseModelViewSet):
             for img in images
         ]
         return Response({"images": data, "total": len(data)})
+
+    @action(detail=True, methods=["post"], url_path="prepare-images")
+    def prepare_images(self, request, pk=None):
+        """在模块拆分后提取需求图片，PDF 通过 Vision MCP 补齐提取。"""
+        document = self.get_object()
+        if not document.modules.exists():
+            return Response({"error": "请先完成模块拆分"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            images = RequirementImageAnalysisService(document).prepare(
+                force=bool(request.data.get("force", False))
+            )
+            serializer = DocumentImageSerializer(images, many=True, context={"request": request})
+            return Response({"images": serializer.data, "total": len(images)})
+        except Exception as exc:
+            logger.exception("需求图片提取失败")
+            return Response({"error": f"需求图片提取失败: {exc}"}, status=status.HTTP_502_BAD_GATEWAY)
+
+    @action(detail=True, methods=["post"], url_path="analyze-images")
+    def analyze_images(self, request, pk=None):
+        """提交后台 OCR + Vision MCP 图片分析任务。"""
+        document = self.get_object()
+        image_ids = request.data.get("image_ids")
+        try:
+            from .tasks import analyze_document_images
+            from .image_analysis import assign_modules_from_document_markers
+
+            if document.image_analysis_status == "processing":
+                return Response({"error": "图片分析任务正在执行，请勿重复提交"}, status=status.HTTP_409_CONFLICT)
+            assign_modules_from_document_markers(document)
+            document.image_analysis_status = "processing"
+            document.save(update_fields=["image_analysis_status"])
+            task = analyze_document_images.delay(str(document.id), image_ids=image_ids)
+            return Response({
+                "task_id": task.id,
+                "image_analysis_status": "processing",
+                "queued": len(image_ids) if image_ids else document.images.filter(is_enabled=True).count(),
+            }, status=status.HTTP_202_ACCEPTED)
+        except Exception as exc:
+            document.image_analysis_status = "failed"
+            document.save(update_fields=["image_analysis_status"])
+            logger.exception("需求图片分析失败")
+            return Response({"error": f"需求图片分析失败: {exc}"}, status=status.HTTP_502_BAD_GATEWAY)
+
+    @action(
+        detail=True,
+        methods=["patch"],
+        url_path=r"image-analysis/(?P<image_pk>[0-9a-fA-F-]+)",
+    )
+    def update_image_analysis(self, request, pk=None, image_pk=None):
+        """用户调整图片所属模块、识别文字、变更说明和测试点。"""
+        document = self.get_object()
+        image = get_object_or_404(document.images, pk=image_pk)
+        serializer = DocumentImageSerializer(
+            image, data=request.data, partial=True, context={"request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        image = serializer.save()
+        if not image.is_enabled:
+            image.review_status = "ignored"
+            image.save(update_fields=["review_status", "updated_at"])
+        elif image.review_status in {"pending", "error"}:
+            image.review_status = "analyzed"
+            image.save(update_fields=["review_status", "updated_at"])
+        return Response(DocumentImageSerializer(image, context={"request": request}).data)
+
+    @action(detail=True, methods=["post"], url_path="confirm-image-analysis")
+    def confirm_image_analysis(self, request, pk=None):
+        """确认后的图片结果才能进入后续测试方案/用例上下文。"""
+        document = self.get_object()
+        enabled = document.images.filter(is_enabled=True)
+        unassigned = enabled.filter(module__isnull=True).count()
+        if unassigned:
+            return Response(
+                {"error": f"仍有 {unassigned} 张启用图片未归属需求模块"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        enabled.update(review_status="confirmed")
+        document.images.filter(is_enabled=False).update(review_status="ignored")
+        document.image_analysis_status = "confirmed"
+        document.save(update_fields=["image_analysis_status"])
+        return Response({"message": "图片分析结果已确认", "confirmed": enabled.count()})
 
     @action(detail=True, methods=["get"], url_path="download-file")
     def download_file(self, request, pk=None):

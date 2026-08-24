@@ -170,6 +170,11 @@
               <icon-scissor />
             </template>
           </a-step>
+          <a-step :title="pageText.workflowImageAnalysis" :description="pageText.workflowImageAnalysisDesc">
+            <template #icon>
+              <icon-image />
+            </template>
+          </a-step>
           <a-step :title="pageText.workflowUserReview" :description="pageText.workflowUserReviewDesc">
             <template #icon>
               <icon-edit />
@@ -212,6 +217,14 @@
           <div class="modules-header">
             <span>{{ getModulesHeaderTitle(document.status, document.modules.length) }}</span>
             <div class="modules-actions">
+              <a-button
+                type="outline"
+                size="small"
+                @click="imageAnalysisVisible = true"
+              >
+                <template #icon><icon-image /></template>
+                {{ pageText.openImageAnalysis }}
+              </a-button>
               <a-button 
                 v-if="document.status === 'user_reviewing'"
                 type="primary" 
@@ -387,6 +400,24 @@
       </a-empty>
     </div>
 
+    <!-- 图片识别作为独立操作，不占用模块拆分页面的纵向空间 -->
+    <a-modal
+      v-if="document"
+      v-model:visible="imageAnalysisVisible"
+      :title="pageText.imageAnalysisDialogTitle"
+      width="min(1200px, 94vw)"
+      :footer="false"
+      unmount-on-close
+    >
+      <ImageAnalysisPanel
+        :document-id="document.id"
+        :modules="sortedModules"
+        :images="document.images || []"
+        :status="document.image_analysis_status || 'not_started'"
+        @refresh="loadDocument"
+      />
+    </a-modal>
+
     <!-- 加载状态 -->
     <div v-if="loading" class="loading-state">
       <a-spin size="large" />
@@ -471,6 +502,7 @@ import {
   IconEdit,
   IconDelete,
   IconFile,
+  IconImage,
   IconScissor,
   IconRobot,
   IconRefresh
@@ -486,6 +518,7 @@ import type {
   SplitModulesRequest
 } from '../types';
 import SplitOptionsModal from '../components/SplitOptionsModal.vue';
+import ImageAnalysisPanel from '../components/ImageAnalysisPanel.vue';
 import { useAppI18n } from '@/composables/useAppI18n';
 import { useProjectStore } from '@/store/projectStore';
 import { translateLegacyText, type AppLocale } from '@/i18n';
@@ -534,6 +567,8 @@ const pageText = computed(() => (
         workflowDocumentUploadDesc: 'Upload requirement documents',
         workflowModuleSplit: 'Module split',
         workflowModuleSplitDesc: 'Split the document into modules',
+        workflowImageAnalysis: 'Image analysis',
+        workflowImageAnalysisDesc: 'Extract, recognize and confirm UI changes',
         workflowUserReview: 'User review',
         workflowUserReviewDesc: 'Confirm the split result when needed',
         workflowRequirementReview: 'Requirement review',
@@ -544,6 +579,8 @@ const pageText = computed(() => (
         modulesDetails: 'Module details',
         modulesManagement: 'Module management',
         confirmModuleSegmentation: 'Confirm segmentation',
+        openImageAnalysis: 'Image analysis',
+        imageAnalysisDialogTitle: 'Requirement image analysis',
         addModule: 'Add module',
         totalModules: (count: number) => `${count} ${count === 1 ? 'module' : 'modules'} total`,
         mergeSelected: 'Merge selected',
@@ -641,6 +678,8 @@ const pageText = computed(() => (
         workflowDocumentUploadDesc: '上传需求文档',
         workflowModuleSplit: '模块拆分',
         workflowModuleSplitDesc: '拆分文档生成模块',
+        workflowImageAnalysis: '图片识别',
+        workflowImageAnalysisDesc: '提取、识别并确认页面变更',
         workflowUserReview: '用户调整',
         workflowUserReviewDesc: '确认模块拆分结果（如需要）',
         workflowRequirementReview: '需求评审',
@@ -651,6 +690,8 @@ const pageText = computed(() => (
         modulesDetails: '模块详情',
         modulesManagement: '模块管理',
         confirmModuleSegmentation: '确认模块划分',
+        openImageAnalysis: '图片识别',
+        imageAnalysisDialogTitle: '需求图片识别与调整',
         addModule: '添加模块',
         totalModules: (count: number) => `共 ${count} 个模块`,
         mergeSelected: '合并选中',
@@ -785,6 +826,7 @@ const loading = ref(false);
 const splitLoading = ref(false);
 const reviewLoading = ref(false);
 const docxEditorLoading = ref(false);
+const imageAnalysisVisible = ref(false);
 const document = ref<DocumentDetail | null>(null);
 const expandedModules = ref<string[]>([]);
 
@@ -936,10 +978,10 @@ const getCurrentStep = (status: DocumentStatus) => {
   const stepMap: Partial<Record<DocumentStatus, number>> = {
     'processing': 2,
     'module_split': 3,
-    'user_reviewing': 3,
-    'ready_for_review': 4,
-    'reviewing': 4,
-    'review_completed': 5,
+    'user_reviewing': document.value?.image_analysis_status === 'confirmed' ? 4 : 3,
+    'ready_for_review': 5,
+    'reviewing': 5,
+    'review_completed': 6,
     'failed': 0
   };
 

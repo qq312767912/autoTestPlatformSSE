@@ -19,7 +19,7 @@ class RequirementDocumentSerializer(serializers.ModelSerializer):
             'status', 'version', 'is_latest', 'parent_document',
             'uploader', 'uploader_name', 'project', 'project_name',
             'uploaded_at', 'updated_at', 'word_count', 'page_count',
-            'has_images', 'image_count', 'modules_count',
+            'has_images', 'image_count', 'modules_count', 'image_analysis_status',
             'is_anonymized', 'anonymized_at'
         ]
         read_only_fields = ['id', 'uploader', 'uploaded_at', 'updated_at']
@@ -62,6 +62,7 @@ class RequirementDocumentUploadSerializer(serializers.ModelSerializer):
 class RequirementModuleSerializer(serializers.ModelSerializer):
     """需求模块序列化器"""
     issues_count = serializers.SerializerMethodField()
+    confirmed_image_context = serializers.SerializerMethodField()
     
     class Meta:
         model = RequirementModule
@@ -69,13 +70,53 @@ class RequirementModuleSerializer(serializers.ModelSerializer):
             'id', 'title', 'content', 'start_page', 'end_page',
             'start_position', 'end_position', 'order', 'parent_module',
             'is_auto_generated', 'confidence_score', 'ai_suggested_title',
-            'created_at', 'updated_at', 'issues_count'
+            'created_at', 'updated_at', 'issues_count', 'confirmed_image_context'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
     
     def get_issues_count(self, obj):
         """获取问题数量"""
         return obj.issues.count()
+
+    def get_confirmed_image_context(self, obj):
+        from .image_analysis import confirmed_image_context
+        return confirmed_image_context(obj)
+
+
+class DocumentImageSerializer(serializers.ModelSerializer):
+    module_title = serializers.CharField(source='module.title', read_only=True)
+    image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DocumentImage
+        fields = [
+            'id', 'image_id', 'order', 'image_url', 'original_filename',
+            'content_type', 'width', 'height', 'file_size', 'module',
+            'module_title', 'nearby_text', 'ocr_text', 'page_title',
+            'change_type', 'change_description', 'analysis_result',
+            'table_markdown',
+            'suggested_test_points', 'confidence', 'user_notes',
+            'is_enabled', 'review_status', 'analysis_error',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'image_id', 'order', 'image_url', 'original_filename',
+            'content_type', 'width', 'height', 'file_size', 'analysis_result',
+            'confidence', 'review_status', 'analysis_error', 'created_at', 'updated_at',
+        ]
+
+    def get_image_url(self, obj):
+        path = f'/api/requirements/documents/{obj.document_id}/images/{obj.image_id}/'
+        # Relative URLs preserve the browser's actual host and non-standard port (e.g. 8913).
+        return path
+
+    def validate_module(self, module):
+        if module is None:
+            return module
+        document_id = self.instance.document_id if self.instance else None
+        if document_id and module.document_id != document_id:
+            raise serializers.ValidationError("图片只能归属到同一需求文档的模块")
+        return module
 
 
 class ReviewIssueSerializer(serializers.ModelSerializer):
@@ -207,10 +248,11 @@ class RequirementDocumentDetailSerializer(RequirementDocumentSerializer):
     modules = RequirementModuleSerializer(many=True, read_only=True)
     review_reports = ReviewReportSerializer(many=True, read_only=True)
     latest_review = serializers.SerializerMethodField()
+    images = DocumentImageSerializer(many=True, read_only=True)
     
     class Meta(RequirementDocumentSerializer.Meta):
         fields = RequirementDocumentSerializer.Meta.fields + [
-            'modules', 'review_reports', 'latest_review'
+            'modules', 'images', 'review_reports', 'latest_review'
         ]
     
     def get_latest_review(self, obj):

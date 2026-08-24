@@ -463,6 +463,7 @@ def _file_to_data_url(path: str, content_type: str) -> str:
 async def _extract_requirement_doc_images_for_message(
     message: str,
     project: Project,
+    include_original_images: bool = False,
 ) -> tuple[str, list[str], Optional[str]]:
     """
     从消息中识别需求文档图片引用（docimg:// 或 /api/requirements/documents/.../images/...），
@@ -479,6 +480,8 @@ async def _extract_requirement_doc_images_for_message(
         return message, [], None
 
     message_text = _replace_docimg_markdown_with_api_urls(message, document_id)
+    if not include_original_images:
+        return message_text, [], document_id
     image_ids = _extract_requirement_image_ids_in_order(message_text)
     if not image_ids:
         return message_text, [], document_id
@@ -988,6 +991,9 @@ class ChatAPIView(APIView):
         session_id = request.data.get("session_id")
         project_id = request.data.get("project_id")
         image_base64 = request.data.get("image")  # 图片base64编码（不含前缀）
+        include_requirement_images = str(
+            request.data.get("include_requirement_images", "false")
+        ).lower() in {"1", "true", "yes", "on"}
         file_ids = request.data.get("file_ids", [])
 
         # 知识库相关参数
@@ -1527,6 +1533,7 @@ class ChatAPIView(APIView):
                 ) = await _extract_requirement_doc_images_for_message(
                     clean_user_message,
                     project,
+                    include_original_images=include_requirement_images,
                 )
 
                 if req_image_data_urls and not active_config.supports_vision:

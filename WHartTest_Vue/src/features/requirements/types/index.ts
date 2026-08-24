@@ -54,6 +54,7 @@ export interface RequirementDocument {
   modules_count: number;
   has_images: boolean;
   image_count: number;
+  image_analysis_status: 'not_started' | 'processing' | 'user_reviewing' | 'confirmed' | 'failed';
 }
 
 // 创建文档请求
@@ -89,6 +90,30 @@ export interface DocumentModule {
   created_at?: string;
   updated_at?: string;
   issues_count?: number;
+  confirmed_image_context?: string;
+}
+
+export interface DocumentImageAnalysis {
+  id: string;
+  image_id: string;
+  order: number;
+  image_url: string;
+  original_filename: string;
+  module: string | null;
+  module_title?: string;
+  nearby_text: string;
+  ocr_text: string;
+  page_title: string;
+  change_type: 'add' | 'change' | 'remove' | 'unknown';
+  change_description: string;
+  analysis_result: Record<string, any>;
+  table_markdown: string;
+  suggested_test_points: string[];
+  confidence: number | null;
+  user_notes: string;
+  is_enabled: boolean;
+  review_status: 'pending' | 'processing' | 'analyzed' | 'confirmed' | 'ignored' | 'error';
+  analysis_error: string;
 }
 
 // 模块操作类型
@@ -313,6 +338,7 @@ export interface ReviewReport {
 // 文档详情（包含模块和评审报告）
 export interface DocumentDetail extends RequirementDocument {
   modules: DocumentModule[];
+  images: DocumentImageAnalysis[];
   review_reports: ReviewReport[];
   latest_review?: ReviewReport;
 }
