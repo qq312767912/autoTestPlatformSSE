@@ -7,8 +7,8 @@ from asgiref.sync import sync_to_async
 from projects.models import Project  # 假设 Project 模型位于 'projects' 应用
 from .serializers import MCPProjectListSerializer
 from rest_framework_simplejwt.authentication import JWTAuthentication  # 导入 JWT 认证
-from .models import RemoteMCPConfig
-from .serializers import RemoteMCPConfigSerializer
+from .models import RemoteMCPConfig, VisionModelConfig
+from .serializers import RemoteMCPConfigSerializer, VisionModelConfigSerializer
 
 # import urllib.request # 不再需要
 # import urllib.parse # 不再需要
@@ -22,7 +22,7 @@ import logging  # 导入 logging 模块
 from langchain_mcp_adapters.client import (
     MultiServerMCPClient,
 )  # 导入 LangGraph 的 MCP 客户端
-from wharttest_django.permissions import HasModelPermission
+from wharttest_django.permissions import HasModelPermission, permission_required
 
 logger = logging.getLogger(__name__)  # 获取日志实例
 
@@ -461,3 +461,57 @@ class RemoteMCPConfigViewSet(viewsets.ModelViewSet):
                 },
             }
         )
+
+
+class VisionModelConfigViewSet(viewsets.ModelViewSet):
+    """Vision MCP 模型连接配置。API Key 只写，任何读接口均不返回明文。"""
+
+    queryset = VisionModelConfig.objects.all()
+    serializer_class = VisionModelConfigSerializer
+    permission_classes = [permissions.IsAuthenticated, HasModelPermission]
+
+    def get_queryset(self):
+        return VisionModelConfig.objects.order_by("pk")
+
+    @action(detail=True, methods=["post"], url_path="test-connection")
+    @permission_required("mcp_tools.change_visionmodelconfig")
+    def test_connection(self, request, pk=None):
+        """使用已保存密钥或本次输入的新密钥发起最小模型请求。"""
+        import httpx
+
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        values = serializer.validated_data
+        api_key = values.get("api_key") or instance.get_api_key()
+        if not api_key:
+            return Response({"error": "请先填写 API Key"}, status=status.HTTP_400_BAD_REQUEST)
+
+        base_url = str(values.get("base_url", instance.base_url)).rstrip("/")
+        path = str(values.get("chat_completions_path", instance.chat_completions_path)).strip("/")
+        model = values.get("model", instance.model)
+        timeout = values.get("timeout_seconds", instance.timeout_seconds)
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "Return JSON: {\"status\":\"ok\"}"}],
+            "max_tokens": 16,
+            "response_format": {"type": "json_object"},
+        }
+        try:
+            response = httpx.post(
+                f"{base_url}/{path}",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if not data.get("choices"):
+                raise ValueError("响应中缺少 choices")
+        except Exception as exc:
+            logger.warning("Vision MCP 模型连通性检查失败: %s", type(exc).__name__)
+            return Response(
+                {"error": f"连接失败: {str(exc)[:300]}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response({"message": "视觉模型连接成功"})

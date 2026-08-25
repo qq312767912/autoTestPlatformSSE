@@ -1,7 +1,7 @@
 services:
   vision-mcp:
     build:
-      context: ../../vision-mcp-master
+      context: ./WHartTest_Vision_MCP
       dockerfile: Dockerfile
     container_name: wharttest-vision-mcp
     environment:
@@ -36,6 +36,17 @@ services:
   backend:
     environment:
       - VISION_MCP_URL=http://vision-mcp:8010/mcp
+      # vision-analysis Skill 直接调用视觉API；迁移期继续保留上方MCP地址作为回退。
+      - VISION_API_BASE_URL=${VISION_API_BASE_URL:-}
+      - VISION_MCP_BASE_URL=${VISION_MCP_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      - VISION_API_CHAT_PATH=${VISION_API_CHAT_PATH:-}
+      - VISION_MCP_CHAT_COMPLETIONS_PATH=${VISION_MCP_CHAT_COMPLETIONS_PATH:-/chat/completions}
+      - VISION_API_KEY=${VISION_API_KEY:-}
+      - VISION_MCP_API_KEY=${VISION_MCP_API_KEY:-}
+      - VISION_MODEL=${VISION_MODEL:-}
+      - VISION_MCP_MODEL=${VISION_MCP_MODEL:-glm-4.6v-flash}
+      - VISION_API_TIMEOUT_SECONDS=${VISION_API_TIMEOUT_SECONDS:-}
+      - VISION_MCP_TIMEOUT_SECONDS=${VISION_MCP_TIMEOUT_SECONDS:-120}
     volumes:
       - ./WHartTest_Django/mcp_tools/management/commands/configure_vision_mcp.py:/app/mcp_tools/management/commands/configure_vision_mcp.py:ro
     depends_on:

@@ -2,8 +2,49 @@
   <div class="remote-mcp-management">
     <div class="page-header">
       <h2>{{ pageText.pageTitle }}</h2>
-      <a-button type="primary" @click="showAddForm">{{ pageText.addRemoteMcp }}</a-button>
+      <a-space>
+        <a-button @click="showVisionConfig">{{ pageText.openVisionConfig }}</a-button>
+        <a-button type="primary" @click="showAddForm">{{ pageText.addRemoteMcp }}</a-button>
+      </a-space>
     </div>
+
+    <a-modal
+      v-model:visible="visionModalVisible"
+      :title="pageText.visionConfigTitle"
+      :footer="false"
+      :width="760"
+      unmount-on-close
+    >
+      <a-alert type="info" style="margin-bottom: 16px">
+        {{ pageText.visionConfigHint }}
+      </a-alert>
+      <a-form :model="visionForm" layout="vertical">
+        <a-grid :cols="2" :col-gap="16" :row-gap="4">
+          <a-grid-item><a-form-item :label="pageText.visionName"><a-input v-model="visionForm.name" /></a-form-item></a-grid-item>
+          <a-grid-item><a-form-item :label="pageText.visionModel"><a-input v-model="visionForm.model" /></a-form-item></a-grid-item>
+          <a-grid-item><a-form-item :label="pageText.visionBaseUrl"><a-input v-model="visionForm.base_url" placeholder="https://example.com/v1" /></a-form-item></a-grid-item>
+          <a-grid-item><a-form-item :label="pageText.visionChatPath"><a-input v-model="visionForm.chat_completions_path" /></a-form-item></a-grid-item>
+          <a-grid-item>
+            <a-form-item :label="pageText.visionApiKey">
+              <a-input-password
+                v-model="visionForm.api_key"
+                :placeholder="visionForm.has_api_key ? pageText.secretConfigured : pageText.secretPlaceholder"
+                :invisible-button="false"
+                allow-clear
+              />
+            </a-form-item>
+          </a-grid-item>
+          <a-grid-item><a-form-item :label="pageText.status"><a-switch v-model="visionForm.is_active" /></a-form-item></a-grid-item>
+          <a-grid-item><a-form-item :label="pageText.timeoutSeconds"><a-input-number v-model="visionForm.timeout_seconds" :min="1" :max="1800" /></a-form-item></a-grid-item>
+          <a-grid-item><a-form-item :label="pageText.maxRetries"><a-input-number v-model="visionForm.max_retries" :min="0" :max="10" /></a-form-item></a-grid-item>
+        </a-grid>
+        <a-space>
+          <a-button type="primary" :loading="visionSaving" @click="saveVisionConfig">{{ pageText.saveVisionConfig }}</a-button>
+          <a-button :loading="visionTesting" :disabled="!visionForm.id" @click="testVisionConfig">{{ pageText.testVisionConnection }}</a-button>
+          <a-tag v-if="visionForm.has_api_key" color="green">{{ pageText.secretConfigured }}</a-tag>
+        </a-space>
+      </a-form>
+    </a-modal>
 
     <!-- 远程MCP配置列表 -->
     <a-card class="content-card">
@@ -138,7 +179,11 @@ import {
   updateRemoteMcpConfig,
   deleteRemoteMcpConfig,
   pingRemoteMcpConfig,
-  type RemoteMcpConfig
+  type RemoteMcpConfig,
+  type VisionModelConfig,
+  fetchVisionModelConfig,
+  saveVisionModelConfig,
+  testVisionModelConfig
 } from '@/services/remoteMcpConfigService';
 import { useAppI18n } from '@/composables/useAppI18n';
 
@@ -148,6 +193,7 @@ const pageText = computed(() => (
     ? {
         pageTitle: 'MCP Configuration Management',
         addRemoteMcp: 'Add Remote MCP',
+        openVisionConfig: 'Vision model settings',
         enabled: 'Enabled',
         disabled: 'Disabled',
         edit: 'Edit',
@@ -195,10 +241,15 @@ const pageText = computed(() => (
         responseTime: (time: number) => `Response time: ${time}ms`,
         connectionFailed: (message: string) => `Connection failed: ${message}`,
         connectivityCheckFailed: 'Connectivity check failed, please try again later',
+        visionConfigTitle: 'Vision MCP model configuration', visionConfigHint: 'The API Key is encrypted in the database and is never returned by the API or written to source code.',
+        visionName: 'Configuration name', visionModel: 'Model', visionBaseUrl: 'API Base URL', visionChatPath: 'Chat Completions path', visionApiKey: 'API Key',
+        secretConfigured: 'API Key configured; leave blank to keep it', secretPlaceholder: 'Enter API Key', timeoutSeconds: 'Timeout (seconds)', maxRetries: 'Max retries',
+        saveVisionConfig: 'Save model configuration', testVisionConnection: 'Test connection', visionSaveSuccess: 'Vision model configuration saved', visionSaveFailed: 'Failed to save vision model configuration',
       }
     : {
         pageTitle: 'MCP配置管理',
         addRemoteMcp: '添加远程MCP',
+        openVisionConfig: '视觉模型配置',
         enabled: '启用',
         disabled: '禁用',
         edit: '编辑',
@@ -246,12 +297,60 @@ const pageText = computed(() => (
         responseTime: (time: number) => `响应时间: ${time}ms`,
         connectionFailed: (message: string) => `连接失败: ${message}`,
         connectivityCheckFailed: '检查连通性失败，请稍后重试',
+        visionConfigTitle: 'Vision MCP 视觉模型配置', visionConfigHint: 'API Key 加密保存到数据库，接口不会返回明文，也不会写入源代码或环境变量。',
+        visionName: '配置名称', visionModel: '视觉模型', visionBaseUrl: 'API 基础地址', visionChatPath: 'Chat Completions 路径', visionApiKey: 'API Key',
+        secretConfigured: '密钥已配置，留空则保留原密钥', secretPlaceholder: '请输入 API Key', timeoutSeconds: '超时时间（秒）', maxRetries: '最大重试次数',
+        saveVisionConfig: '保存模型配置', testVisionConnection: '测试连接', visionSaveSuccess: '视觉模型配置已保存', visionSaveFailed: '保存视觉模型配置失败',
       }
 ));
 
 // 表格数据和加载状态
 const mcpConfigs = ref<RemoteMcpConfig[]>([]);
 const loading = ref(false);
+const visionModalVisible = ref(false);
+const visionSaving = ref(false);
+const visionTesting = ref(false);
+const visionForm = reactive<VisionModelConfig>({
+  name: 'Vision MCP', base_url: '', chat_completions_path: '/chat/completions',
+  model: '', api_key: '', has_api_key: false, timeout_seconds: 120,
+  max_retries: 2, is_active: true
+});
+
+const loadVisionConfig = async () => {
+  try {
+    const config = await fetchVisionModelConfig();
+    if (config) Object.assign(visionForm, config, { api_key: '' });
+  } catch (error) {
+    console.error('获取视觉模型配置失败', error);
+  }
+};
+
+const showVisionConfig = async () => {
+  visionModalVisible.value = true;
+  await loadVisionConfig();
+};
+
+const saveVisionConfig = async () => {
+  if (!visionForm.base_url || !visionForm.model || (!visionForm.api_key && !visionForm.has_api_key)) {
+    Message.warning(isEnglish.value ? 'Complete the API URL, model and API Key' : '请完整填写 API 地址、模型和 API Key');
+    return;
+  }
+  visionSaving.value = true;
+  try {
+    const saved = await saveVisionModelConfig({ ...visionForm });
+    Object.assign(visionForm, saved, { api_key: '' });
+    Message.success(pageText.value.visionSaveSuccess);
+  } catch (error) {
+    Message.error(error instanceof Error ? error.message : pageText.value.visionSaveFailed);
+  } finally { visionSaving.value = false; }
+};
+
+const testVisionConfig = async () => {
+  visionTesting.value = true;
+  try { Message.success(await testVisionModelConfig({ ...visionForm })); }
+  catch (error) { Message.error(error instanceof Error ? error.message : pageText.value.connectivityCheckFailed); }
+  finally { visionTesting.value = false; }
+};
 const pagination = reactive({
   current: 1,
   pageSize: 10,

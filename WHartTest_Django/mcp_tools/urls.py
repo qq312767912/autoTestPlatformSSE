@@ -6,6 +6,9 @@ router = DefaultRouter()
 router.register(
     r"remote-configs", views.RemoteMCPConfigViewSet, basename="remote-mcp-config"
 )
+router.register(
+    r"vision-model-configs", views.VisionModelConfigViewSet, basename="vision-model-config"
+)
 
 app_name = "mcp_tools"  # 可选：如后续需要可用于 URL 命名空间
 

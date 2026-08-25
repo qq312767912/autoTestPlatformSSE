@@ -1,10 +1,69 @@
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from django.conf import settings
+from cryptography.fernet import Fernet, InvalidToken
+import base64
+import hashlib
 import json
 
 
 User = get_user_model()
+
+
+def _vision_config_cipher():
+    """使用现有 Django SECRET_KEY 派生密钥，避免再引入需要落盘的额外密钥。"""
+    digest = hashlib.sha256(settings.SECRET_KEY.encode("utf-8")).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+class VisionModelConfig(models.Model):
+    """Vision MCP 的全局运行时模型配置（单例）。"""
+
+    name = models.CharField(max_length=255, default="Vision MCP", verbose_name="配置名称")
+    base_url = models.URLField(max_length=2048, verbose_name="API 基础地址")
+    chat_completions_path = models.CharField(
+        max_length=255, default="/chat/completions", verbose_name="Chat Completions 路径"
+    )
+    model = models.CharField(max_length=255, verbose_name="视觉模型")
+    encrypted_api_key = models.TextField(blank=True, default="", verbose_name="加密 API Key")
+    timeout_seconds = models.PositiveIntegerField(default=120, verbose_name="超时秒数")
+    max_retries = models.PositiveSmallIntegerField(default=2, verbose_name="最大重试次数")
+    is_active = models.BooleanField(default=True, verbose_name="是否启用")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Vision MCP 模型配置"
+        verbose_name_plural = "Vision MCP 模型配置"
+
+    def save(self, *args, **kwargs):
+        # 全局只保留一条配置，避免各调用方选中不同模型。
+        if not self.pk:
+            existing = type(self).objects.order_by("pk").first()
+            if existing:
+                self.pk = existing.pk
+        super().save(*args, **kwargs)
+
+    def set_api_key(self, value: str):
+        self.encrypted_api_key = (
+            _vision_config_cipher().encrypt(value.encode("utf-8")).decode("ascii")
+            if value else ""
+        )
+
+    def get_api_key(self) -> str:
+        if not self.encrypted_api_key:
+            return ""
+        try:
+            return _vision_config_cipher().decrypt(
+                self.encrypted_api_key.encode("ascii")
+            ).decode("utf-8")
+        except (InvalidToken, ValueError) as exc:
+            raise ValidationError("视觉模型 API Key 无法解密，请重新配置") from exc
+
+    @property
+    def has_api_key(self) -> bool:
+        return bool(self.encrypted_api_key)
 
 
 class RemoteMCPConfig(models.Model):

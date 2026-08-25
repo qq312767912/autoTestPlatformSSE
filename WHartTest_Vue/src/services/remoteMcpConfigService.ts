@@ -25,6 +25,53 @@ interface PingResponse {
   response_time?: number;
 }
 
+export interface VisionModelConfig {
+  id?: number;
+  name: string;
+  base_url: string;
+  chat_completions_path: string;
+  model: string;
+  api_key?: string;
+  has_api_key?: boolean;
+  timeout_seconds: number;
+  max_retries: number;
+  is_active: boolean;
+  updated_at?: string;
+}
+
+export const fetchVisionModelConfig = async (): Promise<VisionModelConfig | null> => {
+  const response = await request<VisionModelConfig[]>({
+    url: '/mcp_tools/vision-model-configs/', method: 'GET'
+  });
+  if (!response.success) throw new Error(response.error || '获取视觉模型配置失败');
+  const data: any = response.data;
+  const rows = Array.isArray(data) ? data : (data?.results || []);
+  return rows[0] || null;
+};
+
+export const saveVisionModelConfig = async (config: VisionModelConfig): Promise<VisionModelConfig> => {
+  const response = await request<VisionModelConfig>({
+    url: config.id
+      ? `/mcp_tools/vision-model-configs/${config.id}/`
+      : '/mcp_tools/vision-model-configs/',
+    method: config.id ? 'PATCH' : 'POST',
+    data: config
+  });
+  if (!response.success || !response.data) throw new Error(response.error || '保存视觉模型配置失败');
+  return response.data;
+};
+
+export const testVisionModelConfig = async (config: VisionModelConfig): Promise<string> => {
+  if (!config.id) throw new Error('请先保存配置后再测试连接');
+  const response = await request<{ message?: string }>({
+    url: `/mcp_tools/vision-model-configs/${config.id}/test-connection/`,
+    method: 'POST',
+    data: config
+  });
+  if (!response.success) throw new Error(response.error || '视觉模型连接失败');
+  return (response.data as any)?.message || response.message || '视觉模型连接成功';
+};
+
 // 获取所有远程MCP配置
 export const fetchRemoteMcpConfigs = async (): Promise<RemoteMcpConfig[]> => {
   try {

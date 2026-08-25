@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from projects.models import Project  # 假设 Project 模型位于 'projects' 应用
-from .models import RemoteMCPConfig, MCPTool  # 导入 RemoteMCPConfig
+from .models import RemoteMCPConfig, MCPTool, VisionModelConfig
 import re
 from urllib.parse import urlparse
 
@@ -106,3 +106,49 @@ class MCPToolSerializer(serializers.ModelSerializer):
             "synced_at",
         ]
         read_only_fields = ["synced_at"]
+
+
+class VisionModelConfigSerializer(serializers.ModelSerializer):
+    api_key = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    has_api_key = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = VisionModelConfig
+        fields = [
+            "id", "name", "base_url", "chat_completions_path", "model",
+            "api_key", "has_api_key", "timeout_seconds", "max_retries",
+            "is_active", "created_at", "updated_at",
+        ]
+        read_only_fields = ["id", "has_api_key", "created_at", "updated_at"]
+
+    def validate_chat_completions_path(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("Chat Completions 路径不能为空")
+        return "/" + value.strip("/")
+
+    def validate(self, attrs):
+        timeout = attrs.get("timeout_seconds", getattr(self.instance, "timeout_seconds", 120))
+        retries = attrs.get("max_retries", getattr(self.instance, "max_retries", 2))
+        if not 1 <= timeout <= 1800:
+            raise serializers.ValidationError({"timeout_seconds": "超时时间必须在 1~1800 秒之间"})
+        if retries > 10:
+            raise serializers.ValidationError({"max_retries": "最大重试次数不能超过 10"})
+        return attrs
+
+    def create(self, validated_data):
+        api_key = validated_data.pop("api_key", "")
+        instance = VisionModelConfig(**validated_data)
+        instance.set_api_key(api_key)
+        instance.save()
+        return instance
+
+    def update(self, instance, validated_data):
+        api_key = validated_data.pop("api_key", None)
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        # 编辑时留空代表保留原密钥，前端无需也不能回填明文。
+        if api_key:
+            instance.set_api_key(api_key)
+        instance.save()
+        return instance

@@ -58,6 +58,13 @@ async def _call_vision_tool(name: str, arguments: dict) -> dict:
     tool = next((item for item in tools if item.name == name), None)
     if not tool:
         raise RuntimeError(f"Vision MCP 未提供工具: {name}")
+    # 模型密钥从数据库解密后仅在本次 MCP 调用中传递，不写日志、不写环境变量。
+    runtime_config = await _get_vision_model_runtime_config()
+    if runtime_config and name in {
+        "analyze_requirement_ui", "extract_text_from_screenshot", "ui_diff_check",
+        "compare_requirement_with_page_model", "image_analysis",
+    }:
+        arguments = {**arguments, "runtime_config_json": json.dumps(runtime_config, ensure_ascii=False)}
     result = _plain_result(await tool.ainvoke(arguments))
     if isinstance(result, list) and len(result) == 1:
         result = _plain_result(result[0])
@@ -80,6 +87,28 @@ async def _get_vision_config() -> dict:
         "url": os.environ.get("VISION_MCP_URL", "http://vision-mcp:8010/mcp"),
         "transport": "streamable-http",
         "headers": {},
+    }
+
+
+async def _get_vision_model_runtime_config() -> dict | None:
+    from asgiref.sync import sync_to_async
+    from mcp_tools.models import VisionModelConfig
+
+    config = await sync_to_async(
+        lambda: VisionModelConfig.objects.filter(is_active=True).order_by("pk").first()
+    )()
+    if not config:
+        return None
+    api_key = await sync_to_async(config.get_api_key)()
+    if not api_key:
+        raise RuntimeError("已启用的 Vision MCP 模型配置未填写 API Key")
+    return {
+        "base_url": config.base_url,
+        "api_key": api_key,
+        "model": config.model,
+        "chat_completions_path": config.chat_completions_path,
+        "timeout_seconds": config.timeout_seconds,
+        "max_retries": config.max_retries,
     }
 
 
