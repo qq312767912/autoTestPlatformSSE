@@ -491,13 +491,20 @@ const showGenerateCasesModal = () => {
 
 const handleGenerateCasesSubmit = async (formData: {
   generateMode: 'full' | 'title_only' | 'kb_complete' | 'kb_generate',
-  requirementDocumentId: string,
+  requirementDocumentIds: string[],
   requirementModuleIds: string[],
   promptId: number,
   useKnowledgeBase: boolean,
   knowledgeBaseId?: string | null,
   testCaseModuleId: number,
-  selectedModules: { title: string, content: string, confirmed_image_context?: string }[],
+  selectedModules: {
+    title: string,
+    content: string,
+    confirmed_image_context?: string,
+    documentId: string,
+    documentTitle: string,
+    documentCategory: 'business_requirement' | 'requirement_specification' | 'technical_design',
+  }[],
   selectedTestCaseIds: number[],
   selectedTestCases: TestCase[],
   testTypes: string[],
@@ -516,6 +523,22 @@ const handleGenerateCasesSubmit = async (formData: {
 
   // 获取测试类型提示词
   const testTypePrompt = getTestTypePrompt(formData.testTypes);
+  const documentCategoryNames = {
+    business_requirement: '业务需求文档',
+    requirement_specification: '需求规格说明书',
+    technical_design: '技术设计文档',
+  } as const;
+  const selectedDocumentContext = formData.selectedModules.map((mod, idx) => `---
+[文档来源]
+${documentCategoryNames[mod.documentCategory]}：《${mod.documentTitle}》（ID: ${mod.documentId}）
+
+[文档模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''}标题]
+${mod.title}
+
+[文档模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''}内容]
+${mod.content}
+${mod.confirmed_image_context ? `\n[用户已确认的文档图片上下文]\n${mod.confirmed_image_context}` : ''}
+---`).join('\n\n');
 
   switch (formData.generateMode) {
     case 'full':
@@ -525,18 +548,10 @@ const handleGenerateCasesSubmit = async (formData: {
 
 ${testTypePrompt}
 
-${formData.selectedModules.map((mod, idx) => `---
-[需求模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''}标题]
-${mod.title}
-
----
-[需求模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''}内容]
-${mod.content}
-${mod.confirmed_image_context ? `\n---\n[用户已确认的需求图片上下文]\n${mod.confirmed_image_context}` : ''}
----`).join('\n\n')}
+${selectedDocumentContext}
 
 请注意：生成的测试用例最终需要被保存在 **项目ID "${currentProjectId.value}"** 下的 **测试用例模块ID "${formData.testCaseModuleId}"** 中。
-(此需求模块来源于需求文档ID: ${formData.requirementDocumentId})
+(所选文档ID: ${formData.requirementDocumentIds.join(', ')})
       `.trim();
       notificationTitle = taskText.value.generationStarted;
       notificationContent = taskText.value.generationStartedContent;
@@ -550,20 +565,12 @@ ${mod.confirmed_image_context ? `\n---\n[用户已确认的需求图片上下文
 
 ${testTypePrompt}
 
-${formData.selectedModules.map((mod, idx) => `---
-[需求模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''}标题]
-${mod.title}
-
----
-[需求模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''}内容]
-${mod.content}
-${mod.confirmed_image_context ? `\n---\n[用户已确认的需求图片上下文]\n${mod.confirmed_image_context}` : ''}
----`).join('\n\n')}
+${selectedDocumentContext}
 
 请注意：
 - 只需要生成用例标题，不需要生成详细的测试步骤和预期结果
 - 生成的测试用例最终需要被保存在 **项目ID "${currentProjectId.value}"** 下的 **测试用例模块ID "${formData.testCaseModuleId}"** 中
-(此需求模块来源于需求文档ID: ${formData.requirementDocumentId})
+(所选文档ID: ${formData.requirementDocumentIds.join(', ')})
       `.trim();
       notificationTitle = taskText.value.titleGenerationStarted;
       notificationContent = taskText.value.titleGenerationStartedContent;
@@ -608,7 +615,7 @@ ${testTypePrompt}
 ${formData.selectedTestCases.map(tc => `- 用例ID: ${tc.id}, 名称: ${tc.name}, 优先级: ${tc.level}, 模块ID: ${tc.module_id ?? '未分配'}, 模块: ${tc.module_detail || '未分配'}`).join('\n')}
 
 [需求模块参考]
-${formData.selectedModules.length > 0 ? formData.selectedModules.map((mod, idx) => `模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''} 标题: ${mod.title}\n模块${formData.selectedModules.length > 1 ? ` ${idx + 1}` : ''} 内容: ${mod.content}${mod.confirmed_image_context ? `\n[用户已确认的需求图片上下文]\n${mod.confirmed_image_context}` : ''}`).join('\n\n') : '无'}
+${formData.selectedModules.length > 0 ? selectedDocumentContext : '无'}
 
 项目ID: ${currentProjectId.value}
       `.trim();

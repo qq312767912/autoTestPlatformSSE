@@ -13,6 +13,7 @@ class RequirementDocumentFilter(django_filters.FilterSet):
     project = django_filters.NumberFilter(field_name='project__id')
     status = django_filters.ChoiceFilter(choices=RequirementDocument.STATUS_CHOICES)
     document_type = django_filters.ChoiceFilter(choices=RequirementDocument.DOCUMENT_TYPES)
+    document_category = django_filters.ChoiceFilter(choices=RequirementDocument.DOCUMENT_CATEGORIES)
     uploader = django_filters.UUIDFilter(field_name='uploader__id')
     
     # 时间范围过滤
@@ -42,7 +43,7 @@ class RequirementDocumentFilter(django_filters.FilterSet):
     class Meta:
         model = RequirementDocument
         fields = [
-            'project', 'status', 'document_type', 'uploader', 'is_latest',
+            'project', 'status', 'document_type', 'document_category', 'uploader', 'is_latest',
             'uploaded_after', 'uploaded_before', 'updated_after', 'updated_before',
             'title', 'description', 'content', 'version',
             'word_count_min', 'word_count_max', 'page_count_min', 'page_count_max',

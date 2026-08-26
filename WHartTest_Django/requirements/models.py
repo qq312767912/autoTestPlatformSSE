@@ -27,6 +27,12 @@ class RequirementDocument(models.Model):
         ('md', 'Markdown'),
     ]
 
+    DOCUMENT_CATEGORIES = [
+        ('business_requirement', '业务需求文档'),
+        ('requirement_specification', '需求规格说明书'),
+        ('technical_design', '技术设计文档'),
+    ]
+
     STATUS_CHOICES = [
         ('uploaded', '已上传'),
         ('processing', '处理中'),
@@ -51,6 +57,13 @@ class RequirementDocument(models.Model):
         _('文档类型'),
         max_length=10,
         choices=DOCUMENT_TYPES
+    )
+    document_category = models.CharField(
+        _('文档分类'),
+        max_length=40,
+        choices=DOCUMENT_CATEGORIES,
+        default='business_requirement',
+        db_index=True,
     )
     file = models.FileField(
         _('文件'),

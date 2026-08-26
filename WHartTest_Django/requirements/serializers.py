@@ -15,7 +15,7 @@ class RequirementDocumentSerializer(serializers.ModelSerializer):
     class Meta:
         model = RequirementDocument
         fields = [
-            'id', 'title', 'description', 'document_type', 'file', 'content',
+            'id', 'title', 'description', 'document_type', 'document_category', 'file', 'content',
             'status', 'version', 'is_latest', 'parent_document',
             'uploader', 'uploader_name', 'project', 'project_name',
             'uploaded_at', 'updated_at', 'word_count', 'page_count',
@@ -37,7 +37,7 @@ class RequirementDocumentUploadSerializer(serializers.ModelSerializer):
     class Meta:
         model = RequirementDocument
         fields = [
-            'id', 'title', 'description', 'document_type', 'file', 'content', 'project',
+            'id', 'title', 'description', 'document_type', 'document_category', 'file', 'content', 'project',
             'status', 'word_count', 'has_images', 'image_count', 'uploaded_at'
         ]
         read_only_fields = ['id', 'status', 'word_count', 'has_images', 'image_count', 'uploaded_at']

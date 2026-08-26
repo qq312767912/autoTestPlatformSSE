@@ -4,7 +4,7 @@
     :title="pageText.modalTitle"
     @cancel="handleCancel"
     @ok="handleOk"
-    :width="800"
+    :width="920"
     :confirm-loading="isLoading"
   >
     <a-form :model="formState" :label-col-props="{ span: 5 }" :wrapper-col-props="{ span: 19 }">
@@ -33,48 +33,66 @@
         </a-checkbox-group>
       </div>
 
-      <!-- 需求文档和需求模块在一行显示 -->
-      <div v-if="showRequirementFields" class="form-row">
+      <!-- 左侧选择文档，右侧按文档分别选择对应模块 -->
+      <div v-if="showRequirementFields" class="document-selection-section">
         <div class="form-row-item">
           <span class="form-row-label required">{{ pageText.requirementDocument }}</span>
           <a-select
-            v-model="formState.requirementDocumentId"
-            :placeholder="pageText.selectPlaceholder"
+            v-model="formState.requirementDocumentIds"
+            :placeholder="pageText.documentPlaceholder"
             :loading="isDocLoading"
+            multiple
+            allow-clear
+            allow-search
+            :max-tag-count="3"
             style="width: 100%;"
             @change="handleDocumentChange"
           >
-            <a-option v-for="doc in requirementDocuments" :key="doc.id" :value="doc.id">
-              {{ doc.title }}
-            </a-option>
+            <a-optgroup v-for="group in groupedRequirementDocuments" :key="group.category" :label="group.label">
+              <a-option
+                v-for="doc in group.documents"
+                :key="doc.id"
+                :value="doc.id"
+                :disabled="doc.modules_count === 0"
+              >
+                {{ doc.title }}{{ doc.modules_count === 0 ? `（${pageText.pendingSplit}）` : '' }}
+              </a-option>
+            </a-optgroup>
           </a-select>
         </div>
-        <div class="form-row-item">
-          <span class="form-row-label required">
-            {{ pageText.requirementModule }}
-            <a-tooltip content="全选">
-              <icon-select-all
-                class="select-all-icon"
-                :class="{ active: formState.requirementModuleIds.length === requirementModules.length && requirementModules.length > 0 }"
-                @click="toggleSelectAllModules"
-              />
-            </a-tooltip>
-          </span>
-          <a-select
-            v-model="formState.requirementModuleIds"
-            :placeholder="pageText.requirementModulePlaceholder"
-            :loading="isReqModuleLoading"
-            :disabled="!formState.requirementDocumentId"
-            multiple
-            style="width: 100%;"
-            allow-clear
-            allow-search
-            :max-tag-count="2"
-          >
-            <a-option v-for="module in requirementModules" :key="module.id" :value="module.id">
-              {{ module.title }}
-            </a-option>
-          </a-select>
+        <div class="form-row-item document-module-column">
+          <span class="form-row-label required">{{ pageText.requirementModule }}</span>
+          <div v-if="documentModuleGroups.length" class="document-module-list">
+            <div v-for="group in documentModuleGroups" :key="group.documentId" class="document-module-item">
+              <div class="document-module-title" :title="group.documentTitle">
+                <span>{{ group.documentTitle }}</span>
+                <a-tooltip :content="pageText.selectAll">
+                  <icon-select-all
+                    class="select-all-icon"
+                    :class="{ active: isDocumentModulesAllSelected(group.documentId) }"
+                    @click="toggleDocumentModules(group.documentId)"
+                  />
+                </a-tooltip>
+              </div>
+              <a-select
+                :model-value="selectedModuleIdsForDocument(group.documentId)"
+                :placeholder="pageText.selectDocumentModules"
+                :loading="isReqModuleLoading"
+                :disabled="isReqModuleLoading || group.modules.length === 0"
+                multiple
+                allow-clear
+                allow-search
+                :max-tag-count="2"
+                style="width: 100%;"
+                @change="value => updateDocumentModules(group.documentId, value)"
+              >
+                <a-option v-for="module in group.modules" :key="module.id" :value="module.id">
+                  {{ module.title }}
+                </a-option>
+              </a-select>
+            </div>
+          </div>
+          <a-input v-else :placeholder="pageText.requirementModulePlaceholder" disabled />
         </div>
       </div>
 
@@ -247,7 +265,7 @@ import { useProjectStore } from '@/store/projectStore';
 import type { TreeNodeData } from '@arco-design/web-vue';
 import { Message } from '@arco-design/web-vue';
 import { RequirementDocumentService } from '@/features/requirements/services/requirementService';
-import type { RequirementDocument, DocumentModule } from '@/features/requirements/types';
+import type { RequirementDocument, DocumentModule, DocumentCategory } from '@/features/requirements/types';
 import { getUserPrompts } from '@/features/prompts/services/promptService';
 import type { UserPrompt, UserPromptListResponseData } from '@/features/prompts/types/prompt';
 import { KnowledgeService } from '@/features/knowledge/services/knowledgeService';
@@ -279,11 +297,17 @@ const { isEnglish } = useAppI18n();
 const isLoading = ref(false);
 const isDocLoading = ref(false);
 const isReqModuleLoading = ref(false);
+const moduleLoadVersion = ref(0);
 const isPromptsLoading = ref(false);
 const isKbLoading = ref(false);
 
 const requirementDocuments = ref<RequirementDocument[]>([]);
-const requirementModules = ref<DocumentModule[]>([]);
+type SelectedDocumentModule = DocumentModule & {
+  documentId: string;
+  documentTitle: string;
+  documentCategory: DocumentCategory;
+};
+const requirementModules = ref<SelectedDocumentModule[]>([]);
 const prompts = ref<UserPrompt[]>([]);
 const knowledgeBases = ref<KnowledgeBase[]>([]);
 
@@ -313,15 +337,22 @@ const pageText = computed(() => (
         modalTitle: 'AI generate cases',
         currentProject: 'Project',
         generateMode: 'Mode',
-        requirementDocument: 'Req. document',
-        requirementModule: 'Req. module',
+        requirementDocument: 'Documents',
+        requirementModule: 'Document modules',
         selectPrompt: 'Prompt',
         knowledgeBase: 'Knowledge base',
         linkedKnowledgeBase: 'Knowledge base',
         saveModule: 'Save to',
         selectCases: 'Select cases',
         selectPlaceholder: 'Please select',
-        requirementModulePlaceholder: 'Select a document first, then choose modules',
+        documentPlaceholder: 'Select one or more documents',
+        requirementModulePlaceholder: 'Select documents first, then choose modules',
+        selectDocumentModules: 'Select modules for this document',
+        selectAll: 'Select all',
+        businessRequirement: 'Business requirements',
+        requirementSpecification: 'Requirement specifications',
+        technicalDesign: 'Technical designs',
+        pendingSplit: 'not split',
         noGeneralPrompts: 'No prompts yet. Create one first.',
         noKnowledgeBase: 'None',
         selectKnowledgeBase: 'Select knowledge base',
@@ -337,7 +368,7 @@ const pageText = computed(() => (
         testTypeRequired: 'Select at least one test type',
         promptRequired: 'Select a prompt',
         requiredFieldsMissing: 'Fill in all required fields',
-        requirementSelectionRequired: 'Select a requirement document and at least one requirement module',
+        requirementSelectionRequired: 'Select at least one module for each document',
         knowledgeBaseRequired: 'Select a knowledge base',
         testCaseRequired: 'Select at least one test case',
         knowledgeBaseMustBeSelected: 'Select a knowledge base when knowledge-base mode is enabled',
@@ -355,15 +386,22 @@ const pageText = computed(() => (
         modalTitle: 'AI 生成测试用例',
         currentProject: '当前项目',
         generateMode: '生成模式',
-        requirementDocument: '需求文档',
-        requirementModule: '需求模块',
+        requirementDocument: '文档',
+        requirementModule: '文档模块',
         selectPrompt: '选择提示词',
         knowledgeBase: '知识库',
         linkedKnowledgeBase: '关联知识库',
         saveModule: '保存模块',
         selectCases: '选择用例',
         selectPlaceholder: '请选择',
-        requirementModulePlaceholder: '请先选择需求文档后多选需求模块',
+        documentPlaceholder: '请选择一个或多个文档',
+        requirementModulePlaceholder: '请先选择文档后多选文档模块',
+        selectDocumentModules: '请选择该文档的模块',
+        selectAll: '全选该文档模块',
+        businessRequirement: '业务需求文档',
+        requirementSpecification: '需求规格说明书',
+        technicalDesign: '技术设计文档',
+        pendingSplit: '待拆解',
         noGeneralPrompts: '没有可用的通用提示词，请先创建。',
         noKnowledgeBase: '不使用知识库',
         selectKnowledgeBase: '请选择知识库',
@@ -379,7 +417,7 @@ const pageText = computed(() => (
         testTypeRequired: '请至少选择一种测试类型',
         promptRequired: '请选择提示词',
         requiredFieldsMissing: '请填写所有必填项',
-        requirementSelectionRequired: '请选择需求文档和至少一个需求模块',
+        requirementSelectionRequired: '请为每个已选文档至少选择一个对应模块',
         knowledgeBaseRequired: '请选择知识库',
         testCaseRequired: '请至少选择一个测试用例',
         knowledgeBaseMustBeSelected: '启用知识库后必须选择一个知识库',
@@ -443,7 +481,7 @@ const testCaseColumns = computed(() => [
 
 const formState = reactive({
   generateMode: 'full' as GenerateMode,
-  requirementDocumentId: null as string | null,
+  requirementDocumentIds: [] as string[],
   requirementModuleIds: [] as string[],
   promptId: null as number | null,
   useKnowledgeBase: false,
@@ -453,6 +491,35 @@ const formState = reactive({
 });
 
 const currentProjectName = computed(() => projectStore.currentProject?.name || pageText.value.unnamedProject);
+
+const categoryLabelMap = computed<Record<DocumentCategory, string>>(() => ({
+  business_requirement: pageText.value.businessRequirement,
+  requirement_specification: pageText.value.requirementSpecification,
+  technical_design: pageText.value.technicalDesign,
+}));
+
+const groupedRequirementDocuments = computed(() => (
+  (Object.keys(categoryLabelMap.value) as DocumentCategory[]).map(category => ({
+    category,
+    label: categoryLabelMap.value[category],
+    documents: requirementDocuments.value.filter(doc => doc.document_category === category),
+  })).filter(group => group.documents.length > 0)
+));
+
+const documentModuleGroups = computed(() => formState.requirementDocumentIds.map(documentId => ({
+  documentId,
+  documentTitle: requirementDocuments.value.find(doc => doc.id === documentId)?.title || documentId,
+  modules: requirementModules.value.filter(module => module.documentId === documentId),
+})));
+
+const everyDocumentHasSelectedModules = computed(() => (
+  formState.requirementDocumentIds.length > 0
+  && formState.requirementDocumentIds.every(documentId => (
+    requirementModules.value.some(module => (
+      module.documentId === documentId && formState.requirementModuleIds.includes(module.id)
+    ))
+  ))
+));
 
 // 是否显示需求文档相关字段
 const showRequirementFields = computed(() => {
@@ -516,14 +583,18 @@ const handleOk = () => {
 
   // 根据模式验证必填项
   if (['full', 'title_only'].includes(formState.generateMode)) {
-    if (!formState.requirementDocumentId || formState.requirementModuleIds.length === 0 || !formState.testCaseModuleId) {
+    if (!everyDocumentHasSelectedModules.value) {
+      Message.error(pageText.value.requirementSelectionRequired);
+      return;
+    }
+    if (!formState.testCaseModuleId) {
       Message.error(pageText.value.requiredFieldsMissing);
       return;
     }
   }
 
   if (formState.generateMode === 'kb_generate') {
-    if (!formState.requirementDocumentId || formState.requirementModuleIds.length === 0) {
+    if (!everyDocumentHasSelectedModules.value) {
       Message.error(pageText.value.requirementSelectionRequired);
       return;
     }
@@ -569,20 +640,43 @@ const handleModeChange = () => {
   }
 };
 
-const toggleSelectAllModules = () => {
-  if (requirementModules.value.length === 0) return;
-  if (formState.requirementModuleIds.length === requirementModules.value.length) {
-    formState.requirementModuleIds = [];
-  } else {
-    formState.requirementModuleIds = requirementModules.value.map(m => m.id);
-  }
+const selectedModuleIdsForDocument = (documentId: string) => {
+  const moduleIds = new Set(requirementModules.value
+    .filter(module => module.documentId === documentId)
+    .map(module => module.id));
+  return formState.requirementModuleIds.filter(id => moduleIds.has(id));
+};
+
+const updateDocumentModules = (documentId: string, value: unknown) => {
+  const documentModuleIds = new Set(requirementModules.value
+    .filter(module => module.documentId === documentId)
+    .map(module => module.id));
+  const otherDocumentSelections = formState.requirementModuleIds.filter(id => !documentModuleIds.has(id));
+  const selectedIds = Array.isArray(value) ? value.filter(id => typeof id === 'string') : [];
+  formState.requirementModuleIds = [...otherDocumentSelections, ...selectedIds];
+};
+
+const isDocumentModulesAllSelected = (documentId: string) => {
+  const modules = requirementModules.value.filter(module => module.documentId === documentId);
+  return modules.length > 0 && modules.every(module => formState.requirementModuleIds.includes(module.id));
+};
+
+const toggleDocumentModules = (documentId: string) => {
+  const moduleIds = requirementModules.value
+    .filter(module => module.documentId === documentId)
+    .map(module => module.id);
+  if (moduleIds.length === 0) return;
+  updateDocumentModules(documentId, isDocumentModulesAllSelected(documentId) ? [] : moduleIds);
 };
 
 const fetchRequirementDocuments = async () => {
   if (!projectStore.currentProjectId) return;
   isDocLoading.value = true;
   try {
-    const response = await RequirementDocumentService.getDocumentList({ project: String(projectStore.currentProjectId) });
+    const response = await RequirementDocumentService.getDocumentList({
+      project: String(projectStore.currentProjectId),
+      page_size: 1000,
+    });
     if (response.status === 'success') {
       requirementDocuments.value = toArray<RequirementDocument>((response.data as any)?.results ?? response.data);
     } else {
@@ -597,28 +691,47 @@ const fetchRequirementDocuments = async () => {
   }
 };
 
-const fetchRequirementModules = async (documentId: string) => {
+const fetchRequirementModules = async (documentIds: string[]) => {
+  const requestVersion = ++moduleLoadVersion.value;
   isReqModuleLoading.value = true;
-  requirementModules.value = [];
-  formState.requirementModuleIds = [];
   try {
-    const response = await RequirementDocumentService.getDocumentDetail(documentId);
-    if (response.status === 'success' && response.data?.modules) {
-      requirementModules.value = response.data.modules;
-    } else {
+    const responses = await Promise.all(documentIds.map(documentId => (
+      RequirementDocumentService.getDocumentDetail(documentId)
+    )));
+    if (requestVersion !== moduleLoadVersion.value) return;
+    const modules = responses.flatMap((response, index) => {
+      const document = requirementDocuments.value.find(doc => doc.id === documentIds[index]);
+      if (response.status !== 'success' || !response.data?.modules || !document) return [];
+      return response.data.modules.map(module => ({
+        ...module,
+        documentId: document.id,
+        documentTitle: document.title,
+        documentCategory: document.document_category,
+      }));
+    });
+    requirementModules.value = modules;
+    formState.requirementModuleIds = formState.requirementModuleIds.filter(id => (
+      modules.some(module => module.id === id)
+    ));
+    if (responses.some(response => response.status !== 'success')) {
       Message.error(pageText.value.loadRequirementModulesFailed);
     }
   } catch (error) {
     Message.error(pageText.value.loadRequirementModulesError);
   } finally {
-    isReqModuleLoading.value = false;
+    if (requestVersion === moduleLoadVersion.value) {
+      isReqModuleLoading.value = false;
+    }
   }
 };
 
 const handleDocumentChange = (value: any) => {
-  if (value) {
-    fetchRequirementModules(value);
+  const documentIds = Array.isArray(value) ? value : [];
+  if (documentIds.length > 0) {
+    fetchRequirementModules(documentIds);
   } else {
+    moduleLoadVersion.value += 1;
+    isReqModuleLoading.value = false;
     requirementModules.value = [];
     formState.requirementModuleIds = [];
   }
@@ -769,7 +882,7 @@ watch(() => props.visible, (newVal) => {
   if (newVal) {
     // 每次打开弹窗时重置表单
     formState.generateMode = 'full';
-    formState.requirementDocumentId = null;
+    formState.requirementDocumentIds = [];
     formState.requirementModuleIds = [];
     formState.promptId = null;
     formState.useKnowledgeBase = false;
@@ -834,6 +947,67 @@ watch(() => props.visible, (newVal) => {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.document-selection-section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px;
+  margin-bottom: 18px;
+  padding: 16px;
+  background: var(--color-fill-1);
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+}
+
+.document-selection-section .form-row-item {
+  min-width: 0;
+}
+
+.document-selection-section :deep(.arco-select-view-multiple) {
+  min-height: 42px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+.document-selection-section :deep(.arco-tag) {
+  max-width: min(100%, 360px);
+}
+
+.document-selection-section :deep(.arco-tag-content) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.document-module-column {
+  align-self: start;
+}
+
+.document-module-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.document-module-item {
+  min-width: 0;
+}
+
+.document-module-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  color: var(--color-text-2);
+  font-size: 12px;
+}
+
+.document-module-title > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .form-row-label {

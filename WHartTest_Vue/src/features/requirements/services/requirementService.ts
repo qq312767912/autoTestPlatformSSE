@@ -66,6 +66,7 @@ export class RequirementDocumentService {
     formData.append('title', data.title);
     if (data.description) formData.append('description', data.description);
     formData.append('document_type', data.document_type);
+    formData.append('document_category', data.document_category);
     formData.append('project', data.project);
 
     if (data.file) {

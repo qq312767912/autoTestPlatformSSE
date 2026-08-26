@@ -1,5 +1,15 @@
 <template>
   <div class="requirement-management">
+    <div class="document-category-bar">
+      <a-tabs v-model:active-key="activeCategory" type="rounded" @change="handleCategoryChange">
+        <a-tab-pane
+          v-for="category in categoryOptions"
+          :key="category.value"
+          :title="category.label"
+        />
+      </a-tabs>
+    </div>
+
     <!-- 搜索和筛选 -->
     <div class="filter-section">
       <div class="filter-row">
@@ -32,7 +42,7 @@
         </a-select>
         <a-button type="primary" @click="showUploadModal">
           <template #icon><icon-plus /></template>
-          {{ pageText.uploadRequirementDocument }}
+          {{ pageText.uploadDocument }}
         </a-button>
       </div>
     </div>
@@ -141,7 +151,7 @@
     <!-- 上传文档模态框 -->
     <a-modal
       v-model:visible="uploadModalVisible"
-      :title="pageText.uploadRequirementDocument"
+      :title="pageText.uploadDocument"
       width="600px"
       @ok="handleUpload"
       @cancel="resetUploadForm"
@@ -153,6 +163,9 @@
         :rules="uploadRules"
         layout="vertical"
       >
+        <a-alert type="info" class="category-hint">
+          {{ pageText.currentCategory }}：{{ getCategoryText(activeCategory) }}
+        </a-alert>
         <a-form-item :label="pageText.documentTitle" field="title">
           <a-input v-model="uploadForm.title" :placeholder="pageText.enterDocumentTitle" />
         </a-form-item>
@@ -263,6 +276,7 @@ import type {
   RequirementDocument,
   DocumentStatus,
   DocumentType,
+  DocumentCategory,
   CreateDocumentRequest,
   DocumentListParams
 } from '../types';
@@ -278,7 +292,11 @@ const pageText = computed(() => (
         searchPlaceholder: 'Search document title or description',
         documentStatus: 'Document status',
         documentType: 'Document type',
-        uploadRequirementDocument: 'Upload requirement document',
+        uploadDocument: 'Upload document',
+        currentCategory: 'Document category',
+        businessRequirement: 'Business requirements',
+        requirementSpecification: 'Requirement specifications',
+        technicalDesign: 'Technical designs',
         allStatuses: 'All statuses',
         allTypes: 'All types',
         textType: 'Text',
@@ -339,7 +357,11 @@ const pageText = computed(() => (
         searchPlaceholder: '搜索文档标题或描述',
         documentStatus: '文档状态',
         documentType: '文档类型',
-        uploadRequirementDocument: '上传需求文档',
+        uploadDocument: '上传文档',
+        currentCategory: '当前栏目',
+        businessRequirement: '业务需求文档',
+        requirementSpecification: '需求规格说明书',
+        technicalDesign: '技术设计文档',
         allStatuses: '全部状态',
         allTypes: '全部类型',
         textType: '文本',
@@ -440,6 +462,12 @@ const typeLabelMap = computed<Record<DocumentType, string>>(() => (
       }
 ));
 
+const categoryOptions = computed<Array<{ value: DocumentCategory; label: string }>>(() => [
+  { value: 'business_requirement', label: pageText.value.businessRequirement },
+  { value: 'requirement_specification', label: pageText.value.requirementSpecification },
+  { value: 'technical_design', label: pageText.value.technicalDesign },
+]);
+
 const statusOptions = computed(() => [
   { value: '', label: pageText.value.allStatuses },
   { value: 'uploaded', label: statusLabelMap.value.uploaded },
@@ -481,6 +509,7 @@ const reviewWorkerOptions = computed(() => (
 // 响应式数据
 const loading = ref(false);
 const documentList = ref<RequirementDocument[]>([]);
+const activeCategory = ref<DocumentCategory>('business_requirement');
 const searchKeyword = ref('');
 const statusFilter = ref<DocumentStatus | ''>('');
 const typeFilter = ref<DocumentType | ''>('');
@@ -505,6 +534,7 @@ const uploadForm = reactive<CreateDocumentRequest & { uploadType: 'file' | 'cont
   title: '',
   description: '',
   document_type: 'pdf',
+  document_category: 'business_requirement',
   project: '',
   uploadType: 'file',
   file: undefined,
@@ -631,6 +661,10 @@ const getTypeText = (type: DocumentType) => {
   return typeLabelMap.value[type] || type;
 };
 
+const getCategoryText = (category: DocumentCategory) => (
+  categoryOptions.value.find(item => item.value === category)?.label || category
+);
+
 const formatWordCount = (count: number) => (
   isEnglish.value ? `${count} ${pageText.value.words}` : `${count} ${pageText.value.words}`
 );
@@ -655,7 +689,8 @@ const loadDocuments = async () => {
     const params: DocumentListParams = {
       project: String(currentProjectId.value),
       page: pagination.current,
-      page_size: pagination.pageSize
+      page_size: pagination.pageSize,
+      document_category: activeCategory.value,
     };
 
     if (searchKeyword.value) {
@@ -693,6 +728,12 @@ const handleSearch = () => {
   loadDocuments();
 };
 
+const handleCategoryChange = (category: string | number) => {
+  activeCategory.value = category as DocumentCategory;
+  pagination.current = 1;
+  loadDocuments();
+};
+
 // 分页处理
 const handlePageChange = (page: number) => {
   pagination.current = page;
@@ -712,6 +753,7 @@ const showUploadModal = () => {
     return;
   }
   uploadForm.project = String(currentProjectId.value);
+  uploadForm.document_category = activeCategory.value;
   console.log('打开上传模态框，项目ID:', uploadForm.project); // 调试日志
   uploadModalVisible.value = true;
 };
@@ -816,6 +858,7 @@ const resetUploadForm = () => {
     title: '',
     description: '',
     document_type: 'pdf',
+    document_category: activeCategory.value,
     project: String(currentProjectId.value || ''),
     uploadType: 'file',
     file: undefined,
@@ -950,6 +993,17 @@ projectStore.$subscribe((_mutation, state) => {
 </script>
 
 <style scoped>
+.document-category-bar {
+  margin-bottom: 14px;
+  padding: 6px 8px 0;
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-border-2);
+  border-radius: 10px;
+}
+
+.category-hint {
+  margin-bottom: 16px;
+}
 .requirement-management {
   padding: 24px;
   background: transparent; /* 使用主布局的背景 */

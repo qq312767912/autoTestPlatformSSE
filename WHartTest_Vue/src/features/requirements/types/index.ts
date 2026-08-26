@@ -31,12 +31,18 @@ export type DocumentStatus =
 // 文档类型枚举
 export type DocumentType = 'pdf' | 'doc' | 'docx' | 'txt' | 'md';
 
+export type DocumentCategory =
+  | 'business_requirement'
+  | 'requirement_specification'
+  | 'technical_design';
+
 // 需求文档接口
 export interface RequirementDocument {
   id: string;
   title: string;
   description: string | null;
   document_type: DocumentType;
+  document_category: DocumentCategory;
   file?: string; // 文件URL
   content?: string | null;
   status: DocumentStatus;
@@ -62,6 +68,7 @@ export interface CreateDocumentRequest {
   title: string;
   description?: string;
   document_type: DocumentType;
+  document_category: DocumentCategory;
   project: string; // 项目ID，虽然后端期望数字，但我们在服务层转换
   file?: File;
   content?: string;
@@ -348,6 +355,7 @@ export interface DocumentListParams {
   project: string;
   status?: DocumentStatus;
   document_type?: DocumentType;
+  document_category?: DocumentCategory;
   search?: string;
   page?: number;
   page_size?: number;

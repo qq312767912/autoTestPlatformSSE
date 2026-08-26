@@ -7,14 +7,14 @@ from .models import (
 
 @admin.register(RequirementDocument)
 class RequirementDocumentAdmin(admin.ModelAdmin):
-    list_display = ['title', 'project', 'status', 'document_type', 'uploader', 'uploaded_at']
-    list_filter = ['status', 'document_type', 'is_latest', 'uploaded_at']
+    list_display = ['title', 'project', 'document_category', 'status', 'document_type', 'uploader', 'uploaded_at']
+    list_filter = ['document_category', 'status', 'document_type', 'is_latest', 'uploaded_at']
     search_fields = ['title', 'description', 'content']
     readonly_fields = ['id', 'uploaded_at', 'updated_at', 'word_count', 'page_count']
 
     fieldsets = (
         ('基本信息', {
-            'fields': ('title', 'description', 'project', 'document_type')
+            'fields': ('title', 'description', 'project', 'document_category', 'document_type')
         }),
         ('文档内容', {
             'fields': ('file', 'content')
