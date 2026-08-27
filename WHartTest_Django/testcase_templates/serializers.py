@@ -27,6 +27,8 @@ class ImportExportTemplateSerializer(serializers.ModelSerializer):
             'step_parsing_mode_display',
             'step_config',
             'module_path_delimiter',
+            'module_parsing_mode',
+            'module_hierarchy_columns',
             'is_active',
             'creator',
             'creator_name',
@@ -34,6 +36,39 @@ class ImportExportTemplateSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
         read_only_fields = ['id', 'creator', 'creator_name', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        instance = self.instance
+        mode = attrs.get('module_parsing_mode', getattr(instance, 'module_parsing_mode', 'path'))
+        mappings = attrs.get('field_mappings', getattr(instance, 'field_mappings', {}) or {})
+        delimiter = attrs.get('module_path_delimiter', getattr(instance, 'module_path_delimiter', '/'))
+        columns = attrs.get(
+            'module_hierarchy_columns',
+            getattr(instance, 'module_hierarchy_columns', []) or []
+        )
+
+        if mode == 'columns':
+            normalized = [str(column).strip() for column in columns if str(column).strip()]
+            if not normalized:
+                raise serializers.ValidationError({
+                    'module_hierarchy_columns': '多列表头层级模式下，请至少选择一个模块表头。'
+                })
+            if len(normalized) > 10:
+                raise serializers.ValidationError({
+                    'module_hierarchy_columns': '模块层级最多支持10级。'
+                })
+            if len(normalized) != len(set(normalized)):
+                raise serializers.ValidationError({
+                    'module_hierarchy_columns': '模块层级表头不能重复。'
+                })
+            attrs['module_hierarchy_columns'] = normalized
+        else:
+            if not mappings.get('module'):
+                raise serializers.ValidationError({'field_mappings': '请选择所属模块对应的Excel列。'})
+            if not delimiter:
+                raise serializers.ValidationError({'module_path_delimiter': '模块路径分隔符不能为空。'})
+
+        return attrs
 
     def create(self, validated_data):
         """创建时自动设置创建人"""

@@ -25,6 +25,11 @@ class ImportExportTemplate(models.Model):
         ('multi_row', _('多行步骤')),          # 每行一个步骤
     ]
 
+    MODULE_PARSING_MODE_CHOICES = [
+        ('path', _('单列路径')),
+        ('columns', _('多列表头层级')),
+    ]
+
     name = models.CharField(_('模板名称'), max_length=255, unique=True)
     template_type = models.CharField(
         _('模板类型'),
@@ -107,6 +112,19 @@ class ImportExportTemplate(models.Model):
         max_length=10,
         default='/',
         help_text=_('Excel中模块路径的分隔符，如 "/" 或 ">"')
+    )
+    module_parsing_mode = models.CharField(
+        _('模块解析模式'),
+        max_length=20,
+        choices=MODULE_PARSING_MODE_CHOICES,
+        default='path',
+        help_text=_('单列路径或按多个Excel表头列构建模块层级')
+    )
+    module_hierarchy_columns = models.JSONField(
+        _('模块层级表头'),
+        default=list,
+        blank=True,
+        help_text=_('按层级顺序保存Excel表头，如 ["一级模块", "二级模块"]')
     )
 
     # 元数据

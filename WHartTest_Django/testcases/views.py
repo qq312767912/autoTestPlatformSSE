@@ -745,7 +745,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
 class TestCaseModuleViewSet(viewsets.ModelViewSet):
     """
-    用例模块视图集，处理模块的 CRUD 操作，支持5级子模块。
+    用例模块视图集，处理模块的 CRUD 操作，支持10级子模块。
     API 端点将嵌套在项目下，例如 /api/projects/{project_pk}/testcase-modules/
     """
 
@@ -891,17 +891,17 @@ class TestCaseModuleViewSet(viewsets.ModelViewSet):
 
             if drop_position == 0:
                 # 移动到目标模块内部，作为其子模块
-                if target_module.level >= 5:
+                if target_module.level >= 10:
                     return Response(
-                        {"error": "模块级别不能超过5级。"},
+                        {"error": "模块级别不能超过10级。"},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
                 # 校验子树最大深度
                 subtree_depth = instance.get_max_depth()
-                if target_module.level + subtree_depth > 5:
+                if target_module.level + subtree_depth > 10:
                     return Response(
-                        {"error": f"移动后模块层级将超过5级限制（当前子树深度: {subtree_depth}）。"},
+                        {"error": f"移动后模块层级将超过10级限制（当前子树深度: {subtree_depth}）。"},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
@@ -923,9 +923,9 @@ class TestCaseModuleViewSet(viewsets.ModelViewSet):
                 # 校验子树最大深度
                 target_parent_level = target_module.parent.level if target_module.parent else 0
                 subtree_depth = instance.get_max_depth()
-                if target_parent_level + subtree_depth > 5:
+                if target_parent_level + subtree_depth > 10:
                     return Response(
-                        {"error": f"移动后模块层级将超过5级限制（当前子树深度: {subtree_depth}）。"},
+                        {"error": f"移动后模块层级将超过10级限制（当前子树深度: {subtree_depth}）。"},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 

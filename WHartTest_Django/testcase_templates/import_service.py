@@ -34,6 +34,22 @@ class ImportResult:
 class TestCaseImportService:
     """测试用例导入服务"""
 
+    MODULE_HIERARCHY_HEADER_PATTERN = re.compile(
+        r'^([一二三四五六七八九十]|\d+)级模块$'
+    )
+    CHINESE_MODULE_LEVELS = {
+        '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+        '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+    }
+    DEFAULT_LEVEL_MAPPING = {
+        '最高': 'P0', '高': 'P0', '中': 'P1', '低': 'P2', '最低': 'P3',
+    }
+    DEFAULT_TEST_TYPE_MAPPING = {
+        '冒烟测试': 'smoke', '功能测试': 'functional', '边界测试': 'boundary',
+        '异常测试': 'exception', '权限测试': 'permission', '安全测试': 'security',
+        '兼容性测试': 'compatibility',
+    }
+
     def __init__(self, template: ImportExportTemplate, project: Project, user):
         self.template = template
         self.project = project
@@ -132,6 +148,26 @@ class TestCaseImportService:
         # 应用值转换
         return self.template.transform_value(field_name, raw_value)
 
+    def _get_level(self, row, headers: Dict[str, int]) -> str:
+        """读取并标准化用例等级，兼容旧模板中的中文优先级。"""
+        value = self._get_field_value(row, headers, 'level').strip()
+        if not value:
+            return 'P2'
+        normalized = value.upper()
+        if normalized in {'P0', 'P1', 'P2', 'P3'}:
+            return normalized
+        return self.DEFAULT_LEVEL_MAPPING.get(value, 'P2')
+
+    def _get_test_type(self, row, headers: Dict[str, int]) -> str:
+        """读取并标准化用例类型，兼容中文名称和系统内部代码。"""
+        value = self._get_field_value(row, headers, 'test_type').strip()
+        if not value:
+            return 'functional'
+        valid_codes = {choice[0] for choice in TestCase.TEST_TYPE_CHOICES}
+        if value in valid_codes:
+            return value
+        return self.DEFAULT_TEST_TYPE_MAPPING.get(value, 'functional')
+
     def _get_or_create_module(self, module_path: str) -> Optional[TestCaseModule]:
         """根据模块路径获取或创建模块"""
         if not module_path:
@@ -174,6 +210,54 @@ class TestCaseImportService:
             parent = module
 
         return parent
+
+    def _get_module_path(self, row, headers: Dict[str, int]) -> str:
+        """根据模板的模块解析模式生成统一的模块路径。"""
+        hierarchy_columns = self._get_module_hierarchy_columns(headers)
+        if not hierarchy_columns:
+            return self._get_field_value(row, headers, 'module')
+
+        values = [self._get_cell_value(row, headers, column) for column in hierarchy_columns]
+
+        # 允许末尾层级为空，但不允许跳过中间层级，否则父子关系不明确。
+        first_empty_index = next((index for index, value in enumerate(values) if not value), len(values))
+        if any(values[first_empty_index + 1:]):
+            raise ValueError('模块层级存在断层，请检查所选表头列及Excel数据。')
+
+        return self.template.module_path_delimiter.join(values[:first_empty_index])
+
+    def _get_module_hierarchy_columns(self, headers: Dict[str, int]) -> List[str]:
+        """获取本次导入使用的模块层级列，并兼容旧版单列模块模板。"""
+        if self.template.module_parsing_mode == 'columns':
+            return self.template.module_hierarchy_columns or []
+
+        # 旧模板通常会把“三级模块”等某一层映射成所属模块。若当前工作表
+        # 同时存在多个标准层级表头，则自动使用所有层级列，避免只导入叶子模块。
+        mapped_module_column = (self.template.field_mappings or {}).get('module')
+        detected_by_level = {}
+        for header in headers:
+            match = self.MODULE_HIERARCHY_HEADER_PATTERN.fullmatch(header)
+            if not match:
+                continue
+            level_text = match.group(1)
+            level = self.CHINESE_MODULE_LEVELS.get(level_text)
+            if level is None:
+                level = int(level_text)
+            if 1 <= level <= 10:
+                detected_by_level[level] = header
+
+        # 只采用从一级开始的连续层级。文档只有一至三级时返回3列，
+        # 一至六级时返回6列；中间缺级不会被错误地压缩成连续父子关系。
+        detected_columns = []
+        for level in range(1, 11):
+            header = detected_by_level.get(level)
+            if not header:
+                break
+            detected_columns.append(header)
+        if mapped_module_column in detected_columns and len(detected_columns) >= 2:
+            return detected_columns
+
+        return []
 
     def _parse_steps_single_cell(self, steps_text: str, expected_text: str) -> List[Dict[str, str]]:
         """
@@ -265,7 +349,7 @@ class TestCaseImportService:
                     continue
 
                 # 获取模块
-                module_path = self._get_field_value(row, headers, 'module')
+                module_path = self._get_module_path(row, headers)
                 module = self._get_or_create_module(module_path)
 
                 if not module:
@@ -288,7 +372,8 @@ class TestCaseImportService:
                     })
 
                 # 获取其他字段
-                level = self._get_field_value(row, headers, 'level') or 'P2'
+                level = self._get_level(row, headers)
+                test_type = self._get_test_type(row, headers)
                 precondition = self._get_field_value(row, headers, 'precondition')
                 notes = self._get_field_value(row, headers, 'notes')
 
@@ -304,6 +389,7 @@ class TestCaseImportService:
                         module=module,
                         name=name,
                         level=level,
+                        test_type=test_type,
                         precondition=precondition,
                         notes=notes,
                         creator=self.user,
@@ -363,8 +449,9 @@ class TestCaseImportService:
                 current_case = {
                     'row': row_idx,
                     'name': case_name,
-                    'module_path': self._get_field_value(row, headers, 'module'),
-                    'level': self._get_field_value(row, headers, 'level') or 'P2',
+                    'module_path': self._get_module_path(row, headers),
+                    'level': self._get_level(row, headers),
+                    'test_type': self._get_test_type(row, headers),
                     'precondition': self._get_field_value(row, headers, 'precondition'),
                     'notes': self._get_field_value(row, headers, 'notes'),
                     'steps': [],
@@ -415,6 +502,7 @@ class TestCaseImportService:
                         module=module,
                         name=case_data['name'],
                         level=case_data['level'],
+                        test_type=case_data['test_type'],
                         precondition=case_data['precondition'],
                         notes=case_data['notes'],
                         creator=self.user,

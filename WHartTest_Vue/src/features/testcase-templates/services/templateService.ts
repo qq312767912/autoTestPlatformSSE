@@ -15,11 +15,34 @@ function unwrapResponse<T>(responseData: any): T {
   return responseData as T;
 }
 
+function extractApiError(error: any, fallback: string): string {
+  const payload = error?.response?.data;
+  const candidates = [payload?.error, payload?.message, payload?.errors, payload, error?.message];
+  const findMessage = (value: any): string | undefined => {
+    if (typeof value === 'string' && value.trim()) return value;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const message = findMessage(item);
+        if (message) return message;
+      }
+    }
+    if (value && typeof value === 'object') {
+      for (const item of Object.values(value)) {
+        const message = findMessage(item);
+        if (message) return message;
+      }
+    }
+    return undefined;
+  };
+  return candidates.map(findMessage).find(Boolean) || fallback;
+}
+
 // 模版类型
 export type TemplateType = 'import' | 'export' | 'both';
 
 // 步骤解析模式
 export type StepParsingMode = 'single_cell' | 'multi_row';
+export type ModuleParsingMode = 'path' | 'columns';
 
 // 字段映射配置
 export interface FieldMappings {
@@ -64,6 +87,8 @@ export interface ImportExportTemplate {
   step_parsing_mode_display: string;
   step_config: StepConfig;
   module_path_delimiter: string;
+  module_parsing_mode: ModuleParsingMode;
+  module_hierarchy_columns: string[];
   is_active: boolean;
   creator?: number;
   creator_name?: string;
@@ -98,6 +123,8 @@ export interface TemplateFormData {
   step_parsing_mode: StepParsingMode;
   step_config: StepConfig;
   module_path_delimiter: string;
+  module_parsing_mode: ModuleParsingMode;
+  module_hierarchy_columns: string[];
   is_active: boolean;
 }
 
@@ -221,7 +248,7 @@ export const createTemplate = async (data: TemplateFormData): Promise<OperationR
   } catch (error: any) {
     return {
       success: false,
-      error: error.response?.data?.error || error.response?.data?.name?.[0] || error.message || '创建模版失败',
+      error: extractApiError(error, '创建模版失败'),
     };
   }
 };
@@ -245,7 +272,7 @@ export const updateTemplate = async (id: number, data: Partial<TemplateFormData>
   } catch (error: any) {
     return {
       success: false,
-      error: error.response?.data?.error || error.message || '更新模版失败',
+      error: extractApiError(error, '更新模版失败'),
     };
   }
 };

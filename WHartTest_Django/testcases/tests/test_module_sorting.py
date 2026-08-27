@@ -127,11 +127,19 @@ class TestCaseModuleSortingTests(APITestCase):
         self.assertIn("无法移动模块到自身或其子模块下", response.data['error'])
 
     def test_move_api_depth_limit_protection(self):
-        """测试5级深度保护"""
-        # Create a deep tree structure to reach level 5
+        """测试10级深度保护"""
+        # Create a deep tree structure to reach level 10
         # root1 (level 1) -> child1_1 (2) -> child1_1_1 (3)
         child4 = TestCaseModule.objects.create(project=self.project, name='Child 4', parent=self.child1_1_1, creator=self.user) # level 4
         child5 = TestCaseModule.objects.create(project=self.project, name='Child 5', parent=child4, creator=self.user) # level 5
+        parent = child5
+        for level in range(6, 11):
+            parent = TestCaseModule.objects.create(
+                project=self.project,
+                name=f'Child {level}',
+                parent=parent,
+                creator=self.user,
+            )
 
         # Try to move child5 under a new parent at level 5 (which would exceed 5)
         # Or try to move child4 under root2 (target is root2 level 1, child4 has subtree depth 2. Level of child4 under root2 would be 2, deep child5 would be 3. That is OK).
@@ -146,4 +154,4 @@ class TestCaseModuleSortingTests(APITestCase):
 
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("将超过5级限制", response.data['error'])
+        self.assertIn("将超过10级限制", response.data['error'])

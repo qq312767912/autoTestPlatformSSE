@@ -1,12 +1,15 @@
 """登录凭据的 RSA-OAEP 加解密。
 
-生产环境应通过 LOGIN_RSA_PRIVATE_KEY 为所有 Web worker 配置同一份 PEM 私钥。
-未配置时会在当前进程生成临时密钥，仅适合单进程开发环境。
+生产环境可通过 LOGIN_RSA_PRIVATE_KEY 为所有 Web worker 配置同一份 PEM 私钥。
+未配置时在运行时临时目录原子生成密钥文件，供同一容器内的 worker 共享。
 """
 
 import base64
 import hashlib
 import json
+import os
+from pathlib import Path
+import tempfile
 import time
 from functools import lru_cache
 
@@ -20,6 +23,39 @@ class LoginCredentialError(ValueError):
     pass
 
 
+_RUNTIME_PRIVATE_KEY_PATH = (
+    Path(tempfile.gettempdir()) / "wharttest" / "login_rsa_private_key.pem"
+)
+
+
+def _runtime_private_key():
+    """加载或原子创建容器运行期共享私钥，避免多 worker 各用一把密钥。"""
+    try:
+        pem = _RUNTIME_PRIVATE_KEY_PATH.read_bytes()
+    except FileNotFoundError:
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        _RUNTIME_PRIVATE_KEY_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            file_descriptor = os.open(
+                _RUNTIME_PRIVATE_KEY_PATH,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            # 另一个 worker 已抢先创建，读取它生成的共享密钥。
+            pem = _RUNTIME_PRIVATE_KEY_PATH.read_bytes()
+        else:
+            with os.fdopen(file_descriptor, "wb") as key_file:
+                key_file.write(pem)
+
+    return serialization.load_pem_private_key(pem, password=None)
+
+
 @lru_cache(maxsize=1)
 def _private_key():
     configured_key = getattr(settings, "LOGIN_RSA_PRIVATE_KEY", "")
@@ -27,7 +63,7 @@ def _private_key():
         return serialization.load_pem_private_key(
             configured_key.replace("\\n", "\n").encode("utf-8"), password=None
         )
-    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return _runtime_private_key()
 
 
 def public_key_payload():

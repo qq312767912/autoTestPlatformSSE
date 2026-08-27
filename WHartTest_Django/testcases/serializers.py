@@ -318,9 +318,9 @@ class TestCaseModuleSerializer(serializers.ModelSerializer):
                     {"parent": "父模块必须属于同一个项目"}
                 )
 
-            # 验证模块级别不超过5级
-            if parent.level >= 5:
-                raise serializers.ValidationError({"parent": "模块级别不能超过5级"})
+            # 验证模块级别不超过10级
+            if parent.level >= 10:
+                raise serializers.ValidationError({"parent": "模块级别不能超过10级"})
 
         # 更新时，确保父模块属于同一个项目
         elif self.instance and "parent" in attrs and attrs["parent"]:
@@ -330,9 +330,9 @@ class TestCaseModuleSerializer(serializers.ModelSerializer):
                     {"parent": "父模块必须属于同一个项目"}
                 )
 
-            # 验证模块级别不超过5级
-            if parent.level >= 5:
-                raise serializers.ValidationError({"parent": "模块级别不能超过5级"})
+            # 验证模块级别不超过10级
+            if parent.level >= 10:
+                raise serializers.ValidationError({"parent": "模块级别不能超过10级"})
 
             # 验证父模块不是自己或自己的子模块（避免循环引用）
             if parent.id == self.instance.id:

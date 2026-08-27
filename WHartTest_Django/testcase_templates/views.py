@@ -16,6 +16,13 @@ from .serializers import (
 )
 
 
+def _reset_read_only_worksheet_dimensions(worksheet):
+    """忽略文件中可能错误的 dimension 元数据，按实际单元格重新扫描范围。"""
+    reset_dimensions = getattr(worksheet, 'reset_dimensions', None)
+    if callable(reset_dimensions):
+        reset_dimensions()
+
+
 class ImportExportTemplateViewSet(viewsets.ModelViewSet):
     """
     导入导出模版管理 ViewSet
@@ -73,6 +80,8 @@ class ImportExportTemplateViewSet(viewsets.ModelViewSet):
             else:
                 worksheet = workbook.active
 
+            _reset_read_only_worksheet_dimensions(worksheet)
+
             # 读取表头行
             headers = []
             for cell in worksheet[header_row]:
@@ -97,7 +106,9 @@ class ImportExportTemplateViewSet(viewsets.ModelViewSet):
                     sample_data.append(row_data)
 
             # 计算数据行数
-            row_count = worksheet.max_row - header_row if worksheet.max_row else 0
+            row_count = sum(
+                1 for _ in worksheet.iter_rows(min_row=header_row + 1)
+            )
 
             workbook.close()
 
@@ -148,6 +159,8 @@ class ImportExportTemplateViewSet(viewsets.ModelViewSet):
                 if not template.sheet_name:
                     template.sheet_name = worksheet.title
 
+            _reset_read_only_worksheet_dimensions(worksheet)
+
             header_row = template.header_row or 1
             headers = []
             for cell in worksheet[header_row]:
@@ -190,6 +203,7 @@ class ImportExportTemplateViewSet(viewsets.ModelViewSet):
             {'value': 'module', 'label': '所属模块', 'required': True},
             {'value': 'precondition', 'label': '前置条件', 'required': False},
             {'value': 'level', 'label': '用例等级', 'required': False, 'has_transform': True},
+            {'value': 'test_type', 'label': '用例类型', 'required': False, 'has_transform': True},
             {'value': 'notes', 'label': '备注', 'required': False},
             {'value': 'steps', 'label': '步骤描述', 'required': False, 'is_step_field': True},
             {'value': 'expected_results', 'label': '预期结果', 'required': False, 'is_step_field': True},
@@ -236,6 +250,11 @@ class ImportExportTemplateViewSet(viewsets.ModelViewSet):
             step_parsing_mode=template.step_parsing_mode,
             step_config=template.step_config.copy() if template.step_config else {},
             module_path_delimiter=template.module_path_delimiter,
+            module_parsing_mode=template.module_parsing_mode,
+            module_hierarchy_columns=(
+                template.module_hierarchy_columns.copy()
+                if template.module_hierarchy_columns else []
+            ),
             is_active=True,
             creator=request.user,
         )

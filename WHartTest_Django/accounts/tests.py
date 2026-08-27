@@ -1,6 +1,8 @@
 import base64
 import json
 import secrets
+from pathlib import Path
+import tempfile
 import time
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -14,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 from accounts.serializers import ContentTypeSerializer
 from accounts.views import MyTokenObtainPairView
+from accounts.login_crypto import _private_key, public_key_payload
 
 
 class EncryptedLoginTests(TestCase):
@@ -92,6 +95,20 @@ class EncryptedLoginTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200, response.content)
+
+    def test_runtime_private_key_is_shared_across_worker_caches(self):
+        with tempfile.TemporaryDirectory() as temp_directory:
+            runtime_key_path = Path(temp_directory) / 'login_rsa_private_key.pem'
+            with patch('accounts.login_crypto._RUNTIME_PRIVATE_KEY_PATH', runtime_key_path):
+                _private_key.cache_clear()
+                first_worker_payload = public_key_payload()
+
+                # 清空进程内缓存，模拟另一个 Uvicorn worker 独立加载密钥。
+                _private_key.cache_clear()
+                second_worker_payload = public_key_payload()
+
+        self.assertEqual(first_worker_payload['key_id'], second_worker_payload['key_id'])
+        self.assertEqual(first_worker_payload['public_key'], second_worker_payload['public_key'])
 
 
 class MyTokenObtainPairViewTests(SimpleTestCase):

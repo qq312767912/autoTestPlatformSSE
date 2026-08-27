@@ -120,9 +120,71 @@
             将 Excel 列名映射到用例字段。带 * 的字段为必填。
           </a-alert>
 
+          <a-card title="模块层级来源" size="small" class="module-config-card">
+            <a-radio-group v-model="form.module_parsing_mode" class="module-mode-selector">
+              <a-radio value="path">
+                <div>
+                  <div>单列模块路径</div>
+                  <div class="radio-desc">一个单元格保存完整路径，例如 模块A/子模块B</div>
+                </div>
+              </a-radio>
+              <a-radio value="columns">
+                <div>
+                  <div>多列表头层级</div>
+                  <div class="radio-desc">一级模块、二级模块等表头分别代表一层，无需修改Excel</div>
+                </div>
+              </a-radio>
+            </a-radio-group>
+
+            <div v-if="form.module_parsing_mode === 'columns'" class="hierarchy-config">
+              <a-form-item label="按层级顺序选择表头" required>
+                <a-select
+                  v-model="form.module_hierarchy_columns"
+                  multiple
+                  allow-clear
+                  allow-search
+                  :max-tag-count="4"
+                  placeholder="请选择一级模块、二级模块等表头"
+                >
+                  <a-option
+                    v-for="header in parsedHeaders"
+                    :key="header"
+                    :value="header"
+                    :disabled="form.module_hierarchy_columns.length >= 10 && !form.module_hierarchy_columns.includes(header)"
+                  >
+                    {{ header }}
+                  </a-option>
+                </a-select>
+                <template #extra>平台将按下面的顺序创建模块树，最多10级。</template>
+              </a-form-item>
+
+              <div v-if="form.module_hierarchy_columns.length" class="hierarchy-preview">
+                <div
+                  v-for="(header, index) in form.module_hierarchy_columns"
+                  :key="header"
+                  class="hierarchy-level-row"
+                >
+                  <span class="level-index">{{ index + 1 }}</span>
+                  <span class="level-header">{{ header }}</span>
+                  <a-space :size="4">
+                    <a-button size="mini" type="text" :disabled="index === 0" @click="moveHierarchyColumn(index, -1)">
+                      <icon-up />
+                    </a-button>
+                    <a-button size="mini" type="text" :disabled="index === form.module_hierarchy_columns.length - 1" @click="moveHierarchyColumn(index, 1)">
+                      <icon-down />
+                    </a-button>
+                    <a-button size="mini" type="text" status="danger" @click="removeHierarchyColumn(index)">
+                      移除
+                    </a-button>
+                  </a-space>
+                </div>
+              </div>
+            </div>
+          </a-card>
+
           <a-form :model="form.field_mappings" layout="vertical">
             <a-row :gutter="16">
-              <a-col :span="12" v-for="field in fieldOptions" :key="field.value">
+              <a-col :span="12" v-for="field in visibleFieldOptions" :key="field.value">
                 <a-form-item>
                   <template #label>
                     {{ field.label }}
@@ -198,6 +260,39 @@
               添加规则
             </a-button>
           </a-card>
+
+          <a-card title="用例类型转换" size="small" class="transform-card">
+            <a-table
+              :columns="transformColumns"
+              :data="testTypeTransformData"
+              :pagination="false"
+              size="small"
+            >
+              <template #input_value="{ record }">
+                <a-input v-model="record.input" placeholder="Excel中的值" size="small" />
+              </template>
+              <template #output_value="{ record }">
+                <a-select v-model="record.output" placeholder="转换为" size="small" style="width: 140px">
+                  <a-option value="smoke">冒烟测试</a-option>
+                  <a-option value="functional">功能测试</a-option>
+                  <a-option value="boundary">边界测试</a-option>
+                  <a-option value="exception">异常测试</a-option>
+                  <a-option value="permission">权限测试</a-option>
+                  <a-option value="security">安全测试</a-option>
+                  <a-option value="compatibility">兼容性测试</a-option>
+                </a-select>
+              </template>
+              <template #actions="{ rowIndex }">
+                <a-button size="mini" status="danger" @click="removeTestTypeTransform(rowIndex)">
+                  删除
+                </a-button>
+              </template>
+            </a-table>
+            <a-button size="small" type="text" class="add-btn" @click="addTestTypeTransform">
+              <template #icon><icon-plus /></template>
+              添加规则
+            </a-button>
+          </a-card>
         </div>
 
         <!-- Step 4: 步骤解析配置 -->
@@ -220,14 +315,14 @@
               </a-radio-group>
             </a-form-item>
 
-            <a-form-item label="模块路径分隔符">
+            <a-form-item v-if="form.module_parsing_mode === 'path'" label="模块路径分隔符">
               <a-input
                 v-model="form.module_path_delimiter"
                 placeholder="如 / 或 >"
                 style="width: 120px"
               />
               <template #extra>
-                用于解析模块层级路径，如 "模块A/子模块B"
+                这里只填写分隔符本身，例如 /；完整路径填写在Excel单元格中。
               </template>
             </a-form-item>
           </a-form>
@@ -270,7 +365,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { IconUpload, IconPlus } from '@arco-design/web-vue/es/icon';
+import { IconUpload, IconPlus, IconUp, IconDown } from '@arco-design/web-vue/es/icon';
 import type { FileItem } from '@arco-design/web-vue/es/upload/interfaces';
 import {
   getTemplateDetail,
@@ -283,6 +378,7 @@ import {
   type FieldOption,
   type StepParsingMode,
   type TemplateType,
+  type ModuleParsingMode,
 } from '../services/templateService';
 
 const emit = defineEmits<{
@@ -317,6 +413,8 @@ const form = reactive<TemplateFormData & { field_mappings: Record<string, string
   step_parsing_mode: 'single_cell' as StepParsingMode,
   step_config: {},
   module_path_delimiter: '/',
+  module_parsing_mode: 'path' as ModuleParsingMode,
+  module_hierarchy_columns: [],
   is_active: true,
 });
 
@@ -333,18 +431,39 @@ const levelTransformData = ref<{ input: string; output: string }[]>([
   { input: '低', output: 'P2' },
 ]);
 
+const defaultTestTypeTransforms = () => [
+  { input: '冒烟测试', output: 'smoke' },
+  { input: '功能测试', output: 'functional' },
+  { input: '边界测试', output: 'boundary' },
+  { input: '异常测试', output: 'exception' },
+  { input: '权限测试', output: 'permission' },
+  { input: '安全测试', output: 'security' },
+  { input: '兼容性测试', output: 'compatibility' },
+];
+const testTypeTransformData = ref<{ input: string; output: string }[]>(defaultTestTypeTransforms());
+
 const transformColumns = [
   { title: 'Excel 中的值', slotName: 'input_value', width: 150 },
   { title: '转换为', slotName: 'output_value', width: 150 },
   { title: '操作', slotName: 'actions', width: 80 },
 ];
 
+const visibleFieldOptions = computed(() => (
+  form.module_parsing_mode === 'columns'
+    ? fieldOptions.value.filter(field => field.value !== 'module')
+    : fieldOptions.value
+));
+
 const canNextStep = computed(() => {
   switch (currentStep.value) {
     case 0: // 表头配置
       return form.header_row > 0 && form.data_start_row >= form.header_row;
     case 1: // 字段映射
-      return !!form.field_mappings.name && !!form.field_mappings.module;
+      return !!form.field_mappings.name && (
+        form.module_parsing_mode === 'columns'
+          ? form.module_hierarchy_columns.length > 0
+          : !!form.field_mappings.module
+      );
     case 4: // 基本信息
       return !!form.name;
     default:
@@ -368,7 +487,16 @@ const parseHeaders = async () => {
     if (result.success && result.data) {
       parsedHeaders.value = result.data.headers.filter((h: string) => h);
       sheetOptions.value = result.data.sheet_names.map((s: string) => ({ value: s, label: s }));
-      Message.success(`成功解析 ${parsedHeaders.value.length} 个表头列`);
+      const detectedHierarchyHeaders = parsedHeaders.value.filter(header => (
+        /^(?:[一二三四五六七八九十]|\d+)级模块$/.test(header)
+      )).slice(0, 10);
+      if (detectedHierarchyHeaders.length >= 2) {
+        form.module_parsing_mode = 'columns';
+        form.module_hierarchy_columns = detectedHierarchyHeaders;
+        Message.success(`已识别 ${detectedHierarchyHeaders.length} 级模块表头并自动建立层级顺序`);
+      } else {
+        Message.success(`成功解析 ${parsedHeaders.value.length} 个表头列`);
+      }
     } else {
       Message.error(result.error || '解析失败');
     }
@@ -389,6 +517,26 @@ const addLevelTransform = () => {
 
 const removeLevelTransform = (index: number) => {
   levelTransformData.value.splice(index, 1);
+};
+
+const addTestTypeTransform = () => {
+  testTypeTransformData.value.push({ input: '', output: 'functional' });
+};
+
+const removeTestTypeTransform = (index: number) => {
+  testTypeTransformData.value.splice(index, 1);
+};
+
+const moveHierarchyColumn = (index: number, direction: -1 | 1) => {
+  const targetIndex = index + direction;
+  if (targetIndex < 0 || targetIndex >= form.module_hierarchy_columns.length) return;
+  const columns = [...form.module_hierarchy_columns];
+  [columns[index], columns[targetIndex]] = [columns[targetIndex], columns[index]];
+  form.module_hierarchy_columns = columns;
+};
+
+const removeHierarchyColumn = (index: number) => {
+  form.module_hierarchy_columns = form.module_hierarchy_columns.filter((_, itemIndex) => itemIndex !== index);
 };
 
 const nextStep = () => {
@@ -414,6 +562,14 @@ const buildFormData = (): TemplateFormData => {
       }
     }
   }
+  if (testTypeTransformData.value.some(t => t.input && t.output)) {
+    valueTransformations.test_type = {};
+    for (const t of testTypeTransformData.value) {
+      if (t.input && t.output) {
+        valueTransformations.test_type[t.input] = t.output;
+      }
+    }
+  }
 
   return {
     name: form.name,
@@ -428,6 +584,8 @@ const buildFormData = (): TemplateFormData => {
     step_parsing_mode: form.step_parsing_mode,
     step_config: form.step_config,
     module_path_delimiter: form.module_path_delimiter,
+    module_parsing_mode: form.module_parsing_mode,
+    module_hierarchy_columns: form.module_hierarchy_columns,
     is_active: form.is_active,
   };
 };
@@ -483,6 +641,8 @@ const resetForm = () => {
   form.step_parsing_mode = 'single_cell';
   form.step_config = {};
   form.module_path_delimiter = '/';
+  form.module_parsing_mode = 'path';
+  form.module_hierarchy_columns = [];
   form.is_active = true;
   sampleFileList.value = [];
   parsedHeaders.value = [];
@@ -493,6 +653,7 @@ const resetForm = () => {
     { input: '中', output: 'P1' },
     { input: '低', output: 'P2' },
   ];
+  testTypeTransformData.value = defaultTestTypeTransforms();
   isEdit.value = false;
   editId.value = null;
 };
@@ -529,6 +690,8 @@ const open = async (id?: number) => {
         form.step_parsing_mode = data.step_parsing_mode;
         form.step_config = data.step_config || {};
         form.module_path_delimiter = data.module_path_delimiter;
+        form.module_parsing_mode = data.module_parsing_mode || 'path';
+        form.module_hierarchy_columns = data.module_hierarchy_columns || [];
         form.is_active = data.is_active;
 
         // 回填模版结构：优先使用后端保存的 template_headers
@@ -539,6 +702,11 @@ const open = async (id?: number) => {
         // 解析等级转换规则
         if (data.value_transformations?.level) {
           levelTransformData.value = Object.entries(data.value_transformations.level).map(
+            ([input, output]) => ({ input, output })
+          );
+        }
+        if (data.value_transformations?.test_type) {
+          testTypeTransformData.value = Object.entries(data.value_transformations.test_type).map(
             ([input, output]) => ({ input, output })
           );
         }
@@ -598,6 +766,69 @@ defineExpose({ open });
 
 .mapping-tip {
   margin-bottom: 20px;
+}
+
+.module-config-card {
+  margin-bottom: 20px;
+  border-radius: 8px;
+}
+
+.module-mode-selector {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+
+.module-mode-selector :deep(.arco-radio) {
+  margin: 0;
+}
+
+.hierarchy-config {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-border-2);
+}
+
+.hierarchy-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: var(--color-fill-1);
+  border-radius: 8px;
+}
+
+.hierarchy-level-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 8px;
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-border-2);
+  border-radius: 6px;
+}
+
+.level-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: rgb(var(--primary-6));
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--color-primary-light-1);
+  border-radius: 50%;
+}
+
+.level-header {
+  overflow: hidden;
+  color: var(--color-text-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .required-mark {
