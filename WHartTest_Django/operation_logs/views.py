@@ -146,15 +146,6 @@ class AnonymizationRuleViewSet(viewsets.ModelViewSet):
         # 额外内置规则（不依赖 Presidio 识别器）
         EXTRA_RULES = [
             {
-                'name': 'chinese_person_name',
-                'entity_type': 'PERSON_NAME',
-                'entity_label': '自然人姓名',
-                'regex': r'[一-鿿]{2,4}',
-                'score': 0.6,
-                'is_active': True,
-                'description': '内置规则：匹配2-4个汉字组成的中文姓名',
-            },
-            {
                 'name': 'financial_account',
                 'entity_type': 'FINANCIAL_ACCOUNT',
                 'entity_label': '资金账户',
@@ -729,8 +720,6 @@ class AnonymizedDocumentViewSet(viewsets.ModelViewSet):
     @classmethod
     def _anonymize_docx_content(cls, doc, enabled_preset_types, custom_keywords):
         """按 DOCX 节点原位脱敏，返回汇总结果和输出文件字节。"""
-        import uuid
-
         from docx import Document as DocxDocument
         from utils.anonymization.service import DocumentAnonymizer
 
@@ -743,7 +732,10 @@ class AnonymizedDocumentViewSet(viewsets.ModelViewSet):
             if paragraph_text.strip() and text_nodes:
                 paragraph_entries.append((text_nodes, paragraph_text))
 
-        boundary = f'\ue000WHARTTEST_DOCX_{uuid.uuid4().hex}\ue001'
+        # DOCX XML 不允许出现这些控制字符，因此它们不可能来自原文，也不会被
+        # 手机号、邮箱、URL 等文本规则命中。此前边界中包含随机 UUID；当 UUID
+        # 恰好含有 11 位手机号样式的数字时，边界会被脱敏并导致段落无法拆回。
+        boundary = '\x00\x01\x02\x03'
         combined_text = boundary.join(text for _, text in paragraph_entries)
         result = DocumentAnonymizer.anonymize_with_config(
             text=combined_text,

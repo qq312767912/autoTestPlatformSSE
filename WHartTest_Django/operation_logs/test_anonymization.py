@@ -74,3 +74,26 @@ class DocxAnonymizationScopeTests(SimpleTestCase):
         self.assertNotIn('secret', combined.casefold())
         self.assertGreaterEqual(combined.count('[敏感]'), 6)
         self.assertEqual(len(result.entities_found), 6)
+
+    def test_phone_number_rule_cannot_modify_docx_paragraph_boundary(self):
+        document = Document()
+        document.add_paragraph('联系人手机号 13800138000')
+        document.add_paragraph('备用手机号 13900139000')
+
+        source = io.BytesIO()
+        document.save(source)
+        stored_document = SimpleNamespace(original_file=ContentFile(source.getvalue()))
+
+        result, output = AnonymizedDocumentViewSet._anonymize_docx_content(
+            stored_document,
+            enabled_preset_types=['PHONE_NUMBER'],
+            custom_keywords=[],
+        )
+
+        processed = Document(io.BytesIO(output))
+        combined = '\n'.join(paragraph.text for paragraph in processed.paragraphs)
+
+        self.assertNotIn('13800138000', combined)
+        self.assertNotIn('13900139000', combined)
+        self.assertEqual(combined.count('<PHONE_NUMBER>'), 2)
+        self.assertEqual(len(result.entities_found), 2)
