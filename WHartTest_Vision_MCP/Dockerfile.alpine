@@ -1,0 +1,47 @@
+# Vision MCP 信创版：使用 musl 和 Alpine 原生 aarch64 ONNX Runtime，
+# 避免麒麟 ARM64 64KB 页环境下 manylinux Python/ONNX 二进制启动失败。
+FROM alpine:edge
+
+ARG ALPINE_MIRROR=https://dl-cdn.alpinelinux.org/alpine
+ARG PIP_INDEX_URL=https://pypi.org/simple
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    VISION_MCP_HOST=0.0.0.0 \
+    VISION_MCP_PORT=8010 \
+    VISION_MCP_PATH=/mcp \
+    VISION_MCP_TRANSPORT=streamable-http
+
+WORKDIR /app
+
+RUN sed -i \
+      -e "s#https://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" \
+      -e "s#https://cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" \
+      /etc/apk/repositories \
+    && apk add --no-cache \
+      python3 \
+      py3-pip \
+      py3-numpy \
+      py3-onnxruntime \
+      py3-opencv \
+      py3-pillow \
+      py3-pyclipper \
+      py3-shapely \
+      py3-six \
+      py3-yaml \
+      py3-tqdm
+
+COPY pyproject.toml README.md ./
+COPY src ./src
+
+# RapidOCR 本身为 Python 代码；其二进制依赖全部使用上面的 Alpine aarch64 包。
+# PyMuPDF 没有可直接复用的 musl 包，信创镜像使用纯 Python 的 pypdf 回退。
+# --no-deps 防止 pip 再安装 manylinux onnxruntime/opencv 覆盖系统兼容版本。
+RUN python3 -m pip install --no-cache-dir --no-deps --index-url "${PIP_INDEX_URL}" . \
+    && python3 -m pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" 'mcp>=1.9.0,<2.0.0' 'httpx>=0.27.0' 'pypdf>=5.0.0' \
+    && python3 -m pip install --no-cache-dir --no-deps --index-url "${PIP_INDEX_URL}" rapidocr-onnxruntime \
+    && python3 -c 'import onnxruntime; from rapidocr_onnxruntime import RapidOCR; RapidOCR(); print("Vision OCR runtime OK")'
+
+EXPOSE 8010
+CMD ["vision-mcp"]

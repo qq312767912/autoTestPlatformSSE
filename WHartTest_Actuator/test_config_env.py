@@ -3,6 +3,7 @@
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -53,6 +54,23 @@ class ConfigEnvOverrideTest(unittest.TestCase):
 
         self.assertFalse(config.use_gui)
         self.assertTrue(config.headless)
+
+    def test_config_loads_password_from_secret_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            secret_path = Path(temp_dir) / "api_password"
+            secret_path.write_text("  secret-from-file\n", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "WHARTTEST_ACTUATOR_API_PASSWORD_FILE": str(secret_path),
+                    "WHARTTEST_ACTUATOR_API_PASSWORD": "ignored-inline-password",
+                },
+                clear=True,
+            ):
+                config = Config()
+                config.load_from_env()
+
+        self.assertEqual(config.api_password, "secret-from-file")
 
     @patch.dict(
         os.environ,

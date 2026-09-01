@@ -247,7 +247,13 @@ class Config:
             self.actuator_name = actuator_name.strip()
         if api_username := os.environ.get('WHARTTEST_ACTUATOR_API_USERNAME'):
             self.api_username = api_username.strip()
-        if api_password := os.environ.pop('WHARTTEST_ACTUATOR_API_PASSWORD', None):
+        api_password_file = os.environ.get('WHARTTEST_ACTUATOR_API_PASSWORD_FILE')
+        if api_password_file:
+            try:
+                self.api_password = Path(api_password_file).read_text(encoding='utf-8').strip()
+            except OSError as exc:
+                raise RuntimeError(f'无法读取执行器 API 密码文件: {api_password_file}') from exc
+        elif api_password := os.environ.pop('WHARTTEST_ACTUATOR_API_PASSWORD', None):
             self.api_password = api_password.strip()
         if browser_type := os.environ.get('WHARTTEST_ACTUATOR_BROWSER_TYPE'):
             self.browser_type = browser_type.strip()

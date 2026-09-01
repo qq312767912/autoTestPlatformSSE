@@ -1,0 +1,61 @@
+# syntax=docker/dockerfile:1.7
+ARG PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.12-alpine
+
+FROM ${PYTHON_BASE_IMAGE}
+
+ARG BUILD_REVISION=unknown
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PLAYWRIGHT_NODEJS_PATH=/usr/bin/node \
+    WHARTTEST_ACTUATOR_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium-browser \
+    WHARTTEST_ACTUATOR_DOCKER=1
+
+LABEL org.opencontainers.image.title="WHartTest Actuator" \
+      org.opencontainers.image.revision="${BUILD_REVISION}"
+
+RUN sed -i 's|https://dl-cdn.alpinelinux.org/alpine|https://mirrors.tuna.tsinghua.edu.cn/alpine|g' /etc/apk/repositories \
+    && apk add --no-cache \
+        chromium \
+        nodejs \
+        nss \
+        freetype \
+        harfbuzz \
+        font-noto \
+        font-noto-cjk \
+        ttf-freefont \
+        tzdata
+
+COPY requirements.txt /app/requirements.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=secret,id=pip_index_url,required=false \
+    set -eu; \
+    if [ -s /run/secrets/pip_index_url ]; then \
+        PIP_INDEX_URL="$(cat /run/secrets/pip_index_url)"; \
+    else \
+        PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"; \
+    fi; \
+    grep -v -E '^[[:space:]]*playwright==' /app/requirements.txt > /tmp/requirements-alpine.txt; \
+    printf '%s\n' 'pyee>=13,<14' 'greenlet>=3.1.1,<4' >> /tmp/requirements-alpine.txt; \
+    python -m pip install --retries 10 --timeout 600 -i "${PIP_INDEX_URL}" -r /tmp/requirements-alpine.txt; \
+    python -m pip download --retries 10 --timeout 600 -i "${PIP_INDEX_URL}" \
+        --platform manylinux2014_aarch64 --python-version 312 --implementation cp \
+        --only-binary=:all: --no-deps playwright==1.61.0 -d /tmp/playwright-wheel; \
+    wheel_path="$(find /tmp/playwright-wheel -name 'playwright-*.whl' -print -quit)"; \
+    site_packages="$(python -c 'import site; print(site.getsitepackages()[0])')"; \
+    python -m zipfile -e "$wheel_path" "$site_packages"; \
+    rm -rf /tmp/requirements-alpine.txt /tmp/playwright-wheel
+
+COPY . /app
+
+RUN mkdir -p /app/data/browser /app/data/screenshots /app/data/traces \
+    && python -c 'import os,sys; assert os.access("/usr/bin/chromium-browser", os.X_OK); import playwright; print(sys.version)'
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import os; os.kill(1, 0)"
+
+CMD ["python", "/app/main.py"]

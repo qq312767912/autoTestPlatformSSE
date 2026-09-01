@@ -71,8 +71,8 @@ def extract_docx_images(document: Path, output: Path) -> list[dict]:
 def extract_pdf_images(document: Path, output: Path) -> list[dict]:
     try:
         import fitz
-    except ImportError as exc:
-        raise RuntimeError("PDF图片提取需要安装 pymupdf") from exc
+    except ImportError:
+        return _extract_pdf_images_with_pypdf(document, output)
     results: list[dict] = []
     pdf = fitz.open(document)
     try:
@@ -86,6 +86,25 @@ def extract_pdf_images(document: Path, output: Path) -> list[dict]:
                 results.append(_record(image_path, document, len(results) + 1, context, f"page:{page_index}"))
     finally:
         pdf.close()
+    return results
+
+
+def _extract_pdf_images_with_pypdf(document: Path, output: Path) -> list[dict]:
+    """Alpine/ARM64 fallback that avoids the manylinux-only PyMuPDF runtime."""
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:
+        raise RuntimeError("PDF图片提取需要安装 pymupdf 或 pypdf") from exc
+
+    results: list[dict] = []
+    reader = PdfReader(str(document))
+    for page_index, page in enumerate(reader.pages, 1):
+        context = page.extract_text() or ""
+        for image in page.images:
+            suffix = Path(image.name or "image.png").suffix or ".png"
+            image_path = output / f"page_{page_index:03d}_image_{len(results) + 1:03d}{suffix}"
+            image_path.write_bytes(image.data)
+            results.append(_record(image_path, document, len(results) + 1, context, f"page:{page_index}"))
     return results
 
 

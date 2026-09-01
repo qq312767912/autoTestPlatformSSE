@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1.7
 ARG PLAYWRIGHT_VERSION=1.61.0
+ARG BUILD_REVISION=unknown
+ARG PLAYWRIGHT_BASE_IMAGE=mcr.microsoft.com/playwright/python:v1.61.0-jammy
 
-FROM mcr.microsoft.com/playwright/python:v${PLAYWRIGHT_VERSION}-jammy
+FROM ${PLAYWRIGHT_BASE_IMAGE}
 
 ARG PLAYWRIGHT_VERSION
 
@@ -12,6 +14,9 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     WHARTTEST_ACTUATOR_DOCKER=1
+
+LABEL org.opencontainers.image.title="WHartTest Actuator" \
+      org.opencontainers.image.revision="${BUILD_REVISION}"
 
 COPY requirements.txt /app/requirements.txt
 
@@ -29,5 +34,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY . /app
 
 RUN mkdir -p /app/data/browser /app/data/screenshots /app/data/traces
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import os; os.kill(1, 0)"
 
 CMD ["python", "main.py"]

@@ -225,6 +225,13 @@ class PlaywrightExecutor:
             'timeout': self.launch_timeout,
         }
 
+        if self.browser_type == 'chromium':
+            executable_path = os.environ.get(
+                'WHARTTEST_ACTUATOR_BROWSER_EXECUTABLE_PATH', ''
+            ).strip()
+            if executable_path:
+                launch_options['executable_path'] = executable_path
+
         launch_args: list[str] = []
         if self.stealth_enabled and self.browser_type == 'chromium':
             launch_args.extend([

@@ -64,6 +64,7 @@ services:
       - ./data:/app/data
       - backend-static:/app/static
       - ./WHartTest_Skills:/app/bundled_skills:ro
+      - ./WHartTest_Django/supervisord.conf:/app/supervisord.conf:ro
     environment:
       # 数据库配置
       # 默认使用 PostgreSQL（生产环境推荐）

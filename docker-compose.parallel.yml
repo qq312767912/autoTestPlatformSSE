@@ -66,6 +66,7 @@ services:
       - ./data-parallel:/app/data
       - backend-static:/app/static
       - ./WHartTest_Skills:/app/bundled_skills:ro
+      - ./WHartTest_Django/supervisord.conf:/app/supervisord.conf:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:

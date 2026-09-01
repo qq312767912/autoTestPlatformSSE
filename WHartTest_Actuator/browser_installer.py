@@ -63,6 +63,13 @@ def _browser_dir_has_executable(browser_dir: Path, names: tuple) -> bool:
 
 def is_browser_installed(browser_type: str = 'chromium') -> bool:
     """检查浏览器是否已安装（同时校验实际可执行文件存在）"""
+    system_executable = os.environ.get('WHARTTEST_ACTUATOR_BROWSER_EXECUTABLE_PATH', '').strip()
+    if browser_type == 'chromium' and system_executable:
+        executable = Path(system_executable)
+        if executable.is_file() and os.access(executable, os.X_OK):
+            logger.info(f"使用系统 Chromium: {executable}")
+            return True
+
     browser_path = get_browser_path()
     if not browser_path.exists():
         return False

@@ -10,6 +10,7 @@ ARG PYTHON_BASE_IMAGE=python:3.11-alpine
 # ============================================
 FROM ${PYTHON_BASE_IMAGE} AS builder
 
+ARG ALPINE_MIRROR=https://dl-cdn.alpinelinux.org/alpine
 ARG PIP_INDEX_URL=https://pypi.org/simple
 ARG PIP_INDEX_FALLBACKS=
 ARG HF_ENDPOINT=https://huggingface.co
@@ -25,7 +26,8 @@ ENV PYTHONUNBUFFERED=1 \
     HF_ENDPOINT=${HF_ENDPOINT}
 
 # 安装构建依赖
-RUN apk add --no-cache \
+RUN sed -i "s#https://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" /etc/apk/repositories && \
+    apk add --no-cache \
     build-base \
     gcc \
     musl-dev \
@@ -93,6 +95,7 @@ RUN mkdir -p /root/.cache/fastembed
 # ============================================
 FROM ${PYTHON_BASE_IMAGE}
 
+ARG ALPINE_MIRROR=https://dl-cdn.alpinelinux.org/alpine
 ARG HF_ENDPOINT=https://huggingface.co
 ARG NPM_REGISTRY=https://registry.npmjs.org
 
@@ -106,7 +109,8 @@ ENV PYTHONUNBUFFERED=1 \
     HF_ENDPOINT=${HF_ENDPOINT}
 
 # 运行时依赖
-RUN apk add --no-cache \
+RUN sed -i "s#https://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" /etc/apk/repositories && \
+    apk add --no-cache \
     bash \
     supervisor \
     curl \
@@ -162,6 +166,7 @@ COPY api_modules/ /app/api_modules/
 COPY api_sync/ /app/api_sync/
 COPY api_testcases/ /app/api_testcases/
 COPY api_testtasks/ /app/api_testtasks/
+COPY file_management/ /app/file_management/
 COPY httprunner/ /app/httprunner/
 COPY knowledge/ /app/knowledge/
 COPY langgraph_integration/ /app/langgraph_integration/
