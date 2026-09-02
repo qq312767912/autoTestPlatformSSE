@@ -77,13 +77,15 @@
       <KnowledgeBaseSelector
         :project-id="projectId"
         :use-knowledge-base="useKnowledgeBase"
-        :selected-knowledge-base-id="selectedKnowledgeBaseId"
+        :selected-knowledge-base-ids="selectedKnowledgeBaseIds"
         :similarity-threshold="similarityThreshold"
         :top-k="topK"
+        :coverage-priority="coveragePriority"
         @update:use-knowledge-base="$emit('update:use-knowledge-base', $event)"
-        @update:selected-knowledge-base-id="$emit('update:selected-knowledge-base-id', $event)"
+        @update:selected-knowledge-base-ids="$emit('update:selected-knowledge-base-ids', $event)"
         @update:similarity-threshold="$emit('update:similarity-threshold', $event)"
         @update:top-k="$emit('update:top-k', $event)"
+        @update:coverage-priority="$emit('update:coverage-priority', $event)"
       />
     </div>
 
@@ -136,9 +138,10 @@ interface Props {
   hasMessages: boolean;
   projectId: number | null;
   useKnowledgeBase: boolean;
-  selectedKnowledgeBaseId: string | null;
+  selectedKnowledgeBaseIds: string[];
   similarityThreshold: number;
   topK: number;
+  coveragePriority: boolean;
   selectedPromptId: number | null;
 }
 
@@ -150,9 +153,10 @@ const emit = defineEmits<{
   (e: 'show-tool-approval-settings'): void;
   (e: 'show-weixin-connect'): void;
   (e: 'update:use-knowledge-base', value: boolean): void;
-  (e: 'update:selected-knowledge-base-id', value: string | null): void;
+  (e: 'update:selected-knowledge-base-ids', value: string[]): void;
   (e: 'update:similarity-threshold', value: number): void;
   (e: 'update:top-k', value: number): void;
+  (e: 'update:coverage-priority', value: boolean): void;
   (e: 'update:selected-prompt-id', value: number | null): void;
 }>();
 

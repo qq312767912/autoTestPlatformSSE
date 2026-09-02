@@ -1052,9 +1052,11 @@ export async function resumeAgentLoop(
   decision: 'approve' | 'reject',
   projectId: number,
   signal?: AbortSignal,
-  knowledgeBaseId?: string | null,
+  knowledgeBaseIds?: string[],
   useKnowledgeBase?: boolean,
-  actionCount?: number
+  actionCount?: number,
+  similarityThreshold?: number,
+  topK?: number
 ): Promise<void> {
   const authStore = useAuthStore();
   let token = authStore.getAccessToken;
@@ -1126,9 +1128,11 @@ export async function resumeAgentLoop(
     };
 
     // 添加知识库参数
-    if (knowledgeBaseId && useKnowledgeBase) {
-      resumeData.knowledge_base_id = knowledgeBaseId;
+    if (knowledgeBaseIds?.length && useKnowledgeBase) {
+      resumeData.knowledge_base_ids = knowledgeBaseIds;
       resumeData.use_knowledge_base = useKnowledgeBase;
+      resumeData.similarity_threshold = similarityThreshold ?? 0.3;
+      resumeData.top_k = topK ?? 5;
     }
 
     let response = await fetch(`${getApiBaseUrl()}${AGENT_LOOP_API_URL}/resume/`, {

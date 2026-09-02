@@ -487,9 +487,36 @@ class ConversationalRAGService(KnowledgeRAGService):
             }
 
 
-def create_knowledge_tool(knowledge_base_id: str, user, similarity_threshold: float = 0.5, top_k: int = 5):
-    """创建知识库工具，用于Agent调用"""
+def create_knowledge_tool(knowledge_base_id, user, similarity_threshold: float = 0.5,
+                          top_k: int = 5, coverage_priority: bool = False):
+    """创建知识库工具，用于Agent调用。
+
+    ``knowledge_base_id`` 同时兼容旧版单个 ID 和新版 ID 列表，避免
+    老客户端、已保存会话在升级后失效。
+    """
     from langchain_core.tools import tool
+
+    if isinstance(knowledge_base_id, (list, tuple, set)):
+        knowledge_base_ids = list(dict.fromkeys(str(item) for item in knowledge_base_id if item))
+    elif knowledge_base_id:
+        knowledge_base_ids = [str(knowledge_base_id)]
+    else:
+        knowledge_base_ids = []
+
+    candidate_k = min(40, max(top_k * 2, 30 if coverage_priority else 10))
+
+    def dynamically_trim(results):
+        """按相关性断崖动态截断，避免固定数量塞入低质量上下文。"""
+        if not results:
+            return []
+        minimum = min(10 if coverage_priority else 5, top_k, len(results))
+        limit = min(top_k, len(results))
+        for index in range(minimum, limit):
+            previous = float(results[index - 1].get("similarity_score", 0))
+            current = float(results[index].get("similarity_score", 0))
+            if previous - current >= 0.12 or current < similarity_threshold:
+                return results[:index]
+        return results[:limit]
 
     @tool
     def knowledge_search(query: str) -> str:
@@ -505,30 +532,46 @@ def create_knowledge_tool(knowledge_base_id: str, user, similarity_threshold: fl
         try:
             logger.info(f"知识库工具被调用: {query[:50]}...")
 
-            # 获取知识库
-            knowledge_base = KnowledgeBase.objects.get(id=knowledge_base_id)
-            service = KnowledgeBaseService(knowledge_base)
+            if not knowledge_base_ids:
+                return "未选择知识库。"
 
-            # 统一检索增强（含 Query Rewrite）
-            search_results = service.enhanced_search(
-                query, top_k=top_k, similarity_threshold=similarity_threshold
-            )
+            if len(knowledge_base_ids) == 1:
+                knowledge_base = KnowledgeBase.objects.get(id=knowledge_base_ids[0])
+                service = KnowledgeBaseService(knowledge_base)
+                # 单库继续使用原有增强检索（含 Query Rewrite）。
+                search_results = service.enhanced_search(
+                    query, top_k=candidate_k, similarity_threshold=similarity_threshold
+                )
+            else:
+                # 多库并发检索后按相似度融合、MMR 去重，最终 top_k
+                # 是所有选中知识库的全局上限，防止上下文成倍膨胀。
+                search_results = KnowledgeBaseService.multi_kb_search(
+                    query,
+                    knowledge_base_ids,
+                    k=top_k,
+                    score_threshold=similarity_threshold,
+                    candidate_k=candidate_k,
+                )
+
+            search_results = dynamically_trim(search_results)
 
             if not search_results:
                 return "未找到相关信息。"
 
             # 格式化结果
             formatted_results = []
-            for i, result in enumerate(search_results[:3], 1):
+            for i, result in enumerate(search_results[:top_k], 1):
                 content = result.get("content", "")
                 score = result.get("similarity_score", 0.0)
                 metadata = result.get("metadata", {})
                 source = metadata.get("source", "未知来源")
+                result_kb_id = metadata.get("knowledge_base_id")
 
                 # 将相似度转换为百分比显示
                 similarity_percentage = score * 100
+                kb_label = f", 知识库: {result_kb_id}" if result_kb_id else ""
                 formatted_results.append(
-                    f"[结果{i}] (相似度: {similarity_percentage:.1f}%, 来源: {source})\n{content}"
+                    f"[结果{i}] (相似度: {similarity_percentage:.1f}%, 来源: {source}{kb_label})\n{content}"
                 )
 
             result_text = "\n\n".join(formatted_results)
@@ -545,11 +588,12 @@ def create_knowledge_tool(knowledge_base_id: str, user, similarity_threshold: fl
             # 如果是 Collection 不存在的错误,清理缓存
             if "does not exist" in str(e) or "Collection" in str(e):
                 from .services import VectorStoreManager
-                VectorStoreManager.clear_cache(knowledge_base_id)
+                for kb_id in knowledge_base_ids:
+                    VectorStoreManager.clear_cache(kb_id)
             return f"知识库搜索失败: {str(e)}"
 
     # 设置工具的名称和描述
     knowledge_search.name = "knowledge_search"
-    knowledge_search.description = f"搜索知识库 {knowledge_base_id} 获取相关信息。当用户询问特定知识、文档内容或需要查找资料时使用此工具。"
+    knowledge_search.description = f"搜索知识库 {', '.join(knowledge_base_ids)} 获取相关信息。当用户询问特定知识、文档内容或需要查找资料时使用此工具。"
 
     return knowledge_search

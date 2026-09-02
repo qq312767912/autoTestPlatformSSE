@@ -14,6 +14,7 @@ from . import agent_loop_view
 from .agent_loop_view import (
     _extract_linked_image_urls,
     _is_linked_image_url_allowed,
+    _normalize_knowledge_base_ids,
     _normalize_uploaded_image_base64_list,
     _prepare_agent_loop_human_message,
 )
@@ -30,6 +31,26 @@ from .builtin_tools.output_sanitizer import strip_terminal_control_sequences
 from .middleware_config import get_user_friendly_llm_error, _model_retry_should_retry
 from projects.models import Project, ProjectMember
 from requirements.models import DocumentImage, RequirementDocument
+
+
+class KnowledgeBaseSelectionTests(SimpleTestCase):
+    def test_multiple_ids_are_deduplicated_without_changing_order(self):
+        self.assertEqual(
+            _normalize_knowledge_base_ids(["kb-2", "kb-1", "kb-2"]),
+            ["kb-2", "kb-1"],
+        )
+
+    def test_legacy_single_id_is_still_supported(self):
+        self.assertEqual(
+            _normalize_knowledge_base_ids(None, "legacy-kb"),
+            ["legacy-kb"],
+        )
+
+    def test_new_ids_take_precedence_over_legacy_id(self):
+        self.assertEqual(
+            _normalize_knowledge_base_ids(["new-kb"], "legacy-kb"),
+            ["new-kb"],
+        )
 
 
 class LLMFriendlyErrorTests(SimpleTestCase):

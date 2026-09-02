@@ -11,10 +11,12 @@ export interface ChatRequest {
 
   // 知识库相关参数
   knowledge_base_id?: string; // 知识库ID，可选
+  knowledge_base_ids?: string[]; // 多个知识库ID，优先于旧的单选字段
   use_knowledge_base?: boolean; // 是否启用知识库功能，默认true
   include_requirement_images?: boolean; // 按需将需求原图发送给视觉模型（执行/视觉对比场景）
   similarity_threshold?: number; // 相似度阈值，范围0.0-1.0，默认0.3
   top_k?: number; // 检索结果数量，范围1-20，默认5
+  coverage_priority?: boolean; // 覆盖优先：扩大候选召回并动态截断
 
   // 多模态相关参数
   image?: string; // 图片base64编码（不含前缀），可选
@@ -41,6 +43,7 @@ export interface ChatResponseData {
 
   // 知识库相关响应字段
   knowledge_base_id?: string; // 使用的知识库ID
+  knowledge_base_ids?: string[]; // 使用的知识库ID列表
   use_knowledge_base?: boolean; // 是否启用了知识库功能
   knowledge_base_used?: boolean; // 是否实际使用了知识库
 }

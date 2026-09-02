@@ -2278,13 +2278,17 @@ class KnowledgeBaseService:
 
     @staticmethod
     def multi_kb_search(
-        query: str, knowledge_base_ids: list, k: int = 5, score_threshold: float = 0.1
+        query: str, knowledge_base_ids: list, k: int = 5, score_threshold: float = 0.1,
+        candidate_k: int = None,
     ) -> List[Dict[str, Any]]:
         """多知识库并发检索 + 结果融合"""
         import concurrent.futures
 
         all_results = []
-        kbs = KnowledgeBase.objects.filter(id__in=knowledge_base_ids)
+        candidate_k = candidate_k or min(40, max(10, k * 2))
+        kbs = list(KnowledgeBase.objects.filter(id__in=knowledge_base_ids))
+        if not kbs:
+            return []
 
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(4, len(kbs))
@@ -2295,7 +2299,7 @@ class KnowledgeBaseService:
                 future = executor.submit(
                     manager.similarity_search,
                     query,
-                    k=k,
+                    k=candidate_k,
                     score_threshold=score_threshold,
                 )
                 futures[future] = str(kb.id)

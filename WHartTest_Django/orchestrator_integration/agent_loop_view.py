@@ -195,6 +195,16 @@ def _normalize_uploaded_image_base64_list(
     return normalized
 
 
+def _normalize_knowledge_base_ids(value=None, legacy_value=None) -> List[str]:
+    """将新版多选参数和旧版单选参数归一化为去重后的 ID 列表。"""
+    raw_values = value if isinstance(value, (list, tuple, set)) else []
+    if not raw_values and value:
+        raw_values = [value]
+    if not raw_values and legacy_value:
+        raw_values = [legacy_value]
+    return list(dict.fromkeys(str(item) for item in raw_values if item))
+
+
 _LINKED_IMAGE_URL_ALLOWLIST = {
     host.strip().lower()
     for host in os.getenv("AGENT_LOOP_IMAGE_URL_ALLOWLIST", "*").split(",")
@@ -851,8 +861,10 @@ class AgentLoopStreamAPIView(View):
         session_id: str,
         project_id: str,
         project: Project,
-        knowledge_base_id: Optional[int] = None,
+        knowledge_base_ids: Optional[List[str]] = None,
         use_knowledge_base: bool = True,
+        similarity_threshold: float = 0.3,
+        top_k: int = 5,
         prompt_id: Optional[int] = None,
         uploaded_images_base64: Optional[List[str]] = None,
         generate_playwright_script: bool = False,
@@ -955,15 +967,19 @@ class AgentLoopStreamAPIView(View):
 
             # 5. 添加知识库工具
             logger.info(
-                f"AgentLoopStreamAPI: 检查知识库工具 - knowledge_base_id={knowledge_base_id}, use_knowledge_base={use_knowledge_base}"
+                f"AgentLoopStreamAPI: 检查知识库工具 - knowledge_base_ids={knowledge_base_ids}, use_knowledge_base={use_knowledge_base}"
             )
-            if knowledge_base_id and use_knowledge_base:
+            if knowledge_base_ids and use_knowledge_base:
                 try:
                     from knowledge.langgraph_integration import create_knowledge_tool
 
                     logger.info(f"AgentLoopStreamAPI: 正在创建知识库工具...")
                     kb_tool = await sync_to_async(create_knowledge_tool)(
-                        knowledge_base_id=knowledge_base_id, user=request.user
+                        knowledge_base_id=knowledge_base_ids,
+                        user=request.user,
+                        similarity_threshold=similarity_threshold,
+                        top_k=top_k,
+                        coverage_priority=top_k >= 20 and similarity_threshold <= 0.25,
                     )
                     tools.append(kb_tool)
                     logger.info(
@@ -976,7 +992,7 @@ class AgentLoopStreamAPIView(View):
                     )
             else:
                 logger.info(
-                    f"AgentLoopStreamAPI: ⚠️ 跳过知识库工具 (knowledge_base_id={knowledge_base_id}, use_knowledge_base={use_knowledge_base})"
+                    f"AgentLoopStreamAPI: ⚠️ 跳过知识库工具 (knowledge_base_ids={knowledge_base_ids}, use_knowledge_base={use_knowledge_base})"
                 )
 
             # 6. 添加内置工具（Playwright 脚本管理等）
@@ -1527,8 +1543,19 @@ class AgentLoopStreamAPIView(View):
         user_message = body_data.get("message")
         session_id = body_data.get("session_id")
         project_id = body_data.get("project_id")
-        knowledge_base_id = body_data.get("knowledge_base_id")
+        knowledge_base_ids = _normalize_knowledge_base_ids(
+            body_data.get("knowledge_base_ids"), body_data.get("knowledge_base_id")
+        )
         use_knowledge_base = body_data.get("use_knowledge_base", True)
+        try:
+            similarity_threshold = min(1.0, max(0.0, float(body_data.get("similarity_threshold", 0.3))))
+            top_k = min(20, max(1, int(body_data.get("top_k", 5))))
+        except (TypeError, ValueError):
+            return api_error_response("similarity_threshold or top_k is invalid", 400)
+        coverage_priority = str(body_data.get("coverage_priority", "false")).lower() in {"1", "true", "yes", "on"}
+        if coverage_priority:
+            top_k = max(top_k, 20)
+            similarity_threshold = min(similarity_threshold, 0.25)
         include_requirement_images = str(
             body_data.get("include_requirement_images", "false")
         ).lower() in {"1", "true", "yes", "on"}
@@ -1537,7 +1564,7 @@ class AgentLoopStreamAPIView(View):
 
         # 调试日志：知识库参数
         logger.info(
-            f"AgentLoopStreamAPI: knowledge_base_id={knowledge_base_id}, use_knowledge_base={use_knowledge_base}"
+            f"AgentLoopStreamAPI: knowledge_base_ids={knowledge_base_ids}, use_knowledge_base={use_knowledge_base}"
         )
         uploaded_images_base64 = _normalize_uploaded_image_base64_list(
             body_data.get("images"),
@@ -1605,8 +1632,10 @@ class AgentLoopStreamAPIView(View):
                     session_id,
                     project_id,
                     project,
-                    knowledge_base_id,
+                    knowledge_base_ids,
                     use_knowledge_base,
+                    similarity_threshold,
+                    top_k,
                     prompt_id,
                     uploaded_images_base64,
                     generate_playwright_script,
@@ -1631,8 +1660,10 @@ class AgentLoopStreamAPIView(View):
                 session_id,
                 project_id,
                 project,
-                knowledge_base_id,
+                knowledge_base_ids,
                 use_knowledge_base,
+                similarity_threshold,
+                top_k,
                 prompt_id,
                 uploaded_images_base64,
                 generate_playwright_script,
@@ -1649,8 +1680,10 @@ class AgentLoopStreamAPIView(View):
         session_id: str,
         project_id: str,
         project: Project,
-        knowledge_base_id: Optional[int] = None,
+        knowledge_base_ids: Optional[List[str]] = None,
         use_knowledge_base: bool = True,
+        similarity_threshold: float = 0.3,
+        top_k: int = 5,
         prompt_id: Optional[int] = None,
         uploaded_images_base64: Optional[List[str]] = None,
         generate_playwright_script: bool = False,
@@ -1681,8 +1714,10 @@ class AgentLoopStreamAPIView(View):
                 session_id,
                 project_id,
                 project,
-                knowledge_base_id,
+                knowledge_base_ids,
                 use_knowledge_base,
+                similarity_threshold,
+                top_k,
                 prompt_id,
                 uploaded_images_base64,
                 generate_playwright_script,
@@ -1870,8 +1905,10 @@ class AgentLoopResumeAPIView(View):
         session_id: str,
         project_id: str,
         resume_data: dict,
-        knowledge_base_id: Optional[str] = None,
+        knowledge_base_ids: Optional[List[str]] = None,
         use_knowledge_base: bool = False,
+        similarity_threshold: float = 0.3,
+        top_k: int = 5,
     ):
         """
         创建 Resume SSE 流式生成器
@@ -1965,14 +2002,18 @@ class AgentLoopResumeAPIView(View):
                     logger.warning(f"AgentLoopResumeAPI: MCP tools loading failed: {e}")
 
                 # 加载知识库工具
-                if knowledge_base_id and use_knowledge_base:
+                if knowledge_base_ids and use_knowledge_base:
                     try:
                         from knowledge.langgraph_integration import (
                             create_knowledge_tool,
                         )
 
                         kb_tool = await sync_to_async(create_knowledge_tool)(
-                            knowledge_base_id=knowledge_base_id, user=user
+                            knowledge_base_id=knowledge_base_ids,
+                            user=user,
+                            similarity_threshold=similarity_threshold,
+                            top_k=top_k,
+                            coverage_priority=top_k >= 20 and similarity_threshold <= 0.25,
                         )
                         tools.append(kb_tool)
                         logger.info(
@@ -2384,8 +2425,15 @@ class AgentLoopResumeAPIView(View):
         project_id = body_data.get("project_id")
         resume_data = body_data.get("resume", {})
         # 知识库参数（用于 resume 时重新加载知识库工具）
-        knowledge_base_id = body_data.get("knowledge_base_id")
+        knowledge_base_ids = _normalize_knowledge_base_ids(
+            body_data.get("knowledge_base_ids"), body_data.get("knowledge_base_id")
+        )
         use_knowledge_base = body_data.get("use_knowledge_base", False)
+        try:
+            similarity_threshold = min(1.0, max(0.0, float(body_data.get("similarity_threshold", 0.3))))
+            top_k = min(20, max(1, int(body_data.get("top_k", 5))))
+        except (TypeError, ValueError):
+            similarity_threshold, top_k = 0.3, 5
 
         if not session_id:
             return StreamingHttpResponse(
@@ -2422,7 +2470,7 @@ class AgentLoopResumeAPIView(View):
             )
 
         logger.info(
-            f"AgentLoopResumeAPI: Resume request for session {session_id}, knowledge_base_id={knowledge_base_id}"
+            f"AgentLoopResumeAPI: Resume request for session {session_id}, knowledge_base_ids={knowledge_base_ids}"
         )
 
         # 3. 返回 SSE 流式响应
@@ -2432,8 +2480,10 @@ class AgentLoopResumeAPIView(View):
                 session_id,
                 project_id,
                 resume_data,
-                knowledge_base_id,
+                knowledge_base_ids,
                 use_knowledge_base,
+                similarity_threshold,
+                top_k,
             ):
                 yield chunk
 

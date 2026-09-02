@@ -20,18 +20,20 @@
         :has-messages="messages.length > 0"
         :project-id="projectStore.currentProjectId"
         :use-knowledge-base="useKnowledgeBase"
-        :selected-knowledge-base-id="selectedKnowledgeBaseId"
+        :selected-knowledge-base-ids="selectedKnowledgeBaseIds"
         :similarity-threshold="similarityThreshold"
         :top-k="topK"
+        :coverage-priority="coveragePriority"
         :selected-prompt-id="selectedPromptId"
         @clear-chat="clearChat"
         @show-system-prompt="showSystemPromptModal"
         @show-tool-approval-settings="isToolApprovalSettingsVisible = true"
         @show-weixin-connect="isWeixinConnectVisible = true"
         @update:use-knowledge-base="useKnowledgeBase = $event"
-        @update:selected-knowledge-base-id="selectedKnowledgeBaseId = $event"
+        @update:selected-knowledge-base-ids="selectedKnowledgeBaseIds = $event"
         @update:similarity-threshold="similarityThreshold = $event"
         @update:top-k="topK = $event"
+        @update:coverage-priority="coveragePriority = $event"
         @update:selected-prompt-id="selectedPromptId = $event"
       />
 
@@ -428,9 +430,10 @@ const isStreamMode = computed(() => currentLlmConfig.value?.enable_streaming ?? 
 
 // 知识库相关
 const useKnowledgeBase = ref(false); // 是否启用知识库功能
-const selectedKnowledgeBaseId = ref<string | null>(null); // 选中的知识库ID
-const similarityThreshold = ref(0.3); // 相似度阈值
-const topK = ref(5); // 检索结果数量
+const selectedKnowledgeBaseIds = ref<string[]>([]); // 选中的知识库ID列表
+const similarityThreshold = ref(0.2); // 用例生成模式由平台自动配置
+const topK = ref(20); // 测试用例生成默认使用深度检索
+const coveragePriority = ref(true); // 测试用例生成默认覆盖优先
 
 // 消息操作相关
 const quotedMessage = ref<ChatMessage | null>(null); // 引用的消息
@@ -733,7 +736,7 @@ const handleToolDecision = async (decision: {
     interruptId: decision.interruptId,
     decision: decision.type,
     projectId,
-    knowledgeBaseId: selectedKnowledgeBaseId.value,
+    knowledgeBaseIds: selectedKnowledgeBaseIds.value,
     useKnowledgeBase: useKnowledgeBase.value
   });
 
@@ -754,9 +757,11 @@ const handleToolDecision = async (decision: {
       decision.type,
       projectId,
       undefined, // signal
-      selectedKnowledgeBaseId.value,
+      selectedKnowledgeBaseIds.value,
       useKnowledgeBase.value,
-      actionCount
+      actionCount,
+      similarityThreshold.value,
+      topK.value
     );
     // SSE 流结束后，如果没有新的中断，会话会标记为完成
     // 如果有新的中断，interrupt 状态会被更新，触发新的审批对话框
@@ -790,9 +795,10 @@ const getSessionIdFromStorage = (): string | null => {
 const saveKnowledgeBaseSettings = () => {
   const settings = {
     useKnowledgeBase: useKnowledgeBase.value,
-    selectedKnowledgeBaseId: selectedKnowledgeBaseId.value,
+    selectedKnowledgeBaseIds: selectedKnowledgeBaseIds.value,
     similarityThreshold: similarityThreshold.value,
-    topK: topK.value
+    topK: topK.value,
+    coveragePriority: coveragePriority.value
   };
   localStorage.setItem('langgraph_knowledge_settings', JSON.stringify(settings));
 };
@@ -804,9 +810,14 @@ const loadKnowledgeBaseSettings = () => {
     try {
       const settings = JSON.parse(settingsJson);
       useKnowledgeBase.value = settings.useKnowledgeBase ?? false;
-      selectedKnowledgeBaseId.value = settings.selectedKnowledgeBaseId ?? null;
-      similarityThreshold.value = settings.similarityThreshold ?? 0.3;
-      topK.value = settings.topK ?? 5;
+      selectedKnowledgeBaseIds.value = Array.isArray(settings.selectedKnowledgeBaseIds)
+        ? settings.selectedKnowledgeBaseIds
+        : (settings.selectedKnowledgeBaseId ? [settings.selectedKnowledgeBaseId] : []);
+      coveragePriority.value = settings.coveragePriority ?? true;
+      similarityThreshold.value = settings.similarityThreshold ?? 0.2;
+      topK.value = settings.topK ?? 20;
+      // 只迁移旧版本明显不可用的 1.0 配置，自定义模式的其他参数继续保留。
+      if (similarityThreshold.value >= 1) similarityThreshold.value = 0.2;
       console.log('✅ 知识库设置加载完成:', settings);
     } catch (error) {
       console.error('❌ 加载知识库设置失败:', error);
@@ -1958,12 +1969,13 @@ const handleSendMessage = async (data: {
   }
 
   // 添加知识库参数
-  if (useKnowledgeBase.value && selectedKnowledgeBaseId.value) {
-    requestData.knowledge_base_id = selectedKnowledgeBaseId.value;
+  if (useKnowledgeBase.value && selectedKnowledgeBaseIds.value.length > 0) {
+    requestData.knowledge_base_ids = selectedKnowledgeBaseIds.value;
     requestData.use_knowledge_base = true;
     requestData.similarity_threshold = similarityThreshold.value;
     requestData.top_k = topK.value;
-  } else if (useKnowledgeBase.value && !selectedKnowledgeBaseId.value) {
+    requestData.coverage_priority = coveragePriority.value;
+  } else if (useKnowledgeBase.value && selectedKnowledgeBaseIds.value.length === 0) {
     // 如果开启了知识库但没有选择知识库，提示用户
     Message.warning(pageText.value.selectKnowledgeBaseFirst);
     isLoading.value = false;
@@ -2467,7 +2479,7 @@ watch(() => projectStore.currentProjectId, async (newProjectId, oldProjectId) =>
   }
 });
 
-watch([useKnowledgeBase, selectedKnowledgeBaseId, similarityThreshold, topK], () => {
+watch([useKnowledgeBase, selectedKnowledgeBaseIds, similarityThreshold, topK, coveragePriority], () => {
   saveKnowledgeBaseSettings();
 }, { deep: true });
 

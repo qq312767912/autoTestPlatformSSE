@@ -1,12 +1,53 @@
 from unittest.mock import Mock, patch
 
 from django.contrib.auth.models import User
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
 
 from .models import KnowledgeGlobalConfig
+from .langgraph_integration import create_knowledge_tool
 from .views import _mask_secret
+
+
+class MultiKnowledgeBaseToolTests(SimpleTestCase):
+    @patch("knowledge.langgraph_integration.KnowledgeBaseService.multi_kb_search")
+    def test_multiple_knowledge_bases_use_fused_search(self, mock_search):
+        mock_search.return_value = [
+            {
+                "content": "联合检索结果",
+                "similarity_score": 0.9,
+                "metadata": {"source": "requirements.docx"},
+            }
+        ]
+        tool = create_knowledge_tool(["kb-1", "kb-2", "kb-1"], user=None)
+
+        result = tool.invoke({"query": "查询入参"})
+
+        self.assertIn("联合检索结果", result)
+        mock_search.assert_called_once_with(
+            "查询入参", ["kb-1", "kb-2"], k=5, score_threshold=0.5,
+            candidate_k=10,
+        )
+
+    @patch("knowledge.langgraph_integration.KnowledgeBaseService.multi_kb_search")
+    def test_coverage_priority_uses_larger_candidate_pool(self, mock_search):
+        mock_search.return_value = [
+            {"content": f"结果{i}", "similarity_score": 0.9 - i * 0.01, "metadata": {}}
+            for i in range(20)
+        ]
+        tool = create_knowledge_tool(
+            ["kb-1", "kb-2"], user=None, similarity_threshold=0.2,
+            top_k=20, coverage_priority=True,
+        )
+
+        result = tool.invoke({"query": "生成完整测试用例"})
+
+        self.assertIn("结果19", result)
+        mock_search.assert_called_once_with(
+            "生成完整测试用例", ["kb-1", "kb-2"], k=20,
+            score_threshold=0.2, candidate_k=40,
+        )
 
 
 class KnowledgeGlobalConfigSecretHandlingTests(TestCase):
