@@ -165,6 +165,24 @@ python whart_tools.py --action update_file_settings \
   --auto_delete_zero_refs false
 ```
 
+## 测试用例质量审查报告
+
+生成测试用例质量审查 Excel 时，先生成包含下列标准工作表的原始 `.xlsx`，然后**必须**调用统一美化脚本，不得直接把临时拼接的工作簿作为最终交付物：
+
+- `执行摘要`
+- `问题明细`
+- `改写示例`
+- `待确认事项`
+- `治理建议`
+
+```bash
+python beautify_quality_review_report.py \
+  --input "原始测试用例质量审查报告.xlsx" \
+  --output "$SKILL_OUTPUT_DIR/测试用例质量审查报告.xlsx"
+```
+
+美化脚本会统一工作表顺序、中文字体、标题层级、风险色、列宽、换行、冻结窗格、筛选和 A4 打印设置。最终只向用户交付美化后的文件；原始中间文件不得放入 `SKILL_OUTPUT_DIR`。
+
 ## 输出格式
 
 所有操作返回 JSON 格式结果，便于解析处理。

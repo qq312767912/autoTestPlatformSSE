@@ -3,6 +3,8 @@
 解决LangChain MCP适配器每次工具调用都创建新会话的问题
 """
 import asyncio
+import inspect
+import re
 import time
 from typing import Dict, Any, Optional, List
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -18,6 +20,70 @@ except ImportError:
     _CONNECTION_ERRORS = (ConnectionError, OSError)
 
 logger = logging.getLogger(__name__)
+
+
+_BROWSER_CODE_TOOL_NAMES = {"browser_run_code_unsafe"}
+_BROWSER_CODE_INSTRUCTION = """
+
+调用约束：`code` 必须是一个可执行函数，推荐格式为
+`async (page) => { ... }`。不要直接以 var、let、const、return 等语句开头；
+发生 SyntaxError 时必须修改代码结构，不得原样重试。
+""".strip()
+
+
+def _is_javascript_function(code: str) -> bool:
+    """判断代码是否已经是 Playwright MCP 所需的函数表达式。"""
+    normalized = code.lstrip()
+    return bool(
+        re.match(r"^(?:async\s*)?\([^)]*\)\s*=>", normalized)
+        or re.match(r"^(?:async\s+)?function\b", normalized)
+        or re.match(r"^(?:async\s+)?[A-Za-z_$][\w$]*\s*=>", normalized)
+    )
+
+
+def normalize_browser_run_code(code: Any) -> Any:
+    """将模型生成的顶层 JS 语句包装为 browser_run_code_unsafe 函数。"""
+    if not isinstance(code, str):
+        return code
+    normalized = code.strip()
+    if not normalized or _is_javascript_function(normalized):
+        return normalized
+    # 模型偶尔会把 Markdown 代码围栏一并传入 MCP。
+    fenced = re.match(r"^```(?:javascript|js)?\s*(.*?)\s*```$", normalized, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        normalized = fenced.group(1).strip()
+        if _is_javascript_function(normalized):
+            return normalized
+    return f"async (page) => {{\n{normalized}\n}}"
+
+
+def _normalize_browser_tool_arguments(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    updated = dict(arguments)
+    if "code" in updated:
+        updated["code"] = normalize_browser_run_code(updated["code"])
+    return updated
+
+
+def enhance_mcp_tools(tools: List[BaseTool]) -> List[BaseTool]:
+    """为已加载的 MCP 工具增加参数防护，不改动 MCP 服务镜像。"""
+    for tool in tools:
+        if getattr(tool, "name", "") not in _BROWSER_CODE_TOOL_NAMES:
+            continue
+        description = (getattr(tool, "description", "") or "").rstrip()
+        if _BROWSER_CODE_INSTRUCTION not in description:
+            tool.description = f"{description}\n\n{_BROWSER_CODE_INSTRUCTION}".strip()
+
+        original_coroutine = getattr(tool, "coroutine", None)
+        if original_coroutine and not getattr(tool, "_whart_browser_code_guarded", False):
+            async def guarded_coroutine(*args, _original=original_coroutine, **kwargs):
+                result = _original(*args, **_normalize_browser_tool_arguments(kwargs))
+                return await result if inspect.isawaitable(result) else result
+
+            tool.coroutine = guarded_coroutine
+            # BaseTool 是 Pydantic 模型，私有标记需绕过字段校验。
+            object.__setattr__(tool, "_whart_browser_code_guarded", True)
+            logger.info("已启用 MCP 工具参数防护: %s", tool.name)
+    return tools
 
 
 def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
@@ -217,6 +283,7 @@ class PersistentMCPClient:
                 if server_name not in self.tools_cache:
                     try:
                         tools = await load_mcp_tools(session)
+                        tools = enhance_mcp_tools(tools)
                     except Exception as exc:
                         logger.error(
                             f"Failed to load tools for {server_name}: {exc}",

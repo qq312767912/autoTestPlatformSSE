@@ -3,7 +3,8 @@
     "browserName": "chromium",
     "isolated": true,
     "launchOptions": {
-      "headless": true
+      "headless": true,
+      "executablePath": "__BROWSER_EXECUTABLE__"
     },
     "contextOptions": {
       "viewport": {

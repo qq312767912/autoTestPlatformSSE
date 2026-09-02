@@ -78,8 +78,8 @@
     {
       "id": "whart-test",
       "name": "whart-test",
-      "description": "WHartTest 测试管理平台工具集。用于管理项目、模块、测试用例、测试截图和项目文件附件的增删改查。当用户需要操作测试用例、查询项目信息、上传截图、上传/下载/预览/删除项目文件、校验 file_ids 或管理文件清理设置时使用。",
-      "version": "1.0.0",
+      "description": "WHartTest 测试管理平台工具集。用于管理项目、模块、测试用例、测试截图和项目文件附件，并提供测试用例质量审查 Excel 报告的统一美化能力。",
+      "version": "1.1.0",
       "author": "mgdaas-lab",
       "tags": ["wharttest", "test-management"],
       "zip_path": "wharttest_skills.zip"
