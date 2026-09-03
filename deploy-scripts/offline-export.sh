@@ -249,6 +249,8 @@ cp "${PROJECT_DIR}/docker-compose.offline.yml" "${OUTPUT_DIR}/"
 
 mkdir -p "${OUTPUT_DIR}/config"
 cp "${PROJECT_DIR}/WHartTest_MCP/playwright-mcp-config.json" "${OUTPUT_DIR}/config/" 2>/dev/null || true
+cp "${PROJECT_DIR}/WHartTest_MCP/playwright-mcp-entrypoint.sh" "${OUTPUT_DIR}/config/"
+cp "${PROJECT_DIR}/WHartTest_MCP/playwright-mcp-config.template.json" "${OUTPUT_DIR}/config/"
 
 if [ -d "${PROJECT_DIR}/WHartTest_Skills" ]; then
   mkdir -p "${OUTPUT_DIR}/skills"

@@ -1613,7 +1613,8 @@ class VectorStoreManager:
 
 
     def similarity_search(
-        self, query: str, k: int = 5, score_threshold: float = 0.1
+        self, query: str, k: int = 5, score_threshold: float = 0.1,
+        document_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """相似度搜索（支持稠密+稀疏混合检索）"""
         embedding_type = type(self.embeddings).__name__
@@ -1625,13 +1626,24 @@ class VectorStoreManager:
         # 根据是否有稀疏编码器选择检索方式
         if self.sparse_encoder:
             logger.info("   🔀 使用混合检索（BM25 + 稠密向量）")
-            return self._hybrid_similarity_search(query, k, score_threshold)
+            return self._hybrid_similarity_search(query, k, score_threshold, document_ids)
         else:
             logger.info("   📊 使用纯稠密向量检索")
-            return self._dense_similarity_search(query, k, score_threshold)
+            return self._dense_similarity_search(query, k, score_threshold, document_ids)
+
+    @staticmethod
+    def _document_filter(document_ids: Optional[List[str]]):
+        """构造 Qdrant 文档范围过滤；未指定时保持全库检索。"""
+        ids = list(dict.fromkeys(str(item) for item in (document_ids or []) if item))
+        if not ids:
+            return None
+        return models.Filter(
+            must=[models.FieldCondition(key="document_id", match=models.MatchAny(any=ids))]
+        )
 
     def _dense_similarity_search(
-        self, query: str, k: int, score_threshold: float
+        self, query: str, k: int, score_threshold: float,
+        document_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """纯稠密向量检索"""
         try:
@@ -1646,6 +1658,7 @@ class VectorStoreManager:
                 ),
                 limit=k,
                 with_payload=True,
+                query_filter=self._document_filter(document_ids),
             )
 
             logger.info(f"🔍 稠密检索结果: {len(results)}")
@@ -1656,7 +1669,8 @@ class VectorStoreManager:
             raise
 
     def _hybrid_similarity_search(
-        self, query: str, k: int, score_threshold: float
+        self, query: str, k: int, score_threshold: float,
+        document_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """混合检索（RRF 融合稠密+稀疏 + Reranker 精排）"""
         try:
@@ -1680,6 +1694,7 @@ class VectorStoreManager:
                 ),
                 limit=per_source_limit,
                 with_payload=True,
+                query_filter=self._document_filter(document_ids),
             )
 
             # 稀疏向量检索
@@ -1696,6 +1711,7 @@ class VectorStoreManager:
                     ),
                     limit=per_source_limit,
                     with_payload=True,
+                    query_filter=self._document_filter(document_ids),
                 )
 
             logger.info(
@@ -1726,7 +1742,7 @@ class VectorStoreManager:
             logger.error(f"混合搜索失败: {e}")
             # 降级为纯稠密检索
             logger.warning("⚠️ 降级为纯稠密检索")
-            return self._dense_similarity_search(query, k, score_threshold)
+            return self._dense_similarity_search(query, k, score_threshold, document_ids)
 
     def _rrf_fusion(
         self, dense_results, sparse_results, limit: int
@@ -2128,16 +2144,17 @@ class KnowledgeBaseService:
         top_k: int = 5,
         similarity_threshold: float = 0.5,
         enable_rewrite: bool = True,
+        document_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """统一检索增强入口：原始检索 + Query Rewrite 二次检索 + 多维度去重"""
         results = self.vector_manager.similarity_search(
-            query_text, k=top_k, score_threshold=similarity_threshold
+            query_text, k=top_k, score_threshold=similarity_threshold, document_ids=document_ids
         )
         if enable_rewrite:
             rewritten = self._rewrite_query(query_text)
             if rewritten:
                 rewrite_results = self.vector_manager.similarity_search(
-                    rewritten, k=top_k, score_threshold=similarity_threshold
+                    rewritten, k=top_k, score_threshold=similarity_threshold, document_ids=document_ids
                 )
                 seen = set()
                 for r in results:
@@ -2279,7 +2296,7 @@ class KnowledgeBaseService:
     @staticmethod
     def multi_kb_search(
         query: str, knowledge_base_ids: list, k: int = 5, score_threshold: float = 0.1,
-        candidate_k: int = None,
+        candidate_k: int = None, document_ids_by_kb: Optional[Dict[str, List[str]]] = None,
     ) -> List[Dict[str, Any]]:
         """多知识库并发检索 + 结果融合"""
         import concurrent.futures
@@ -2301,6 +2318,7 @@ class KnowledgeBaseService:
                     query,
                     k=candidate_k,
                     score_threshold=score_threshold,
+                    document_ids=(document_ids_by_kb or {}).get(str(kb.id)),
                 )
                 futures[future] = str(kb.id)
 

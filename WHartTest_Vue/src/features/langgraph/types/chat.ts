@@ -12,6 +12,7 @@ export interface ChatRequest {
   // 知识库相关参数
   knowledge_base_id?: string; // 知识库ID，可选
   knowledge_base_ids?: string[]; // 多个知识库ID，优先于旧的单选字段
+  knowledge_document_ids?: string[]; // 指定检索的文档 ID；未传时检索所选知识库全部文档
   use_knowledge_base?: boolean; // 是否启用知识库功能，默认true
   include_requirement_images?: boolean; // 按需将需求原图发送给视觉模型（执行/视觉对比场景）
   similarity_threshold?: number; // 相似度阈值，范围0.0-1.0，默认0.3

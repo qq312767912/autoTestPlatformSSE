@@ -1,5 +1,7 @@
 # Vision MCP 接入
 
+> 迁移说明：平台已增加`vision-analysis` Skill，默认由Skill直接调用视觉API；本文件中的Vision MCP作为第一阶段兼容回退，验证完成前暂不删除。
+
 ## 启动
 
 在 `.env` 中填写 `VISION_MCP_API_KEY`，然后运行：

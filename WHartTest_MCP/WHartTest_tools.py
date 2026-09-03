@@ -38,6 +38,40 @@ api_key = os.getenv("WHARTTEST_API_KEY", "")
 headers = {"accept": "application/json, text/plain,*/*", "X-API-Key": api_key}
 
 
+@mcp.tool(description="分析GitLab代码Diff中的关键删除，返回供测试影响Skill使用的结构化风险。只读，不修改仓库。")
+def analyze_code_diff(diff: str, file_path: str = "", critical_annotations: Optional[List[str]] = None) -> str:
+    """对单个文件Diff进行确定性检查，避免大Diff直接占满LLM上下文。"""
+    import re
+    annotations = set(critical_annotations or []) | {
+        "Excel", "ExcelProperty", "JsonProperty", "JSONField", "NotNull", "NotBlank",
+        "Size", "Transactional", "PreAuthorize", "RequestMapping", "GetMapping", "PostMapping",
+    }
+    findings = []
+    for index, raw in enumerate(diff.splitlines(), 1):
+        if not raw.startswith("-") or raw.startswith("---"):
+            continue
+        line = raw[1:].strip()
+        match = re.match(r"@([A-Za-z_$][\w$]*)", line)
+        if match and match.group(1) in annotations:
+            findings.append({"type": "annotation_removed", "severity": "high", "confidence": 1.0, "file": file_path, "diff_line": index, "evidence": line, "annotation": match.group(1)})
+        modifiers = re.findall(r"\b(public|protected|private|static|final|synchronized|volatile|abstract)\b", line)
+        if modifiers and re.search(r"\b(class|interface|enum|\w+\s*\()", line):
+            findings.append({"type": "modifier_declaration_removed", "severity": "medium", "confidence": 0.9, "file": file_path, "diff_line": index, "evidence": line, "modifiers": sorted(set(modifiers))})
+    return json.dumps({"file": file_path, "findings": findings, "machine_coverage": 100}, ensure_ascii=False)
+
+
+@mcp.tool(description="根据结构化代码风险生成测试需求点草稿。输入不包含GitLab Token。")
+def build_test_requirements(findings: List[Dict[str, Any]]) -> str:
+    points = []
+    for item in findings:
+        evidence = str(item.get("evidence", ""))
+        if "@Excel" in evidence or "@ExcelProperty" in evidence:
+            points.append({"title": "验证Excel导入导出字段完整性", "priority": "high", "test_type": "功能回归", "objective": "验证列、表头、顺序和数据映射", "source": item})
+        else:
+            points.append({"title": "验证关键代码删除后的业务兼容性", "priority": item.get("severity", "medium"), "test_type": "变更回归", "objective": "验证相关正常、异常和边界流程", "source": item})
+    return json.dumps({"test_requirements": points}, ensure_ascii=False)
+
+
 def generate_custom_id():
     """
     生成一个基于毫秒级时间戳自增 + 静态 '00000' 的 ID。

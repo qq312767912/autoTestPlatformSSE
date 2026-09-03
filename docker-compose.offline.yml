@@ -196,13 +196,14 @@ services:
     image: mcr.microsoft.com/playwright/mcp:latest
     container_name: wharttest-playwright-mcp
     user: root
-    entrypoint: ["node", "/app/cli.js"]
-    command: ["--no-sandbox", "--host", "0.0.0.0", "--allowed-hosts", "*", "--config", "/app/playwright-mcp-config.json"]
+    entrypoint: ["/bin/sh", "/opt/wharttest/playwright-mcp-entrypoint.sh"]
+    command: ["--no-sandbox", "--host", "0.0.0.0", "--allowed-hosts", "*"]
     ports:
       - "0.0.0.0:8916:8931"
     volumes:
       - ./data/playwright-screenshots:/tmp/playwright-output
-      - ./config/playwright-mcp-config.json:/app/playwright-mcp-config.json:ro
+      - ./config/playwright-mcp-entrypoint.sh:/opt/wharttest/playwright-mcp-entrypoint.sh:ro
+      - ./config/playwright-mcp-config.template.json:/opt/wharttest/playwright-mcp-config.template.json:ro
     networks:
       - wharttest-network
     restart: unless-stopped

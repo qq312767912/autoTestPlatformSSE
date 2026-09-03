@@ -78,11 +78,15 @@
         :project-id="projectId"
         :use-knowledge-base="useKnowledgeBase"
         :selected-knowledge-base-ids="selectedKnowledgeBaseIds"
+        :document-scope-mode="documentScopeMode"
+        :selected-document-ids="selectedDocumentIds"
         :similarity-threshold="similarityThreshold"
         :top-k="topK"
         :coverage-priority="coveragePriority"
         @update:use-knowledge-base="$emit('update:use-knowledge-base', $event)"
         @update:selected-knowledge-base-ids="$emit('update:selected-knowledge-base-ids', $event)"
+        @update:document-scope-mode="$emit('update:document-scope-mode', $event)"
+        @update:selected-document-ids="$emit('update:selected-document-ids', $event)"
         @update:similarity-threshold="$emit('update:similarity-threshold', $event)"
         @update:top-k="$emit('update:top-k', $event)"
         @update:coverage-priority="$emit('update:coverage-priority', $event)"
@@ -139,6 +143,8 @@ interface Props {
   projectId: number | null;
   useKnowledgeBase: boolean;
   selectedKnowledgeBaseIds: string[];
+  documentScopeMode: 'all' | 'selected';
+  selectedDocumentIds: string[];
   similarityThreshold: number;
   topK: number;
   coveragePriority: boolean;
@@ -154,6 +160,8 @@ const emit = defineEmits<{
   (e: 'show-weixin-connect'): void;
   (e: 'update:use-knowledge-base', value: boolean): void;
   (e: 'update:selected-knowledge-base-ids', value: string[]): void;
+  (e: 'update:document-scope-mode', value: 'all' | 'selected'): void;
+  (e: 'update:selected-document-ids', value: string[]): void;
   (e: 'update:similarity-threshold', value: number): void;
   (e: 'update:top-k', value: number): void;
   (e: 'update:coverage-priority', value: boolean): void;

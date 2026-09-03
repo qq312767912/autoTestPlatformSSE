@@ -37,8 +37,10 @@ RUN set -eux; \
 # 复制依赖文件
 COPY requirements.txt .
 
-# 使用 uv 安装 Python 依赖（主镜像失败时自动切换到后备源）
-RUN set -eux; \
+# 使用 uv 安装 Python 依赖（主镜像失败时自动切换到后备源）。
+# 下载缓存独立于镜像层保留，代码变更或层缓存失效时无需重新下载全部依赖。
+RUN --mount=type=cache,id=wharttest-mcp-uv,target=/root/.cache/uv \
+    set -eux; \
     install_requirements() { \
       for index in "${PIP_INDEX_URL}" ${PIP_INDEX_FALLBACKS}; do \
         [ -n "$index" ] || continue; \

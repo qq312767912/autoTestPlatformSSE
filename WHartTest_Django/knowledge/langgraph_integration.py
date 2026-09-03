@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END, START
 from langgraph.graph.message import add_messages
-from .models import KnowledgeBase
+from .models import KnowledgeBase, Document
 from .services import KnowledgeBaseService
 import logging
 
@@ -488,7 +488,8 @@ class ConversationalRAGService(KnowledgeRAGService):
 
 
 def create_knowledge_tool(knowledge_base_id, user, similarity_threshold: float = 0.5,
-                          top_k: int = 5, coverage_priority: bool = False):
+                          top_k: int = 5, coverage_priority: bool = False,
+                          document_ids: List[str] | None = None):
     """创建知识库工具，用于Agent调用。
 
     ``knowledge_base_id`` 同时兼容旧版单个 ID 和新版 ID 列表，避免
@@ -502,6 +503,17 @@ def create_knowledge_tool(knowledge_base_id, user, similarity_threshold: float =
         knowledge_base_ids = [str(knowledge_base_id)]
     else:
         knowledge_base_ids = []
+
+    selected_document_ids = list(dict.fromkeys(str(item) for item in (document_ids or []) if item))[:20]
+    document_ids_by_kb: Dict[str, List[str]] = {}
+    if selected_document_ids:
+        # 只接受当前已选知识库中、已完成处理的文档，避免前端传入跨库 ID。
+        for document in Document.objects.filter(
+            id__in=selected_document_ids,
+            knowledge_base_id__in=knowledge_base_ids,
+            status="completed",
+        ).only("id", "knowledge_base_id"):
+            document_ids_by_kb.setdefault(str(document.knowledge_base_id), []).append(str(document.id))
 
     candidate_k = min(40, max(top_k * 2, 30 if coverage_priority else 10))
 
@@ -534,13 +546,16 @@ def create_knowledge_tool(knowledge_base_id, user, similarity_threshold: float =
 
             if not knowledge_base_ids:
                 return "未选择知识库。"
+            if selected_document_ids and not document_ids_by_kb:
+                return "未找到可用的指定文档，请重新选择后再试。"
 
             if len(knowledge_base_ids) == 1:
                 knowledge_base = KnowledgeBase.objects.get(id=knowledge_base_ids[0])
                 service = KnowledgeBaseService(knowledge_base)
                 # 单库继续使用原有增强检索（含 Query Rewrite）。
                 search_results = service.enhanced_search(
-                    query, top_k=candidate_k, similarity_threshold=similarity_threshold
+                    query, top_k=candidate_k, similarity_threshold=similarity_threshold,
+                    document_ids=document_ids_by_kb.get(knowledge_base_ids[0]),
                 )
             else:
                 # 多库并发检索后按相似度融合、MMR 去重，最终 top_k
@@ -551,6 +566,7 @@ def create_knowledge_tool(knowledge_base_id, user, similarity_threshold: float =
                     k=top_k,
                     score_threshold=similarity_threshold,
                     candidate_k=candidate_k,
+                    document_ids_by_kb=document_ids_by_kb,
                 )
 
             search_results = dynamically_trim(search_results)

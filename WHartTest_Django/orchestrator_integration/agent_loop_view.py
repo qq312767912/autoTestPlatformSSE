@@ -205,6 +205,12 @@ def _normalize_knowledge_base_ids(value=None, legacy_value=None) -> List[str]:
     return list(dict.fromkeys(str(item) for item in raw_values if item))
 
 
+def _normalize_knowledge_document_ids(value=None) -> List[str]:
+    """归一化指定文档列表，并限制单次检索范围，避免无意放大过滤条件。"""
+    raw_values = value if isinstance(value, (list, tuple, set)) else ([value] if value else [])
+    return list(dict.fromkeys(str(item) for item in raw_values if item))[:20]
+
+
 _LINKED_IMAGE_URL_ALLOWLIST = {
     host.strip().lower()
     for host in os.getenv("AGENT_LOOP_IMAGE_URL_ALLOWLIST", "*").split(",")
@@ -862,6 +868,7 @@ class AgentLoopStreamAPIView(View):
         project_id: str,
         project: Project,
         knowledge_base_ids: Optional[List[str]] = None,
+        knowledge_document_ids: Optional[List[str]] = None,
         use_knowledge_base: bool = True,
         similarity_threshold: float = 0.3,
         top_k: int = 5,
@@ -980,6 +987,7 @@ class AgentLoopStreamAPIView(View):
                         similarity_threshold=similarity_threshold,
                         top_k=top_k,
                         coverage_priority=top_k >= 20 and similarity_threshold <= 0.25,
+                        document_ids=knowledge_document_ids,
                     )
                     tools.append(kb_tool)
                     logger.info(
@@ -1546,6 +1554,7 @@ class AgentLoopStreamAPIView(View):
         knowledge_base_ids = _normalize_knowledge_base_ids(
             body_data.get("knowledge_base_ids"), body_data.get("knowledge_base_id")
         )
+        knowledge_document_ids = _normalize_knowledge_document_ids(body_data.get("knowledge_document_ids"))
         use_knowledge_base = body_data.get("use_knowledge_base", True)
         try:
             similarity_threshold = min(1.0, max(0.0, float(body_data.get("similarity_threshold", 0.3))))
@@ -1564,7 +1573,7 @@ class AgentLoopStreamAPIView(View):
 
         # 调试日志：知识库参数
         logger.info(
-            f"AgentLoopStreamAPI: knowledge_base_ids={knowledge_base_ids}, use_knowledge_base={use_knowledge_base}"
+            f"AgentLoopStreamAPI: knowledge_base_ids={knowledge_base_ids}, knowledge_document_ids={knowledge_document_ids}, use_knowledge_base={use_knowledge_base}"
         )
         uploaded_images_base64 = _normalize_uploaded_image_base64_list(
             body_data.get("images"),
@@ -1633,6 +1642,7 @@ class AgentLoopStreamAPIView(View):
                     project_id,
                     project,
                     knowledge_base_ids,
+                    knowledge_document_ids,
                     use_knowledge_base,
                     similarity_threshold,
                     top_k,
@@ -1661,6 +1671,7 @@ class AgentLoopStreamAPIView(View):
                 project_id,
                 project,
                 knowledge_base_ids,
+                knowledge_document_ids,
                 use_knowledge_base,
                 similarity_threshold,
                 top_k,
@@ -1681,6 +1692,7 @@ class AgentLoopStreamAPIView(View):
         project_id: str,
         project: Project,
         knowledge_base_ids: Optional[List[str]] = None,
+        knowledge_document_ids: Optional[List[str]] = None,
         use_knowledge_base: bool = True,
         similarity_threshold: float = 0.3,
         top_k: int = 5,
@@ -1715,6 +1727,7 @@ class AgentLoopStreamAPIView(View):
                 project_id,
                 project,
                 knowledge_base_ids,
+                knowledge_document_ids,
                 use_knowledge_base,
                 similarity_threshold,
                 top_k,
@@ -1906,6 +1919,7 @@ class AgentLoopResumeAPIView(View):
         project_id: str,
         resume_data: dict,
         knowledge_base_ids: Optional[List[str]] = None,
+        knowledge_document_ids: Optional[List[str]] = None,
         use_knowledge_base: bool = False,
         similarity_threshold: float = 0.3,
         top_k: int = 5,
@@ -2014,6 +2028,7 @@ class AgentLoopResumeAPIView(View):
                             similarity_threshold=similarity_threshold,
                             top_k=top_k,
                             coverage_priority=top_k >= 20 and similarity_threshold <= 0.25,
+                            document_ids=knowledge_document_ids,
                         )
                         tools.append(kb_tool)
                         logger.info(
@@ -2428,6 +2443,7 @@ class AgentLoopResumeAPIView(View):
         knowledge_base_ids = _normalize_knowledge_base_ids(
             body_data.get("knowledge_base_ids"), body_data.get("knowledge_base_id")
         )
+        knowledge_document_ids = _normalize_knowledge_document_ids(body_data.get("knowledge_document_ids"))
         use_knowledge_base = body_data.get("use_knowledge_base", False)
         try:
             similarity_threshold = min(1.0, max(0.0, float(body_data.get("similarity_threshold", 0.3))))
@@ -2481,6 +2497,7 @@ class AgentLoopResumeAPIView(View):
                 project_id,
                 resume_data,
                 knowledge_base_ids,
+                knowledge_document_ids,
                 use_knowledge_base,
                 similarity_threshold,
                 top_k,

@@ -55,15 +55,17 @@ RUN set -eux; \
 # 复制requirements并安装依赖到虚拟环境
 COPY requirements.txt .
 
-# 使用 uv 直接安装到虚拟环境（主镜像失败时自动切换到后备源）
-RUN set -eux; \
+# 使用 uv 直接安装到虚拟环境（主镜像失败时自动切换到后备源）。
+# 依赖层只依赖 requirements.txt；即使基础层缓存失效，也复用 BuildKit 的 uv 下载缓存。
+RUN --mount=type=cache,id=wharttest-django-uv,target=/root/.cache/uv \
+    set -eux; \
     uv venv /opt/venv; \
     install_requirements() { \
       for index in "${PIP_INDEX_URL}" ${PIP_INDEX_FALLBACKS}; do \
         [ -n "$index" ] || continue; \
         echo "uv pip install via $index"; \
         if UV_CONCURRENT_DOWNLOADS=1 UV_CONCURRENT_INSTALLS=1 \
-          uv pip install --python /opt/venv/bin/python --no-cache \
+          uv pip install --python /opt/venv/bin/python \
           --default-index "$index" \
           -r requirements.txt; then \
           return 0; \
@@ -152,8 +154,7 @@ RUN if [ "$APT_BASE_URL" != "http://deb.debian.org" ]; then \
     libpango-1.0-0 \
     libcairo2 \
     libasound2 \
-    # 中文字体支持（解决截图乱码问题）
-    fonts-noto-cjk \
+    # 中文字体支持（文泉驿字体覆盖中文截图与文档渲染；避免下载超大 Noto CJK 包）
     fonts-wqy-zenhei \
     # 旧版Word文档(.doc)解析支持
     antiword \
@@ -256,6 +257,7 @@ COPY api_modules/ /app/api_modules/
 COPY api_sync/ /app/api_sync/
 COPY api_testcases/ /app/api_testcases/
 COPY api_testtasks/ /app/api_testtasks/
+COPY code_analysis/ /app/code_analysis/
 COPY httprunner/ /app/httprunner/
 COPY file_management/ /app/file_management/
 COPY knowledge/ /app/knowledge/

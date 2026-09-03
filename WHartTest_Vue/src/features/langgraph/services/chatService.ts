@@ -1053,6 +1053,7 @@ export async function resumeAgentLoop(
   projectId: number,
   signal?: AbortSignal,
   knowledgeBaseIds?: string[],
+  knowledgeDocumentIds?: string[],
   useKnowledgeBase?: boolean,
   actionCount?: number,
   similarityThreshold?: number,
@@ -1130,6 +1131,7 @@ export async function resumeAgentLoop(
     // 添加知识库参数
     if (knowledgeBaseIds?.length && useKnowledgeBase) {
       resumeData.knowledge_base_ids = knowledgeBaseIds;
+      if (knowledgeDocumentIds?.length) resumeData.knowledge_document_ids = knowledgeDocumentIds;
       resumeData.use_knowledge_base = useKnowledgeBase;
       resumeData.similarity_threshold = similarityThreshold ?? 0.3;
       resumeData.top_k = topK ?? 5;

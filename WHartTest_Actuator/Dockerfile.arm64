@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1.7
+ARG PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.10-slim-bookworm
+
+FROM ${PYTHON_BASE_IMAGE}
+
+ARG PLAYWRIGHT_VERSION=1.61.0
+ARG BUILD_REVISION=unknown
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=300000 \
+    WHARTTEST_ACTUATOR_DOCKER=1
+
+LABEL org.opencontainers.image.title="WHartTest Actuator" \
+      org.opencontainers.image.revision="${BUILD_REVISION}"
+
+COPY requirements.txt /app/requirements.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=secret,id=pip_index_url,required=false \
+    set -eu; \
+    if [ -s /run/secrets/pip_index_url ]; then \
+        PIP_INDEX_URL="$(cat /run/secrets/pip_index_url)"; \
+    else \
+        PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"; \
+    fi; \
+    python -c 'import pathlib, sys; expected = f"playwright=={sys.argv[1]}"; lines = pathlib.Path("/app/requirements.txt").read_text(encoding="utf-8").splitlines(); raise SystemExit(0 if any(line.split("#", 1)[0].strip() == expected for line in lines) else f"ERROR: requirements.txt must pin {expected}")' "${PLAYWRIGHT_VERSION}"; \
+    python -m pip install --retries 10 --timeout 600 -i "${PIP_INDEX_URL}" -r /app/requirements.txt
+
+# 执行器只使用 Chromium，避免携带 Firefox/WebKit，显著缩小离线镜像。
+RUN sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' \
+        /etc/apt/sources.list.d/debian.sources \
+    && python -m playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . /app
+
+RUN mkdir -p /app/data/browser /app/data/screenshots /app/data/traces
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import os; os.kill(1, 0)"
+
+CMD ["python", "main.py"]

@@ -21,6 +21,8 @@
         :project-id="projectStore.currentProjectId"
         :use-knowledge-base="useKnowledgeBase"
         :selected-knowledge-base-ids="selectedKnowledgeBaseIds"
+        :document-scope-mode="knowledgeDocumentScope"
+        :selected-document-ids="selectedKnowledgeDocumentIds"
         :similarity-threshold="similarityThreshold"
         :top-k="topK"
         :coverage-priority="coveragePriority"
@@ -31,6 +33,8 @@
         @show-weixin-connect="isWeixinConnectVisible = true"
         @update:use-knowledge-base="useKnowledgeBase = $event"
         @update:selected-knowledge-base-ids="selectedKnowledgeBaseIds = $event"
+        @update:document-scope-mode="knowledgeDocumentScope = $event"
+        @update:selected-document-ids="selectedKnowledgeDocumentIds = $event"
         @update:similarity-threshold="similarityThreshold = $event"
         @update:top-k="topK = $event"
         @update:coverage-priority="coveragePriority = $event"
@@ -431,6 +435,8 @@ const isStreamMode = computed(() => currentLlmConfig.value?.enable_streaming ?? 
 // 知识库相关
 const useKnowledgeBase = ref(false); // 是否启用知识库功能
 const selectedKnowledgeBaseIds = ref<string[]>([]); // 选中的知识库ID列表
+const knowledgeDocumentScope = ref<'all' | 'selected'>('all');
+const selectedKnowledgeDocumentIds = ref<string[]>([]);
 const similarityThreshold = ref(0.2); // 用例生成模式由平台自动配置
 const topK = ref(20); // 测试用例生成默认使用深度检索
 const coveragePriority = ref(true); // 测试用例生成默认覆盖优先
@@ -758,6 +764,7 @@ const handleToolDecision = async (decision: {
       projectId,
       undefined, // signal
       selectedKnowledgeBaseIds.value,
+      knowledgeDocumentScope.value === 'selected' ? selectedKnowledgeDocumentIds.value : undefined,
       useKnowledgeBase.value,
       actionCount,
       similarityThreshold.value,
@@ -796,6 +803,8 @@ const saveKnowledgeBaseSettings = () => {
   const settings = {
     useKnowledgeBase: useKnowledgeBase.value,
     selectedKnowledgeBaseIds: selectedKnowledgeBaseIds.value,
+    knowledgeDocumentScope: knowledgeDocumentScope.value,
+    selectedKnowledgeDocumentIds: selectedKnowledgeDocumentIds.value,
     similarityThreshold: similarityThreshold.value,
     topK: topK.value,
     coveragePriority: coveragePriority.value
@@ -813,6 +822,9 @@ const loadKnowledgeBaseSettings = () => {
       selectedKnowledgeBaseIds.value = Array.isArray(settings.selectedKnowledgeBaseIds)
         ? settings.selectedKnowledgeBaseIds
         : (settings.selectedKnowledgeBaseId ? [settings.selectedKnowledgeBaseId] : []);
+      knowledgeDocumentScope.value = settings.knowledgeDocumentScope === 'selected' ? 'selected' : 'all';
+      selectedKnowledgeDocumentIds.value = Array.isArray(settings.selectedKnowledgeDocumentIds)
+        ? settings.selectedKnowledgeDocumentIds : [];
       coveragePriority.value = settings.coveragePriority ?? true;
       similarityThreshold.value = settings.similarityThreshold ?? 0.2;
       topK.value = settings.topK ?? 20;
@@ -1970,7 +1982,13 @@ const handleSendMessage = async (data: {
 
   // 添加知识库参数
   if (useKnowledgeBase.value && selectedKnowledgeBaseIds.value.length > 0) {
+    if (knowledgeDocumentScope.value === 'selected' && !selectedKnowledgeDocumentIds.value.length) {
+      Message.warning('指定文档模式下请至少选择一篇文档');
+      isLoading.value = false;
+      return;
+    }
     requestData.knowledge_base_ids = selectedKnowledgeBaseIds.value;
+    if (knowledgeDocumentScope.value === 'selected') requestData.knowledge_document_ids = selectedKnowledgeDocumentIds.value;
     requestData.use_knowledge_base = true;
     requestData.similarity_threshold = similarityThreshold.value;
     requestData.top_k = topK.value;
@@ -2479,7 +2497,7 @@ watch(() => projectStore.currentProjectId, async (newProjectId, oldProjectId) =>
   }
 });
 
-watch([useKnowledgeBase, selectedKnowledgeBaseIds, similarityThreshold, topK, coveragePriority], () => {
+watch([useKnowledgeBase, selectedKnowledgeBaseIds, knowledgeDocumentScope, selectedKnowledgeDocumentIds, similarityThreshold, topK, coveragePriority], () => {
   saveKnowledgeBaseSettings();
 }, { deep: true });
 

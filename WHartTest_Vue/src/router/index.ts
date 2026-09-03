@@ -28,6 +28,7 @@ import TraceDetailView from '@/features/ui-automation/views/TraceDetail.vue'; //
 import TaskCenterView from '@/features/task-center/views/TaskCenterView.vue'; // 导入任务中心视图
 import FileManagementView from '@/features/file-management/views/FileManagementView.vue'; // 导入文件管理页面组件。
 import DocumentAnonymizationView from '@/views/DocumentAnonymizationView.vue'; // 导入文档脱敏管理页面组件。
+import CodeAnalysisView from '@/features/code-analysis/CodeAnalysisView.vue';
 
 const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束为 RouteRecordRaw。
   {
@@ -115,6 +116,11 @@ const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束�
         path: 'requirements', // 定义需求管理子路径。
         name: 'RequirementManagement', // 定义需求管理路由名称。
         component: RequirementManagementView, // 指定需求管理页面组件。
+      },
+      {
+        path: 'code-analysis',
+        name: 'CodeAnalysis',
+        component: CodeAnalysisView,
       },
       {
         path: 'requirements/:id', // 定义需求文档详情动态路径，:id 为文档主键参数。

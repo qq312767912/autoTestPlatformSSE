@@ -290,7 +290,9 @@ const startAutomationTask = (
       // 保存知识库设置，使LangGraphChatView能恢复选中状态
       const knowledgeSettings = {
         useKnowledgeBase: requestData.use_knowledge_base || false,
-        selectedKnowledgeBaseId: requestData.knowledge_base_id || null,
+        selectedKnowledgeBaseIds: requestData.knowledge_base_ids || (requestData.knowledge_base_id ? [requestData.knowledge_base_id] : []),
+        knowledgeDocumentScope: requestData.knowledge_document_ids?.length ? 'selected' : 'all',
+        selectedKnowledgeDocumentIds: requestData.knowledge_document_ids || [],
         similarityThreshold: 0.3, // 默认值
         topK: 5 // 默认值
       };
@@ -495,7 +497,9 @@ const handleGenerateCasesSubmit = async (formData: {
   requirementModuleIds: string[],
   promptId: number,
   useKnowledgeBase: boolean,
-  knowledgeBaseId?: string | null,
+  knowledgeBaseIds: string[],
+  knowledgeDocumentScope: 'all' | 'selected',
+  knowledgeDocumentIds: string[],
   testCaseModuleId: number,
   selectedModules: {
     title: string,
@@ -634,10 +638,13 @@ ${formData.selectedModules.length > 0 ? selectedDocumentContext : '无'}
       : ['kb_complete', 'kb_generate'].includes(formData.generateMode),
   };
 
-  // 如果需要知识库，添加知识库ID
-  if ((['full', 'title_only'].includes(formData.generateMode) && formData.useKnowledgeBase && formData.knowledgeBaseId) ||
-      (['kb_complete', 'kb_generate'].includes(formData.generateMode) && formData.knowledgeBaseId)) {
-    requestData.knowledge_base_id = formData.knowledgeBaseId;
+  // 如果需要知识库，传递全部已选知识库；后端会保留顺序并去重。
+  if ((['full', 'title_only'].includes(formData.generateMode) && formData.useKnowledgeBase && formData.knowledgeBaseIds.length > 0) ||
+      (['kb_complete', 'kb_generate'].includes(formData.generateMode) && formData.knowledgeBaseIds.length > 0)) {
+    requestData.knowledge_base_ids = formData.knowledgeBaseIds;
+    if (formData.knowledgeDocumentScope === 'selected' && formData.knowledgeDocumentIds.length) {
+      requestData.knowledge_document_ids = formData.knowledgeDocumentIds;
+    }
   }
 
   startAutomationTask(

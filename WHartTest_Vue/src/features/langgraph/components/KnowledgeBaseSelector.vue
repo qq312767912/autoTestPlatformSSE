@@ -86,6 +86,14 @@
           </a-checkbox>
         </div>
       </template>
+      <KnowledgeDocumentScopeSelector
+        :knowledge-base-ids="selectedKnowledgeBaseIds"
+        :knowledge-bases="knowledgeBases"
+        :scope-mode="documentScopeMode"
+        :document-ids="selectedDocumentIds"
+        @update:scope-mode="emit('update:document-scope-mode', $event)"
+        @update:document-ids="emit('update:selected-document-ids', $event)"
+      />
     </div>
   </div>
 </template>
@@ -108,11 +116,14 @@ import { IconSettings, IconStorage } from '@arco-design/web-vue/es/icon';
 import type { KnowledgeBase } from '@/features/knowledge/types/knowledge';
 import { useAppI18n } from '@/composables/useAppI18n';
 import { toArray } from '@/features/api-testing/services/responseHelpers';
+import KnowledgeDocumentScopeSelector from '@/features/knowledge/components/KnowledgeDocumentScopeSelector.vue';
 
 interface Props {
   projectId?: number | null;
   useKnowledgeBase: boolean;
   selectedKnowledgeBaseIds: string[];
+  documentScopeMode: 'all' | 'selected';
+  selectedDocumentIds: string[];
   similarityThreshold: number;
   topK: number;
   coveragePriority: boolean;
@@ -146,6 +157,8 @@ const text = computed(() => (
 const emit = defineEmits<{
   'update:use-knowledge-base': [value: boolean];
   'update:selected-knowledge-base-ids': [value: string[]];
+  'update:document-scope-mode': [value: 'all' | 'selected'];
+  'update:selected-document-ids': [value: string[]];
   'update:similarity-threshold': [value: number];
   'update:top-k': [value: number];
   'update:coverage-priority': [value: boolean];
@@ -198,6 +211,8 @@ const fetchKnowledgeBases = async () => {
 
 const handleSelectKnowledgeBase = (value: string[]) => {
   emit('update:selected-knowledge-base-ids', value || []);
+  emit('update:selected-document-ids', []);
+  if (!value?.length) emit('update:document-scope-mode', 'all');
 };
 
 const handleModeChange = (value: string | number | boolean) => {

@@ -161,6 +161,11 @@
             <a href="#" @click="checkProjectAndNavigate($event, '/requirements')">{{ requirementsMenuLabel }}</a>
           </a-menu-item>
 
+          <a-menu-item key="code-analysis" v-if="hasCodeAnalysisPermission">
+            <template #icon><icon-code-block /></template>
+            <a href="#" @click="checkProjectAndNavigate($event, '/code-analysis')">{{ codeAnalysisMenuLabel }}</a>
+          </a-menu-item>
+
           <a-menu-item key="api-testing" v-if="hasApiTestingPermission">
             <template #icon><icon-cloud /></template>
             <a href="#" @click="checkProjectAndNavigate($event, '/api-testing')">{{ apiTestingMenuLabel }}</a>
@@ -256,7 +261,7 @@
             </a-menu-item>
             <a-menu-item key="operation-logs" v-if="hasOperationLogsPermission">
               <template #icon><icon-history /></template>
-              <a href="#" @click="checkProjectAndNavigate($event, '/operation-logs')">{{ operationLogsMenuLabel }}</a>
+              <a href="#" @click="navigateWithoutProject($event, '/operation-logs')">{{ operationLogsMenuLabel }}</a>
             </a-menu-item>
           </a-sub-menu>
         </a-menu>
@@ -378,6 +383,7 @@ const hasUpdate = computed(() => versionInfo.value?.hasUpdate ?? false);
 const dashboardMenuLabel = computed(() => (locale.value === 'en-US' ? 'Home' : tl('首页')));
 const projectsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Projects' : tl('项目管理')));
 const requirementsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Requirements' : tl('需求管理')));
+const codeAnalysisMenuLabel = computed(() => (locale.value === 'en-US' ? 'Code Review' : tl('代码审查')));
 const apiTestingMenuLabel = computed(() => (locale.value === 'en-US' ? 'API Testing' : tl('接口自动化')));
 const automationMenuLabel = computed(() => (locale.value === 'en-US' ? 'Automation' : tl('UI自动化')));
 const tasksMenuLabel = computed(() => (locale.value === 'en-US' ? 'Tasks' : tl('任务中心')));
@@ -442,6 +448,7 @@ const activeMenu = computed(() => {
   if (path.startsWith('/dashboard')) return 'dashboard';
   if (path.startsWith('/projects')) return 'projects';
   if (path.startsWith('/requirements')) return 'requirements'; // 添加对需求管理路由的识别
+  if (path.startsWith('/code-analysis')) return 'code-analysis';
   if (path.startsWith('/api-testing')) return 'api-testing';
   if (path.startsWith('/ui-automation')) return 'ui-automation';
   if (path.startsWith('/testsuites')) return 'testsuites'; // 添加对测试套件路由的识别
@@ -477,6 +484,9 @@ const hasProjectsPermission = computed(() => {
 const hasRequirementsPermission = computed(() => {
   return authStore.hasPermission('requirements.view_requirementdocument');
 });
+
+// 代码审查的后端接口还会按项目成员身份做二次隔离。
+const hasCodeAnalysisPermission = computed(() => !!authStore.currentUser);
 
 const hasTestcasesPermission = computed(() => {
   return authStore.hasPermission('testcases.view_testcase');
@@ -651,6 +661,12 @@ const checkProjectAndNavigate = (event: MouseEvent, path: string) => {
     Message.warning(tl('请先选择或创建项目'));
     return;
   }
+  router.push(path);
+};
+
+// 操作日志属于系统级功能，不应因未选择项目而无法访问。
+const navigateWithoutProject = (event: MouseEvent, path: string) => {
+  event.preventDefault();
   router.push(path);
 };
 

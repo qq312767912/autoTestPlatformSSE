@@ -119,13 +119,15 @@
         <div class="form-row-item">
           <span class="form-row-label">{{ pageText.knowledgeBase }}</span>
           <a-select
-            v-model="formState.knowledgeBaseId"
+            v-model="formState.knowledgeBaseIds"
             :placeholder="pageText.noKnowledgeBase"
             :loading="isKbLoading"
+            multiple
+            :max-tag-count="1"
             allow-clear
             style="width: 100%;"
             @clear="formState.useKnowledgeBase = false"
-            @change="(val: any) => formState.useKnowledgeBase = !!val"
+            @change="(val: string[]) => formState.useKnowledgeBase = val.length > 0"
           >
             <a-option v-for="kb in knowledgeBases" :key="kb.id" :value="kb.id">
               {{ kb.name }}
@@ -167,9 +169,11 @@
         <div class="form-row-item">
           <span class="form-row-label required">{{ pageText.linkedKnowledgeBase }}</span>
           <a-select
-            v-model="formState.knowledgeBaseId"
+            v-model="formState.knowledgeBaseIds"
             :placeholder="pageText.selectKnowledgeBase"
             :loading="isKbLoading"
+            multiple
+            :max-tag-count="1"
             allow-clear
             style="width: 100%;"
           >
@@ -179,6 +183,17 @@
           </a-select>
         </div>
       </div>
+
+      <KnowledgeDocumentScopeSelector
+        v-if="formState.knowledgeBaseIds.length"
+        class="knowledge-document-scope"
+        :knowledge-base-ids="formState.knowledgeBaseIds"
+        :knowledge-bases="knowledgeBases"
+        :scope-mode="formState.knowledgeDocumentScope"
+        :document-ids="formState.knowledgeDocumentIds"
+        @update:scope-mode="formState.knowledgeDocumentScope = $event"
+        @update:document-ids="formState.knowledgeDocumentIds = $event"
+      />
 
       <!-- 用例选择表格：知识库补全、知识生成模式显示 -->
       <div v-if="showTestCaseSelector" class="testcase-selector-section">
@@ -275,6 +290,7 @@ import { getTestCaseModules, type TestCaseModule } from '@/services/testcaseModu
 import { toArray } from '@/features/api-testing/services/responseHelpers';
 import { useAppI18n } from '@/composables/useAppI18n';
 import { getLevelColor } from '@/utils/formatters';
+import KnowledgeDocumentScopeSelector from '@/features/knowledge/components/KnowledgeDocumentScopeSelector.vue';
 
 // 生成模式类型
 type GenerateMode = 'full' | 'title_only' | 'kb_complete' | 'kb_generate';
@@ -485,7 +501,9 @@ const formState = reactive({
   requirementModuleIds: [] as string[],
   promptId: null as number | null,
   useKnowledgeBase: false,
-  knowledgeBaseId: null as string | null,
+  knowledgeBaseIds: [] as string[],
+  knowledgeDocumentScope: 'all' as 'all' | 'selected',
+  knowledgeDocumentIds: [] as string[],
   testCaseModuleId: null,
   testTypes: ['functional'] as string[],
 });
@@ -602,7 +620,7 @@ const handleOk = () => {
 
   // 知识库补全和知识生成模式：知识库必选
   if (['kb_complete', 'kb_generate'].includes(formState.generateMode)) {
-    if (!formState.knowledgeBaseId) {
+    if (formState.knowledgeBaseIds.length === 0) {
       Message.error(pageText.value.knowledgeBaseRequired);
       return;
     }
@@ -612,8 +630,13 @@ const handleOk = () => {
     }
   }
 
-  // 完整生成/标题生成模式：如果启用了知识库，必须选择知识库ID
-  if (['full', 'title_only'].includes(formState.generateMode) && formState.useKnowledgeBase && !formState.knowledgeBaseId) {
+  if (formState.knowledgeDocumentScope === 'selected' && formState.knowledgeBaseIds.length && !formState.knowledgeDocumentIds.length) {
+    Message.error('指定文档模式下请至少选择一篇文档');
+    return;
+  }
+
+  // 完整生成/标题生成模式：如果启用了知识库，必须至少选择一个知识库。
+  if (['full', 'title_only'].includes(formState.generateMode) && formState.useKnowledgeBase && formState.knowledgeBaseIds.length === 0) {
     Message.error(pageText.value.knowledgeBaseMustBeSelected);
     return;
   }
@@ -886,7 +909,9 @@ watch(() => props.visible, (newVal) => {
     formState.requirementModuleIds = [];
     formState.promptId = null;
     formState.useKnowledgeBase = false;
-    formState.knowledgeBaseId = null;
+    formState.knowledgeBaseIds = [];
+    formState.knowledgeDocumentScope = 'all';
+    formState.knowledgeDocumentIds = [];
     formState.testCaseModuleId = null;
     formState.testTypes = ['functional'];
     requirementDocuments.value = [];

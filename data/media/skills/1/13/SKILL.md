@@ -38,6 +38,7 @@ description: |
 
 ## 图片与页面感知
 
+- 默认先读取并调用平台Skill `vision-analysis`：使用其 `extract_requirement_images`、`analyze_requirement_ui`、`ui_diff_check` 或 `compare_page_models` 操作。只有该Skill不可用或直接视觉API失败时，才回退现有Vision MCP；不得同时合并两套视觉结果。
 - 需求图片在模块拆分后识别，用户可调整所属模块、结构化内容和采用状态。
 - 只有人工确认的图片识别结果才能进入原子需求；保留文档名、页码、图片ID和所属模块。
 - 图片内容采用“视觉AI结构化结果优先、OCR仅兜底”的单一路径：视觉AI结果完整、语义连贯且无异常时，直接采用视觉AI结果，不再把OCR全文并入需求上下文。

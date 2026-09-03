@@ -15,6 +15,7 @@ from .agent_loop_view import (
     _extract_linked_image_urls,
     _is_linked_image_url_allowed,
     _normalize_knowledge_base_ids,
+    _normalize_knowledge_document_ids,
     _normalize_uploaded_image_base64_list,
     _prepare_agent_loop_human_message,
 )
@@ -51,6 +52,12 @@ class KnowledgeBaseSelectionTests(SimpleTestCase):
             _normalize_knowledge_base_ids(["new-kb"], "legacy-kb"),
             ["new-kb"],
         )
+
+    def test_document_ids_are_deduplicated_and_limited(self):
+        document_ids = ["doc-1", "doc-1"] + [f"doc-{index}" for index in range(2, 25)]
+        normalized = _normalize_knowledge_document_ids(document_ids)
+        self.assertEqual(normalized[0], "doc-1")
+        self.assertEqual(len(normalized), 20)
 
 
 class LLMFriendlyErrorTests(SimpleTestCase):
