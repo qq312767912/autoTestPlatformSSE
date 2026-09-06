@@ -185,7 +185,10 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
                     "```", str(item.get("evidence", "")), "```", "",
                     f"- 影响：{item.get('impact', '')}",
                     f"- 建议：{item.get('recommendation') or '覆盖相关正常流程、异常分支及调用链后再决定是否修复'}", "",
+                    f"- 建议修复状态：{'可应用' if item.get('patch_status') == 'applicable' else '仅供参考'}", "",
                 ])
+                if item.get("suggested_patch"):
+                    lines.extend(["```diff", str(item["suggested_patch"]), "```", ""])
             lines.extend(["## 变更文件", ""])
             lines.extend(f"- `{item.get('path', '')}`" for item in report.get("files", []))
         else:

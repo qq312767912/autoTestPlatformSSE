@@ -5,6 +5,7 @@ import re
 import signal
 import shutil
 import subprocess
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -137,13 +138,24 @@ def _run_git(command, *, cwd, env, timeout=180):
 
 
 def remove_ocr_repository(task_id):
-    """删除一条分析任务独占的浅仓库；只能由删除分析记录的流程调用。"""
+    """删除任务独占的 OCR 工作目录；只能由删除分析记录的流程调用。"""
     root = OCR_WORKSPACE_ROOT.resolve()
     target = (root / str(task_id)).resolve()
     if target.parent != root:
         raise ValueError("OCR 浅仓库路径越界")
     if target.exists():
         shutil.rmtree(target)
+
+
+def _ocr_result_path(task):
+    """返回独立的可写结果路径，绝不向只读的被审查仓库写文件。"""
+    root = OCR_WORKSPACE_ROOT.resolve()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    task_root = (root / str(task.pk)).resolve()
+    if task_root.parent != root:
+        raise ValueError("OCR 结果路径越界")
+    task_root.mkdir(mode=0o700, exist_ok=True)
+    return task_root / ".ocr-review-result.json"
 
 
 @contextmanager
@@ -484,7 +496,9 @@ def _run_open_code_review(task):
             env.update({"OCR_LLM_URL": config.api_url, "OCR_LLM_TOKEN": config.api_key, "OCR_LLM_MODEL": config.name, "OCR_LLM_PROTOCOL": "openai"})
             # 不传 --max-tokens，使用 OCR/模型的原生上下文上限；人为设为 5k/8k 会使
             # 多轮工具调用过早触发上下文压缩并中止审查。
-            output_path = Path(root) / ".ocr-review-result.json"
+            # OCR 仍以完整 Git 仓库作为只读工作目录，以便读取源码与历史；
+            # JSON 结果单独写入 /app/data 下的任务工作目录。
+            output_path = _ocr_result_path(task)
             output_path.unlink(missing_ok=True)
             command = [
                 "ocr", "review", "--from", base_ref, "--to", head_ref,
@@ -560,6 +574,96 @@ def _normalize_ocr_findings(task, findings):
         return findings, int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0), "OCR 审查意见已转换为中文结论"
     except Exception as exc:
         return findings, 0, f"OCR 中文整理未完成：{exc}"
+
+
+def _target_file_content(task, path, review_client=None):
+    """读取目标提交文件的完整内容，用于在隔离目录校验建议补丁。"""
+    if task.repository.source_type == "local_git":
+        return LocalGitClient(task.repository.local_path)._git("show", f"{task.head_sha}:{path}")
+    if not review_client:
+        return ""
+    return review_client.raw_file(task.repository.gitlab_project_id, path, task.head_sha)
+
+
+def _validate_suggested_patch(task, patch_text, review_client=None):
+    """在目标版本文件的临时副本上执行 git apply --check，绝不修改真实仓库。"""
+    paths = []
+    for raw_path in re.findall(r"^(?:---|\+\+\+)\s+([^\t\n]+)", patch_text or "", re.MULTILINE):
+        if raw_path == "/dev/null":
+            continue
+        path = raw_path[2:] if raw_path.startswith(("a/", "b/")) else raw_path
+        if path not in paths:
+            paths.append(path)
+    if not paths:
+        return False, "补丁未包含可识别的文件路径"
+    try:
+        with tempfile.TemporaryDirectory(prefix="wharttest-fix-check-") as directory:
+            root = Path(directory).resolve()
+            for path in paths:
+                target = (root / path).resolve()
+                target.relative_to(root)
+                try:
+                    content = _target_file_content(task, path, review_client)
+                except (ValueError, OSError, subprocess.CalledProcessError):
+                    content = ""
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if content:
+                    target.write_text(content, encoding="utf-8")
+            result = subprocess.run(
+                ["git", "apply", "--check", "--recount", "-"], cwd=root,
+                input=patch_text, text=True, capture_output=True, timeout=15,
+            )
+            return result.returncode == 0, (result.stderr or result.stdout).strip()[-500:]
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+
+
+def _generate_fix_patches(task, findings, analyzable_diffs, review_client=None):
+    """批量生成纯审阅补丁，并将可应用性校验结果写回对应风险。"""
+    if task.mode == "quick" or not findings:
+        for finding in findings:
+            finding.update({"suggested_patch": "", "patch_status": "reference", "patch_validation_message": "快速模式不生成 AI 修复建议"})
+        return 0, "快速模式未生成建议修复"
+    from langgraph_integration.models import LLMConfig
+    from langgraph_integration.views import create_llm_instance
+    for finding in findings:
+        finding.update({"suggested_patch": "", "patch_status": "reference", "patch_validation_message": "未生成有效补丁"})
+    try:
+        config = LLMConfig.objects.get(is_active=True)
+        diff_by_path = {item.get("path", ""): item.get("diff", "") for item in analyzable_diffs}
+        source = []
+        for finding in findings[:40]:
+            source.append({
+                "key": finding.get("key"), "file": finding.get("file"),
+                "problem": finding.get("change"), "impact": finding.get("impact"),
+                "recommendation": finding.get("recommendation"), "evidence": finding.get("evidence"),
+                "original_diff": diff_by_path.get(finding.get("file", ""), "")[:6000],
+            })
+        prompt = (
+            "你是代码修复补丁生成器。针对每条风险，基于目标版本代码和原始 Diff 生成最小化 unified diff。"
+            "补丁必须应用于目标版本（变更完成后的代码），文件头使用 --- a/路径 和 +++ b/路径；"
+            "不得输出 Markdown 代码围栏，不得修改与风险无关的代码，不确定时 patch 返回空字符串。"
+            "仅输出严格 JSON：{\"items\":[{\"key\":\"\",\"patch\":\"完整 unified diff 或空字符串\"}]}。\n"
+            f"风险与变更：{json.dumps(source, ensure_ascii=False)}"
+        )
+        response = create_llm_instance(config, temperature=0).invoke(prompt)
+        payload = _json_from_response(getattr(response, "content", response))
+        mapped = {str(item.get("key")): str(item.get("patch") or "").strip() for item in payload.get("items", [])}
+        for finding in findings:
+            patch_text = mapped.get(str(finding.get("key")), "")
+            if patch_text.startswith("```"):
+                patch_text = re.sub(r"^```(?:diff)?\s*|\s*```$", "", patch_text, flags=re.DOTALL).strip()
+            finding["suggested_patch"] = patch_text[:100_000]
+            if patch_text:
+                applicable, message = _validate_suggested_patch(task, patch_text, review_client)
+                finding["patch_status"] = "applicable" if applicable else "reference"
+                finding["patch_validation_message"] = message or ("已通过 git apply --check" if applicable else "补丁未通过校验")
+        usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
+        tokens = int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0)
+        applicable_count = sum(1 for item in findings if item.get("patch_status") == "applicable")
+        return tokens, f"已生成建议修复，{applicable_count} 项通过 git apply --check"
+    except Exception as exc:
+        return 0, f"建议修复生成未完成：{exc}"
 
 
 def _run_iteration_test_design(task, analyzable_diffs, findings):
@@ -929,11 +1033,16 @@ def run_analysis(task: AnalysisTask):
         findings = _deduplicate_findings(findings)
         for finding in findings:
             finding["verified"] = finding.get("source") != "ai_analysis"
+        patch_tokens, patch_note = _generate_fix_patches(
+            task, findings, analyzable_diffs,
+            client if task.repository.source_type != "local_git" else None,
+        )
+        token_usage += patch_tokens
         risk_test_points, risk_test_tokens, risk_test_note = _run_risk_test_design(task, findings)
         for finding in findings:
             finding.pop("_risk_test_point", None)
         token_usage += risk_test_tokens
-        ai_note = f"{ai_note}；{risk_test_note}"
+        ai_note = f"{ai_note}；{patch_note}；{risk_test_note}"
         task.raw_diff = "\n\n".join(raw_parts)[:2_000_000]
         severity_counts = {}
         source_counts = {}

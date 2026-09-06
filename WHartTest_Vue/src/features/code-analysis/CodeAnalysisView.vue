@@ -104,7 +104,11 @@
             <div class="code-snippet"><div class="snippet-caption"><span>风险凭据</span><small>{{ item.line_start ? `旧版本第 ${item.line_start} 行` : '未定位源码行' }}</small></div><div v-for="(line, index) in evidenceLines(item)" :key="index" class="snippet-line"><span>{{ item.line_start ? item.line_start + index : '—' }}</span><code>{{ line || ' ' }}</code></div></div>
             <div class="finding-detail"><b>影响：</b><span>{{ item.impact || '需结合代码上下文和完整 Diff 确认实际影响范围' }}</span></div>
             <div class="finding-detail"><b>建议：</b><span>{{ item.recommendation || '覆盖相关正常流程、异常分支及调用链后再决定是否修复' }}</span></div>
-            <a-link class="diff-link" @click="openDiff(item)"><icon-file /> 查看完整 Diff</a-link>
+            <div class="patch-actions">
+              <a-link class="diff-link" @click="openDiff(item)"><icon-file /> 查看相关 Diff</a-link>
+              <a-link class="diff-link fix-link" @click="openSuggestedPatch(item)"><icon-file /> 查看建议修复</a-link>
+              <a-tag size="small" :color="item.patch_status === 'applicable' ? 'green' : 'gray'">{{ item.patch_status === 'applicable' ? '可应用' : '仅供参考' }}</a-tag>
+            </div>
           </div>
           <a-empty v-if="selectedTask.change_report?.findings?.length && !filteredFindings.length" description="没有符合筛选条件的风险" />
           <a-empty v-if="!selectedTask.change_report?.findings?.length" description="未发现确定性风险" />
@@ -165,7 +169,8 @@
     </a-modal>
 
     <a-modal v-model:visible="diffVisible" :title="diffTitle" width="960px" :footer="false" unmount-on-close>
-      <a-spin :loading="diffLoading" style="width:100%"><div v-if="diffLines.length" class="diff-view"><div v-for="(line, index) in diffLines" :key="index" class="diff-line" :class="diffLineClass(line)"><span>{{ index + 1 }}</span><code>{{ line || ' ' }}</code></div></div><a-empty v-else-if="!diffLoading" description="未保存可展示的 Diff 内容" /></a-spin>
+      <a-alert v-if="diffNotice" :type="diffNoticeType" class="diff-notice">{{ diffNotice }}</a-alert>
+      <a-spin :loading="diffLoading" style="width:100%"><div v-if="diffLines.length" class="diff-view"><div v-for="(line, index) in diffLines" :key="index" class="diff-line" :class="diffLineClass(line)"><span>{{ index + 1 }}</span><code>{{ line || ' ' }}</code></div></div><a-empty v-else-if="!diffLoading" description="未生成可展示的建议修复补丁" /></a-spin>
     </a-modal>
 
     <a-modal v-model:visible="createVisible" title="新建代码审查" :ok-loading="submitting" @ok="submitTask">
@@ -223,7 +228,7 @@ const riskSeverityFilter = ref<string|undefined>();
 const riskTypeFilter = ref<string|undefined>();
 const testPriorityFilter = ref<string|undefined>();
 const testTypeFilter = ref<string[]>([]);
-const diffVisible = ref(false), diffLoading = ref(false), diffTitle = ref('代码 Diff'), diffText = ref('');
+const diffVisible = ref(false), diffLoading = ref(false), diffTitle = ref('代码 Diff'), diffText = ref(''), diffNotice = ref(''), diffNoticeType = ref<'success'|'warning'|'info'>('info');
 const form = reactive<any>({ repository:null, source_type:'commits', merge_request_iid:null, base_sha:'HEAD~1', head_sha:'HEAD', requirement_document_ids:[], api_document_ids:[], mode:'standard' });
 const connectionForm = reactive<any>({ name:'内网 GitLab', base_url:'', verify_ssl:true, is_active:true });
 const repoForm = reactive<any>({ connection:null, gitlab_project_id:'', name:'', path_with_namespace:'', default_branch:'main' });
@@ -255,6 +260,35 @@ const ocrStatusNotice = computed(() => {
 const evidenceLines = (item:any) => String(item.evidence || '未提供代码证据').split(/\r?\n/);
 const diffLines = computed(() => diffText.value.split(/\r?\n/).filter((line, index, all) => line || index < all.length - 1));
 const diffLineClass = (line:string) => line.startsWith('+') && !line.startsWith('+++') ? 'added' : (line.startsWith('-') && !line.startsWith('---') ? 'removed' : (line.startsWith('@@') ? 'hunk' : ''));
+const relevantDiffFragment = (diff:string, targetLine?:number, evidence?:string) => {
+  const lines = String(diff || '').split(/\r?\n/);
+  const hunks:Array<{start:number;end:number;oldStart:number;oldCount:number;newStart:number;newCount:number}> = [];
+  lines.forEach((line,index) => {
+    const match = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+    if (!match) return;
+    if (hunks.length) hunks[hunks.length - 1].end = index;
+    hunks.push({start:index,end:lines.length,oldStart:Number(match[1]),oldCount:Number(match[2] || 1),newStart:Number(match[3]),newCount:Number(match[4] || 1)});
+  });
+  if (!hunks.length) return lines.slice(0,24).join('\n');
+  const evidenceNeedle = String(evidence || '').split(/\r?\n/).map(line => line.trim()).find(line => line.length >= 8);
+  let hunk = targetLine ? hunks.find(item =>
+    (targetLine >= item.oldStart && targetLine < item.oldStart + Math.max(item.oldCount,1)) ||
+    (targetLine >= item.newStart && targetLine < item.newStart + Math.max(item.newCount,1))) : undefined;
+  if (!hunk && evidenceNeedle) hunk = hunks.find(item => lines.slice(item.start,item.end).some(line => line.includes(evidenceNeedle)));
+  hunk ||= hunks[0];
+  let oldLine = hunk.oldStart, newLine = hunk.newStart, anchor = hunk.start + 1;
+  for (let index=hunk.start+1; index<hunk.end; index++) {
+    const line = lines[index];
+    const matchesLine = !!targetLine && ((line.startsWith('-') && oldLine === targetLine) || (line.startsWith('+') && newLine === targetLine) || (!line.startsWith('+') && !line.startsWith('-') && (oldLine === targetLine || newLine === targetLine)));
+    const matchesEvidence = !!evidenceNeedle && line.includes(evidenceNeedle);
+    if (matchesLine || matchesEvidence) { anchor=index; break; }
+    if (!line.startsWith('+')) oldLine++;
+    if (!line.startsWith('-')) newLine++;
+  }
+  const from = Math.max(hunk.start + 1, anchor - 6);
+  const to = Math.min(hunk.end, anchor + 9);
+  return [lines[hunk.start], ...lines.slice(from,to)].join('\n');
+};
 const impactScopeCount = (task:AnalysisTask) => {
   const saved = task.change_report?.summary?.impact_scope_count;
   if (typeof saved === 'number') return saved;
@@ -337,7 +371,8 @@ const iterationConclusion = (task:AnalysisTask) => {
   return '未发现明显高风险变化，建议完成常规变更回归';
 };
 async function download(task:AnalysisTask,type:'change'|'test'){try{await api.downloadReport(task.id,type);Message.success('报告下载已开始')}catch(e:any){Message.error(e.message||'报告下载失败')}}
-async function openDiff(item:any){if(!selectedTask.value)return;diffVisible.value=true;diffLoading.value=true;diffText.value='';diffTitle.value=`Diff · ${item.file || '变更文件'}`;try{const payload=await api.getTaskDiff(selectedTask.value.id,item.file);diffText.value=payload?.diff||''}catch(e:any){Message.error(e.message||'读取 Diff 失败')}finally{diffLoading.value=false}}
+async function openDiff(item:any){if(!selectedTask.value)return;diffVisible.value=true;diffLoading.value=true;diffText.value='';diffNotice.value='';diffTitle.value=`相关 Diff · ${item.file || '变更文件'}`;try{const payload=await api.getTaskDiff(selectedTask.value.id,item.file);diffText.value=relevantDiffFragment(payload?.diff||'',item.line_start,item.evidence)}catch(e:any){Message.error(e.message||'读取 Diff 失败')}finally{diffLoading.value=false}}
+function openSuggestedPatch(item:any){diffVisible.value=true;diffLoading.value=false;diffTitle.value=`建议修复 · ${item.file || '变更文件'}`;diffText.value=item.suggested_patch||'';const applicable=item.patch_status==='applicable';diffNoticeType.value=applicable?'success':'warning';diffNotice.value=applicable?'纯审阅模式：该补丁已通过 git apply --check，但平台不会自动修改仓库。':`纯审阅模式：该建议仅供参考，未通过可应用性校验。${item.patch_validation_message ? ` ${item.patch_validation_message}` : ''}`}
 async function loadBase(){ const id=projectStore.currentProjectId; if(!id)return; [connections.value,repositories.value,projectDocuments.value]=await Promise.all([api.getConnections(),api.getRepositories(id),api.getProjectDocuments(id)]); }
 async function refreshExecutionLogs(){if(!selectedTask.value)return;try{executionLogs.value=await api.getExecutionLogs(selectedTask.value.id)}catch{executionLogs.value=[]}}
 async function loadTasks(silent=false){ const id=projectStore.currentProjectId;if(!id && !isPlatformAdmin.value)return;if(!silent)loading.value=true;try{tasks.value=await api.getTasks(isPlatformAdmin.value ? undefined : id!);if(selectedTask.value){selectedTask.value=tasks.value.find(task=>task.id===selectedTask.value?.id)||null;await refreshExecutionLogs()}}catch(e:any){if(!silent)Message.error(e.message)}finally{if(!silent)loading.value=false} }
@@ -363,6 +398,7 @@ onBeforeUnmount(()=>{if(pollTimer)window.clearInterval(pollTimer)});
 </script>
 
 <style scoped>
+.patch-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:11px}.patch-actions .diff-link{margin-top:0}.fix-link{color:#16827d}.diff-notice{margin-bottom:12px}
 .ocr-status-alert{margin:0 0 14px}.ocr-status-alert b{margin-right:8px}.ocr-status-alert span{line-height:1.6}.finding-detail{display:grid;grid-template-columns:52px minmax(0,1fr);gap:6px;margin-top:12px;color:#526273;line-height:1.65}.finding-detail b{color:#344054}
 .analysis-page{padding:28px;min-height:100%;background:#f5f7fa;color:#1d2939}.hero{display:flex;justify-content:space-between;align-items:flex-end;padding:30px 34px;border-radius:18px;background:linear-gradient(125deg,#102a43,#176b87 62%,#1b8f8a);color:white;box-shadow:0 14px 40px rgb(16 42 67 / 18%)}.eyebrow{font-size:11px;letter-spacing:.16em;color:#9fe1dd}.hero h1{margin:8px 0 6px;font-size:28px}.hero p{margin:0;color:#d8edf0}.hero-actions{display:flex;gap:10px}.metric-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:18px 0}.metric{padding:18px 20px;background:white;border:1px solid #e5eaf0;border-radius:12px}.metric span{display:block;color:#718096;font-size:13px}.metric strong{display:block;margin-top:5px;font-size:26px}.metric.danger strong{color:#d9485f}.content-card{padding:22px;background:white;border:1px solid #e4e9f0;border-radius:14px}.section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.section-head h2{margin:0;font-size:17px}.section-head p{margin:4px 0 0;color:#8792a2;font-size:12px}.task-row{display:grid;grid-template-columns:4px minmax(240px,1fr) 70px 70px 90px 90px 48px 36px;gap:12px;align-items:center;padding:15px 6px;border-top:1px solid #edf0f4;cursor:pointer}.task-row:hover{background:#f8fafc}.task-mark{height:34px;border-radius:4px;background:#2d8cf0}.task-mark.completed{background:#16a085}.task-mark.failed{background:#d9485f}.task-title{font-weight:600}.task-meta{margin-top:4px;color:#8b96a5;font-size:12px}.task-score span{display:block;color:#8b96a5;font-size:11px}.task-score b{font-size:17px}.iteration-overview{padding:20px;border-radius:14px;background:linear-gradient(135deg,#102f46,#176b6f);color:#fff;box-shadow:0 10px 24px rgb(16 47 70 / 16%)}.overview-title{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.overview-title span{font-size:11px;letter-spacing:.1em;color:#9bd9d4}.overview-title h2{max-width:560px;margin:6px 0 0;font-size:20px;line-height:1.45}.overview-numbers{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:18px}.overview-numbers>div{padding:10px 12px;border-radius:9px;background:rgb(255 255 255 / 9%)}.overview-numbers b,.overview-numbers span{display:block}.overview-numbers b{font-size:20px}.overview-numbers span{margin-top:2px;color:#c5dadd;font-size:11px}.overview-numbers .danger b,.overview-numbers .deletion b{color:#ffb0a8}.overview-numbers .addition b{color:#8ee6b5}.overview-focus{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:14px}.overview-focus b{margin-right:3px;font-size:12px}.overview-focus span{padding:5px 9px;border-radius:999px;background:rgb(255 255 255 / 12%);font-size:11px}.overview-files{margin-top:14px;padding-top:12px;border-top:1px solid rgb(255 255 255 / 14%)}.overview-files>b{display:block;margin-bottom:7px;font-size:12px}.overview-files>div{display:flex;justify-content:space-between;gap:12px;padding:5px 0;color:#e3f0f1}.overview-files code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.line-stat{display:flex;gap:8px;white-space:nowrap}.line-stat i{color:#8ee6b5;font-style:normal}.line-stat em{color:#ffb0a8;font-style:normal}.overview-files small{display:block;margin-top:5px;color:#a9c5c8}.input-collapse{margin:10px 0 4px;background:transparent}.analysis-context{padding:14px;border:1px solid #dbe7ee;border-radius:10px;background:#f8fafc}.context-head,.report-toolbar,.finding-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.context-head h3,.report-toolbar h3{margin:3px 0 0}.context-kicker{font-size:10px;letter-spacing:.14em;color:#16827d}.context-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-top:16px}.context-grid span{display:block;color:#8591a2;font-size:11px}.context-grid b{display:block;margin-top:3px;font-size:13px}.context-grid .wide{grid-column:1/-1}.help-icon{margin-left:3px;color:#758397}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.report-tabs{margin-top:4px}.report-toolbar{align-items:center;margin:8px 0 14px}.report-toolbar p{margin:4px 0 0;color:#8893a2;font-size:12px}.report-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px}.report-summary span{padding:10px 12px;border-radius:8px;background:#f3f6f8;color:#718096;font-size:11px}.report-summary b{display:block;margin-top:2px;color:#223143;font-size:18px}.report-summary .risk-number b{color:#d9485f}.finding,.test-point{margin-top:12px;padding:15px;border:1px solid #e7ebf0;border-radius:10px;background:#fff}.finding strong,.test-point strong{margin-left:8px}.finding p{color:#667085}.finding code{display:block;padding:10px;overflow:auto;background:#f7f8fa;border-radius:6px}.confidence{white-space:nowrap;color:#8792a2;font-size:11px}.impact,.expected{margin-top:10px;color:#526273}.source-key{margin-top:9px;color:#98a2b3;font-size:11px}.report-section{margin-top:18px;padding:16px;border:1px solid #e7ebf0;border-radius:10px}.report-section h3{margin:0 0 12px;font-size:14px}.chip-list{display:flex;flex-wrap:wrap;gap:8px}.chip-list span{padding:6px 10px;border-radius:999px;background:#eaf5f4;color:#176d69;font-size:12px}.file-list{display:flex;flex-direction:column;gap:8px}.file-list>div{display:flex;align-items:center;gap:8px}.file-list code{overflow:hidden;text-overflow:ellipsis;color:#526273}.two-column-sections{display:grid;grid-template-columns:1fr 1fr;gap:12px}.report-section ul{margin:0;padding-left:20px;color:#526273}.report-section li+li{margin-top:7px}.report-section.gap{border-color:#f0dfca;background:#fffaf3}.mode-description{font-size:12px;color:#8b96a5}@media(max-width:900px){.metric-grid{grid-template-columns:repeat(2,1fr)}.task-row{grid-template-columns:4px 1fr 80px}.task-score,.task-row :deep(.arco-progress){display:none}.context-grid,.two-column-sections{grid-template-columns:1fr}}
 .quality-breakdown{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin:-4px 0 14px;color:#667085;font-size:12px}.quality-breakdown>b{margin-right:3px;color:#344054}.quality-breakdown span{padding:4px 8px;border-radius:999px;background:#edf7f6;color:#166b66}.mode-help{margin-left:4px;vertical-align:-2px;color:#718096;cursor:help}.mode-tooltip{width:290px;padding:3px 2px}.mode-tooltip>div{display:grid;grid-template-columns:38px 1fr;gap:8px;padding:7px 4px;border-bottom:1px solid rgb(255 255 255 / 12%);line-height:1.45}.mode-tooltip>div:last-child{border-bottom:0}.mode-tooltip b{color:#9fe1dd}.mode-tooltip span{color:#e7edf3;font-size:12px}.finding-filter{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:14px 0;padding:10px 12px;border:1px solid #dce8ef;border-radius:9px;background:#f8fbfc}.finding-filter>span{color:#758397;font-size:12px}.risk-type{margin-left:7px}.code-snippet{overflow:hidden;border:1px solid #e8edf1;border-radius:8px;background:#f6f8fa}.snippet-caption{display:flex;justify-content:space-between;padding:7px 11px;border-bottom:1px solid #e6ebef;background:#edf2f5;color:#5f6f7f;font-size:11px}.snippet-caption small{color:#8b98a6}.snippet-line{display:grid;grid-template-columns:42px minmax(0,1fr);min-height:25px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;line-height:1.55}.snippet-line>span{padding:3px 9px 3px 4px;border-right:1px solid #e4e9ee;background:#f0f3f5;color:#98a4af;text-align:right;user-select:none}.snippet-line code{padding:3px 12px;white-space:pre-wrap;overflow-wrap:anywhere;color:#26333f;background:transparent}

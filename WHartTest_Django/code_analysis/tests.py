@@ -11,10 +11,35 @@ from rest_framework.test import APIClient
 
 from projects.models import Project, ProjectMember
 from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
-from .services import DEFAULT_ANNOTATIONS, LocalGitClient, _diff_line_stats, _load_ocr_payload, _managed_gitlab_repository, _parse_diff, _risk_findings_for_tests, remove_ocr_repository, run_analysis
+from .services import DEFAULT_ANNOTATIONS, LocalGitClient, _diff_line_stats, _load_ocr_payload, _managed_gitlab_repository, _ocr_result_path, _parse_diff, _risk_findings_for_tests, _validate_suggested_patch, remove_ocr_repository, run_analysis
 
 
 class DiffRuleTests(TestCase):
+    def test_suggested_patch_is_checked_in_isolated_target_copy(self):
+        task = SimpleNamespace(
+            head_sha="head",
+            repository=SimpleNamespace(source_type="local_git", local_path="."),
+        )
+        patch_text = "\n".join([
+            "diff --git a/app.py b/app.py", "--- a/app.py", "+++ b/app.py",
+            "@@ -1 +1 @@", "-old", "+new", "",
+        ])
+        with patch("code_analysis.services._target_file_content", return_value="old\n"):
+            applicable, message = _validate_suggested_patch(task, patch_text)
+        self.assertTrue(applicable, message)
+
+    def test_ocr_result_is_written_outside_read_only_source_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "ocr-workspace"
+            source_repository = Path(directory) / "source"
+            source_repository.mkdir()
+            task = SimpleNamespace(pk="task-123")
+            with patch("code_analysis.services.OCR_WORKSPACE_ROOT", workspace):
+                result_path = _ocr_result_path(task)
+                result_path.write_text("{}", encoding="utf-8")
+            self.assertEqual(result_path.read_text(encoding="utf-8"), "{}")
+            self.assertFalse(result_path.is_relative_to(source_repository))
+
     def test_deleted_excel_annotation_is_deterministic_risk(self):
         findings = _parse_diff("@@ -1,2 +1 @@\n-    @Excel(name = \"证券代码\")\n     private String code;", "Quote.java", DEFAULT_ANNOTATIONS)
         self.assertEqual(findings[0]["change"], "删除 @Excel 注解")
