@@ -205,9 +205,36 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
                 f"- 高优先级：{summary.get('high_priority_count', 0)}", "",
             ]
             if iteration_summary.get("title"):
-                lines.extend(["## 本次迭代总结", "", f"### {iteration_summary.get('title')}", "", iteration_summary.get("description", "")])
-                lines.extend(f"- {item}" for item in iteration_summary.get("change_items", []))
-                lines.append("")
+                change_groups = iteration_summary.get("change_groups") or []
+                summary_points = iteration_summary.get("summary_points") or [
+                    f"{item.get('name')}：{item.get('description')}"
+                    for item in change_groups
+                    if item.get("name") and item.get("description")
+                ] or iteration_summary.get("change_items", []) or ([iteration_summary.get("description")] if iteration_summary.get("description") else [])
+                if len(summary_points) == len(change_groups):
+                    scale_order = {"large": 3, "medium": 2, "small": 1}
+                    ranked_indexes = sorted(
+                        range(len(change_groups)),
+                        key=lambda index: (
+                            scale_order.get(change_groups[index].get("change_scale"), 0),
+                            len(change_groups[index].get("files") or []),
+                            sum(1 for point in iteration_test_requirements if point.get("change_group") == change_groups[index].get("name")),
+                        ),
+                        reverse=True,
+                    )
+                    summary_points = [summary_points[index] for index in ranked_indexes]
+                    change_groups = [change_groups[index] for index in ranked_indexes]
+                lines.extend(["## 本次迭代总结", "", f"### {iteration_summary.get('title')}", ""])
+                for index, item in enumerate(summary_points, start=1):
+                    group = change_groups[index - 1] if index <= len(change_groups) else {}
+                    point_title = group.get("name") or f"变更点 {index}"
+                    point_content = item
+                    for separator in ("：", ":"):
+                        prefix = f"{point_title}{separator}"
+                        if point_content.startswith(prefix):
+                            point_content = point_content[len(prefix):].strip()
+                            break
+                    lines.extend([f"### {index}. {point_title}", "", point_content, ""])
             lines.extend(["## 需求测试点", ""])
             for index, item in enumerate(iteration_test_requirements, 1):
                 lines.extend([

@@ -110,7 +110,12 @@
           <section v-if="selectedTask.test_report?.iteration_summary?.title" class="report-section iteration-summary">
             <h3>本次迭代总结</h3>
             <strong>{{ selectedTask.test_report.iteration_summary.title }}</strong>
-            <p>{{ selectedTask.test_report.iteration_summary.description }}</p>
+            <div class="iteration-summary-points">
+              <div v-for="(item, index) in iterationSummaryItems" :key="`${index}-${item.title}`" class="iteration-summary-point">
+                <span class="summary-index">{{ index + 1 }}.</span>
+                <div><b>{{ item.title }}</b><p>{{ item.content }}</p></div>
+              </div>
+            </div>
             <div v-if="iterationGroups.length" class="iteration-group-grid">
               <article v-for="group in iterationGroups" :key="group.name" class="iteration-group-card">
                 <div><b>{{ group.name }}</b><a-tag color="arcoblue">{{ testCountForGroup(group.name) }} 个测试点</a-tag></div>
@@ -119,7 +124,6 @@
                 <div class="group-files"><code v-for="file in group.files || []" :key="file">{{ file }}</code></div>
               </article>
             </div>
-            <ul v-else-if="selectedTask.test_report.iteration_summary.change_items?.length"><li v-for="item in selectedTask.test_report.iteration_summary.change_items" :key="item">{{ item }}</li></ul>
           </section>
           <section class="report-section risk-summary">
             <h3>风险总结</h3>
@@ -251,7 +255,33 @@ const testTypeCounts = computed(() => ({
   '迭代验证': iterationTestRequirements.value.length,
   '风险排查': riskTestRequirements.value.length,
 }));
-const iterationGroups = computed(() => selectedTask.value?.test_report?.iteration_summary?.change_groups || []);
+const iterationGroupRanking = computed(() => {
+  const groups = selectedTask.value?.test_report?.iteration_summary?.change_groups || [];
+  const requirements = selectedTask.value?.test_report?.test_requirements || [];
+  const scaleScore:Record<string,number> = {large:3,medium:2,small:1};
+  return groups.map((group,index) => ({group,index,score:[scaleScore[group.change_scale || ''] || 0,(group.files || []).length,requirements.filter(item => item.change_group === group.name).length]}))
+    .sort((a,b) => b.score[0]-a.score[0] || b.score[1]-a.score[1] || b.score[2]-a.score[2] || a.index-b.index);
+});
+const iterationGroups = computed(() => iterationGroupRanking.value.map(item => item.group));
+const iterationSummaryItems = computed(() => {
+  const summary = selectedTask.value?.test_report?.iteration_summary;
+  if (!summary) return [];
+  let points:string[] = [];
+  if (summary.summary_points?.length) {
+    points = summary.summary_points.length === iterationGroupRanking.value.length
+      ? iterationGroupRanking.value.map(item => summary.summary_points![item.index])
+      : summary.summary_points;
+  } else if (iterationGroups.value.length) points = iterationGroups.value.map(item => item.description);
+  else if (summary.change_items?.length) points = summary.change_items;
+  else if (summary.description) points = [summary.description];
+  return points.map((content,index) => {
+    const group = iterationGroups.value[index];
+    const matched = content.match(/^([^：:。；;]{2,24})[：:](.+)$/);
+    const title = group?.name || matched?.[1]?.trim() || `变更点 ${index + 1}`;
+    const detail = matched && (!group || matched[1].trim() === title) ? matched[2].trim() : content;
+    return {title,content:detail};
+  });
+});
 const testCountForGroup = (name:string) => visibleTestRequirements.value.filter(item => item.change_group === name).length;
 const availableTestTypes = computed(() => ['迭代验证', '风险排查']);
 const matchesTestType = (item:any) => !testTypeFilter.value.length || testTypeFilter.value.includes(testTypeFor(item));
@@ -322,5 +352,5 @@ onBeforeUnmount(()=>{if(pollTimer)window.clearInterval(pollTimer)});
 .execution-log{margin-top:16px;padding-top:13px;border-top:1px solid #dce6ec}.execution-log-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}.execution-log-head small{color:#8591a2;font-size:11px}.execution-log-item{display:grid;grid-template-columns:10px 136px 62px minmax(0,1fr) 104px;gap:7px;align-items:center;padding:5px 0;color:#556473;font-size:12px}.execution-log-item time{color:#8591a2;font-variant-numeric:tabular-nums}.execution-log-item b{color:#334155;font-weight:600}.execution-log-item em{color:#16827d;font-size:11px;font-style:normal;white-space:nowrap}.execution-dot{width:7px;height:7px;border-radius:50%;background:#8fa2b2}.execution-dot.completed{background:#1fa77a}.execution-dot.partial{background:#f59e0b}.execution-dot.failed{background:#e15361}.execution-dot.cancelled{background:#8793a0}.execution-dot.started,.execution-dot.queued{background:#2488cc}
 .draft-actions{display:flex;align-items:center;gap:3px}.convert-description{margin:0 0 14px;color:#667085;font-size:13px;line-height:1.6}
 .point-section-title{margin:22px 0 8px;color:#344054;font-size:15px}.risk-test-point{border-color:#f2dec5;background:#fffdfa}
-.iteration-summary{background:linear-gradient(135deg,#f7fbfc,#fff)}.iteration-summary>strong{display:block;font-size:16px;color:#1f3f4d;line-height:1.5}.iteration-summary>p{margin:7px 0 0;color:#5d6b78;line-height:1.65}.iteration-group-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}.iteration-group-card{padding:12px;border:1px solid #dce9ea;border-radius:9px;background:#fff}.iteration-group-card>div:first-child{display:flex;align-items:center;justify-content:space-between;gap:8px}.iteration-group-card>div:first-child b{color:#234858;font-size:13px}.group-module{display:inline-block;margin-top:6px;color:#16827d;font-size:11px}.iteration-group-card p{min-height:38px;margin:8px 0 5px;color:#526273;font-size:12px;line-height:1.55}.iteration-group-card small{display:block;color:#778899;font-size:11px;line-height:1.5}.group-files{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px}.group-files code{max-width:100%;padding:3px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-radius:4px;background:#edf4f5;color:#477180;font-size:10px}@media(max-width:900px){.iteration-group-grid{grid-template-columns:1fr}}
+.iteration-summary{background:linear-gradient(135deg,#f7fbfc,#fff)}.iteration-summary>strong{display:block;font-size:16px;color:#1f3f4d;line-height:1.5}.iteration-summary-points{display:flex;flex-direction:column;gap:12px;margin-top:14px}.iteration-summary-point{display:grid;grid-template-columns:26px minmax(0,1fr);gap:4px;color:#5d6b78}.summary-index{color:#176b87;font-weight:700;line-height:1.55}.iteration-summary-point b{display:block;color:#294b5a;font-size:14px;line-height:1.55}.iteration-summary-point p{margin:3px 0 0;color:#5d6b78;line-height:1.65}.iteration-group-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}.iteration-group-card{padding:12px;border:1px solid #dce9ea;border-radius:9px;background:#fff}.iteration-group-card>div:first-child{display:flex;align-items:center;justify-content:space-between;gap:8px}.iteration-group-card>div:first-child b{color:#234858;font-size:13px}.group-module{display:inline-block;margin-top:6px;color:#16827d;font-size:11px}.iteration-group-card p{min-height:38px;margin:8px 0 5px;color:#526273;font-size:12px;line-height:1.55}.iteration-group-card small{display:block;color:#778899;font-size:11px;line-height:1.5}.group-files{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px}.group-files code{max-width:100%;padding:3px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-radius:4px;background:#edf4f5;color:#477180;font-size:10px}@media(max-width:900px){.iteration-group-grid{grid-template-columns:1fr}}
 </style>

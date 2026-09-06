@@ -11,7 +11,7 @@ from rest_framework.test import APIClient
 
 from projects.models import Project, ProjectMember
 from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
-from .services import DEFAULT_ANNOTATIONS, LocalGitClient, _diff_line_stats, _load_ocr_payload, _parse_diff, run_analysis
+from .services import DEFAULT_ANNOTATIONS, LocalGitClient, _diff_line_stats, _load_ocr_payload, _parse_diff, _risk_findings_for_tests, run_analysis
 
 
 class DiffRuleTests(TestCase):
@@ -50,6 +50,14 @@ class DiffRuleTests(TestCase):
         payload = _load_ocr_payload("OCR started\\n{\"status\": \"completed\", \"comments\": []}")
         self.assertEqual(payload["status"], "completed")
         self.assertEqual(payload["comments"], [])
+
+    def test_only_high_and_medium_report_risks_generate_risk_tests(self):
+        findings = [
+            {"key": "high", "severity": "high", "verified": True},
+            {"key": "medium-ai", "severity": "medium", "verified": False},
+            {"key": "low", "severity": "low", "verified": True},
+        ]
+        self.assertEqual([item["key"] for item in _risk_findings_for_tests(findings)], ["high", "medium-ai"])
 
 
 class LocalGitClientTests(SimpleTestCase):

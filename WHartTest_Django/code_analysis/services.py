@@ -2,13 +2,16 @@ import fnmatch
 import json
 import os
 import re
+import signal
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote
 
 import requests
 from django.utils import timezone
+from django.db import close_old_connections
 
 from .models import AnalysisTask, AnalysisTaskExecutionLog, TestRequirementDraft, UserGitLabCredential
 
@@ -209,7 +212,9 @@ def _test_point_for(finding):
         return {"title": "验证接口兼容性与边界输入", "objective": "覆盖变更接口的正常调用、参数边界和异常返回", "expected_result": "接口契约、返回结果和异常码符合既有约定", "priority": finding.get("severity", "medium"), "test_type": "风险排查"}
     if any(token in text for token in ("vue", "ui", "页面", "组件", "template")):
         return {"title": "验证前端交互与页面回归", "objective": "覆盖变更页面的关键交互、状态切换和异常提示", "expected_result": "页面可正常加载，关键操作与提示符合需求", "priority": finding.get("severity", "medium"), "test_type": "风险排查"}
-    return {"title": "核对代码审查风险对应场景", "objective": "依据代码审查结论复核受影响的输入、处理分支和结果状态", "expected_result": "风险所描述的异常或边界行为得到明确验证，实际结果与预期一致", "priority": finding.get("severity", "medium"), "test_type": "风险排查"}
+    risk_title = str(finding.get("change") or "代码审查风险")
+    risk_impact = str(finding.get("impact") or "代码审查报告描述的行为与影响")
+    return {"title": f"排查：{risk_title}"[:500], "objective": f"根据代码审查证据构造对应触发条件，确认是否出现：{risk_impact}"[:1500], "expected_result": f"实际行为可明确判定，且不会产生代码审查报告指出的影响：{risk_impact}"[:1500], "priority": finding.get("severity", "medium"), "test_type": "风险排查"}
 
 
 def normalize_test_point_for_display(point, findings):
@@ -295,8 +300,13 @@ def _load_ocr_payload(stdout):
 
 
 def _run_ocr_process(command, *, cwd, env, timeout, task):
-    """运行 OCR，并在任务被取消或超时时主动停止子进程。"""
-    process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    """运行 OCR，并在任务被取消或超时时停止整个 OCR 进程组。"""
+    # OCR CLI 会再拉起原生 opencodereview 子进程。仅 terminate 父进程会让子进程
+    # 保持 stdout/stderr 管道，进而导致 communicate 一直等待、任务永久停在 65%。
+    process = subprocess.Popen(
+        command, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True,
+    )
     deadline = time.monotonic() + timeout
     try:
         while True:
@@ -310,13 +320,35 @@ def _run_ocr_process(command, *, cwd, env, timeout, task):
             except subprocess.TimeoutExpired:
                 continue
     except (AnalysisCancelled, subprocess.TimeoutExpired):
-        process.terminate()
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         try:
             process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
-            process.kill()
-            process.communicate()
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate(timeout=5)
         raise
+
+
+def _analysis_stage(task_id, name, function, *args):
+    """独立线程使用独立数据库连接，并记录真实阶段耗时。"""
+    close_old_connections()
+    started = time.monotonic()
+    try:
+        return function(*args)
+    finally:
+        try:
+            AnalysisTaskExecutionLog.objects.create(
+                task_id=task_id, event="stage_finished", message=f"{name}结束",
+                detail={"stage": name, "elapsed_seconds": round(time.monotonic() - started, 2)},
+            )
+        finally:
+            close_old_connections()
 
 
 def _run_open_code_review(task):
@@ -418,27 +450,66 @@ def _run_iteration_test_design(task, analyzable_diffs, findings):
             "风险列表仅用于补充风险验证，不能逐条照抄为测试点。无业务证据时不要生成空泛测试点。"
             "全程中文。先输出对本次迭代的精确总结，再按模块/业务域归类所有业务变化并拆分测试需求；文件只能作为变更依据，不能一文件对应一个测试点。"
             "必须完整输出所有识别到的业务变化，不设分组数量上限；总结不超过 80 字，每个分组不超过 2 句。"
-            "输出严格 JSON：{\"iteration_summary\":{\"title\":\"一句话迭代主题\",\"description\":\"简短业务影响\",\"change_groups\":[{\"module\":\"模块或业务域\",\"name\":\"业务变化名称\",\"description\":\"变化与影响\",\"files\":[\"文件路径\"],\"test_focus\":\"测试关注点\"}]},\"test_requirements\":[{\"change_group\":\"对应业务变化名称\",\"title\":\"\",\"objective\":\"\",\"expected_result\":\"\",\"priority\":\"high|medium|low\",\"test_type\":\"迭代验证\"}]}。\n"
+            "先合并同一业务目标下的零散代码修改，再按变更规模从大到小排列；变更规模综合影响流程、涉及模块、文件范围和测试工作量判断。"
+            "迭代总结必须分点输出，summary_points 中每个业务变化组至少对应一个独立要点，不设要点数量上限；"
+            "要点按展示顺序排列，change_groups.name 必须是对应要点的简短中文小标题；"
+            "summary_points 只写具体变化内容，不要自行添加序号，由报告统一生成 1、2、3、4 等序号。"
+            "输出严格 JSON：{\"iteration_summary\":{\"title\":\"一句话迭代主题\",\"description\":\"一句话总体影响\",\"summary_points\":[\"与change_groups逐项对应的业务变化要点\"],\"change_groups\":[{\"module\":\"模块或业务域\",\"name\":\"业务变化名称\",\"description\":\"变化与影响\",\"change_scale\":\"large|medium|small\",\"files\":[\"文件路径\"],\"test_focus\":\"测试关注点\"}]},\"test_requirements\":[{\"change_group\":\"对应业务变化名称\",\"title\":\"\",\"objective\":\"\",\"expected_result\":\"\",\"priority\":\"high|medium|low\",\"test_type\":\"迭代验证\"}]}。\n"
             f"风险摘要：{json.dumps(risks, ensure_ascii=False)}\n本次Diff：\n{diff_context}"
         )
         response = create_llm_instance(config, temperature=0.1).invoke(prompt)
         payload = _json_from_response(getattr(response, "content", response))
         usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
         points = [item for item in payload.get("test_requirements", []) if item.get("title") and item.get("objective")]
-        return payload.get("iteration_summary") or {}, points, int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0), "AI 已基于代码变更完成迭代总结并梳理测试点"
+        iteration_summary = payload.get("iteration_summary") or {}
+        groups = iteration_summary.get("change_groups") or []
+        summary_points = iteration_summary.get("summary_points") or []
+        scale_order = {"large": 3, "medium": 2, "small": 1}
+        ranked = sorted(
+            enumerate(groups),
+            key=lambda pair: (
+                scale_order.get(pair[1].get("change_scale"), 0),
+                len(pair[1].get("files") or []),
+                sum(1 for point in points if point.get("change_group") == pair[1].get("name")),
+            ),
+            reverse=True,
+        )
+        if ranked:
+            iteration_summary["change_groups"] = [group for _, group in ranked]
+            if len(summary_points) == len(groups):
+                iteration_summary["summary_points"] = [summary_points[index] for index, _ in ranked]
+        if not iteration_summary.get("summary_points"):
+            iteration_summary["summary_points"] = [
+                f"{item.get('name')}：{item.get('description')}"
+                for item in iteration_summary.get("change_groups", [])
+                if item.get("name") and item.get("description")
+            ] or ([iteration_summary["description"]] if iteration_summary.get("description") else [])
+        return iteration_summary, points, int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0), "AI 已基于代码变更完成迭代总结并梳理测试点"
     except Exception as exc:
         return {}, [], 0, f"AI 迭代测试点生成未完成：{exc}"
 
 
+def _risk_findings_for_tests(findings):
+    """只有代码审查报告中的高、中风险需要形成专项风险测试点。"""
+    return [item for item in findings if item.get("severity") in {"high", "medium"}]
+
+
 def _run_risk_test_design(task, findings):
-    """将已确认的代码审查结论逐条转为可执行的风险排查点。
+    """将代码审查报告的高、中风险逐条转为可执行的风险排查点。
 
     风险测试点的唯一事实来源是代码审查报告，避免再次从 Diff 泛化出
     “验证核心流程”这类没有落点的模板化描述。
     """
-    source_findings = [item for item in findings if item.get("verified") is not False]
+    source_findings = _risk_findings_for_tests(findings)
     if not source_findings:
-        return {}, 0, "没有已确认风险，无需生成风险排查点"
+        return {}, 0, "代码审查报告没有高风险或中风险，无需生成风险排查点"
+    points = {
+        item["key"]: item["_risk_test_point"]
+        for item in source_findings if item.get("_risk_test_point")
+    }
+    source_findings = [item for item in source_findings if item["key"] not in points]
+    if not source_findings:
+        return points, 0, "风险排查点已随代码审查同步生成"
     from langgraph_integration.models import LLMConfig
     from langgraph_integration.views import create_llm_instance
     try:
@@ -459,7 +530,6 @@ def _run_risk_test_design(task, findings):
         response = create_llm_instance(config, temperature=0.1).invoke(prompt)
         payload = _json_from_response(getattr(response, "content", response))
         known_keys = {item["key"] for item in source_findings}
-        points = {}
         for item in payload.get("risk_test_points", []):
             risk_key = str(item.get("risk_key", ""))
             if risk_key not in known_keys or not item.get("title") or not item.get("objective"):
@@ -474,7 +544,7 @@ def _run_risk_test_design(task, findings):
         tokens = int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0)
         return points, tokens, "已根据代码审查风险逐条生成风险排查点"
     except Exception as exc:
-        return {}, 0, f"风险排查点生成未完成，已使用规则化兜底：{exc}"
+        return points, 0, f"风险排查点生成未完成，已使用规则化兜底：{exc}"
 
 
 def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None):
@@ -503,7 +573,6 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
     if current:
         batches.append("\n\n".join(current))
 
-    llm = create_llm_instance(config, temperature=0.1)
     ai_findings, test_points, impact_modules, used = [], [], [], 0
     from requirements.models import RequirementDocument
     def context_from_documents(document_ids, legacy_id, label):
@@ -536,25 +605,56 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
         "按三步完成：先说明变更文件/模块；再识别类型（接口、SQL、配置、数据模型、权限、前端UI、任务/脚本等）；"
         "最后只基于明确证据评估影响范围并生成回归点。不得把单独出现的闭合标签、截断代码或未提供的上下文判断为模板语法/编译错误；"
         "模板、XML、Vue 等语法问题只有在同一 Diff 中存在明确不匹配证据时才可报告。"
+        "对每条高风险或中风险，必须同时给出基于该风险结论的中文测试标题、触发条件和可判定预期；低风险无需给风险测试内容。"
         "输出严格JSON：{\"impact_modules\":[{\"module\":\"\",\"change_type\":\"\",\"impact\":\"\",\"regression_scope\":\"\"}],\"risks\":[{\"change\":\"\",\"file\":\"\",\"severity\":\"high|medium|low\","
-        "\"confidence\":0.0,\"evidence\":\"\",\"impact\":\"\"}],\"test_requirements\":[{\"title\":\"\","
+        "\"confidence\":0.0,\"evidence\":\"\",\"impact\":\"\",\"test_title\":\"\",\"test_objective\":\"\",\"test_expected_result\":\"\"}],\"test_requirements\":[{\"title\":\"\","
         "\"objective\":\"\",\"expected_result\":\"\",\"priority\":\"high|medium|low\",\"test_type\":\"\"}]}。"
     )
-    for index, batch in enumerate(batches):
+    def analyze_batch(index, batch):
+        # 各线程使用独立模型客户端，避免共享 HTTP 会话和回调状态。
+        llm = create_llm_instance(config, temperature=0.1)
         known = [x for x in machine_findings if x.get("file") in batch]
         response = llm.invoke(f"{prompt_head}\n业务上下文：\n{business_context}\n已读取的目标版本源码上下文（只读MCP）：\n{json.dumps(repository_context, ensure_ascii=False)[:18000]}\n机器已确认风险：{json.dumps(known, ensure_ascii=False)}\nDIFF:\n{batch}")
         payload = _json_from_response(getattr(response, "content", response))
-        impact_modules.extend(payload.get("impact_modules", []))
-        for risk in payload.get("risks", []):
-            if _is_unverified_syntax_claim(risk):
-                continue
-            risk.update({"key": f"ai:{index}:{len(ai_findings)}", "source": "ai_analysis"})
-            ai_findings.append(risk)
-        test_points.extend(payload.get("test_requirements", []))
         usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
-        used += int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0)
-    coverage = round(min(len(analyzable_diffs), max_files) / len(analyzable_diffs) * 100, 1)
-    note = "AI已按文件分批分析" if coverage == 100 else f"AI仅分析前{max_files}个文件，其余保留机器分析"
+        tokens = int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0)
+        return index, payload, tokens
+
+    successful_batches, batch_errors = 0, []
+    worker_count = min(3, len(batches))
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="diff-review") as executor:
+        futures = [executor.submit(analyze_batch, index, batch) for index, batch in enumerate(batches)]
+        for index, future in enumerate(futures):
+            try:
+                batch_index, payload, batch_tokens = future.result()
+            except Exception as exc:
+                batch_errors.append(f"批次{index + 1}失败：{exc}")
+                continue
+            successful_batches += 1
+            used += batch_tokens
+            impact_modules.extend(payload.get("impact_modules", []))
+            for risk_index, risk in enumerate(payload.get("risks", [])):
+                if _is_unverified_syntax_claim(risk):
+                    continue
+                test_title = str(risk.pop("test_title", "") or "").strip()
+                test_objective = str(risk.pop("test_objective", "") or "").strip()
+                test_expected = str(risk.pop("test_expected_result", "") or "").strip()
+                if risk.get("severity") in {"high", "medium"} and test_title and test_objective:
+                    risk["_risk_test_point"] = {
+                        "title": test_title[:500], "objective": test_objective[:1500],
+                        "expected_result": (test_expected or "风险场景的实际行为与代码审查结论一致")[:1500],
+                        "test_type": "风险排查",
+                    }
+                risk.update({"key": f"ai:{batch_index}:{risk_index}", "source": "ai_analysis"})
+                ai_findings.append(risk)
+            test_points.extend(payload.get("test_requirements", []))
+    selected_coverage = min(len(analyzable_diffs), max_files) / len(analyzable_diffs) * 100
+    batch_coverage = successful_batches / len(batches) if batches else 0
+    coverage = round(selected_coverage * batch_coverage, 1)
+    if batch_errors:
+        note = f"AI并行分析完成 {successful_batches}/{len(batches)} 个批次；" + "；".join(batch_errors)
+    else:
+        note = "AI已并行完成全部 Diff 批次分析" if coverage == 100 else f"AI仅分析前{max_files}个文件，其余保留机器分析"
     return ai_findings, test_points, impact_modules, used, coverage, note
 
 
@@ -656,27 +756,42 @@ def run_analysis(task: AnalysisTask):
         task.status, task.progress, task.current_step = "ai_analyzing", 65, "分批分析语义风险"
         task.save(update_fields=["status", "progress", "current_step", "updated_at"])
         ai_failed = False
+        # 迭代需求来自 Diff，不依赖 OCR 风险；两项可同时执行。
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="iteration-design")
+        iteration_future = executor.submit(
+            _analysis_stage, task.pk, "迭代需求分析", _run_iteration_test_design,
+            task, analyzable_diffs, list(findings),
+        )
         try:
-            ocr_findings, ocr_tokens, ocr_note, ocr_completed, ocr_coverage = _run_open_code_review(task)
+            ocr_findings, ocr_tokens, ocr_note, ocr_completed, ocr_coverage = _analysis_stage(task.pk, "OCR审查", _run_open_code_review, task)
             if ocr_completed:
                 ocr_findings, chinese_tokens, chinese_note = _normalize_ocr_findings(task, ocr_findings)
                 findings.extend(ocr_findings)
                 ai_findings, iteration_test_points, impact_modules, enrichment_tokens, enrichment_note = [], [], [], 0, ""
-                iteration_summary, iteration_test_points, iteration_tokens, iteration_note = _run_iteration_test_design(task, analyzable_diffs, findings)
                 document_test_points, impact_modules, enrichment_tokens, enrichment_note = _run_context_test_enrichment(task, findings)
-                iteration_test_points.extend(document_test_points)
-                token_usage, ai_coverage = ocr_tokens + chinese_tokens + iteration_tokens + enrichment_tokens, ocr_coverage
-                ai_note = f"{ocr_note}；{chinese_note}；{iteration_note}；{enrichment_note}"
+                token_usage, ai_coverage = ocr_tokens + chinese_tokens + enrichment_tokens, ocr_coverage
+                ai_note = f"{ocr_note}；{chinese_note}；{enrichment_note}"
             else:
                 ai_findings, _unused_points, impact_modules, token_usage, ai_coverage, ai_note = _run_ai_batches(task, analyzable_diffs, findings, client if task.repository.source_type != "local_git" else None)
                 ai_note = f"{ocr_note}；{ai_note}"
                 findings.extend(ai_findings)
-                iteration_summary, iteration_test_points, iteration_tokens, iteration_note = _run_iteration_test_design(task, analyzable_diffs, findings)
-                token_usage += iteration_tokens
-                ai_note = f"{ai_note}；{iteration_note}"
+                document_test_points, document_modules, enrichment_tokens, enrichment_note = _run_context_test_enrichment(task, findings)
+                impact_modules.extend(document_modules)
+                token_usage += enrichment_tokens
+            iteration_summary, iteration_test_points, iteration_tokens, iteration_note = iteration_future.result()
+            iteration_test_points.extend(document_test_points)
+            token_usage += iteration_tokens
+            ai_note = f"{ai_note}；{iteration_note}"
+        except AnalysisCancelled:
+            raise
         except Exception as exc:
             ai_findings, iteration_summary, iteration_test_points, impact_modules, token_usage, ai_coverage = [], {}, [], [], 0, 0
             ai_note, ai_failed = f"AI分析失败，已保留机器结果：{exc}", True
+            # 审查失败时仍保留独立生成的迭代需求。
+            iteration_summary, iteration_test_points, iteration_tokens, iteration_note = iteration_future.result()
+            token_usage += iteration_tokens
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         _ensure_not_cancelled(task)
         task.status, task.progress, task.current_step = "generating_tests", 82, "生成测试分析报告"
@@ -685,6 +800,8 @@ def run_analysis(task: AnalysisTask):
         for finding in findings:
             finding["verified"] = finding.get("source") != "ai_analysis"
         risk_test_points, risk_test_tokens, risk_test_note = _run_risk_test_design(task, findings)
+        for finding in findings:
+            finding.pop("_risk_test_point", None)
         token_usage += risk_test_tokens
         ai_note = f"{ai_note}；{risk_test_note}"
         task.raw_diff = "\n\n".join(raw_parts)[:2_000_000]
@@ -700,9 +817,9 @@ def run_analysis(task: AnalysisTask):
             "analysis_note": "；".join([*static_notes, ai_note]),
         }
         drafts = []
-        # 已确认的代码审查风险生成风险测试点：一条测试点只关联一条源风险，
-        # 且优先级严格继承源风险等级；AI 待确认提示不生成风险测试点。
-        for finding in [item for item in findings if item.get("verified") is not False]:
+        # 代码审查报告中的高、中风险逐条生成风险测试点；低风险不生成专项测试点。
+        # 优先级严格继承源风险等级，保留风险键以供报告追溯。
+        for finding in _risk_findings_for_tests(findings):
             point = risk_test_points.get(finding["key"], _test_point_for(finding))
             point["priority"] = finding.get("severity", "medium")
             point["test_type"] = "风险排查"
