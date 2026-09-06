@@ -16,7 +16,7 @@ def run_code_analysis(self, task_id):
     """在后台执行代码分析；业务进度和最终结果以数据库记录为准。"""
     try:
         task = AnalysisTask.objects.select_related(
-            "project", "repository__connection", "creator"
+            "project", "repository__connection", "creator", "executor"
         ).get(pk=task_id)
     except AnalysisTask.DoesNotExist:
         return {"status": "missing"}

@@ -28,9 +28,13 @@ class GitLabConnection(models.Model):
 
 
 class ProjectRepository(models.Model):
+    SOURCE_CHOICES = [("gitlab", "GitLab"), ("local_git", "本地 Git（开发测试）")]
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="code_repositories")
-    connection = models.ForeignKey(GitLabConnection, on_delete=models.PROTECT, related_name="repositories")
-    gitlab_project_id = models.CharField(max_length=255)
+    source_type = models.CharField(max_length=20, choices=SOURCE_CHOICES, default="gitlab")
+    connection = models.ForeignKey(GitLabConnection, on_delete=models.PROTECT, related_name="repositories", null=True, blank=True)
+    gitlab_project_id = models.CharField(max_length=255, blank=True)
+    # 仅允许相对于容器内 /workspace 的路径，避免将任意宿主机路径暴露给任务。
+    local_path = models.CharField(max_length=500, blank=True)
     name = models.CharField(max_length=255)
     path_with_namespace = models.CharField(max_length=500)
     default_branch = models.CharField(max_length=255, default="main")
@@ -80,11 +84,20 @@ class AnalysisTask(models.Model):
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="code_analysis_tasks")
     repository = models.ForeignKey(ProjectRepository, on_delete=models.CASCADE, related_name="analysis_tasks")
     creator = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="code_analysis_tasks")
+    # 创建人与最近一次执行人分离：成员协作重跑时，只能使用自己的 GitLab Token。
+    executor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="executed_code_analysis_tasks")
     source_type = models.CharField(max_length=20, choices=SOURCE_CHOICES)
     merge_request_iid = models.PositiveIntegerField(null=True, blank=True)
     base_sha = models.CharField(max_length=64, blank=True)
     head_sha = models.CharField(max_length=64, blank=True)
     title = models.CharField(max_length=500, blank=True)
+    requirement_context = models.TextField(blank=True)
+    api_context = models.TextField(blank=True)
+    requirement_document_id = models.UUIDField(null=True, blank=True)
+    api_document_id = models.UUIDField(null=True, blank=True)
+    # 多选文档；保留旧单选字段，保证历史审查任务仍可读取。
+    requirement_document_ids = models.JSONField(default=list, blank=True)
+    api_document_ids = models.JSONField(default=list, blank=True)
     mode = models.CharField(max_length=20, choices=MODE_CHOICES, default="standard")
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default="pending", db_index=True)
     progress = models.PositiveSmallIntegerField(default=0)
@@ -105,6 +118,24 @@ class AnalysisTask(models.Model):
         ordering = ["-created_at"]
 
 
+class AnalysisTaskExecutionLog(models.Model):
+    """保留一次任务从提交到结束的关键事件，便于审计和定位失败原因。"""
+    EVENT_CHOICES = [
+        ("created", "已创建"), ("queued", "已入队"), ("started", "已开始"),
+        ("completed", "已完成"), ("partial", "部分完成"), ("failed", "执行失败"),
+        ("cancelled", "已取消"),
+    ]
+    task = models.ForeignKey(AnalysisTask, on_delete=models.CASCADE, related_name="execution_logs")
+    event = models.CharField(max_length=20, choices=EVENT_CHOICES)
+    message = models.CharField(max_length=500, blank=True)
+    detail = models.JSONField(default=dict, blank=True)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="code_analysis_execution_logs")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+
 class TestRequirementDraft(models.Model):
     STATUS_CHOICES = [("draft", "AI草稿"), ("accepted", "已采纳"), ("ignored", "已忽略"), ("converted", "已转用例")]
     task = models.ForeignKey(AnalysisTask, on_delete=models.CASCADE, related_name="test_requirement_drafts")
@@ -115,4 +146,5 @@ class TestRequirementDraft(models.Model):
     test_type = models.CharField(max_length=100, default="功能回归")
     source_finding_key = models.CharField(max_length=255, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft")
+    converted_test_case = models.ForeignKey("testcases.TestCase", on_delete=models.SET_NULL, null=True, blank=True, related_name="code_review_drafts")
     created_at = models.DateTimeField(auto_now_add=True)

@@ -215,7 +215,7 @@ RUN set -eux; \
 # 国内网络无法访问 storage.googleapis.com，Chrome for Testing 改用国内镜像下载后解压，
 # 并通过 AGENT_BROWSER_EXECUTABLE_PATH 让 agent-browser 直接使用该 Chrome。
 RUN npm config set registry "${NPM_REGISTRY}" && \
-    npm install -g agent-browser && \
+    npm install -g agent-browser @alibaba-group/open-code-review && \
     case "$(uname -m)" in \
       aarch64|arm64) \
         echo "Skipping agent-browser install on Linux ARM64; Chrome for Testing is not available for this platform."; \

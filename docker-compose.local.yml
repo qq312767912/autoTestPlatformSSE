@@ -72,6 +72,8 @@ services:
       - ./data:/app/data
       - backend-static:/app/static
       - ./WHartTest_Skills:/app/bundled_skills:ro
+      # 仅供“代码审查-本地 Git”开发验证使用；服务内只接受 /workspace 下的相对路径。
+      - ./:/workspace:ro
       - ./WHartTest_Django/supervisord.conf:/app/supervisord.conf:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"

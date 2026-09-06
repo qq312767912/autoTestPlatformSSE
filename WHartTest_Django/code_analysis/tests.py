@@ -1,13 +1,17 @@
 from unittest.mock import patch
 from types import SimpleNamespace
+import os
+import subprocess
+import tempfile
+from pathlib import Path
 
 from django.contrib.auth.models import User
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from rest_framework.test import APIClient
 
 from projects.models import Project, ProjectMember
-from .models import AnalysisTask, GitLabConnection, ProjectRepository, UserGitLabCredential
-from .services import DEFAULT_ANNOTATIONS, _diff_line_stats, _parse_diff, run_analysis
+from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
+from .services import DEFAULT_ANNOTATIONS, LocalGitClient, _diff_line_stats, _load_ocr_payload, _parse_diff, run_analysis
 
 
 class DiffRuleTests(TestCase):
@@ -22,6 +26,69 @@ class DiffRuleTests(TestCase):
 
     def test_diff_line_stats_excludes_file_headers(self):
         self.assertEqual(_diff_line_stats("--- a/a.py\n+++ b/a.py\n-old\n+new\n+more"), (2, 1))
+
+    def test_python_permission_decorator_removal_is_high_risk(self):
+        findings = _parse_diff("-@login_required\n def view(): pass\n", "app/views.py", set())
+        self.assertEqual(findings[0]["severity"], "high")
+
+    def test_deleted_security_config_is_high_risk(self):
+        findings = _parse_diff("-security.verify-ssl: true\n", "application.yml", set())
+        self.assertEqual(findings[0]["change"], "删除关键配置：security.verify-ssl")
+        self.assertEqual(findings[0]["severity"], "high")
+
+    def test_same_evidence_is_not_counted_twice(self):
+        from .services import _deduplicate_findings
+        duplicated = [{"file": "a.java", "evidence": "@Excel", "source": "machine_rule"}, {"file": "a.java", "evidence": "@Excel", "source": "ai_analysis"}]
+        self.assertEqual(len(_deduplicate_findings(duplicated)), 1)
+
+    def test_unverified_ai_syntax_claim_is_filtered(self):
+        from .services import _is_unverified_syntax_claim
+        self.assertTrue(_is_unverified_syntax_claim({"change": "闭合标签写错", "impact": "Vue 模板编译错误"}))
+        self.assertFalse(_is_unverified_syntax_claim({"change": "权限校验缺失", "impact": "未授权访问"}))
+
+    def test_ocr_payload_ignores_non_json_prefix(self):
+        payload = _load_ocr_payload("OCR started\\n{\"status\": \"completed\", \"comments\": []}")
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["comments"], [])
+
+
+class LocalGitClientTests(SimpleTestCase):
+    def test_local_git_compares_two_branch_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def git(*args):
+                return subprocess.run(["git", "-C", directory, *args], check=True, capture_output=True, text=True)
+            git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test")
+            file_path = os.path.join(directory, "Demo.java")
+            with open(file_path, "w", encoding="utf-8") as handle: handle.write("@Excel\nprivate String name;\n")
+            git("add", "."); git("commit", "-m", "base"); git("branch", "base")
+            with open(file_path, "w", encoding="utf-8") as handle: handle.write("private String name;\n")
+            git("commit", "-am", "remove annotation"); git("branch", "head")
+            original_root = LocalGitClient.ROOT
+            try:
+                LocalGitClient.ROOT = Path(directory).resolve()
+                result = LocalGitClient(".").compare("base", "head")
+            finally:
+                LocalGitClient.ROOT = original_root
+            self.assertEqual(len(result["diffs"]), 1)
+            self.assertIn("@Excel", result["diffs"][0]["diff"])
+
+    def test_local_git_tolerates_non_utf8_diff_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def git(*args):
+                return subprocess.run(["git", "-C", directory, *args], check=True, capture_output=True, text=True)
+            git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test")
+            file_path = os.path.join(directory, "legacy.properties")
+            with open(file_path, "wb") as handle: handle.write(b"name=\\xcb\\xd4")
+            git("add", "."); git("commit", "-m", "base"); git("branch", "base")
+            with open(file_path, "wb") as handle: handle.write(b"name=\\xcb\\xd4\\xca\\xd4")
+            git("commit", "-am", "legacy encoding"); git("branch", "head")
+            original_root = LocalGitClient.ROOT
+            try:
+                LocalGitClient.ROOT = Path(directory).resolve()
+                result = LocalGitClient(".").compare("base", "head")
+            finally:
+                LocalGitClient.ROOT = original_root
+            self.assertEqual(len(result["diffs"]), 1)
 
 
 class AnalysisLifecycleTests(TestCase):
@@ -94,6 +161,107 @@ class AnalysisLifecycleTests(TestCase):
         self.assertEqual(task.current_step, "等待后台执行")
         self.assertEqual(task.celery_task_id, "celery-job-1")
         delay.assert_called_once_with(str(task.id))
+        self.assertEqual(list(task.execution_logs.values_list("event", flat=True)), ["queued"])
+
+    @patch("code_analysis.tasks.run_code_analysis.delay")
+    def test_running_repository_rejects_duplicate_queue(self, delay):
+        current = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="a" * 40, head_sha="b" * 40,
+            status="pending", celery_task_id="already-queued",
+        )
+        task = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="c" * 40, head_sha="d" * 40,
+        )
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.post(f"/api/code-analysis/tasks/{task.id}/run/")
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("正在运行", response.data["detail"])
+        delay.assert_not_called()
+        self.assertEqual(current.status, "pending")
+
+    def test_execution_logs_are_visible_to_project_member(self):
+        task = AnalysisTask.objects.create(project=self.project, repository=self.repository, creator=self.user, source_type="commits", base_sha="a", head_sha="b")
+        AnalysisTaskExecutionLog.objects.create(task=task, event="completed", message="分析完成")
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.get(f"/api/code-analysis/tasks/{task.id}/execution-logs/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data[0]["event"], "completed")
+
+    def test_project_member_can_read_another_members_reports_diff_and_logs(self):
+        member = User.objects.create_user("reviewer", password="secret")
+        ProjectMember.objects.create(project=self.project, user=member, role="member")
+        task = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="a", head_sha="b", raw_diff="diff -- src/a.py\n+print('ok')",
+            change_report={"summary": {}, "findings": []}, test_report={"summary": {}, "test_requirements": []},
+        )
+        AnalysisTaskExecutionLog.objects.create(task=task, event="completed", message="分析完成")
+        client = APIClient(); client.force_authenticate(member)
+        self.assertEqual(client.get(f"/api/code-analysis/tasks/?project={self.project.id}").status_code, 200)
+        self.assertEqual(client.get(f"/api/code-analysis/tasks/{task.id}/diff/").status_code, 200)
+        self.assertEqual(client.get(f"/api/code-analysis/tasks/{task.id}/execution-logs/").status_code, 200)
+        self.assertEqual(client.get(f"/api/code-analysis/tasks/{task.id}/download-change-report/").status_code, 200)
+        self.assertEqual(client.get(f"/api/code-analysis/tasks/{task.id}/download-test-report/").status_code, 200)
+
+    @patch("code_analysis.tasks.run_code_analysis.delay")
+    def test_project_member_can_rerun_task_with_own_executor(self, delay):
+        member = User.objects.create_user("reviewer", password="secret")
+        ProjectMember.objects.create(project=self.project, user=member, role="member")
+        task = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="a" * 40, head_sha="b" * 40, status="failed",
+        )
+        delay.return_value = SimpleNamespace(id="celery-member-run")
+        client = APIClient(); client.force_authenticate(member)
+        response = client.post(f"/api/code-analysis/tasks/{task.id}/run/")
+        self.assertEqual(response.status_code, 202)
+        task.refresh_from_db()
+        self.assertEqual(task.executor_id, member.id)
+        self.assertEqual(task.creator_id, self.user.id)
+        log = task.execution_logs.get(event="queued")
+        self.assertEqual(log.actor_id, member.id)
+        response = client.get(f"/api/code-analysis/tasks/{task.id}/execution-logs/")
+        self.assertEqual(response.data[-1]["actor_name"], "reviewer")
+
+    def test_project_member_can_edit_another_members_test_draft(self):
+        member = User.objects.create_user("reviewer", password="secret")
+        ProjectMember.objects.create(project=self.project, user=member, role="member")
+        task = AnalysisTask.objects.create(project=self.project, repository=self.repository, creator=self.user, source_type="commits", base_sha="a", head_sha="b")
+        draft = TestRequirementDraft.objects.create(task=task, title="旧标题")
+        client = APIClient(); client.force_authenticate(member)
+        response = client.patch(f"/api/code-analysis/test-requirements/{draft.id}/", {"title": "成员已编辑", "status": "accepted"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        draft.refresh_from_db()
+        self.assertEqual((draft.title, draft.status), ("成员已编辑", "accepted"))
+
+    def test_project_member_can_accept_ignore_and_convert_draft_to_testcase(self):
+        from testcases.models import TestCase, TestCaseModule
+        member = User.objects.create_user("reviewer2", password="secret")
+        ProjectMember.objects.create(project=self.project, user=member, role="member")
+        task = AnalysisTask.objects.create(project=self.project, repository=self.repository, creator=self.user, source_type="commits", base_sha="a", head_sha="b")
+        draft = TestRequirementDraft.objects.create(task=task, title="验证导出权限", objective="以无权限账号发起导出", expected_result="接口拒绝且页面无导出入口", priority="high", test_type="安全回归")
+        ignored = TestRequirementDraft.objects.create(task=task, title="无需处理")
+        module = TestCaseModule.objects.create(project=self.project, name="代码审查回归", level=1, creator=self.user)
+        client = APIClient(); client.force_authenticate(member)
+        self.assertEqual(client.post(f"/api/code-analysis/test-requirements/{draft.id}/accept/").status_code, 200)
+        self.assertEqual(client.post(f"/api/code-analysis/test-requirements/{ignored.id}/ignore/").status_code, 200)
+        response = client.post(f"/api/code-analysis/test-requirements/{draft.id}/convert/", {"module_id": module.id}, format="json")
+        self.assertEqual(response.status_code, 201)
+        draft.refresh_from_db(); ignored.refresh_from_db()
+        self.assertEqual((draft.status, ignored.status), ("converted", "ignored"))
+        case = TestCase.objects.get(pk=response.data["test_case_id"])
+        self.assertEqual((case.project_id, case.module_id, case.level), (self.project.id, module.id, "P0"))
+        self.assertIn(str(task.id), case.notes)
+        self.assertEqual(case.steps.count(), 1)
+
+    def test_context_enrichment_skips_when_no_document_is_selected(self):
+        from .services import _run_context_test_enrichment
+        task = AnalysisTask.objects.create(project=self.project, repository=self.repository, creator=self.user, source_type="commits", base_sha="a", head_sha="b")
+        points, modules, tokens, note = _run_context_test_enrichment(task, [])
+        self.assertEqual((points, modules, tokens), ([], [], 0))
+        self.assertIn("未关联", note)
 
     @patch("code_analysis.views.current_app.control.revoke")
     def test_cancel_marks_task_and_revokes_queued_job(self, revoke):

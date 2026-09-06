@@ -1,19 +1,33 @@
 import fnmatch
 import json
+import os
 import re
+import subprocess
+import time
+from pathlib import Path
 from urllib.parse import quote
 
 import requests
 from django.utils import timezone
 
-from .models import AnalysisTask, TestRequirementDraft, UserGitLabCredential
+from .models import AnalysisTask, AnalysisTaskExecutionLog, TestRequirementDraft, UserGitLabCredential
 
 
 DEFAULT_ANNOTATIONS = {
     "Excel", "ExcelProperty", "JsonProperty", "JSONField", "NotNull", "NotBlank",
     "Size", "Transactional", "PreAuthorize", "RequestMapping", "GetMapping", "PostMapping",
+    "PutMapping", "DeleteMapping", "PatchMapping", "Secured", "RolesAllowed", "Validated",
+    "RequestBody", "PathVariable", "RequestParam", "ResponseBody", "Column", "Id",
 }
+API_ANNOTATIONS = {"RequestMapping", "GetMapping", "PostMapping", "PutMapping", "DeleteMapping", "PatchMapping", "PreAuthorize", "Secured", "RolesAllowed"}
+PYTHON_DECORATORS = {"login_required", "permission_required", "require_http_methods", "api_view", "transaction.atomic"}
 CRITICAL_MODIFIERS = {"public", "protected", "private", "static", "final", "synchronized", "volatile", "abstract"}
+SENSITIVE_CONFIG_KEYS = {"enabled", "enable", "auth", "authentication", "authorization", "permission", "security", "ssl", "verify", "timeout", "retry", "url", "endpoint"}
+
+# OpenCodeReview 参数统一维护。内网自建模型不限制 token；OCR 需要保留原生上下文，
+# 否则多轮工具调用可能在上下文压缩阶段提前结束。
+OCR_CONCURRENCY = 4
+OCR_TIMEOUT_SECONDS = {"standard": 360, "deep": 600}
 
 
 class AnalysisCancelled(Exception):
@@ -49,25 +63,112 @@ class GitLabClient:
     def compare(self, project_id, base_sha, head_sha):
         return self.get(f"/projects/{quote(str(project_id), safe='')}/repository/compare", {"from": base_sha, "to": head_sha, "straight": True})
 
+    def raw_file(self, project_id, path, ref):
+        encoded = quote(path, safe="")
+        response = requests.get(f"{self.base_url}/api/v4/projects/{quote(str(project_id), safe='')}/repository/files/{encoded}/raw", headers=self.headers, params={"ref": ref}, timeout=20, verify=self.verify)
+        response.raise_for_status()
+        return response.text
+
+
+class LocalGitClient:
+    """本地开发验证专用的只读 Git 读取器。仓库只能位于 /workspace 挂载目录。"""
+    ROOT = Path("/workspace").resolve()
+
+    def __init__(self, relative_path):
+        self.path = (self.ROOT / (relative_path or ".")).resolve()
+        if self.path != self.ROOT and self.ROOT not in self.path.parents:
+            raise ValueError("本地仓库路径不在允许范围内")
+        if not (self.path / ".git").exists():
+            raise ValueError(f"本地 Git 仓库不存在：{relative_path}")
+
+    def _git(self, *args):
+        # 历史仓库中可能存在 GBK 等非 UTF-8 文本；审查任务不能因单个文件编码失败。
+        result = subprocess.run(
+            ["git", "-C", str(self.path), "--no-pager", *args],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=45,
+        )
+        if result.returncode:
+            raise ValueError(result.stderr.strip() or "本地 Git 命令执行失败")
+        return result.stdout
+
+    def resolve(self, ref):
+        return self._git("rev-parse", "--verify", f"{ref}^{{commit}}").strip()
+
+    def compare(self, base_ref, head_ref):
+        base_sha, head_sha = self.resolve(base_ref), self.resolve(head_ref)
+        name_status = self._git("diff", "--name-status", "--find-renames", base_sha, head_sha)
+        diffs = []
+        for row in name_status.splitlines():
+            parts = row.split("\t")
+            if len(parts) < 2:
+                continue
+            status, old_path, new_path = parts[0], parts[-2] if len(parts) > 2 else parts[1], parts[-1]
+            target = new_path if not status.startswith("D") else old_path
+            diff = self._git("diff", "--no-ext-diff", "--find-renames", base_sha, head_sha, "--", target)
+            diffs.append({"old_path": old_path, "new_path": new_path, "new_file": status.startswith("A"), "deleted_file": status.startswith("D"), "diff": diff})
+        return {"base_sha": base_sha, "head_sha": head_sha, "diffs": diffs}
+
+
+def _deleted_line_numbers(diff_text):
+    """返回被删除文本在旧版本源码中的行号，供报告跳转和人工复核使用。"""
+    result, old_line = {}, None
+    for raw in diff_text.splitlines():
+        hunk = re.match(r"@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@", raw)
+        if hunk:
+            old_line = int(hunk.group(1))
+            continue
+        if old_line is None:
+            continue
+        if raw.startswith("-") and not raw.startswith("---"):
+            result.setdefault(raw[1:].strip(), []).append(old_line)
+            old_line += 1
+        elif raw.startswith(" "):
+            old_line += 1
+    return result
+
 
 def _parse_diff(diff_text, file_path, annotations):
     findings = []
+    line_numbers = _deleted_line_numbers(diff_text)
     deleted = [line[1:].strip() for line in diff_text.splitlines() if line.startswith("-") and not line.startswith("---")]
     for line in deleted:
+        line_start = (line_numbers.get(line) or [None]).pop(0)
         annotation = re.match(r"@([A-Za-z_$][\w$]*)", line)
         if annotation and annotation.group(1) in annotations:
             name = annotation.group(1)
+            impact = "接口暴露范围、路由映射或访问控制可能发生变化" if name in API_ANNOTATIONS else "字段映射、接口契约、权限、事务或校验行为可能发生变化"
             findings.append({
                 "key": f"annotation:{file_path}:{name}:{len(findings)}", "change": f"删除 @{name} 注解",
                 "file": file_path, "severity": "high", "source": "machine_rule", "confidence": 1.0,
-                "evidence": line, "impact": "字段映射、接口契约、权限、事务或校验行为可能发生变化",
+                "evidence": line, "line_start": line_start, "impact": impact,
+            })
+        python_decorator = re.match(r"@([\w.]+)", line)
+        if python_decorator and python_decorator.group(1) in PYTHON_DECORATORS:
+            findings.append({
+                "key": f"pydecorator:{file_path}:{python_decorator.group(1)}:{len(findings)}", "change": f"删除 Python 装饰器 @{python_decorator.group(1)}",
+                "file": file_path, "severity": "high", "source": "machine_rule", "confidence": 0.95,
+                "evidence": line, "line_start": line_start, "impact": "认证、权限、请求方法限制或事务边界可能失效",
+            })
+        if file_path.endswith((".yml", ".yaml", ".properties", ".env")):
+            config_key = re.match(r"([A-Za-z][\w.-]*)\s*(?::|=)", line)
+            if config_key and any(token in config_key.group(1).lower() for token in SENSITIVE_CONFIG_KEYS):
+                findings.append({
+                    "key": f"config:{file_path}:{len(findings)}", "change": f"删除关键配置：{config_key.group(1)}",
+                    "file": file_path, "severity": "high", "source": "machine_rule", "confidence": 0.9,
+                    "evidence": line, "line_start": line_start, "impact": "认证、安全通信、服务连通性或超时重试策略可能失效",
+                })
+        if file_path.endswith((".vue", ".tsx", ".jsx")) and ("v-permission" in line or "hasPermission" in line or "v-if" in line and "permission" in line.lower()):
+            findings.append({
+                "key": f"frontend-permission:{file_path}:{len(findings)}", "change": "删除前端权限控制条件",
+                "file": file_path, "severity": "high", "source": "machine_rule", "confidence": 0.9,
+                "evidence": line, "line_start": line_start, "impact": "受限操作可能在前端暴露，需验证后端鉴权与菜单可见性",
             })
         modifier_tokens = set(re.findall(r"\b(public|protected|private|static|final|synchronized|volatile|abstract)\b", line))
         if modifier_tokens & CRITICAL_MODIFIERS and re.search(r"\b(class|interface|enum|\w+\s*\()", line):
             findings.append({
                 "key": f"modifier:{file_path}:{len(findings)}", "change": f"删除包含修饰符的声明：{line[:120]}",
                 "file": file_path, "severity": "medium", "source": "machine_rule", "confidence": 0.9,
-                "evidence": line, "impact": "可见性、共享状态、不可变性或并发语义可能变化",
+                "evidence": line, "line_start": line_start, "impact": "可见性、共享状态、不可变性或并发语义可能变化",
             })
     return findings
 
@@ -78,11 +179,88 @@ def _diff_line_stats(diff_text):
     return additions, deletions
 
 
+def _impact_scope_count(files):
+    """以变更文件的前两级目录归并影响范围；根目录文件单独计入。"""
+    scopes = set()
+    for item in files:
+        path = item.get("path", "")
+        parts = [part for part in path.split("/") if part]
+        if parts:
+            scopes.add("/".join(parts[:2]) if len(parts) > 1 else parts[0])
+    return len(scopes)
+
+
 def _test_point_for(finding):
     evidence = finding.get("evidence", "")
     if "@Excel" in evidence or "@ExcelProperty" in evidence:
-        return {"title": "验证Excel导入导出字段完整性", "objective": "确认注解变更未导致列缺失、表头或顺序异常", "expected_result": "导入导出字段、表头、顺序和数据与需求一致", "priority": "high", "test_type": "功能回归"}
-    return {"title": f"验证{finding['change']}的业务兼容性", "objective": finding.get("impact", "验证代码变更影响"), "expected_result": "相关功能、接口及异常分支行为符合需求", "priority": finding.get("severity", "medium"), "test_type": "变更回归"}
+        return {"title": "验证Excel导入导出字段完整性", "objective": "确认注解变更未导致列缺失、表头或顺序异常", "expected_result": "导入导出字段、表头、顺序和数据与需求一致", "priority": "high", "test_type": "风险排查"}
+    if finding["key"].startswith(("annotation:", "pydecorator:", "frontend-permission:")):
+        return {"title": "验证认证与权限边界", "objective": "确认变更后未授权用户无法访问受限接口、菜单或操作", "expected_result": "鉴权、授权、接口路由和前端可见性均符合原有权限规则", "priority": "high", "test_type": "风险排查"}
+    if finding["key"].startswith("config:"):
+        return {"title": "验证关键配置与异常降级", "objective": "确认部署配置删除或调整后服务安全连接、超时与重试策略仍有效", "expected_result": "服务可用，安全配置与失败场景处理符合发布要求", "priority": "high", "test_type": "风险排查"}
+    # OCR 风险结论往往是长篇自然语言，不能原样拼进测试点标题。
+    # 将它转为测试人员可执行的验证目标，而不是把审查意见伪装成测试需求。
+    text = " ".join(str(finding.get(key, "")) for key in ("change", "evidence", "impact")).lower()
+    if any(token in text for token in ("bare exception", "catching.*exception", "swallow", "instance.save", "persist", "trace_data")):
+        return {"title": "验证异常处理与结果持久化", "objective": "模拟保存或数据持久化失败，确认异常不会被误判为成功，且后续读取不会重复执行无效处理", "expected_result": "失败状态、错误反馈与实际持久化结果一致；失败数据不会被标记为成功", "priority": finding.get("severity", "medium"), "test_type": "风险排查"}
+    if any(token in text for token in ("exception", "异常", "error", "错误", "失败")):
+        return {"title": "验证异常分支与错误反馈", "objective": "覆盖本次变更涉及的失败输入、依赖异常和重试场景", "expected_result": "异常被正确处理并返回可识别的失败结果，不影响正常业务流程", "priority": finding.get("severity", "medium"), "test_type": "风险排查"}
+    if any(token in text for token in ("api", "接口", "request", "response", "route")):
+        return {"title": "验证接口兼容性与边界输入", "objective": "覆盖变更接口的正常调用、参数边界和异常返回", "expected_result": "接口契约、返回结果和异常码符合既有约定", "priority": finding.get("severity", "medium"), "test_type": "风险排查"}
+    if any(token in text for token in ("vue", "ui", "页面", "组件", "template")):
+        return {"title": "验证前端交互与页面回归", "objective": "覆盖变更页面的关键交互、状态切换和异常提示", "expected_result": "页面可正常加载，关键操作与提示符合需求", "priority": finding.get("severity", "medium"), "test_type": "风险排查"}
+    return {"title": "核对代码审查风险对应场景", "objective": "依据代码审查结论复核受影响的输入、处理分支和结果状态", "expected_result": "风险所描述的异常或边界行为得到明确验证，实际结果与预期一致", "priority": finding.get("severity", "medium"), "test_type": "风险排查"}
+
+
+def normalize_test_point_for_display(point, findings):
+    """兼容历史 OCR 草稿：旧版本把审查原文当作测试标题，展示/下载时实时规范化。
+
+    不改写用户已经采纳或转为正式用例的原始数据，只修复报告呈现层。
+    """
+    normalized = dict(point)
+    source_key = str(normalized.get("source_finding_key", ""))
+    legacy_ocr = source_key.startswith("ocr:") and "OCR 分类" in str(normalized.get("objective", ""))
+    if not legacy_ocr:
+        return normalized
+    finding = next((item for item in findings if item.get("key") == source_key), None)
+    if not finding:
+        return normalized
+    normalized.update(_test_point_for(finding))
+    return normalized
+
+
+def normalize_finding_for_display(finding):
+    """兼容历史 OCR 英文评论的中文呈现；新任务由 AI 中文整理提供更完整表述。"""
+    normalized = dict(finding)
+    if normalized.get("source") != "ocr_ai" or normalized.get("recommendation"):
+        return normalized
+    text = " ".join(str(normalized.get(key, "")) for key in ("change", "impact", "evidence")).lower()
+    if "bare" in text and "exception" in text:
+        normalized.update({
+            "change": "异常捕获范围过宽，可能掩盖数据保存失败",
+            "impact": "保存失败可能仍返回成功状态，后续请求会重复处理数据，导致状态与实际结果不一致",
+            "recommendation": "区分可预期的数据库异常与其他异常；保存失败时返回失败结果，并验证重复请求行为",
+        })
+    else:
+        normalized.update({
+            "change": "OCR 发现潜在代码风险（需人工确认）",
+            "impact": "请结合下方代码证据和完整 Diff 确认实际影响范围",
+            "recommendation": "覆盖正常流程、异常分支及变更文件相关调用链后再决定是否修复",
+        })
+    return normalized
+
+
+def _deduplicate_findings(findings):
+    """同一文件、同一证据只保留确定性规则，避免 AI 重复放大风险数。"""
+    unique, seen = [], set()
+    for finding in findings:
+        evidence = (finding.get("evidence") or "").strip()
+        identity = (finding.get("file", ""), evidence)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(finding)
+    return unique
 
 
 def _json_from_response(content):
@@ -96,17 +274,220 @@ def _json_from_response(content):
     return json.loads(text[start:end + 1])
 
 
-def _run_ai_batches(task, analyzable_diffs, machine_findings):
+def _is_unverified_syntax_claim(risk):
+    """局部 Diff 无法可靠判断模板/编译语法，避免 AI 将单个闭合标签误报为高风险。"""
+    text = " ".join(str(risk.get(field, "")) for field in ("change", "impact")).lower()
+    return any(word in text for word in ("闭合标签", "未闭合", "语法错误", "编译错误", "template compile", "syntax error"))
+
+
+def _load_ocr_payload(stdout):
+    """兼容 OCR 在 JSON 前输出提示信息的情况，只接收最外层 JSON 对象。"""
+    text = (stdout or "").strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        return json.loads(text[start:end + 1])
+
+
+def _run_ocr_process(command, *, cwd, env, timeout, task):
+    """运行 OCR，并在任务被取消或超时时主动停止子进程。"""
+    process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            _ensure_not_cancelled(task)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                stdout, stderr = process.communicate(timeout=min(5, remaining))
+                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                continue
+    except (AnalysisCancelled, subprocess.TimeoutExpired):
+        process.terminate()
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+        raise
+
+
+def _run_open_code_review(task):
+    """调用 OCR CLI；仅本地 Git，运行配置通过进程环境注入而不写入磁盘。"""
+    if task.repository.source_type != "local_git" or task.mode == "quick":
+        return [], 0, "未启用 OCR（仅标准/深度本地 Git 审查）", False, 0
+    from langgraph_integration.models import LLMConfig
+    config = LLMConfig.objects.filter(is_active=True).first()
+    if not config:
+        return [], 0, "未启用 OCR：没有可用 LLM 配置", False, 0
+    try:
+        root = LocalGitClient(task.repository.local_path).path
+        env = os.environ.copy()
+        env.update({"OCR_LLM_URL": config.api_url, "OCR_LLM_TOKEN": config.api_key, "OCR_LLM_MODEL": config.name, "OCR_LLM_PROTOCOL": "openai"})
+        # 不传 --max-tokens，使用 OCR/模型的原生上下文上限；人为设为 5k/8k 会使
+        # 多轮工具调用过早触发上下文压缩并中止审查。
+        command = [
+            "ocr", "review", "--from", task.base_sha, "--to", task.head_sha,
+            "--format", "json", "--audience", "agent",
+            "--concurrency", str(OCR_CONCURRENCY),
+        ]
+        result = _run_ocr_process(
+            command, cwd=root, env=env, task=task,
+            timeout=OCR_TIMEOUT_SECONDS.get(task.mode, OCR_TIMEOUT_SECONDS["standard"]),
+        )
+        payload = _load_ocr_payload(result.stdout)
+        # OCR 会把 complete / partial / failed 都序列化为 JSON。只要收到了
+        # 结构化输出，就保留 OCR 的真实覆盖情况，不能回退为旧的全量 Diff 扫描。
+        status = payload.get("status")
+        accepted_statuses = {"success", "complete", "partial", "partial_success", "completed", "completed_with_errors", "completed_with_warnings", "skipped", "failed"}
+        if not payload or status not in accepted_statuses:
+            raise ValueError(payload.get("message") or result.stderr[-500:] or f"OCR 返回状态：{status or 'empty'}")
+        manifest = payload.get("manifest") or {}
+        coverage = manifest.get("coverage") or {}
+        selected = len(coverage.get("selected") or [])
+        completed = len(coverage.get("completed") or [])
+        reused = len(coverage.get("reused") or [])
+        failed = len(coverage.get("failed") or [])
+        covered = completed + reused
+        review_coverage = round(covered / selected * 100, 1) if selected else (100 if status in {"success", "complete", "completed", "skipped"} else 0)
+        severity = {"critical": "high", "high": "high", "medium": "medium", "low": "low"}
+        # 部分 OpenAI 兼容服务在“无评论”时返回 comments: null，而非 []。
+        findings = [{"key": f"ocr:{x.get('path')}:{x.get('start_line')}:{index}", "change": x.get("content", "OCR 审查提示"), "file": x.get("path", ""), "severity": severity.get(x.get("severity"), "medium"), "source": "ocr_ai", "confidence": 0.85, "verified": True, "line_start": x.get("start_line"), "evidence": x.get("existing_code") or x.get("content", ""), "impact": f"OCR 分类：{x.get('category') or 'other'}；建议结合上下文确认并回归"} for index, x in enumerate(payload.get("comments") or [])]
+        if status == "failed":
+            note = f"OpenCodeReview 未获得可用覆盖（{payload.get('message') or result.stderr[-500:] or '请检查模型服务或 OCR 输出'}）"
+        elif review_coverage < 100:
+            note = f"已使用 OpenCodeReview 进行分组 Agent 审查（状态 {status}，选中 {selected}，完成 {completed}，复用 {reused}，失败 {failed}，覆盖 {review_coverage}%）"
+        else:
+            note = f"已使用 OpenCodeReview 进行分组 Agent 审查（状态 {status}，选中 {selected}，完成 {completed}，复用 {reused}，覆盖 {review_coverage}%）"
+        return findings, int((payload.get("summary") or {}).get("total_tokens") or 0), note, True, review_coverage
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError) as exc:
+        return [], 0, f"OCR 不可用，已降级：{exc}", False, 0
+
+
+def _normalize_ocr_findings(task, findings):
+    """把 OCR 的英文评论整理为中文审查结论，不改变其原始代码证据。"""
+    if not findings:
+        return findings, 0, ""
+    from langgraph_integration.models import LLMConfig
+    from langgraph_integration.views import create_llm_instance
+    try:
+        config = LLMConfig.objects.get(is_active=True)
+        source = [{key: item.get(key) for key in ("key", "file", "change", "impact", "evidence")} for item in findings]
+        prompt = (
+            "你是中文代码审查编辑。将以下 OCR 审查意见改写成简明、可复核的中文。"
+            "不得夸大风险，不得杜撰；保留原代码证据。输出严格 JSON："
+            "{\"items\":[{\"key\":\"\",\"title\":\"中文问题概述\",\"impact\":\"实际影响\",\"recommendation\":\"修复或验证建议\"}]}。\n"
+            f"OCR意见：{json.dumps(source, ensure_ascii=False)}"
+        )
+        response = create_llm_instance(config, temperature=0.1).invoke(prompt)
+        payload = _json_from_response(getattr(response, "content", response))
+        mapped = {item.get("key"): item for item in payload.get("items", [])}
+        for finding in findings:
+            item = mapped.get(finding["key"])
+            if item:
+                finding["change"] = str(item.get("title") or "OCR 发现潜在代码风险")[:500]
+                finding["impact"] = str(item.get("impact") or "建议根据代码证据确认影响范围")[:1000]
+                finding["recommendation"] = str(item.get("recommendation") or "结合代码上下文验证异常与边界场景")[:1000]
+        usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
+        return findings, int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0), "OCR 审查意见已转换为中文结论"
+    except Exception as exc:
+        return findings, 0, f"OCR 中文整理未完成：{exc}"
+
+
+def _run_iteration_test_design(task, analyzable_diffs, findings):
+    """基于本次 Diff 生成迭代测试点；风险仅作为补充约束，而非逐条转换。"""
+    if task.mode == "quick" or not analyzable_diffs:
+        return {}, [], 0, "快速模式未生成 AI 迭代测试点"
+    from langgraph_integration.models import LLMConfig
+    from langgraph_integration.views import create_llm_instance
+    try:
+        config = LLMConfig.objects.get(is_active=True)
+        max_chars = 18000 if task.mode == "standard" else 50000
+        diff_context = "\n\n".join(f"文件：{item['path']}\n{item['diff'][:7000]}" for item in analyzable_diffs)[:max_chars]
+        risks = [{key: item.get(key) for key in ("file", "change", "severity", "impact")} for item in findings if item.get("severity") in {"high", "medium"}][:40]
+        prompt = (
+            "你是资深测试分析师。基于本次代码 Diff 梳理本迭代可执行的测试需求。"
+            "先理解变更带来的功能/流程调整，再设计正常流程、关键输入、异常分支、兼容或回归测试；"
+            "风险列表仅用于补充风险验证，不能逐条照抄为测试点。无业务证据时不要生成空泛测试点。"
+            "全程中文。先输出对本次迭代的精确总结，再按模块/业务域归类所有业务变化并拆分测试需求；文件只能作为变更依据，不能一文件对应一个测试点。"
+            "必须完整输出所有识别到的业务变化，不设分组数量上限；总结不超过 80 字，每个分组不超过 2 句。"
+            "输出严格 JSON：{\"iteration_summary\":{\"title\":\"一句话迭代主题\",\"description\":\"简短业务影响\",\"change_groups\":[{\"module\":\"模块或业务域\",\"name\":\"业务变化名称\",\"description\":\"变化与影响\",\"files\":[\"文件路径\"],\"test_focus\":\"测试关注点\"}]},\"test_requirements\":[{\"change_group\":\"对应业务变化名称\",\"title\":\"\",\"objective\":\"\",\"expected_result\":\"\",\"priority\":\"high|medium|low\",\"test_type\":\"迭代验证\"}]}。\n"
+            f"风险摘要：{json.dumps(risks, ensure_ascii=False)}\n本次Diff：\n{diff_context}"
+        )
+        response = create_llm_instance(config, temperature=0.1).invoke(prompt)
+        payload = _json_from_response(getattr(response, "content", response))
+        usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
+        points = [item for item in payload.get("test_requirements", []) if item.get("title") and item.get("objective")]
+        return payload.get("iteration_summary") or {}, points, int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0), "AI 已基于代码变更完成迭代总结并梳理测试点"
+    except Exception as exc:
+        return {}, [], 0, f"AI 迭代测试点生成未完成：{exc}"
+
+
+def _run_risk_test_design(task, findings):
+    """将已确认的代码审查结论逐条转为可执行的风险排查点。
+
+    风险测试点的唯一事实来源是代码审查报告，避免再次从 Diff 泛化出
+    “验证核心流程”这类没有落点的模板化描述。
+    """
+    source_findings = [item for item in findings if item.get("verified") is not False]
+    if not source_findings:
+        return {}, 0, "没有已确认风险，无需生成风险排查点"
+    from langgraph_integration.models import LLMConfig
+    from langgraph_integration.views import create_llm_instance
+    try:
+        config = LLMConfig.objects.get(is_active=True)
+        source = [
+            {key: item.get(key, "") for key in ("key", "change", "file", "severity", "impact", "evidence", "recommendation")}
+            for item in source_findings
+        ]
+        prompt = (
+            "你是资深测试工程师。请仅依据下面的代码审查报告，为每一条风险生成一条可执行的风险排查测试点。"
+            "每个输出项必须严格对应一个 risk_key，不能合并、遗漏或新增风险；优先级由系统继承，禁止输出优先级。"
+            "必须直接引用该风险的具体问题、影响、代码证据和建议来表达测试目标，不能使用“验证核心业务流程”、"
+            "“覆盖正常流程”等空泛措辞。若风险标题为通用占位语，必须从代码证据和影响中提炼实际待验证行为。"
+            "全程中文，标题简短明确；测试目标写明输入/触发条件与需观察的行为；预期结果写明可判定结果。"
+            "输出严格 JSON：{\"risk_test_points\":[{\"risk_key\":\"\",\"title\":\"\",\"objective\":\"\",\"expected_result\":\"\"}]}。\n"
+            f"代码审查报告：\n{json.dumps(source, ensure_ascii=False)}"
+        )
+        response = create_llm_instance(config, temperature=0.1).invoke(prompt)
+        payload = _json_from_response(getattr(response, "content", response))
+        known_keys = {item["key"] for item in source_findings}
+        points = {}
+        for item in payload.get("risk_test_points", []):
+            risk_key = str(item.get("risk_key", ""))
+            if risk_key not in known_keys or not item.get("title") or not item.get("objective"):
+                continue
+            points[risk_key] = {
+                "title": str(item["title"])[:500],
+                "objective": str(item["objective"])[:1500],
+                "expected_result": str(item.get("expected_result") or "风险场景的实际行为与代码审查结论一致")[:1500],
+                "test_type": "风险排查",
+            }
+        usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
+        tokens = int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0)
+        return points, tokens, "已根据代码审查风险逐条生成风险排查点"
+    except Exception as exc:
+        return {}, 0, f"风险排查点生成未完成，已使用规则化兜底：{exc}"
+
+
+def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None):
     """只向模型发送受控的小批量Diff；任何失败均降级为机器结果。"""
     if task.mode == "quick" or not analyzable_diffs:
-        return [], [], 0, 0, "快速模式不调用LLM"
+        return [], [], [], 0, 0, "快速模式不调用LLM"
     from langgraph_integration.models import LLMConfig
     from langgraph_integration.views import create_llm_instance
 
     try:
         config = LLMConfig.objects.get(is_active=True)
     except (LLMConfig.DoesNotExist, LLMConfig.MultipleObjectsReturned):
-        return [], [], 0, 0, "没有唯一启用的LLM配置，已仅生成机器分析结果"
+        return [], [], [], 0, 0, "没有唯一启用的LLM配置，已仅生成机器分析结果"
 
     max_files = 24 if task.mode == "standard" else 60
     max_chars = 5000 if task.mode == "standard" else 9000
@@ -123,18 +504,50 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings):
         batches.append("\n\n".join(current))
 
     llm = create_llm_instance(config, temperature=0.1)
-    ai_findings, test_points, used = [], [], 0
+    ai_findings, test_points, impact_modules, used = [], [], [], 0
+    from requirements.models import RequirementDocument
+    def context_from_documents(document_ids, legacy_id, label):
+        ids = list(document_ids or []) or ([legacy_id] if legacy_id else [])
+        documents = RequirementDocument.objects.filter(id__in=ids, project=task.project).values_list("title", "content")
+        if not documents:
+            return f"{label}：未提供"
+        # 上下文有总量上限，避免可选文档挤占 Diff 审查空间。
+        parts, remaining = [], 12000
+        for title, content in documents:
+            part = f"【{title}】\n{(content or '文档尚未完成解析')[:remaining]}"
+            parts.append(part)
+            remaining -= len(part)
+            if remaining <= 0:
+                break
+        return f"{label}：\n" + "\n\n".join(parts)
+    business_context = "\n".join([
+        context_from_documents(task.requirement_document_ids, task.requirement_document_id, "需求文档"),
+        context_from_documents(task.api_document_ids, task.api_document_id, "接口文档"),
+    ])
+    # Agentic 审查的第一步：只读 MCP 按需收集变更文件的完整目标版本上下文。
+    # 获取失败不影响原 Diff 审查。
+    try:
+        from .review_mcp import CodeReviewMCP
+        repository_context = CodeReviewMCP(task, review_client).collect_context(analyzable_diffs)
+    except Exception:
+        repository_context = []
     prompt_head = (
         "你是测试代码审查助手。机器规则结论不可删除。只分析给出的局部 Diff，不推测未提供源码。"
-        "输出严格JSON：{\"risks\":[{\"change\":\"\",\"file\":\"\",\"severity\":\"high|medium|low\","
+        "按三步完成：先说明变更文件/模块；再识别类型（接口、SQL、配置、数据模型、权限、前端UI、任务/脚本等）；"
+        "最后只基于明确证据评估影响范围并生成回归点。不得把单独出现的闭合标签、截断代码或未提供的上下文判断为模板语法/编译错误；"
+        "模板、XML、Vue 等语法问题只有在同一 Diff 中存在明确不匹配证据时才可报告。"
+        "输出严格JSON：{\"impact_modules\":[{\"module\":\"\",\"change_type\":\"\",\"impact\":\"\",\"regression_scope\":\"\"}],\"risks\":[{\"change\":\"\",\"file\":\"\",\"severity\":\"high|medium|low\","
         "\"confidence\":0.0,\"evidence\":\"\",\"impact\":\"\"}],\"test_requirements\":[{\"title\":\"\","
         "\"objective\":\"\",\"expected_result\":\"\",\"priority\":\"high|medium|low\",\"test_type\":\"\"}]}。"
     )
     for index, batch in enumerate(batches):
         known = [x for x in machine_findings if x.get("file") in batch]
-        response = llm.invoke(f"{prompt_head}\n机器已确认风险：{json.dumps(known, ensure_ascii=False)}\nDIFF:\n{batch}")
+        response = llm.invoke(f"{prompt_head}\n业务上下文：\n{business_context}\n已读取的目标版本源码上下文（只读MCP）：\n{json.dumps(repository_context, ensure_ascii=False)[:18000]}\n机器已确认风险：{json.dumps(known, ensure_ascii=False)}\nDIFF:\n{batch}")
         payload = _json_from_response(getattr(response, "content", response))
+        impact_modules.extend(payload.get("impact_modules", []))
         for risk in payload.get("risks", []):
+            if _is_unverified_syntax_claim(risk):
+                continue
             risk.update({"key": f"ai:{index}:{len(ai_findings)}", "source": "ai_analysis"})
             ai_findings.append(risk)
         test_points.extend(payload.get("test_requirements", []))
@@ -142,25 +555,71 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings):
         used += int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0)
     coverage = round(min(len(analyzable_diffs), max_files) / len(analyzable_diffs) * 100, 1)
     note = "AI已按文件分批分析" if coverage == 100 else f"AI仅分析前{max_files}个文件，其余保留机器分析"
-    return ai_findings, test_points, used, coverage, note
+    return ai_findings, test_points, impact_modules, used, coverage, note
+
+
+def _run_context_test_enrichment(task, findings):
+    """OCR 已完成源码审查后，以可选业务文档补充测试需求和回归范围。
+
+    文档不会直接塞入 OCR 的多轮源码上下文，避免影响代码阅读；仅作为测试设计约束使用。
+    """
+    requirement_ids = list(task.requirement_document_ids or []) or ([task.requirement_document_id] if task.requirement_document_id else [])
+    api_ids = list(task.api_document_ids or []) or ([task.api_document_id] if task.api_document_id else [])
+    if not (requirement_ids or api_ids):
+        return [], [], 0, "未关联需求或接口文档，未执行业务上下文补充"
+    from langgraph_integration.models import LLMConfig
+    from langgraph_integration.views import create_llm_instance
+    from requirements.models import RequirementDocument
+    try:
+        config = LLMConfig.objects.get(is_active=True)
+        document_ids = list(dict.fromkeys(requirement_ids + api_ids))
+        documents = RequirementDocument.objects.filter(project=task.project, id__in=document_ids).values("title", "content")
+        context = "\n\n".join(f"文档：{item['title']}\n{(item['content'] or '')[:8000]}" for item in documents)
+        if not context:
+            return [], [], 0, "关联文档尚未解析，未执行业务上下文补充"
+        risk_context = [{key: value for key, value in finding.items() if key in {"change", "file", "severity", "impact", "evidence"}} for finding in findings[:80]]
+        prompt = (
+            "你是测试设计助手。源码审查已完成，不能重复或修改其中的风险结论。"
+            "仅根据业务/接口文档和已确认风险，补充可执行的测试需求及影响模块；"
+            "每一项必须体现文档或风险中的明确依据，不要臆造接口、字段或业务规则。"
+            "输出严格 JSON：{\"impact_modules\":[{\"module\":\"\",\"change_type\":\"\",\"impact\":\"\",\"regression_scope\":\"\"}],"
+            "\"test_requirements\":[{\"title\":\"\",\"objective\":\"\",\"expected_result\":\"\",\"priority\":\"high|medium|low\",\"test_type\":\"\"}]}。\n"
+            f"业务文档：\n{context}\n\n已确认风险：\n{json.dumps(risk_context, ensure_ascii=False)}"
+        )
+        response = create_llm_instance(config, temperature=0.1).invoke(prompt)
+        payload = _json_from_response(getattr(response, "content", response))
+        usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
+        tokens = int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0)
+        return payload.get("test_requirements", []), payload.get("impact_modules", []), tokens, "已结合需求/接口文档补充测试需求与回归范围"
+    except Exception as exc:
+        return [], [], 0, f"业务文档补充未完成：{exc}"
 
 
 def run_analysis(task: AnalysisTask):
     _ensure_not_cancelled(task)
-    task.status, task.progress, task.current_step = "fetching", 10, "读取GitLab代码变更"
+    AnalysisTaskExecutionLog.objects.create(task=task, event="started", message="后台任务开始执行")
+    task.status, task.progress, task.current_step = "fetching", 10, "读取代码变更"
     task.save(update_fields=["status", "progress", "current_step", "updated_at"])
     try:
-        credential = UserGitLabCredential.objects.get(project=task.project, connection=task.repository.connection, user=task.creator)
-        client = GitLabClient(task.repository.connection, credential.get_token())
-        if task.source_type == "merge_request":
-            payload = client.merge_request_changes(task.repository.gitlab_project_id, task.merge_request_iid)
-            task.base_sha = payload.get("diff_refs", {}).get("base_sha", task.base_sha)
-            task.head_sha = payload.get("diff_refs", {}).get("head_sha", task.head_sha)
-            task.title = task.title or payload.get("title", "")
-            diffs = payload.get("changes", [])
+        if task.repository.source_type == "local_git":
+            if task.source_type != "commits":
+                raise ValueError("本地 Git 审查仅支持两个分支或 Commit 对比")
+            payload = LocalGitClient(task.repository.local_path).compare(task.base_sha, task.head_sha)
+            task.base_sha, task.head_sha = payload["base_sha"], payload["head_sha"]
+            task.title = task.title or f"本地 Git：{task.repository.name}"
+            diffs = payload["diffs"]
         else:
-            payload = client.compare(task.repository.gitlab_project_id, task.base_sha, task.head_sha)
-            diffs = payload.get("diffs", [])
+            credential = UserGitLabCredential.objects.get(project=task.project, connection=task.repository.connection, user=task.executor or task.creator)
+            client = GitLabClient(task.repository.connection, credential.get_token())
+            if task.source_type == "merge_request":
+                payload = client.merge_request_changes(task.repository.gitlab_project_id, task.merge_request_iid)
+                task.base_sha = payload.get("diff_refs", {}).get("base_sha", task.base_sha)
+                task.head_sha = payload.get("diff_refs", {}).get("head_sha", task.head_sha)
+                task.title = task.title or payload.get("title", "")
+                diffs = payload.get("changes", [])
+            else:
+                payload = client.compare(task.repository.gitlab_project_id, task.base_sha, task.head_sha)
+                diffs = payload.get("diffs", [])
 
         _ensure_not_cancelled(task)
         task.status, task.progress, task.current_step = "machine_analyzing", 40, "检测关键代码变化"
@@ -185,54 +644,106 @@ def run_analysis(task: AnalysisTask):
             if item.get("deleted_file"):
                 findings.append({"key": f"file_deleted:{path}", "change": "删除文件", "file": path, "severity": "medium", "source": "machine_rule", "confidence": 1.0, "evidence": path, "impact": "依赖该文件的功能可能受到影响"})
 
+        # 确定性工具优先：只有实际运行的静态检查结果才能标记为 static_scan 风险。
+        try:
+            from .review_mcp import CodeReviewMCP
+            static_findings, static_notes = CodeReviewMCP(task, client if task.repository.source_type != "local_git" else None).run_static_checks(analyzable_diffs)
+            findings.extend(static_findings)
+        except Exception as exc:
+            static_notes = [f"静态检查不可用：{exc}"]
+
         _ensure_not_cancelled(task)
         task.status, task.progress, task.current_step = "ai_analyzing", 65, "分批分析语义风险"
         task.save(update_fields=["status", "progress", "current_step", "updated_at"])
         ai_failed = False
         try:
-            ai_findings, ai_test_points, token_usage, ai_coverage, ai_note = _run_ai_batches(task, analyzable_diffs, findings)
-            findings.extend(ai_findings)
+            ocr_findings, ocr_tokens, ocr_note, ocr_completed, ocr_coverage = _run_open_code_review(task)
+            if ocr_completed:
+                ocr_findings, chinese_tokens, chinese_note = _normalize_ocr_findings(task, ocr_findings)
+                findings.extend(ocr_findings)
+                ai_findings, iteration_test_points, impact_modules, enrichment_tokens, enrichment_note = [], [], [], 0, ""
+                iteration_summary, iteration_test_points, iteration_tokens, iteration_note = _run_iteration_test_design(task, analyzable_diffs, findings)
+                document_test_points, impact_modules, enrichment_tokens, enrichment_note = _run_context_test_enrichment(task, findings)
+                iteration_test_points.extend(document_test_points)
+                token_usage, ai_coverage = ocr_tokens + chinese_tokens + iteration_tokens + enrichment_tokens, ocr_coverage
+                ai_note = f"{ocr_note}；{chinese_note}；{iteration_note}；{enrichment_note}"
+            else:
+                ai_findings, _unused_points, impact_modules, token_usage, ai_coverage, ai_note = _run_ai_batches(task, analyzable_diffs, findings, client if task.repository.source_type != "local_git" else None)
+                ai_note = f"{ocr_note}；{ai_note}"
+                findings.extend(ai_findings)
+                iteration_summary, iteration_test_points, iteration_tokens, iteration_note = _run_iteration_test_design(task, analyzable_diffs, findings)
+                token_usage += iteration_tokens
+                ai_note = f"{ai_note}；{iteration_note}"
         except Exception as exc:
-            ai_findings, ai_test_points, token_usage, ai_coverage = [], [], 0, 0
+            ai_findings, iteration_summary, iteration_test_points, impact_modules, token_usage, ai_coverage = [], {}, [], [], 0, 0
             ai_note, ai_failed = f"AI分析失败，已保留机器结果：{exc}", True
 
         _ensure_not_cancelled(task)
         task.status, task.progress, task.current_step = "generating_tests", 82, "生成测试分析报告"
         task.save(update_fields=["status", "progress", "current_step", "updated_at"])
-        task.raw_diff = "\n\n".join(raw_parts)
+        findings = _deduplicate_findings(findings)
+        for finding in findings:
+            finding["verified"] = finding.get("source") != "ai_analysis"
+        risk_test_points, risk_test_tokens, risk_test_note = _run_risk_test_design(task, findings)
+        token_usage += risk_test_tokens
+        ai_note = f"{ai_note}；{risk_test_note}"
+        task.raw_diff = "\n\n".join(raw_parts)[:2_000_000]
+        severity_counts = {}
+        source_counts = {}
+        for finding in findings:
+            severity_counts[finding["severity"]] = severity_counts.get(finding["severity"], 0) + 1
+            source_counts[finding["source"]] = source_counts.get(finding["source"], 0) + 1
         task.change_report = {
-            "summary": {"changed_files": len(files), "additions": total_additions, "deletions": total_deletions, "changed_lines": total_additions + total_deletions, "risk_count": len(findings), "high_risk_count": sum(1 for x in findings if x["severity"] == "high")},
-            "files": files, "findings": findings,
+            "summary": {"changed_files": len(files), "impact_scope_count": _impact_scope_count(files), "additions": total_additions, "deletions": total_deletions, "changed_lines": total_additions + total_deletions, "risk_count": len(findings), "high_risk_count": sum(1 for x in findings if x["severity"] == "high"), "severity_counts": severity_counts, "source_counts": source_counts},
+            "files": files, "findings": findings, "impact_modules": impact_modules,
             "impact_summary": sorted({x["impact"] for x in findings}),
-            "analysis_note": ai_note,
+            "analysis_note": "；".join([*static_notes, ai_note]),
         }
         drafts = []
-        for finding in findings:
-            point = _test_point_for(finding)
+        # 已确认的代码审查风险生成风险测试点：一条测试点只关联一条源风险，
+        # 且优先级严格继承源风险等级；AI 待确认提示不生成风险测试点。
+        for finding in [item for item in findings if item.get("verified") is not False]:
+            point = risk_test_points.get(finding["key"], _test_point_for(finding))
+            point["priority"] = finding.get("severity", "medium")
+            point["test_type"] = "风险排查"
             draft = TestRequirementDraft.objects.create(task=task, source_finding_key=finding["key"], **point)
-            drafts.append({"id": draft.id, **point, "source_finding_key": finding["key"], "status": draft.status})
-        for index, point in enumerate(ai_test_points):
+            drafts.append({"id": draft.id, **point, "change_group": "风险排查", "source_finding_key": finding["key"], "risk_reference": {"key": finding["key"], "title": finding.get("change", "代码审查风险"), "file": finding.get("file", ""), "severity": finding.get("severity", "medium")}, "status": draft.status})
+        for index, point in enumerate(iteration_test_points):
             safe_point = {
-                "title": point.get("title", "代码变更回归验证"),
+                "title": str(point.get("title", "代码变更回归验证"))[:500],
                 "objective": point.get("objective", "验证代码变更影响"),
                 "expected_result": point.get("expected_result", "相关功能符合需求"),
-                "priority": point.get("priority", "medium"),
-                "test_type": point.get("test_type", "AI风险回归"),
+                "priority": str(point.get("priority", "medium"))[:20],
+                # 不论测试点来自 Diff 还是需求/接口文档，均属于本次迭代验证；
+                # 风险排查仅由上方已关联代码审查风险的流程生成。
+                "test_type": "迭代验证",
             }
-            draft = TestRequirementDraft.objects.create(task=task, source_finding_key=f"ai-test:{index}", **safe_point)
-            drafts.append({"id": draft.id, **safe_point, "source_finding_key": f"ai-test:{index}", "status": draft.status})
-        task.test_report = {"summary": {"test_point_count": len(drafts), "high_priority_count": sum(1 for x in drafts if x["priority"] == "high")}, "test_requirements": drafts, "regression_suggestions": sorted({x["file"].split("/")[0] for x in findings if x.get("file")}), "coverage_gaps": []}
+            draft = TestRequirementDraft.objects.create(task=task, source_finding_key=f"iteration-test:{index}", **safe_point)
+            drafts.append({"id": draft.id, **safe_point, "change_group": str(point.get("change_group") or "本次迭代")[ :200], "source_finding_key": f"iteration-test:{index}", "status": draft.status})
+        coverage_gaps = [f"已排除：{item['path']}" for item in files if item["excluded"]]
+        if task.mode != "quick" and ai_coverage < 100:
+            coverage_gaps.append(f"AI仅覆盖 {ai_coverage}% 的可分析文件，其余仅执行机器规则")
+        test_type_counts = {}
+        for draft in drafts:
+            test_type_counts[draft["test_type"]] = test_type_counts.get(draft["test_type"], 0) + 1
+        task.test_report = {"summary": {"test_point_count": len(drafts), "high_priority_count": sum(1 for x in drafts if x["priority"] == "high"), "test_type_counts": test_type_counts}, "iteration_summary": iteration_summary, "test_requirements": drafts, "regression_suggestions": sorted({x["file"].split("/")[0] for x in findings if x.get("file")}), "coverage_gaps": coverage_gaps}
         task.machine_coverage = 100
         task.ai_coverage = ai_coverage
         task.token_usage = token_usage
-        ai_incomplete = task.mode != "quick" and bool(analyzable_diffs) and (ai_failed or ai_coverage == 0)
+        ai_incomplete = task.mode != "quick" and bool(analyzable_diffs) and (ai_failed or ai_coverage < 100)
         final_status = "partial" if ai_incomplete else "completed"
         task.status, task.progress, task.current_step, task.completed_at = final_status, 100, "分析完成", timezone.now()
         task.save()
+        AnalysisTaskExecutionLog.objects.create(
+            task=task, event=final_status, message="分析完成" if final_status == "completed" else "分析部分完成，请查看覆盖缺口",
+            detail={"machine_coverage": task.machine_coverage, "ai_coverage": task.ai_coverage, "risk_count": len(findings)},
+        )
         return task
     except AnalysisCancelled:
+        AnalysisTaskExecutionLog.objects.create(task=task, event="cancelled", message="后台任务响应取消请求")
         raise
     except Exception as exc:
         task.status, task.error_message, task.current_step = "failed", str(exc), "分析失败"
         task.save(update_fields=["status", "error_message", "current_step", "updated_at"])
+        AnalysisTaskExecutionLog.objects.create(task=task, event="failed", message="后台执行失败", detail={"error": str(exc)[:1000]})
         raise

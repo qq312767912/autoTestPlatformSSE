@@ -5,11 +5,13 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.http import HttpResponse
 from celery import current_app
+from django.db import transaction
+from django.db.models import Q
 
 from projects.models import ProjectMember
-from .models import AnalysisTask, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
-from .serializers import AnalysisTaskSerializer, CredentialSerializer, GitLabConnectionSerializer, ProjectRepositorySerializer, TestRequirementDraftSerializer
-from .services import GitLabClient
+from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
+from .serializers import AnalysisTaskExecutionLogSerializer, AnalysisTaskSerializer, CredentialSerializer, GitLabConnectionSerializer, ProjectRepositorySerializer, TestRequirementDraftSerializer
+from .services import GitLabClient, normalize_test_point_for_display
 
 
 def _can_access(user, project_id):
@@ -41,6 +43,8 @@ class ProjectRepositoryViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["get"], url_path="merge-requests")
     def merge_requests(self, request, pk=None):
         repo = self.get_object()
+        if repo.source_type != "gitlab":
+            return Response({"detail": "本地 Git 仓库不支持读取 Merge Request"}, status=status.HTTP_400_BAD_REQUEST)
         credential = UserGitLabCredential.objects.get(project=repo.project, connection=repo.connection, user=request.user)
         data = GitLabClient(repo.connection, credential.get_token()).merge_requests(repo.gitlab_project_id)
         return Response(data)
@@ -71,14 +75,15 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
     serializer_class = AnalysisTaskSerializer
     permission_classes = [IsAuthenticated]
     def get_queryset(self):
-        qs = AnalysisTask.objects.select_related("project", "repository", "creator").prefetch_related("test_requirement_drafts")
+        qs = AnalysisTask.objects.select_related("project", "repository", "creator", "executor").prefetch_related("test_requirement_drafts")
         if not self.request.user.is_superuser: qs = qs.filter(project__members__user=self.request.user)
         project_id = self.request.query_params.get("project")
         return qs.filter(project_id=project_id) if project_id else qs
     def perform_create(self, serializer):
         project = serializer.validated_data["project"]
         if not _can_access(self.request.user, project.id): raise PermissionDenied()
-        serializer.save(creator=self.request.user)
+        task = serializer.save(creator=self.request.user)
+        AnalysisTaskExecutionLog.objects.create(task=task, event="created", actor=self.request.user, message="已创建代码审查任务")
     def destroy(self, request, *args, **kwargs):
         task = self.get_object()
         membership = ProjectMember.objects.filter(project=task.project, user=request.user).first()
@@ -88,16 +93,26 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
     @action(detail=True, methods=["post"])
     def run(self, request, pk=None):
-        task = self.get_object()
-        if task.creator_id != request.user.id and not request.user.is_superuser: raise PermissionDenied("只能使用自己的GitLab Token执行分析")
-        if task.status not in {"pending", "failed", "partial", "cancelled"}:
-            return Response({"detail": "分析任务正在执行或已经完成"}, status=status.HTTP_409_CONFLICT)
-        from .tasks import run_code_analysis
-        task.status, task.progress, task.current_step, task.error_message = "pending", 0, "等待后台执行", ""
-        task.save(update_fields=["status", "progress", "current_step", "error_message", "updated_at"])
-        async_result = run_code_analysis.delay(str(task.id))
-        task.celery_task_id = async_result.id
-        task.save(update_fields=["celery_task_id", "updated_at"])
+        with transaction.atomic():
+            task = AnalysisTask.objects.select_for_update().get(pk=pk)
+            if not _can_access(request.user, task.project_id): raise PermissionDenied("仅项目成员可执行分析")
+            if task.status not in {"pending", "completed", "failed", "partial", "cancelled"}:
+                return Response({"detail": "分析任务正在执行，请完成或取消后再重跑"}, status=status.HTTP_409_CONFLICT)
+            running = AnalysisTask.objects.filter(repository=task.repository).filter(
+                Q(status__in={"fetching", "machine_analyzing", "ai_analyzing", "generating_tests"}) |
+                (Q(status="pending") & ~Q(celery_task_id=""))
+            ).exclude(pk=task.pk).exists()
+            if running:
+                return Response({"detail": "该仓库已有审查任务正在运行，请完成或取消后再发起"}, status=status.HTTP_409_CONFLICT)
+            retrying = task.status in {"completed", "failed", "partial", "cancelled"}
+            removed = task.test_requirement_drafts.filter(status="draft").delete()[0]
+            task.status, task.progress, task.current_step, task.error_message, task.executor = "pending", 0, "等待后台执行", "", request.user
+            task.save(update_fields=["status", "progress", "current_step", "error_message", "executor", "updated_at"])
+            AnalysisTaskExecutionLog.objects.create(task=task, event="queued", actor=request.user, message="重新提交审查任务" if retrying else "审查任务已进入队列", detail={"cleared_drafts": removed})
+            from .tasks import run_code_analysis
+            async_result = run_code_analysis.delay(str(task.id))
+            task.celery_task_id = async_result.id
+            task.save(update_fields=["celery_task_id", "updated_at"])
         return Response(self.get_serializer(task).data, status=status.HTTP_202_ACCEPTED)
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk=None):
@@ -105,9 +120,30 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
         if task.status in {"completed", "failed", "cancelled"}:
             return Response(self.get_serializer(task).data)
         task.status = "cancelled"; task.current_step = "用户已取消"; task.save(update_fields=["status", "current_step", "updated_at"])
+        AnalysisTaskExecutionLog.objects.create(task=task, event="cancelled", actor=request.user, message="用户取消分析任务")
         if task.celery_task_id:
             current_app.control.revoke(task.celery_task_id, terminate=False)
         return Response(self.get_serializer(task).data)
+
+    @action(detail=True, methods=["get"], url_path="execution-logs")
+    def execution_logs(self, request, pk=None):
+        task = self.get_object()
+        return Response(AnalysisTaskExecutionLogSerializer(task.execution_logs.select_related("actor"), many=True).data)
+
+    @action(detail=True, methods=["get"], url_path="diff")
+    def diff(self, request, pk=None):
+        """读取此次任务已保存的 Diff；不会再次访问外部 Git 服务。"""
+        task = self.get_object()
+        file_path = request.query_params.get("file", "")
+        raw_diff = task.raw_diff or ""
+        if file_path:
+            marker = f"diff -- {file_path}\n"
+            start = raw_diff.find(marker)
+            if start < 0:
+                return Response({"detail": "未找到该文件的 Diff"}, status=status.HTTP_404_NOT_FOUND)
+            next_start = raw_diff.find("\ndiff -- ", start + len(marker))
+            raw_diff = raw_diff[start:next_start if next_start >= 0 else None]
+        return Response({"file": file_path, "base_sha": task.base_sha, "head_sha": task.head_sha, "diff": raw_diff})
 
     def _markdown_response(self, task, report_type):
         if report_type == "change":
@@ -147,28 +183,56 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
         else:
             report = task.test_report or {}
             summary = report.get("summary", {})
+            iteration_summary = report.get("iteration_summary") or {}
+            ignored_sources = set(task.test_requirement_drafts.filter(status="ignored").values_list("source_finding_key", flat=True))
+            test_requirements = [
+                normalize_test_point_for_display(item, (task.change_report or {}).get("findings", []))
+                for item in report.get("test_requirements", []) if item.get("source_finding_key") not in ignored_sources
+            ]
+            risk_test_requirements = [
+                item for item in test_requirements
+                if item.get("change_group") in {"风险排查", "风险点", "风险回归"}
+            ]
+            priority_order = {"high": 0, "medium": 1, "low": 2}
+            risk_test_requirements.sort(key=lambda item: priority_order.get(item.get("priority"), 9))
+            iteration_test_requirements = [item for item in test_requirements if item not in risk_test_requirements]
             lines = [
                 f"# {task.title or task.repository.name} - 测试分析报告", "",
                 f"- 代码仓库：{task.repository.path_with_namespace}",
                 f"- 分析范围：{task.base_sha} → {task.head_sha}",
-                f"- 测试需求点：{summary.get('test_point_count', 0)}",
+                f"- 迭代验证：{len(iteration_test_requirements)}",
+                f"- 风险排查：{len(risk_test_requirements)}",
                 f"- 高优先级：{summary.get('high_priority_count', 0)}", "",
-                "## 测试需求点", "",
             ]
-            for index, item in enumerate(report.get("test_requirements", []), 1):
+            if iteration_summary.get("title"):
+                lines.extend(["## 本次迭代总结", "", f"### {iteration_summary.get('title')}", "", iteration_summary.get("description", "")])
+                lines.extend(f"- {item}" for item in iteration_summary.get("change_items", []))
+                lines.append("")
+            lines.extend(["## 需求测试点", ""])
+            for index, item in enumerate(iteration_test_requirements, 1):
                 lines.extend([
                     f"### {index}. {item.get('title', '')}", "",
                     f"- 优先级：{item.get('priority', '')}",
-                    f"- 类型：{item.get('test_type', '')}",
+                    "- 类型：迭代验证",
                     f"- 测试目标：{item.get('objective', '')}",
                     f"- 预期结果：{item.get('expected_result', '')}",
                     f"- 来源：{item.get('source_finding_key', '')}", "",
                 ])
-            lines.extend(["## 回归建议", ""])
-            lines.extend(f"- {item}" for item in report.get("regression_suggestions", []))
+            lines.extend(["## 风险测试点", ""])
+            for index, item in enumerate(risk_test_requirements, 1):
+                reference = item.get("risk_reference") or {}
+                lines.extend([
+                    f"### {index}. {item.get('title', '')}", "",
+                    f"- 优先级：{item.get('priority', '')}",
+                    "- 类型：风险排查",
+                    f"- 关联代码审查风险：{reference.get('title') or item.get('source_finding_key', '')}",
+                    f"- 风险文件：`{reference.get('file', '')}`",
+                    f"- 测试目标：{item.get('objective', '')}",
+                    f"- 预期结果：{item.get('expected_result', '')}", "",
+                ])
             lines.extend(["", "## 覆盖缺口", ""])
             lines.extend(f"- {item}" for item in report.get("coverage_gaps", []))
-        filename = f"code-analysis-{task.id}-{report_type}.txt"
+        filename = f"{'code-review-report' if report_type == 'change' else 'test-analysis-report'}-{task.id}.txt"
         response = HttpResponse("\ufeff" + "\n".join(lines), content_type="text/plain; charset=utf-8")
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
         return response
@@ -189,3 +253,46 @@ class TestRequirementDraftViewSet(viewsets.ModelViewSet):
         qs = TestRequirementDraft.objects.select_related("task__project")
         if not self.request.user.is_superuser: qs = qs.filter(task__project__members__user=self.request.user)
         return qs
+
+    @action(detail=True, methods=["post"])
+    def accept(self, request, pk=None):
+        draft = self.get_object()
+        if draft.status == "converted":
+            return Response({"detail": "该测试需求已转为正式用例"}, status=status.HTTP_409_CONFLICT)
+        draft.status = "accepted"
+        draft.save(update_fields=["status"])
+        return Response(self.get_serializer(draft).data)
+
+    @action(detail=True, methods=["post"])
+    def ignore(self, request, pk=None):
+        draft = self.get_object()
+        if draft.status == "converted":
+            return Response({"detail": "已转正式用例的测试需求不能忽略"}, status=status.HTTP_409_CONFLICT)
+        draft.status = "ignored"
+        draft.save(update_fields=["status"])
+        return Response(self.get_serializer(draft).data)
+
+    @action(detail=True, methods=["post"])
+    def convert(self, request, pk=None):
+        """将确认的测试需求转为项目正式用例，并保持可追溯关联。"""
+        draft = self.get_object()
+        if draft.converted_test_case_id:
+            return Response({"detail": "该测试需求已转为正式用例", "test_case_id": draft.converted_test_case_id}, status=status.HTTP_409_CONFLICT)
+        module_id = request.data.get("module_id")
+        from testcases.models import TestCase, TestCaseModule, TestCaseStep
+        module = TestCaseModule.objects.filter(pk=module_id, project=draft.task.project).first()
+        if not module:
+            return Response({"detail": "请选择当前项目下的用例模块"}, status=status.HTTP_400_BAD_REQUEST)
+        level = {"high": "P0", "medium": "P1", "low": "P2"}.get(draft.priority, "P2")
+        test_type = "security" if "安全" in draft.test_type else "permission" if "权限" in draft.test_type else "functional"
+        with transaction.atomic():
+            test_case = TestCase.objects.create(
+                project=draft.task.project, module=module, creator=request.user,
+                name=draft.title[:255], precondition=draft.objective,
+                level=level, test_type=test_type,
+                notes=f"来源：代码审查任务 {draft.task_id}；风险标识 {draft.source_finding_key or '综合分析'}",
+            )
+            TestCaseStep.objects.create(test_case=test_case, step_number=1, creator=request.user, description=draft.objective or "执行对应业务操作", expected_result=draft.expected_result or "相关功能符合需求")
+            draft.status, draft.converted_test_case = "converted", test_case
+            draft.save(update_fields=["status", "converted_test_case"])
+        return Response({"draft": self.get_serializer(draft).data, "test_case_id": test_case.id}, status=status.HTTP_201_CREATED)
