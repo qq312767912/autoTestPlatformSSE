@@ -32,7 +32,9 @@ SENSITIVE_CONFIG_KEYS = {"enabled", "enable", "auth", "authentication", "authori
 # OpenCodeReview 参数统一维护。内网自建模型不限制 token；OCR 需要保留原生上下文，
 # 否则多轮工具调用可能在上下文压缩阶段提前结束。
 OCR_CONCURRENCY = 4
-OCR_TIMEOUT_SECONDS = {"standard": 360, "deep": 600}
+OCR_TIMEOUT_SECONDS = {"standard": 30 * 60, "deep": 30 * 60}
+OCR_INTERNAL_TIMEOUT_MINUTES = 29
+OCR_GRACEFUL_STOP_SECONDS = 20
 OCR_WORKSPACE_ROOT = Path(os.environ.get("OCR_WORKSPACE_ROOT", "/app/data/code-analysis-repositories"))
 
 
@@ -395,7 +397,7 @@ def _load_ocr_payload(stdout):
 
 
 def _run_ocr_process(command, *, cwd, env, timeout, task):
-    """运行 OCR，并在任务被取消或超时时停止整个 OCR 进程组。"""
+    """运行 OCR；超时时先请求其写出部分结果，再停止整个进程组。"""
     # OCR CLI 会再拉起原生 opencodereview 子进程。仅 terminate 父进程会让子进程
     # 保持 stdout/stderr 管道，进而导致 communicate 一直等待、任务永久停在 65%。
     process = subprocess.Popen(
@@ -411,10 +413,10 @@ def _run_ocr_process(command, *, cwd, env, timeout, task):
                 raise subprocess.TimeoutExpired(command, timeout)
             try:
                 stdout, stderr = process.communicate(timeout=min(5, remaining))
-                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr), False
             except subprocess.TimeoutExpired:
                 continue
-    except (AnalysisCancelled, subprocess.TimeoutExpired):
+    except AnalysisCancelled:
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -428,6 +430,28 @@ def _run_ocr_process(command, *, cwd, env, timeout, task):
                 pass
             process.communicate(timeout=5)
         raise
+    except subprocess.TimeoutExpired:
+        # SIGINT 给 OCR 一个短暂收尾窗口，使其有机会把已完成分组写入 --output。
+        try:
+            os.killpg(process.pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=OCR_GRACEFUL_STOP_SECONDS)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = process.communicate(timeout=5)
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr), True
 
 
 def _analysis_stage(task_id, name, function, *args):
@@ -460,16 +484,21 @@ def _run_open_code_review(task):
             env.update({"OCR_LLM_URL": config.api_url, "OCR_LLM_TOKEN": config.api_key, "OCR_LLM_MODEL": config.name, "OCR_LLM_PROTOCOL": "openai"})
             # 不传 --max-tokens，使用 OCR/模型的原生上下文上限；人为设为 5k/8k 会使
             # 多轮工具调用过早触发上下文压缩并中止审查。
+            output_path = Path(root) / ".ocr-review-result.json"
+            output_path.unlink(missing_ok=True)
             command = [
                 "ocr", "review", "--from", base_ref, "--to", head_ref,
                 "--format", "json", "--audience", "agent",
                 "--concurrency", str(OCR_CONCURRENCY),
+                "--timeout", str(OCR_INTERNAL_TIMEOUT_MINUTES),
+                "--output", str(output_path),
             ]
-            result = _run_ocr_process(
+            result, timed_out = _run_ocr_process(
                 command, cwd=root, env=env, task=task,
                 timeout=OCR_TIMEOUT_SECONDS.get(task.mode, OCR_TIMEOUT_SECONDS["standard"]),
             )
-        payload = _load_ocr_payload(result.stdout)
+            output_text = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
+        payload = _load_ocr_payload(output_text or result.stdout)
         # OCR 会把 complete / partial / failed 都序列化为 JSON。只要收到了
         # 结构化输出，就保留 OCR 的真实覆盖情况，不能回退为旧的全量 Diff 扫描。
         status = payload.get("status")
@@ -487,13 +516,18 @@ def _run_open_code_review(task):
         severity = {"critical": "high", "high": "high", "medium": "medium", "low": "low"}
         # 部分 OpenAI 兼容服务在“无评论”时返回 comments: null，而非 []。
         findings = [{"key": f"ocr:{x.get('path')}:{x.get('start_line')}:{index}", "change": x.get("content", "OCR 审查提示"), "file": x.get("path", ""), "severity": severity.get(x.get("severity"), "medium"), "source": "ocr_ai", "confidence": 0.85, "verified": True, "line_start": x.get("start_line"), "evidence": x.get("existing_code") or x.get("content", ""), "impact": f"OCR 分类：{x.get('category') or 'other'}；建议结合上下文确认并回归"} for index, x in enumerate(payload.get("comments") or [])]
-        if status == "failed":
+        if timed_out:
+            note = f"OpenCodeReview 已达到 30 分钟上限，保留已完成结果（选中 {selected}，完成 {completed}，复用 {reused}，失败 {failed}，覆盖 {review_coverage}%）"
+        elif status == "failed":
             note = f"OpenCodeReview 未获得可用覆盖（{payload.get('message') or result.stderr[-500:] or '请检查模型服务或 OCR 输出'}）"
         elif review_coverage < 100:
             note = f"已使用 OpenCodeReview 进行分组 Agent 审查（状态 {status}，选中 {selected}，完成 {completed}，复用 {reused}，失败 {failed}，覆盖 {review_coverage}%）"
         else:
             note = f"已使用 OpenCodeReview 进行分组 Agent 审查（状态 {status}，选中 {selected}，完成 {completed}，复用 {reused}，覆盖 {review_coverage}%）"
-        return findings, int((payload.get("summary") or {}).get("total_tokens") or 0), note, True, review_coverage
+        tokens = int((payload.get("summary") or {}).get("total_tokens") or 0)
+        # failed 且没有任何完成分组时才执行平台 AI 降级；存在已完成分组时保留部分结果。
+        usable_result = status != "failed" or covered > 0
+        return findings, tokens, note, usable_result, review_coverage
     except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError, OSError) as exc:
         return [], 0, f"OCR 不可用，已降级：{exc}", False, 0
 
@@ -853,6 +887,7 @@ def run_analysis(task: AnalysisTask):
         ai_failed = False
         # 迭代需求来自 Diff，不依赖 OCR 风险；两项可同时执行。
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="iteration-design")
+        ocr_note, ocr_completed, ocr_coverage = "OCR 尚未执行", False, 0
         iteration_future = executor.submit(
             _analysis_stage, task.pk, "迭代需求分析", _run_iteration_test_design,
             task, analyzable_diffs, list(findings),
@@ -905,11 +940,20 @@ def run_analysis(task: AnalysisTask):
         for finding in findings:
             severity_counts[finding["severity"]] = severity_counts.get(finding["severity"], 0) + 1
             source_counts[finding["source"]] = source_counts.get(finding["source"], 0) + 1
+        if task.mode == "quick":
+            ocr_status = {"status": "skipped", "message": "快速模式未启用 OCR", "coverage": 0}
+        elif ocr_completed and ocr_coverage >= 100:
+            ocr_status = {"status": "completed", "message": "OCR 审查已完成", "coverage": ocr_coverage}
+        elif ocr_completed:
+            ocr_status = {"status": "partial", "message": ocr_note, "coverage": ocr_coverage}
+        else:
+            ocr_status = {"status": "failed", "message": ocr_note, "coverage": 0}
         task.change_report = {
             "summary": {"changed_files": len(files), "impact_scope_count": _impact_scope_count(files), "additions": total_additions, "deletions": total_deletions, "changed_lines": total_additions + total_deletions, "risk_count": len(findings), "high_risk_count": sum(1 for x in findings if x["severity"] == "high"), "severity_counts": severity_counts, "source_counts": source_counts},
             "files": files, "findings": findings, "impact_modules": impact_modules,
             "impact_summary": sorted({x["impact"] for x in findings}),
             "analysis_note": "；".join([*static_notes, ai_note]),
+            "ocr_status": ocr_status,
         }
         drafts = []
         # 代码审查报告中的高、中风险逐条生成风险测试点；低风险不生成专项测试点。

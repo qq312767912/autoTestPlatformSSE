@@ -11,7 +11,14 @@ from .services import AnalysisCancelled, run_analysis
 logger = logging.getLogger(__name__)
 
 
-@shared_task(bind=True, autoretry_for=(requests.RequestException,), retry_backoff=True, retry_kwargs={"max_retries": 2})
+@shared_task(
+    bind=True,
+    autoretry_for=(requests.RequestException,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 2},
+    soft_time_limit=35 * 60,
+    time_limit=40 * 60,
+)
 def run_code_analysis(self, task_id):
     """在后台执行代码分析；业务进度和最终结果以数据库记录为准。"""
     try:

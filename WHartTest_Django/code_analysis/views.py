@@ -153,6 +153,7 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
         if report_type == "change":
             report = task.change_report or {}
             summary = report.get("summary", {})
+            ocr_status = report.get("ocr_status") or {}
             lines = [
                 f"# {task.title or task.repository.name} - 代码审查报告", "",
                 "## 分析输入", "",
@@ -170,6 +171,7 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
                 f"- 高风险：{summary.get('high_risk_count', 0)}",
                 f"- 机器覆盖率：{task.machine_coverage}%",
                 f"- AI覆盖率：{task.ai_coverage}%",
+                f"- OCR状态：{ocr_status.get('message') or '历史报告未记录 OCR 状态'}",
                 f"- Token消耗：{task.token_usage}", "",
                 "## 风险与影响", "",
             ]
@@ -179,8 +181,10 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
                     f"- 文件：`{item.get('file', '')}`",
                     f"- 来源：{item.get('source', '')}",
                     f"- 置信度：{item.get('confidence', '-')}",
-                    f"- 影响：{item.get('impact', '')}", "",
+                    "- 风险凭据：", "",
                     "```", str(item.get("evidence", "")), "```", "",
+                    f"- 影响：{item.get('impact', '')}",
+                    f"- 建议：{item.get('recommendation') or '覆盖相关正常流程、异常分支及调用链后再决定是否修复'}", "",
                 ])
             lines.extend(["## 变更文件", ""])
             lines.extend(f"- `{item.get('path', '')}`" for item in report.get("files", []))
