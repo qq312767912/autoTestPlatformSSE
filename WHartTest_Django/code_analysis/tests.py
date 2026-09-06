@@ -11,7 +11,7 @@ from rest_framework.test import APIClient
 
 from projects.models import Project, ProjectMember
 from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
-from .services import DEFAULT_ANNOTATIONS, LocalGitClient, _diff_line_stats, _load_ocr_payload, _parse_diff, _risk_findings_for_tests, run_analysis
+from .services import DEFAULT_ANNOTATIONS, LocalGitClient, _diff_line_stats, _load_ocr_payload, _managed_gitlab_repository, _parse_diff, _risk_findings_for_tests, remove_ocr_repository, run_analysis
 
 
 class DiffRuleTests(TestCase):
@@ -196,6 +196,72 @@ class AnalysisLifecycleTests(TestCase):
         response = client.get(f"/api/code-analysis/tasks/{task.id}/execution-logs/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data[0]["event"], "completed")
+
+    @patch("code_analysis.views.remove_ocr_repository")
+    def test_deleting_analysis_also_deletes_its_ocr_repository(self, remove_repository):
+        task = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="a", head_sha="b",
+        )
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.delete(f"/api/code-analysis/tasks/{task.id}/")
+        self.assertIn(response.status_code, {200, 204})
+        self.assertFalse(AnalysisTask.objects.filter(pk=task.id).exists())
+        remove_repository.assert_called_once_with(task.id)
+
+    def test_gitlab_ocr_repository_is_shallow_persisted_until_explicit_removal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source"
+            managed = Path(directory) / "managed"
+            source.mkdir()
+            def git(*args):
+                return subprocess.run(["git", "-C", source, *args], check=True, capture_output=True, text=True)
+            git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test")
+            (source / "app.py").write_text("value = 1\n", encoding="utf-8")
+            git("add", "."); git("commit", "-m", "base")
+            base_sha = git("rev-parse", "HEAD").stdout.strip()
+            (source / "app.py").write_text("value = 2\n", encoding="utf-8")
+            git("commit", "-am", "head")
+            head_sha = git("rev-parse", "HEAD").stdout.strip()
+            task = AnalysisTask.objects.create(
+                project=self.project, repository=self.repository, creator=self.user, executor=self.user,
+                source_type="commits", base_sha=base_sha, head_sha=head_sha,
+            )
+            with patch("code_analysis.services.OCR_WORKSPACE_ROOT", managed), patch(
+                "code_analysis.services._gitlab_clone_url", return_value=str(source)
+            ):
+                with _managed_gitlab_repository(task) as (root, base_ref, head_ref):
+                    self.assertTrue((root / ".git").exists())
+                    self.assertEqual({base_ref, head_ref}, {"refs/ocr/base", "refs/ocr/head"})
+                self.assertTrue(root.exists())
+                remove_ocr_repository(task.id)
+                self.assertFalse(root.exists())
+
+    def test_platform_admin_can_list_tasks_from_all_projects(self):
+        other_owner = User.objects.create_user("other-owner", password="secret")
+        other_project = Project.objects.create(name="其他平台", creator=other_owner)
+        other_repository = ProjectRepository.objects.create(
+            project=other_project,
+            connection=self.connection,
+            gitlab_project_id="group/other-service",
+            name="other-service",
+            path_with_namespace="group/other-service",
+        )
+        AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="a", head_sha="b",
+        )
+        AnalysisTask.objects.create(
+            project=other_project, repository=other_repository, creator=other_owner,
+            source_type="commits", base_sha="c", head_sha="d",
+        )
+        admin = User.objects.create_user("platform-admin", password="secret", is_staff=True)
+        client = APIClient(); client.force_authenticate(admin)
+        response = client.get("/api/code-analysis/tasks/")
+        self.assertEqual(response.status_code, 200)
+        items = response.data.get("results", response.data) if isinstance(response.data, dict) else response.data
+        self.assertEqual(len(items), 2)
+        self.assertEqual({item["project_name"] for item in items}, {"交易平台", "其他平台"})
 
     def test_project_member_can_read_another_members_reports_diff_and_logs(self):
         member = User.objects.create_user("reviewer", password="secret")

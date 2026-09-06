@@ -62,6 +62,7 @@ class AnalysisTaskExecutionLogSerializer(serializers.ModelSerializer):
 
 
 class AnalysisTaskSerializer(serializers.ModelSerializer):
+    project_name = serializers.CharField(source="project.name", read_only=True)
     repository_name = serializers.CharField(source="repository.name", read_only=True)
     creator_name = serializers.CharField(source="creator.username", read_only=True)
     executor_name = serializers.CharField(source="executor.username", read_only=True, default=None)

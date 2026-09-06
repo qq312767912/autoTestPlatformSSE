@@ -3,9 +3,11 @@ import json
 import os
 import re
 import signal
+import shutil
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
@@ -31,6 +33,7 @@ SENSITIVE_CONFIG_KEYS = {"enabled", "enable", "auth", "authentication", "authori
 # 否则多轮工具调用可能在上下文压缩阶段提前结束。
 OCR_CONCURRENCY = 4
 OCR_TIMEOUT_SECONDS = {"standard": 360, "deep": 600}
+OCR_WORKSPACE_ROOT = Path(os.environ.get("OCR_WORKSPACE_ROOT", "/app/data/code-analysis-repositories"))
 
 
 class AnalysisCancelled(Exception):
@@ -110,6 +113,98 @@ class LocalGitClient:
             diff = self._git("diff", "--no-ext-diff", "--find-renames", base_sha, head_sha, "--", target)
             diffs.append({"old_path": old_path, "new_path": new_path, "new_file": status.startswith("A"), "deleted_file": status.startswith("D"), "diff": diff})
         return {"base_sha": base_sha, "head_sha": head_sha, "diffs": diffs}
+
+
+def _gitlab_clone_url(repository):
+    """使用已配置的 GitLab 地址和项目路径构造不含凭证的 HTTPS clone URL。"""
+    project_path = quote((repository.path_with_namespace or "").strip("/"), safe="/")
+    if not project_path:
+        raise ValueError("GitLab 仓库缺少项目路径")
+    suffix = "" if project_path.endswith(".git") else ".git"
+    return f"{repository.connection.base_url.rstrip('/')}/{project_path}{suffix}"
+
+
+def _run_git(command, *, cwd, env, timeout=180):
+    result = subprocess.run(
+        command, cwd=cwd, env=env, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=timeout,
+    )
+    if result.returncode:
+        raise ValueError(result.stderr.strip()[-1000:] or "GitLab 临时仓库同步失败")
+    return result.stdout
+
+
+def remove_ocr_repository(task_id):
+    """删除一条分析任务独占的浅仓库；只能由删除分析记录的流程调用。"""
+    root = OCR_WORKSPACE_ROOT.resolve()
+    target = (root / str(task_id)).resolve()
+    if target.parent != root:
+        raise ValueError("OCR 浅仓库路径越界")
+    if target.exists():
+        shutil.rmtree(target)
+
+
+@contextmanager
+def _managed_gitlab_repository(task):
+    """使用执行人的 Token创建或更新任务独占浅仓库，任务删除前持续保留。"""
+    credential = UserGitLabCredential.objects.get(
+        project=task.project,
+        connection=task.repository.connection,
+        user=task.executor or task.creator,
+    )
+    token = credential.get_token()
+    OCR_WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root = OCR_WORKSPACE_ROOT / str(task.pk)
+    root.mkdir(mode=0o700, exist_ok=True)
+    askpass = root / "git-askpass.sh"
+    askpass.write_text(
+        "#!/bin/sh\ncase \"$1\" in *Username*) printf '%s\\n' oauth2 ;; *) printf '%s\\n' \"$OCR_GITLAB_TOKEN\" ;; esac\n",
+        encoding="utf-8",
+    )
+    askpass.chmod(0o700)
+    env = os.environ.copy()
+    env.update({
+        "GIT_ASKPASS": str(askpass),
+        "GIT_TERMINAL_PROMPT": "0",
+        "OCR_GITLAB_TOKEN": token,
+    })
+    if not (root / ".git").exists():
+        _run_git(["git", "init", "--quiet"], cwd=root, env=env)
+        _run_git(["git", "remote", "add", "origin", _gitlab_clone_url(task.repository)], cwd=root, env=env)
+    else:
+        _run_git(["git", "remote", "set-url", "origin", _gitlab_clone_url(task.repository)], cwd=root, env=env)
+    _run_git(["git", "fetch", "--quiet", "--force", "--no-tags", "--depth=50", "origin", f"{task.base_sha}:refs/ocr/base"], cwd=root, env=env)
+    _ensure_not_cancelled(task)
+    _run_git(["git", "fetch", "--quiet", "--force", "--no-tags", "--depth=50", "origin", f"{task.head_sha}:refs/ocr/head"], cwd=root, env=env)
+    for deepen_by in (100, 250, 500):
+        merge_base = subprocess.run(
+            ["git", "merge-base", "refs/ocr/base", "refs/ocr/head"],
+            cwd=root, env=env, capture_output=True, text=True, timeout=30,
+        )
+        if merge_base.returncode == 0:
+            break
+        _ensure_not_cancelled(task)
+        _run_git([
+            "git", "fetch", "--quiet", "--force", "--no-tags", f"--deepen={deepen_by}",
+            "origin", task.base_sha, task.head_sha,
+        ], cwd=root, env=env)
+    merge_base = subprocess.run(
+        ["git", "merge-base", "refs/ocr/base", "refs/ocr/head"],
+        cwd=root, env=env, capture_output=True, text=True, timeout=30,
+    )
+    if merge_base.returncode != 0:
+        raise ValueError("浅仓库在最大历史深度内找不到两个 Commit 的共同祖先")
+    _run_git(["git", "checkout", "--quiet", "--force", "--detach", "refs/ocr/head"], cwd=root, env=env)
+    yield root, "refs/ocr/base", "refs/ocr/head"
+
+
+@contextmanager
+def _ocr_repository(task):
+    if task.repository.source_type == "local_git":
+        yield LocalGitClient(task.repository.local_path).path, task.base_sha, task.head_sha
+        return
+    with _managed_gitlab_repository(task) as prepared:
+        yield prepared
 
 
 def _deleted_line_numbers(diff_text):
@@ -352,28 +447,28 @@ def _analysis_stage(task_id, name, function, *args):
 
 
 def _run_open_code_review(task):
-    """调用 OCR CLI；仅本地 Git，运行配置通过进程环境注入而不写入磁盘。"""
-    if task.repository.source_type != "local_git" or task.mode == "quick":
-        return [], 0, "未启用 OCR（仅标准/深度本地 Git 审查）", False, 0
+    """调用 OCR CLI；GitLab 使用个人 Token维护任务独占浅仓库。"""
+    if task.mode == "quick":
+        return [], 0, "快速模式未启用 OCR", False, 0
     from langgraph_integration.models import LLMConfig
     config = LLMConfig.objects.filter(is_active=True).first()
     if not config:
         return [], 0, "未启用 OCR：没有可用 LLM 配置", False, 0
     try:
-        root = LocalGitClient(task.repository.local_path).path
-        env = os.environ.copy()
-        env.update({"OCR_LLM_URL": config.api_url, "OCR_LLM_TOKEN": config.api_key, "OCR_LLM_MODEL": config.name, "OCR_LLM_PROTOCOL": "openai"})
-        # 不传 --max-tokens，使用 OCR/模型的原生上下文上限；人为设为 5k/8k 会使
-        # 多轮工具调用过早触发上下文压缩并中止审查。
-        command = [
-            "ocr", "review", "--from", task.base_sha, "--to", task.head_sha,
-            "--format", "json", "--audience", "agent",
-            "--concurrency", str(OCR_CONCURRENCY),
-        ]
-        result = _run_ocr_process(
-            command, cwd=root, env=env, task=task,
-            timeout=OCR_TIMEOUT_SECONDS.get(task.mode, OCR_TIMEOUT_SECONDS["standard"]),
-        )
+        with _ocr_repository(task) as (root, base_ref, head_ref):
+            env = os.environ.copy()
+            env.update({"OCR_LLM_URL": config.api_url, "OCR_LLM_TOKEN": config.api_key, "OCR_LLM_MODEL": config.name, "OCR_LLM_PROTOCOL": "openai"})
+            # 不传 --max-tokens，使用 OCR/模型的原生上下文上限；人为设为 5k/8k 会使
+            # 多轮工具调用过早触发上下文压缩并中止审查。
+            command = [
+                "ocr", "review", "--from", base_ref, "--to", head_ref,
+                "--format", "json", "--audience", "agent",
+                "--concurrency", str(OCR_CONCURRENCY),
+            ]
+            result = _run_ocr_process(
+                command, cwd=root, env=env, task=task,
+                timeout=OCR_TIMEOUT_SECONDS.get(task.mode, OCR_TIMEOUT_SECONDS["standard"]),
+            )
         payload = _load_ocr_payload(result.stdout)
         # OCR 会把 complete / partial / failed 都序列化为 JSON。只要收到了
         # 结构化输出，就保留 OCR 的真实覆盖情况，不能回退为旧的全量 Diff 扫描。
@@ -399,7 +494,7 @@ def _run_open_code_review(task):
         else:
             note = f"已使用 OpenCodeReview 进行分组 Agent 审查（状态 {status}，选中 {selected}，完成 {completed}，复用 {reused}，覆盖 {review_coverage}%）"
         return findings, int((payload.get("summary") or {}).get("total_tokens") or 0), note, True, review_coverage
-    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError) as exc:
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError, OSError) as exc:
         return [], 0, f"OCR 不可用，已降级：{exc}", False, 0
 
 

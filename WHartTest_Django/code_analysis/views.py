@@ -11,7 +11,7 @@ from django.db.models import Q
 from projects.models import ProjectMember
 from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
 from .serializers import AnalysisTaskExecutionLogSerializer, AnalysisTaskSerializer, CredentialSerializer, GitLabConnectionSerializer, ProjectRepositorySerializer, TestRequirementDraftSerializer
-from .services import GitLabClient, normalize_test_point_for_display
+from .services import GitLabClient, normalize_test_point_for_display, remove_ocr_repository
 
 
 def _can_access(user, project_id):
@@ -34,7 +34,8 @@ class ProjectRepositoryViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     def get_queryset(self):
         qs = ProjectRepository.objects.select_related("project", "connection")
-        if not self.request.user.is_superuser: qs = qs.filter(project__members__user=self.request.user)
+        if not (self.request.user.is_superuser or self.request.user.is_staff):
+            qs = qs.filter(project__members__user=self.request.user)
         project_id = self.request.query_params.get("project")
         return qs.filter(project_id=project_id) if project_id else qs
     def perform_create(self, serializer):
@@ -76,7 +77,8 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     def get_queryset(self):
         qs = AnalysisTask.objects.select_related("project", "repository", "creator", "executor").prefetch_related("test_requirement_drafts")
-        if not self.request.user.is_superuser: qs = qs.filter(project__members__user=self.request.user)
+        if not (self.request.user.is_superuser or self.request.user.is_staff):
+            qs = qs.filter(project__members__user=self.request.user)
         project_id = self.request.query_params.get("project")
         return qs.filter(project_id=project_id) if project_id else qs
     def perform_create(self, serializer):
@@ -89,7 +91,9 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
         membership = ProjectMember.objects.filter(project=task.project, user=request.user).first()
         if not (request.user.is_superuser or task.creator_id == request.user.id or membership and membership.role in {"owner", "admin"}):
             raise PermissionDenied("无权删除该分析任务")
+        task_id = task.pk
         task.delete()
+        remove_ocr_repository(task_id)
         return Response(status=status.HTTP_204_NO_CONTENT)
     @action(detail=True, methods=["post"])
     def run(self, request, pk=None):

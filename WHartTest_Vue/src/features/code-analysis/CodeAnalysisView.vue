@@ -25,7 +25,7 @@
       <a-spin :loading="loading" style="width:100%">
         <div v-for="task in tasks" :key="task.id" class="task-row" @click="selectedTask = task">
           <div class="task-mark" :class="task.status"></div>
-          <div class="task-main"><div class="task-title">{{ task.title || task.repository_name }}</div><div class="task-meta">{{ task.repository_name }} · {{ sourceLabel(task) }} · {{ task.creator_name }}</div></div>
+          <div class="task-main"><div class="task-title">{{ task.title || task.repository_name }}</div><div class="task-meta"><span v-if="isPlatformAdmin">{{ task.project_name || `项目 ${task.project}` }} · </span>{{ task.repository_name }} · {{ sourceLabel(task) }} · {{ task.creator_name }}</div></div>
           <div class="task-score"><span>风险</span><b>{{ task.change_report?.summary?.risk_count || 0 }}</b></div>
           <div class="task-score"><span>测试点</span><b>{{ task.test_report?.summary?.test_point_count || 0 }}</b></div>
           <a-tag :color="statusColor(task.status)">{{ statusLabel(task.status) }}</a-tag>
@@ -203,10 +203,13 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue';
 import { IconDelete, IconDownload, IconFile, IconPlus, IconQuestionCircle, IconRefresh, IconSettings } from '@arco-design/web-vue/es/icon';
 import { useProjectStore } from '@/store/projectStore';
+import { useAuthStore } from '@/store/authStore';
 import type { AnalysisExecutionLog, AnalysisTask, CodeRepository, GitLabConnection, MergeRequest } from './types';
 import * as api from './service';
 
 const projectStore = useProjectStore();
+const authStore = useAuthStore();
+const isPlatformAdmin = computed(() => !!authStore.currentUser?.is_staff);
 const tasks = ref<AnalysisTask[]>([]), repositories = ref<CodeRepository[]>([]), connections = ref<GitLabConnection[]>([]), mergeRequests = ref<MergeRequest[]>([]), projectDocuments = ref<any[]>([]);
 const loading = ref(false), submitting = ref(false), mrLoading = ref(false), createVisible = ref(false), configVisible = ref(false);
 const selectedTask = ref<AnalysisTask|null>(null);
@@ -323,7 +326,7 @@ async function download(task:AnalysisTask,type:'change'|'test'){try{await api.do
 async function openDiff(item:any){if(!selectedTask.value)return;diffVisible.value=true;diffLoading.value=true;diffText.value='';diffTitle.value=`Diff · ${item.file || '变更文件'}`;try{const payload=await api.getTaskDiff(selectedTask.value.id,item.file);diffText.value=payload?.diff||''}catch(e:any){Message.error(e.message||'读取 Diff 失败')}finally{diffLoading.value=false}}
 async function loadBase(){ const id=projectStore.currentProjectId; if(!id)return; [connections.value,repositories.value,projectDocuments.value]=await Promise.all([api.getConnections(),api.getRepositories(id),api.getProjectDocuments(id)]); }
 async function refreshExecutionLogs(){if(!selectedTask.value)return;try{executionLogs.value=await api.getExecutionLogs(selectedTask.value.id)}catch{executionLogs.value=[]}}
-async function loadTasks(silent=false){ const id=projectStore.currentProjectId;if(!id)return;if(!silent)loading.value=true;try{tasks.value=await api.getTasks(id);if(selectedTask.value){selectedTask.value=tasks.value.find(task=>task.id===selectedTask.value?.id)||null;await refreshExecutionLogs()}}catch(e:any){if(!silent)Message.error(e.message)}finally{if(!silent)loading.value=false} }
+async function loadTasks(silent=false){ const id=projectStore.currentProjectId;if(!id && !isPlatformAdmin.value)return;if(!silent)loading.value=true;try{tasks.value=await api.getTasks(isPlatformAdmin.value ? undefined : id!);if(selectedTask.value){selectedTask.value=tasks.value.find(task=>task.id===selectedTask.value?.id)||null;await refreshExecutionLogs()}}catch(e:any){if(!silent)Message.error(e.message)}finally{if(!silent)loading.value=false} }
 async function openCreate(){ await loadBase(); if(!repositories.value.length){configVisible.value=true;Message.info('请先关联本地 Git 仓库或完成 GitLab 配置');return} createVisible.value=true; }
 async function onRepositoryChange(v:any){mergeRequests.value=[];form.merge_request_iid=null;const repo=repositories.value.find(item=>item.id===v);if(!repo)return;if(repo.source_type==='local_git'){form.source_type='commits';return}mrLoading.value=true;try{mergeRequests.value=await api.getMergeRequests(Number(v))}catch(e:any){Message.error(`读取MR失败：${e.message}`)}finally{mrLoading.value=false}}
 async function submitTask(){ const project=projectStore.currentProjectId;if(!project)return;submitting.value=true;try{const task=await api.createTask({...form,project});createVisible.value=false;await api.runTask(task.id);Message.success('分析任务已提交，可在列表查看进度');await loadTasks()}catch(e:any){Message.error(e.message||'提交分析失败');await loadTasks()}finally{submitting.value=false} }
