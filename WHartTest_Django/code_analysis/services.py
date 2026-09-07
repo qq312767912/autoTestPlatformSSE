@@ -32,11 +32,27 @@ SENSITIVE_CONFIG_KEYS = {"enabled", "enable", "auth", "authentication", "authori
 
 # OpenCodeReview 参数统一维护。内网自建模型不限制 token；OCR 需要保留原生上下文，
 # 否则多轮工具调用可能在上下文压缩阶段提前结束。
-OCR_CONCURRENCY = 4
+OCR_CONCURRENCY = 6
 OCR_TIMEOUT_SECONDS = {"standard": 30 * 60, "deep": 30 * 60}
-OCR_INTERNAL_TIMEOUT_MINUTES = 29
+OCR_PRIMARY_TIMEOUT_MINUTES = 20
+OCR_RESUME_TIMEOUT_MINUTES = 8
+OCR_RESUME_CONCURRENCY = 2
 OCR_GRACEFUL_STOP_SECONDS = 20
 OCR_WORKSPACE_ROOT = Path(os.environ.get("OCR_WORKSPACE_ROOT", "/app/data/code-analysis-repositories"))
+LOW_VALUE_FILE_PATTERNS = (
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+    "poetry.lock", "Pipfile.lock", "composer.lock", "Cargo.lock", "go.sum",
+    "*.min.js", "*.min.css", "*.map", "*.snap", "*.generated.*", "*.designer.*",
+    "dist/**", "build/**", "coverage/**", "vendor/**", "node_modules/**",
+    "**/dist/**", "**/build/**", "**/coverage/**", "**/vendor/**", "**/node_modules/**",
+)
+
+
+def _is_low_value_file(path):
+    """识别锁文件、构建产物等不适合消耗 Agent 审查时间的文件。"""
+    normalized = (path or "").replace("\\", "/")
+    name = normalized.rsplit("/", 1)[-1]
+    return any(fnmatch.fnmatch(normalized, pattern) or fnmatch.fnmatch(name, pattern) for pattern in LOW_VALUE_FILE_PATTERNS)
 
 
 class AnalysisCancelled(Exception):
@@ -388,6 +404,26 @@ def _json_from_response(content):
     return json.loads(text[start:end + 1])
 
 
+def _sanitize_json_value(value):
+    """递归转义 PostgreSQL JSONB 不接受的控制字符，同时保留可读含义。"""
+    if isinstance(value, str):
+        return "".join(
+            character if ord(character) >= 32 or character in "\t\n\r"
+            else f"\\u{ord(character):04x}"
+            for character in value
+        )
+    if isinstance(value, list):
+        return [_sanitize_json_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            _sanitize_json_value(key): _sanitize_json_value(item)
+            for key, item in value.items()
+        }
+    return value
+
+
 def _is_unverified_syntax_claim(risk):
     """局部 Diff 无法可靠判断模板/编译语法，避免 AI 将单个闭合标签误报为高风险。"""
     text = " ".join(str(risk.get(field, "")) for field in ("change", "impact")).lower()
@@ -482,14 +518,95 @@ def _analysis_stage(task_id, name, function, *args):
             close_old_connections()
 
 
+def _ocr_diagnostics(payload):
+    """把 OCR manifest/retry_report 转成可展示、可审计的分组完整度诊断。"""
+    manifest = payload.get("manifest") or {}
+    coverage = manifest.get("coverage") or {}
+    selected_items = coverage.get("selected") or []
+    completed_items = coverage.get("completed") or []
+    reused_items = coverage.get("reused") or []
+    failed_items = coverage.get("failed") or []
+    retry_report = payload.get("retry_report") or {}
+    failed_requests = [item for item in retry_report.get("requests") or [] if item.get("outcome") == "failed"]
+    recovered_requests = [item for item in retry_report.get("requests") or [] if item.get("outcome") == "recovered"]
+    request_by_path = {}
+    for request in failed_requests:
+        for path in str(request.get("file_path") or "").split(","):
+            if path.strip():
+                request_by_path[path.strip()] = request
+
+    failure_details, failure_type_counts = [], {}
+    for item in failed_items:
+        request = request_by_path.get(str(item.get("path") or ""), {})
+        attempts = request.get("attempts") or []
+        errors = [attempt for attempt in attempts if attempt.get("outcome") != "success"]
+        status_codes = [attempt.get("status_code") for attempt in attempts if attempt.get("status_code")]
+        if any(attempt.get("error_class") == "network" for attempt in errors):
+            failure_type = "network"
+        elif 429 in status_codes:
+            failure_type = "rate_limit"
+        elif any("timeout" in str(attempt.get("error_class") or "").lower() for attempt in errors):
+            failure_type = "timeout"
+        elif attempts and all(attempt.get("outcome") == "success" and attempt.get("status_code") == 200 for attempt in attempts):
+            failure_type = "agent_subtask"
+        else:
+            failure_type = str(item.get("classification") or "unknown")
+        failure_type_counts[failure_type] = failure_type_counts.get(failure_type, 0) + 1
+        failure_details.append({
+            "path": item.get("path", ""), "item_id": item.get("item_id", ""),
+            "type": failure_type, "classification": item.get("classification", ""),
+            "reason": item.get("reason", ""), "request_no": request.get("request_no"),
+            "status_codes": status_codes,
+        })
+
+    failed_paths = {item.get("path") for item in failed_items}
+    completed_paths = {item.get("path") for item in completed_items} | {item.get("path") for item in reused_items}
+    group_details = []
+    for group in payload.get("groups") or []:
+        files = group.get("files") or []
+        failed_files = [path for path in files if path in failed_paths]
+        covered_files = [path for path in files if path in completed_paths]
+        group_details.append({
+            "label": group.get("label") or "未命名分组", "files": files,
+            "completed": len(covered_files), "failed": len(failed_files),
+            "coverage": round(len(covered_files) / len(files) * 100, 1) if files else 0,
+            "failed_files": failed_files,
+        })
+    summary = payload.get("summary") or {}
+    covered_count = len(completed_items) + len(reused_items)
+    return {
+        "selected": len(selected_items), "completed": len(completed_items),
+        "reused": len(reused_items), "failed": len(failed_items),
+        "coverage": round(covered_count / len(selected_items) * 100, 1) if selected_items else 0,
+        "failure_type_counts": failure_type_counts, "failure_details": failure_details,
+        "groups": group_details,
+        "retry": {
+            "total_requests": retry_report.get("total_requests", 0),
+            "retried_requests": retry_report.get("retried_requests", 0),
+            "recovered_requests": len(recovered_requests),
+            "failed_requests": retry_report.get("failed_requests", len(failed_requests)),
+        },
+        "tool_failures": (payload.get("tool_calls") or {}).get("failure_details") or [],
+        "elapsed": summary.get("elapsed", ""), "total_tokens": summary.get("total_tokens", 0),
+        "configured_concurrency": (manifest.get("execution") or {}).get("configured_concurrency"),
+        "ocr_version": (manifest.get("execution") or {}).get("ocr_version", ""),
+    }
+
+
+def _ocr_needs_resume(payload):
+    """仅在存在可恢复会话和失败项时续审，避免重新分析成功文件。"""
+    coverage = ((payload.get("manifest") or {}).get("coverage") or {}) if payload else {}
+    return bool(payload and payload.get("session_id") and coverage.get("failed"))
+
+
 def _run_open_code_review(task):
     """调用 OCR CLI；GitLab 使用个人 Token维护任务独占浅仓库。"""
     if task.mode == "quick":
-        return [], 0, "快速模式未启用 OCR", False, 0
+        return [], 0, "快速模式未启用 OCR", False, 0, {}
     from langgraph_integration.models import LLMConfig
     config = LLMConfig.objects.filter(is_active=True).first()
     if not config:
-        return [], 0, "未启用 OCR：没有可用 LLM 配置", False, 0
+        return [], 0, "未启用 OCR：没有可用 LLM 配置", False, 0, {}
     try:
         with _ocr_repository(task) as (root, base_ref, head_ref):
             env = os.environ.copy()
@@ -504,15 +621,61 @@ def _run_open_code_review(task):
                 "ocr", "review", "--from", base_ref, "--to", head_ref,
                 "--format", "json", "--audience", "agent",
                 "--concurrency", str(OCR_CONCURRENCY),
-                "--timeout", str(OCR_INTERNAL_TIMEOUT_MINUTES),
+                "--exclude", ",".join(LOW_VALUE_FILE_PATTERNS),
+                "--timeout", str(OCR_PRIMARY_TIMEOUT_MINUTES),
                 "--output", str(output_path),
             ]
             result, timed_out = _run_ocr_process(
                 command, cwd=root, env=env, task=task,
-                timeout=OCR_TIMEOUT_SECONDS.get(task.mode, OCR_TIMEOUT_SECONDS["standard"]),
+                timeout=OCR_PRIMARY_TIMEOUT_MINUTES * 60 + OCR_GRACEFUL_STOP_SECONDS,
             )
             output_text = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
-        payload = _load_ocr_payload(output_text or result.stdout)
+            payload = _load_ocr_payload(output_text or result.stdout)
+            resume_detail = {"triggered": False, "concurrency": OCR_RESUME_CONCURRENCY}
+            if _ocr_needs_resume(payload):
+                _ensure_not_cancelled(task)
+                parent_session_id = payload["session_id"]
+                first_diagnostics = _ocr_diagnostics(payload)
+                resume_detail.update({
+                    "triggered": True, "parent_session_id": parent_session_id,
+                    "before_failed": first_diagnostics.get("failed", 0),
+                    "before_coverage": first_diagnostics.get("coverage", 0),
+                })
+                resume_command = [
+                    "ocr", "review", "--from", base_ref, "--to", head_ref,
+                    "--format", "json", "--audience", "agent",
+                    "--concurrency", str(OCR_RESUME_CONCURRENCY),
+                    "--exclude", ",".join(LOW_VALUE_FILE_PATTERNS),
+                    "--timeout", str(OCR_RESUME_TIMEOUT_MINUTES),
+                    "--resume", parent_session_id,
+                    "--output", str(output_path),
+                ]
+                try:
+                    output_path.unlink(missing_ok=True)
+                    resume_result, resume_timed_out = _run_ocr_process(
+                        resume_command, cwd=root, env=env, task=task,
+                        timeout=OCR_RESUME_TIMEOUT_MINUTES * 60 + OCR_GRACEFUL_STOP_SECONDS,
+                    )
+                    resumed_text = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
+                    resumed_payload = _load_ocr_payload(resumed_text or resume_result.stdout)
+                    if resumed_payload:
+                        payload = resumed_payload
+                        result, timed_out = resume_result, resume_timed_out
+                    resume_detail["timed_out"] = resume_timed_out
+                except AnalysisCancelled:
+                    raise
+                except Exception as resume_exc:
+                    # 续审失败时继续使用首轮结果，绝不清空已经完成的 OCR 评论。
+                    resume_detail.update({"status": "failed", "error": str(resume_exc)})
+            diagnostics = _ocr_diagnostics(payload)
+            if resume_detail.get("triggered"):
+                resume_detail.setdefault("status", "completed" if diagnostics.get("failed", 0) == 0 else "partial")
+                resume_detail.update({
+                    "after_failed": diagnostics.get("failed", 0),
+                    "after_coverage": diagnostics.get("coverage", 0),
+                    "recovered_files": max(0, resume_detail.get("before_failed", 0) - diagnostics.get("failed", 0)),
+                })
+            diagnostics["resume"] = resume_detail
         # OCR 会把 complete / partial / failed 都序列化为 JSON。只要收到了
         # 结构化输出，就保留 OCR 的真实覆盖情况，不能回退为旧的全量 Diff 扫描。
         status = payload.get("status")
@@ -541,9 +704,9 @@ def _run_open_code_review(task):
         tokens = int((payload.get("summary") or {}).get("total_tokens") or 0)
         # failed 且没有任何完成分组时才执行平台 AI 降级；存在已完成分组时保留部分结果。
         usable_result = status != "failed" or covered > 0
-        return findings, tokens, note, usable_result, review_coverage
+        return findings, tokens, note, usable_result, review_coverage, diagnostics
     except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError, OSError) as exc:
-        return [], 0, f"OCR 不可用，已降级：{exc}", False, 0
+        return [], 0, f"OCR 不可用，已降级：{exc}", False, 0, {"failure_type_counts": {"platform": 1}, "failure_details": [{"type": "platform", "reason": str(exc)}]}
 
 
 def _normalize_ocr_findings(task, findings):
@@ -666,6 +829,73 @@ def _generate_fix_patches(task, findings, analyzable_diffs, review_client=None):
         return 0, f"建议修复生成未完成：{exc}"
 
 
+def generate_suggested_patch(task, finding, review_client=None):
+    """按需为单个风险生成建议补丁；该流程只读源码，不会应用补丁。"""
+    path = finding.get("file", "")
+    marker = f"diff -- {path}\n"
+    raw_diff = task.raw_diff or ""
+    start = raw_diff.find(marker)
+    if start >= 0:
+        start += len(marker)
+        end = raw_diff.find("\ndiff -- ", start)
+        file_diff = raw_diff[start:end if end >= 0 else None]
+    else:
+        file_diff = ""
+    generated = dict(finding)
+    tokens, note = _generate_fix_patches(task, [generated], [{"path": path, "diff": file_diff}], review_client)
+    return generated, tokens, note
+
+
+def _validated_iteration_response(config, prompt):
+    """格式或内容缺失时重新生成；失败必须交由报告状态显式处理。"""
+    from langgraph_integration.views import create_llm_instance
+    last_error = None
+    diagnostics = []
+    for attempt in range(3):
+        try:
+            instruction = prompt
+            if attempt:
+                instruction = '只输出一个完整 JSON 对象，禁止 Markdown 和解释文字。\n' + instruction
+            response = create_llm_instance(config, temperature=0.1).invoke(
+                instruction, response_format={"type": "json_object"}
+            )
+            content = getattr(response, 'content', response)
+            extra = getattr(response, 'additional_kwargs', {}) or {}
+            metadata = getattr(response, 'response_metadata', {}) or {}
+            candidates = [content, extra.get('reasoning_content', '')]
+            payload = None
+            parse_errors = []
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                try:
+                    payload = _json_from_response(candidate)
+                    break
+                except Exception as parse_error:
+                    parse_errors.append(str(parse_error))
+            diagnostics.append({
+                "attempt": attempt + 1,
+                "content_length": len(content) if isinstance(content, str) else 0,
+                "reasoning_length": len(extra.get('reasoning_content', '')),
+                "finish_reason": metadata.get("finish_reason"),
+                "parse_errors": parse_errors,
+            })
+            if payload is None:
+                raise ValueError('LLM未返回可解析JSON对象')
+            summary = payload.get('iteration_summary')
+            points = payload.get('test_requirements')
+            if not isinstance(summary, dict) or not summary.get('title') or not summary.get('change_groups'):
+                raise ValueError('迭代总结缺失或结构不完整')
+            if not isinstance(points, list) or not points or any(not isinstance(p, dict) or not all(p.get(k) for k in ('title', 'objective', 'expected_result')) for p in points):
+                raise ValueError('需求测试点缺失或结构不完整')
+            return response, payload
+        except AnalysisCancelled:
+            raise
+        except Exception as exc:
+            last_error = exc
+    raise ValueError(f'迭代分析经过3次尝试仍未通过校验：{last_error}；响应诊断={json.dumps(diagnostics, ensure_ascii=False)}')
+
+
 def _run_iteration_test_design(task, analyzable_diffs, findings):
     """基于本次 Diff 生成迭代测试点；风险仅作为补充约束，而非逐条转换。"""
     if task.mode == "quick" or not analyzable_diffs:
@@ -690,8 +920,7 @@ def _run_iteration_test_design(task, analyzable_diffs, findings):
             "输出严格 JSON：{\"iteration_summary\":{\"title\":\"一句话迭代主题\",\"description\":\"一句话总体影响\",\"summary_points\":[\"与change_groups逐项对应的业务变化要点\"],\"change_groups\":[{\"module\":\"模块或业务域\",\"name\":\"业务变化名称\",\"description\":\"变化与影响\",\"change_scale\":\"large|medium|small\",\"files\":[\"文件路径\"],\"test_focus\":\"测试关注点\"}]},\"test_requirements\":[{\"change_group\":\"对应业务变化名称\",\"title\":\"\",\"objective\":\"\",\"expected_result\":\"\",\"priority\":\"high|medium|low\",\"test_type\":\"迭代验证\"}]}。\n"
             f"风险摘要：{json.dumps(risks, ensure_ascii=False)}\n本次Diff：\n{diff_context}"
         )
-        response = create_llm_instance(config, temperature=0.1).invoke(prompt)
-        payload = _json_from_response(getattr(response, "content", response))
+        response, payload = _validated_iteration_response(config, prompt)
         usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
         points = [item for item in payload.get("test_requirements", []) if item.get("title") and item.get("objective")]
         iteration_summary = payload.get("iteration_summary") or {}
@@ -928,7 +1157,91 @@ def _run_context_test_enrichment(task, findings):
         return [], [], 0, f"业务文档补充未完成：{exc}"
 
 
-def run_analysis(task: AnalysisTask):
+def _cache_report_complete(task):
+    """不复用 OCR 失败或缺少迭代分析的历史结果。"""
+    change, report = task.change_report or {}, task.test_report or {}
+    if not change or not report or not task.raw_diff:
+        return False
+    if task.mode == "quick":
+        return True
+    ocr = change.get("ocr_status") or {}
+    summary = report.get("iteration_summary") or {}
+    return (
+        ocr.get("status") == "completed" and ocr.get("coverage") == 100
+        and bool(summary.get("title")) and bool(summary.get("change_groups"))
+        and any(
+            point.get("test_type") == "迭代验证"
+            and all(point.get(key) for key in ("title", "objective", "expected_result"))
+            for point in report.get("test_requirements", [])
+        )
+    )
+
+
+def _reuse_cached_result(task, original_base_sha, original_head_sha):
+    """相同仓库、Commit、模式与上下文直接复用已完成报告。"""
+    source = None
+    if (
+        _cache_report_complete(task)
+        and original_base_sha == task.base_sha and original_head_sha == task.head_sha
+    ):
+        source = task
+    if source is None:
+        candidates = AnalysisTask.objects.filter(
+            repository=task.repository, base_sha=task.base_sha, head_sha=task.head_sha,
+            mode=task.mode, requirement_context=task.requirement_context, api_context=task.api_context,
+            requirement_document_ids=task.requirement_document_ids,
+            api_document_ids=task.api_document_ids,
+            status="completed",
+        ).exclude(pk=task.pk).order_by("-completed_at")
+        source = next((candidate for candidate in candidates.iterator() if _cache_report_complete(candidate)), None)
+    if source is None:
+        return False
+
+    change_report = json.loads(json.dumps(source.change_report or {}, ensure_ascii=False))
+    test_report = json.loads(json.dumps(source.test_report or {}, ensure_ascii=False))
+    cached_points = test_report.get("test_requirements") or []
+    rebuilt_points = []
+    for point in cached_points:
+        existing = None
+        if source.pk == task.pk and point.get("id"):
+            existing = TestRequirementDraft.objects.filter(task=task, pk=point["id"]).first()
+        if existing:
+            rebuilt_points.append(dict(point))
+            continue
+        draft = TestRequirementDraft.objects.create(
+            task=task,
+            title=str(point.get("title") or "代码变更验证")[:500],
+            objective=str(point.get("objective") or ""),
+            expected_result=str(point.get("expected_result") or ""),
+            priority=str(point.get("priority") or "medium")[:20],
+            test_type=str(point.get("test_type") or "迭代验证")[:100],
+            source_finding_key=str(point.get("source_finding_key") or "")[:255],
+        )
+        rebuilt = dict(point)
+        rebuilt.update({"id": draft.id, "status": draft.status})
+        rebuilt_points.append(rebuilt)
+    test_report["test_requirements"] = rebuilt_points
+    change_report["cache"] = {"reused": True, "source_task_id": str(source.pk)}
+    task.change_report = change_report
+    task.test_report = test_report
+    task.raw_diff = source.raw_diff
+    task.machine_coverage = source.machine_coverage
+    task.ai_coverage = source.ai_coverage
+    task.token_usage = 0
+    task.status = "partial" if task.mode != "quick" and source.ai_coverage < 100 else "completed"
+    task.progress = 100
+    task.current_step = "已复用相同 Commit 的分析缓存"
+    task.completed_at = timezone.now()
+    task.save()
+    AnalysisTaskExecutionLog.objects.create(
+        task=task, event=task.status, message="已复用相同 Commit 的分析缓存",
+        detail={"cache_hit": True, "source_task_id": str(source.pk)},
+    )
+    return True
+
+
+def run_analysis(task: AnalysisTask, force_refresh=False):
+    original_base_sha, original_head_sha = task.base_sha, task.head_sha
     _ensure_not_cancelled(task)
     AnalysisTaskExecutionLog.objects.create(task=task, event="started", message="后台任务开始执行")
     task.status, task.progress, task.current_step = "fetching", 10, "读取代码变更"
@@ -954,6 +1267,9 @@ def run_analysis(task: AnalysisTask):
                 payload = client.compare(task.repository.gitlab_project_id, task.base_sha, task.head_sha)
                 diffs = payload.get("diffs", [])
 
+        if not force_refresh and _reuse_cached_result(task, original_base_sha, original_head_sha):
+            return task
+
         _ensure_not_cancelled(task)
         task.status, task.progress, task.current_step = "machine_analyzing", 40, "检测关键代码变化"
         task.save(update_fields=["status", "progress", "current_step", "base_sha", "head_sha", "title", "updated_at"])
@@ -963,12 +1279,14 @@ def run_analysis(task: AnalysisTask):
         total_additions, total_deletions = 0, 0
         for item in diffs:
             path = item.get("new_path") or item.get("old_path") or ""
-            excluded = any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+            configured_excluded = any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+            low_value = _is_low_value_file(path)
+            excluded = configured_excluded or low_value
             diff = item.get("diff", "")
             additions, deletions = _diff_line_stats(diff)
             total_additions += additions
             total_deletions += deletions
-            files.append({"path": path, "old_path": item.get("old_path"), "new_file": item.get("new_file", False), "deleted_file": item.get("deleted_file", False), "excluded": excluded, "additions": additions, "deletions": deletions, "changed_lines": additions + deletions})
+            files.append({"path": path, "old_path": item.get("old_path"), "new_file": item.get("new_file", False), "deleted_file": item.get("deleted_file", False), "excluded": excluded, "exclusion_reason": "低价值文件" if low_value else ("仓库排除规则" if configured_excluded else ""), "additions": additions, "deletions": deletions, "changed_lines": additions + deletions})
             if excluded and not item.get("deleted_file"):
                 continue
             raw_parts.append(f"diff -- {path}\n{diff}")
@@ -991,20 +1309,56 @@ def run_analysis(task: AnalysisTask):
         ai_failed = False
         # 迭代需求来自 Diff，不依赖 OCR 风险；两项可同时执行。
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="iteration-design")
-        ocr_note, ocr_completed, ocr_coverage = "OCR 尚未执行", False, 0
+        ocr_note, ocr_completed, ocr_coverage, ocr_diagnostics = "OCR 尚未执行", False, 0, {}
         iteration_future = executor.submit(
             _analysis_stage, task.pk, "迭代需求分析", _run_iteration_test_design,
             task, analyzable_diffs, list(findings),
         )
         try:
-            ocr_findings, ocr_tokens, ocr_note, ocr_completed, ocr_coverage = _analysis_stage(task.pk, "OCR审查", _run_open_code_review, task)
+            ocr_findings, ocr_tokens, ocr_note, ocr_completed, ocr_coverage, ocr_diagnostics = _analysis_stage(task.pk, "OCR审查", _run_open_code_review, task)
             if ocr_completed:
                 ocr_findings, chinese_tokens, chinese_note = _normalize_ocr_findings(task, ocr_findings)
                 findings.extend(ocr_findings)
                 ai_findings, iteration_test_points, impact_modules, enrichment_tokens, enrichment_note = [], [], [], 0, ""
-                document_test_points, impact_modules, enrichment_tokens, enrichment_note = _run_context_test_enrichment(task, findings)
-                token_usage, ai_coverage = ocr_tokens + chinese_tokens + enrichment_tokens, ocr_coverage
-                ai_note = f"{ocr_note}；{chinese_note}；{enrichment_note}"
+                fallback_tokens, fallback_note = 0, ""
+                failed_paths = {item.get("path") for item in ocr_diagnostics.get("failure_details", []) if item.get("path")}
+                fallback_diffs = [item for item in analyzable_diffs if item.get("path") in failed_paths]
+                if fallback_diffs:
+                    try:
+                        fallback_findings, _unused_points, fallback_modules, fallback_tokens, fallback_coverage, fallback_note = _run_ai_batches(
+                            task, fallback_diffs, findings,
+                            client if task.repository.source_type != "local_git" else None,
+                        )
+                        findings.extend(fallback_findings)
+                        impact_modules.extend(fallback_modules)
+                        selected_count = int(ocr_diagnostics.get("selected") or len(analyzable_diffs) or 1)
+                        ocr_covered = int(ocr_diagnostics.get("completed") or 0) + int(ocr_diagnostics.get("reused") or 0)
+                        fallback_covered = len(fallback_diffs) * fallback_coverage / 100
+                        effective_coverage = round(min(100, (ocr_covered + fallback_covered) / selected_count * 100), 1)
+                        ocr_diagnostics["fallback"] = {
+                            "triggered": True, "status": "completed" if fallback_coverage >= 100 else "partial",
+                            "files": sorted(failed_paths), "file_count": len(fallback_diffs),
+                            "coverage": fallback_coverage, "effective_coverage": effective_coverage,
+                            "note": fallback_note,
+                        }
+                    except AnalysisCancelled:
+                        raise
+                    except Exception as fallback_exc:
+                        # OCR 已完成的分组仍然有效；补审失败不能中断迭代总结和测试点生成。
+                        fallback_coverage, effective_coverage = 0, ocr_coverage
+                        fallback_note = f"OCR失败文件补审失败，已保留OCR完成结果：{fallback_exc}"
+                        ocr_diagnostics["fallback"] = {
+                            "triggered": True, "status": "failed", "files": sorted(failed_paths),
+                            "file_count": len(fallback_diffs), "coverage": 0,
+                            "effective_coverage": ocr_coverage, "note": fallback_note,
+                        }
+                else:
+                    fallback_coverage, effective_coverage = 0, ocr_coverage
+                    ocr_diagnostics["fallback"] = {"triggered": False, "file_count": 0, "coverage": 0, "effective_coverage": ocr_coverage}
+                document_test_points, document_modules, enrichment_tokens, enrichment_note = _run_context_test_enrichment(task, findings)
+                impact_modules.extend(document_modules)
+                token_usage, ai_coverage = ocr_tokens + chinese_tokens + fallback_tokens + enrichment_tokens, effective_coverage
+                ai_note = f"{ocr_note}；{chinese_note}；{fallback_note}；{enrichment_note}"
             else:
                 ai_findings, _unused_points, impact_modules, token_usage, ai_coverage, ai_note = _run_ai_batches(task, analyzable_diffs, findings, client if task.repository.source_type != "local_git" else None)
                 ai_note = f"{ocr_note}；{ai_note}"
@@ -1012,6 +1366,10 @@ def run_analysis(task: AnalysisTask):
                 document_test_points, document_modules, enrichment_tokens, enrichment_note = _run_context_test_enrichment(task, findings)
                 impact_modules.extend(document_modules)
                 token_usage += enrichment_tokens
+            AnalysisTaskExecutionLog.objects.create(
+                task=task, event="stage_finished", message="OCR 完整度诊断",
+                detail={"stage": "OCR完整度", **ocr_diagnostics},
+            )
             iteration_summary, iteration_test_points, iteration_tokens, iteration_note = iteration_future.result()
             iteration_test_points.extend(document_test_points)
             token_usage += iteration_tokens
@@ -1033,16 +1391,16 @@ def run_analysis(task: AnalysisTask):
         findings = _deduplicate_findings(findings)
         for finding in findings:
             finding["verified"] = finding.get("source") != "ai_analysis"
-        patch_tokens, patch_note = _generate_fix_patches(
-            task, findings, analyzable_diffs,
-            client if task.repository.source_type != "local_git" else None,
-        )
-        token_usage += patch_tokens
+        # 建议修复不阻塞主报告。用户在报告中点击后，才对单个风险生成并校验补丁。
+        for finding in findings:
+            finding.pop("suggested_patch", None)
+            finding.pop("patch_status", None)
+            finding.pop("patch_validation_message", None)
         risk_test_points, risk_test_tokens, risk_test_note = _run_risk_test_design(task, findings)
         for finding in findings:
             finding.pop("_risk_test_point", None)
         token_usage += risk_test_tokens
-        ai_note = f"{ai_note}；{patch_note}；{risk_test_note}"
+        ai_note = f"{ai_note}；建议修复改为按需生成；{risk_test_note}"
         task.raw_diff = "\n\n".join(raw_parts)[:2_000_000]
         severity_counts = {}
         source_counts = {}
@@ -1050,31 +1408,31 @@ def run_analysis(task: AnalysisTask):
             severity_counts[finding["severity"]] = severity_counts.get(finding["severity"], 0) + 1
             source_counts[finding["source"]] = source_counts.get(finding["source"], 0) + 1
         if task.mode == "quick":
-            ocr_status = {"status": "skipped", "message": "快速模式未启用 OCR", "coverage": 0}
+            ocr_status = {"status": "skipped", "message": "快速模式未启用 OCR", "coverage": 0, "diagnostics": ocr_diagnostics}
         elif ocr_completed and ocr_coverage >= 100:
-            ocr_status = {"status": "completed", "message": "OCR 审查已完成", "coverage": ocr_coverage}
+            ocr_status = {"status": "completed", "message": "OCR 审查已完成", "coverage": ocr_coverage, "diagnostics": ocr_diagnostics}
         elif ocr_completed:
-            ocr_status = {"status": "partial", "message": ocr_note, "coverage": ocr_coverage}
+            ocr_status = {"status": "partial", "message": ocr_note, "coverage": ocr_coverage, "diagnostics": ocr_diagnostics}
         else:
-            ocr_status = {"status": "failed", "message": ocr_note, "coverage": 0}
-        task.change_report = {
+            ocr_status = {"status": "failed", "message": ocr_note, "coverage": 0, "diagnostics": ocr_diagnostics}
+        task.change_report = _sanitize_json_value({
             "summary": {"changed_files": len(files), "impact_scope_count": _impact_scope_count(files), "additions": total_additions, "deletions": total_deletions, "changed_lines": total_additions + total_deletions, "risk_count": len(findings), "high_risk_count": sum(1 for x in findings if x["severity"] == "high"), "severity_counts": severity_counts, "source_counts": source_counts},
             "files": files, "findings": findings, "impact_modules": impact_modules,
             "impact_summary": sorted({x["impact"] for x in findings}),
             "analysis_note": "；".join([*static_notes, ai_note]),
             "ocr_status": ocr_status,
-        }
+        })
         drafts = []
         # 代码审查报告中的高、中风险逐条生成风险测试点；低风险不生成专项测试点。
         # 优先级严格继承源风险等级，保留风险键以供报告追溯。
         for finding in _risk_findings_for_tests(findings):
-            point = risk_test_points.get(finding["key"], _test_point_for(finding))
+            point = _sanitize_json_value(risk_test_points.get(finding["key"], _test_point_for(finding)))
             point["priority"] = finding.get("severity", "medium")
             point["test_type"] = "风险排查"
             draft = TestRequirementDraft.objects.create(task=task, source_finding_key=finding["key"], **point)
             drafts.append({"id": draft.id, **point, "change_group": "风险排查", "source_finding_key": finding["key"], "risk_reference": {"key": finding["key"], "title": finding.get("change", "代码审查风险"), "file": finding.get("file", ""), "severity": finding.get("severity", "medium")}, "status": draft.status})
         for index, point in enumerate(iteration_test_points):
-            safe_point = {
+            safe_point = _sanitize_json_value({
                 "title": str(point.get("title", "代码变更回归验证"))[:500],
                 "objective": point.get("objective", "验证代码变更影响"),
                 "expected_result": point.get("expected_result", "相关功能符合需求"),
@@ -1082,20 +1440,23 @@ def run_analysis(task: AnalysisTask):
                 # 不论测试点来自 Diff 还是需求/接口文档，均属于本次迭代验证；
                 # 风险排查仅由上方已关联代码审查风险的流程生成。
                 "test_type": "迭代验证",
-            }
+            })
             draft = TestRequirementDraft.objects.create(task=task, source_finding_key=f"iteration-test:{index}", **safe_point)
             drafts.append({"id": draft.id, **safe_point, "change_group": str(point.get("change_group") or "本次迭代")[ :200], "source_finding_key": f"iteration-test:{index}", "status": draft.status})
         coverage_gaps = [f"已排除：{item['path']}" for item in files if item["excluded"]]
+        iteration_incomplete = task.mode != 'quick' and bool(analyzable_diffs) and (not iteration_summary or not iteration_test_points)
+        if iteration_incomplete:
+            coverage_gaps.append('迭代分析未完成：迭代总结或需求测试点缺失，需要重新生成')
         if task.mode != "quick" and ai_coverage < 100:
             coverage_gaps.append(f"AI仅覆盖 {ai_coverage}% 的可分析文件，其余仅执行机器规则")
         test_type_counts = {}
         for draft in drafts:
             test_type_counts[draft["test_type"]] = test_type_counts.get(draft["test_type"], 0) + 1
-        task.test_report = {"summary": {"test_point_count": len(drafts), "high_priority_count": sum(1 for x in drafts if x["priority"] == "high"), "test_type_counts": test_type_counts}, "iteration_summary": iteration_summary, "test_requirements": drafts, "regression_suggestions": sorted({x["file"].split("/")[0] for x in findings if x.get("file")}), "coverage_gaps": coverage_gaps}
+        task.test_report = _sanitize_json_value({"summary": {"test_point_count": len(drafts), "high_priority_count": sum(1 for x in drafts if x["priority"] == "high"), "test_type_counts": test_type_counts}, "iteration_summary": iteration_summary, "test_requirements": drafts, "regression_suggestions": sorted({x["file"].split("/")[0] for x in findings if x.get("file")}), "coverage_gaps": coverage_gaps})
         task.machine_coverage = 100
         task.ai_coverage = ai_coverage
         task.token_usage = token_usage
-        ai_incomplete = task.mode != "quick" and bool(analyzable_diffs) and (ai_failed or ai_coverage < 100)
+        ai_incomplete = task.mode != "quick" and bool(analyzable_diffs) and (ai_failed or ai_coverage < 100 or iteration_incomplete)
         final_status = "partial" if ai_incomplete else "completed"
         task.status, task.progress, task.current_step, task.completed_at = final_status, 100, "分析完成", timezone.now()
         task.save()

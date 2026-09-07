@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
     soft_time_limit=45 * 60,
     time_limit=50 * 60,
 )
-def run_code_analysis(self, task_id):
+def run_code_analysis(self, task_id, force_refresh=False):
     """在后台执行代码分析；业务进度和最终结果以数据库记录为准。"""
     try:
         task = AnalysisTask.objects.select_related(
@@ -32,7 +32,7 @@ def run_code_analysis(self, task_id):
         return {"status": "cancelled"}
 
     try:
-        run_analysis(task)
+        run_analysis(task, force_refresh=force_refresh)
         task.refresh_from_db(fields=["status"])
         return {"status": task.status}
     except AnalysisCancelled:

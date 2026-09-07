@@ -13,7 +13,7 @@ export async function getMergeRequests(repository: number) { const r = await req
 export async function getTasks(project?: number) { const r = await request<any>({ url: `${base}/tasks/`, method: 'GET', params: project ? { project } : undefined }); if (!r.success) throw new Error(r.error); return list<AnalysisTask>(r.data); }
 export async function getProjectDocuments(project: number) { const r = await request<any>({ url: '/requirements/documents/', method: 'GET', params: { project, page_size: 100 } }); if (!r.success) throw new Error(r.error); return list<any>(r.data); }
 export async function createTask(data: any) { const r = await request<AnalysisTask>({ url: `${base}/tasks/`, method: 'POST', data }); if (!r.success) throw new Error(r.error); return r.data!; }
-export async function runTask(id: string) { const r = await request<AnalysisTask>({ url: `${base}/tasks/${id}/run/`, method: 'POST' }); if (!r.success) throw new Error(r.error); return r.data!; }
+export async function runTask(id: string) { const r = await request<AnalysisTask>({ url: `${base}/tasks/${id}/run/`, method: 'POST', data: { force_refresh: true } }); if (!r.success) throw new Error(r.error); return r.data!; }
 export async function cancelTask(id: string) { const r = await request<AnalysisTask>({ url: `${base}/tasks/${id}/cancel/`, method: 'POST' }); if (!r.success) throw new Error(r.error); return r.data!; }
 export async function getExecutionLogs(id: string) { const r = await request<any>({ url: `${base}/tasks/${id}/execution-logs/`, method: 'GET' }); if (!r.success) throw new Error(r.error); return list<AnalysisExecutionLog>(r.data); }
 export async function getTestcaseModules(project: number) { const r = await request<any>({ url: `/projects/${project}/testcase-modules/`, method: 'GET' }); if (!r.success) throw new Error(r.error); return list<any>(r.data); }
@@ -22,6 +22,7 @@ export async function ignoreTestRequirement(id: number) { const r = await reques
 export async function convertTestRequirement(id: number, moduleId: number) { const r = await request<any>({ url: `${base}/test-requirements/${id}/convert/`, method: 'POST', data: { module_id: moduleId } }); if (!r.success) throw new Error(r.error); return r.data; }
 export async function deleteTask(id: string) { const r = await request({ url: `${base}/tasks/${id}/`, method: 'DELETE' }); if (!r.success) throw new Error(r.error); }
 export async function getTaskDiff(id: string, file: string) { const r = await request<any>({ url: `${base}/tasks/${id}/diff/`, method: 'GET', params: { file } }); if (!r.success) throw new Error(r.error); return r.data; }
+export async function generateSuggestedPatch(id: string, findingKey: string) { const r = await request<any>({ url: `${base}/tasks/${id}/suggested-patch/`, method: 'POST', data: { finding_key: findingKey } }); if (!r.success) throw new Error(r.error); return r.data; }
 export async function downloadReport(id: string, type: 'change'|'test') {
   const url = `${base}/tasks/${id}/download-${type}-report/`;
   const response = await http.get(url, { responseType: 'blob' });

@@ -6,15 +6,92 @@ import tempfile
 from pathlib import Path
 
 from django.contrib.auth.models import User
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, TransactionTestCase
 from rest_framework.test import APIClient
 
 from projects.models import Project, ProjectMember
 from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
-from .services import DEFAULT_ANNOTATIONS, LocalGitClient, _diff_line_stats, _load_ocr_payload, _managed_gitlab_repository, _ocr_result_path, _parse_diff, _risk_findings_for_tests, _validate_suggested_patch, remove_ocr_repository, run_analysis
+from .services import DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, LocalGitClient, _diff_line_stats, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _parse_diff, _reuse_cached_result, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repository, run_analysis
 
 
 class DiffRuleTests(TestCase):
+    def test_json_sanitizer_escapes_database_unsupported_control_chars(self):
+        value = _sanitize_json_value({"text": "null:\x00 bell:\x07 keep:\t\n"})
+        self.assertEqual(value["text"], "null:\\u0000 bell:\\u0007 keep:\t\n")
+        self.assertNotIn("\x00", value["text"])
+
+    def test_ocr_uses_six_workers(self):
+        self.assertEqual(OCR_CONCURRENCY, 6)
+
+    def test_low_value_files_are_filtered(self):
+        self.assertTrue(_is_low_value_file("frontend/package-lock.json"))
+        self.assertTrue(_is_low_value_file("web/dist/app.min.js"))
+        self.assertFalse(_is_low_value_file("src/orders/service.py"))
+        self.assertIn("package-lock.json", LOW_VALUE_FILE_PATTERNS)
+
+    def test_ocr_diagnostics_classifies_http_200_subtask_failure(self):
+        payload = {
+            "summary": {"elapsed": "2m", "total_tokens": 10},
+            "groups": [{"label": "配置", "files": ["a.json", "b.py"]}],
+            "manifest": {"execution": {"configured_concurrency": 6}, "coverage": {
+                "selected": [{"path": "a.json"}, {"path": "b.py"}],
+                "completed": [{"path": "b.py"}], "reused": [],
+                "failed": [{"path": "a.json", "classification": "provider", "reason": "provider or subtask request failed"}],
+            }},
+            "retry_report": {"total_requests": 2, "failed_requests": 1, "requests": [{
+                "file_path": "a.json", "request_no": 1, "outcome": "failed",
+                "attempts": [{"outcome": "success", "status_code": 200}],
+            }]},
+        }
+        diagnostics = _ocr_diagnostics(payload)
+        self.assertEqual(diagnostics["failure_type_counts"], {"agent_subtask": 1})
+        self.assertEqual(diagnostics["groups"][0]["coverage"], 50.0)
+
+    def test_partial_ocr_with_failed_items_uses_low_concurrency_resume(self):
+        payload = {
+            "session_id": "session-1",
+            "manifest": {"coverage": {
+                "selected": [{"path": "a.py"}, {"path": "b.py"}],
+                "completed": [{"path": "a.py"}], "reused": [],
+                "failed": [{"path": "b.py"}],
+            }},
+        }
+        self.assertTrue(_ocr_needs_resume(payload))
+        self.assertEqual(OCR_RESUME_CONCURRENCY, 2)
+        self.assertEqual(_ocr_diagnostics(payload)["coverage"], 50.0)
+        payload["manifest"]["coverage"]["failed"] = []
+        self.assertFalse(_ocr_needs_resume(payload))
+
+    def test_same_commit_rerun_reuses_report_and_rebuilds_drafts(self):
+        from .services import _cache_report_complete
+        user = User.objects.create_user("cache-user")
+        project = Project.objects.create(name="缓存测试项目", creator=user)
+        repository = ProjectRepository.objects.create(
+            project=project, source_type="local_git", local_path="repo", name="repo",
+            path_with_namespace="repo",
+        )
+        point = {"title": "验证登录", "objective": "提交凭据", "expected_result": "登录成功", "priority": "high", "test_type": "迭代验证", "source_finding_key": "iteration-test:0", "status": "draft"}
+        task = AnalysisTask.objects.create(
+            project=project, repository=repository, creator=user, source_type="commits",
+            base_sha="a" * 40, head_sha="b" * 40, status="fetching", raw_diff="diff -- app.py\n+ok",
+            change_report={"summary": {"risk_count": 1}, "findings": [], "ocr_status": {"status": "completed", "coverage": 100}},
+            test_report={"summary": {"test_point_count": 1}, "iteration_summary": {"title": "登录变更", "change_groups": [{"name": "登录"}]}, "test_requirements": [point]},
+            machine_coverage=100, ai_coverage=100,
+        )
+        self.assertTrue(_reuse_cached_result(task, task.base_sha, task.head_sha))
+        task.refresh_from_db()
+        self.assertEqual(task.current_step, "已复用相同 Commit 的分析缓存")
+        self.assertTrue(task.change_report["cache"]["reused"])
+        self.assertEqual(task.test_requirement_drafts.count(), 1)
+        task.change_report["ocr_status"] = {"status": "partial", "coverage": 55.6}
+        self.assertFalse(_cache_report_complete(task))
+        task.change_report["ocr_status"] = {"status": "completed", "coverage": 100}
+        task.test_report["iteration_summary"] = {}
+        self.assertFalse(_cache_report_complete(task))
+        task.test_report["iteration_summary"] = {"title": "登录", "change_groups": [{"name": "登录"}]}
+        task.test_report["test_requirements"][0]["test_type"] = "风险排查"
+        self.assertFalse(_cache_report_complete(task))
+
     def test_suggested_patch_is_checked_in_isolated_target_copy(self):
         task = SimpleNamespace(
             head_sha="head",
@@ -124,7 +201,7 @@ class LocalGitClientTests(SimpleTestCase):
             self.assertEqual(len(result["diffs"]), 1)
 
 
-class AnalysisLifecycleTests(TestCase):
+class AnalysisLifecycleTests(TransactionTestCase):
     def setUp(self):
         self.user = User.objects.create_user("tester", password="secret")
         self.project = Project.objects.create(name="交易平台", creator=self.user)
@@ -193,8 +270,28 @@ class AnalysisLifecycleTests(TestCase):
         task.refresh_from_db()
         self.assertEqual(task.current_step, "等待后台执行")
         self.assertEqual(task.celery_task_id, "celery-job-1")
-        delay.assert_called_once_with(str(task.id))
+        delay.assert_called_once_with(str(task.id), force_refresh=True)
         self.assertEqual(list(task.execution_logs.values_list("event", flat=True)), ["queued"])
+
+    @patch("code_analysis.views.generate_suggested_patch")
+    def test_suggested_patch_is_generated_on_demand_and_persisted(self, generate):
+        finding = {"key": "risk-1", "file": "app.py", "change": "风险", "severity": "high"}
+        generated = {**finding, "suggested_patch": "--- a/app.py\n+++ b/app.py\n", "patch_status": "reference", "patch_validation_message": "仅供参考"}
+        generate.return_value = (generated, 12, "已生成")
+        task = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="a" * 40, head_sha="b" * 40,
+            status="completed", change_report={"summary": {}, "findings": [finding]},
+        )
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.post(
+            f"/api/code-analysis/tasks/{task.id}/suggested-patch/", {"finding_key": "risk-1"}, format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.change_report["findings"][0]["patch_status"], "reference")
+        self.assertEqual(task.token_usage, 12)
+        generate.assert_called_once()
 
     @patch("code_analysis.tasks.run_code_analysis.delay")
     def test_running_repository_rejects_duplicate_queue(self, delay):

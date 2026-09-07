@@ -11,7 +11,7 @@ from django.db.models import Q
 from projects.models import ProjectMember
 from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
 from .serializers import AnalysisTaskExecutionLogSerializer, AnalysisTaskSerializer, CredentialSerializer, GitLabConnectionSerializer, ProjectRepositorySerializer, TestRequirementDraftSerializer
-from .services import GitLabClient, normalize_test_point_for_display, remove_ocr_repository
+from .services import GitLabClient, generate_suggested_patch, normalize_test_point_for_display, remove_ocr_repository
 
 
 def _can_access(user, project_id):
@@ -97,6 +97,9 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
     @action(detail=True, methods=["post"])
     def run(self, request, pk=None):
+        force_refresh = request.data.get("force_refresh", True)
+        if not isinstance(force_refresh, bool):
+            return Response({"detail": "force_refresh 必须为布尔值"}, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
             task = AnalysisTask.objects.select_for_update().get(pk=pk)
             if not _can_access(request.user, task.project_id): raise PermissionDenied("仅项目成员可执行分析")
@@ -114,7 +117,7 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
             task.save(update_fields=["status", "progress", "current_step", "error_message", "executor", "updated_at"])
             AnalysisTaskExecutionLog.objects.create(task=task, event="queued", actor=request.user, message="重新提交审查任务" if retrying else "审查任务已进入队列", detail={"cleared_drafts": removed})
             from .tasks import run_code_analysis
-            async_result = run_code_analysis.delay(str(task.id))
+            async_result = run_code_analysis.delay(str(task.id), force_refresh=force_refresh)
             task.celery_task_id = async_result.id
             task.save(update_fields=["celery_task_id", "updated_at"])
         return Response(self.get_serializer(task).data, status=status.HTTP_202_ACCEPTED)
@@ -148,6 +151,45 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
             next_start = raw_diff.find("\ndiff -- ", start + len(marker))
             raw_diff = raw_diff[start:next_start if next_start >= 0 else None]
         return Response({"file": file_path, "base_sha": task.base_sha, "head_sha": task.head_sha, "diff": raw_diff})
+
+    @action(detail=True, methods=["post"], url_path="suggested-patch")
+    def suggested_patch(self, request, pk=None):
+        """按需生成单条修复建议；仅校验补丁，不修改被审查仓库。"""
+        task = self.get_object()
+        if task.status not in {"completed", "partial"}:
+            return Response({"detail": "报告完成后才能生成建议修复"}, status=status.HTTP_409_CONFLICT)
+        finding_key = str(request.data.get("finding_key") or "")
+        findings = (task.change_report or {}).get("findings") or []
+        finding = next((item for item in findings if str(item.get("key")) == finding_key), None)
+        if not finding:
+            return Response({"detail": "未找到对应风险点"}, status=status.HTTP_404_NOT_FOUND)
+        if finding.get("patch_status"):
+            return Response(finding)
+
+        review_client = None
+        if task.repository.source_type != "local_git":
+            try:
+                credential = UserGitLabCredential.objects.get(
+                    project=task.project, connection=task.repository.connection, user=request.user,
+                )
+            except UserGitLabCredential.DoesNotExist:
+                return Response({"detail": "请先配置当前用户的 GitLab Token"}, status=status.HTTP_400_BAD_REQUEST)
+            review_client = GitLabClient(task.repository.connection, credential.get_token())
+        generated, tokens, note = generate_suggested_patch(task, finding, review_client)
+
+        with transaction.atomic():
+            locked = AnalysisTask.objects.select_for_update().get(pk=task.pk)
+            report = dict(locked.change_report or {})
+            stored_findings = list(report.get("findings") or [])
+            for index, item in enumerate(stored_findings):
+                if str(item.get("key")) == finding_key:
+                    stored_findings[index] = generated
+                    break
+            report["findings"] = stored_findings
+            locked.change_report = report
+            locked.token_usage += tokens
+            locked.save(update_fields=["change_report", "token_usage", "updated_at"])
+        return Response({**generated, "generation_note": note})
 
     def _markdown_response(self, task, report_type):
         if report_type == "change":
