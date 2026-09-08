@@ -11,7 +11,7 @@ from rest_framework.test import APIClient
 
 from projects.models import Project, ProjectMember
 from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
-from .services import DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, LocalGitClient, _diff_line_stats, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _parse_diff, _reuse_cached_result, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repository, run_analysis
+from .services import DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, LocalGitClient, _diff_line_stats, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _reuse_cached_result, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repository, run_analysis
 
 
 class DiffRuleTests(TestCase):
@@ -47,7 +47,7 @@ class DiffRuleTests(TestCase):
         self.assertEqual(diagnostics["failure_type_counts"], {"agent_subtask": 1})
         self.assertEqual(diagnostics["groups"][0]["coverage"], 50.0)
 
-    def test_partial_ocr_with_failed_items_uses_low_concurrency_resume(self):
+    def test_partial_ocr_with_failed_items_uses_bounded_resume_concurrency(self):
         payload = {
             "session_id": "session-1",
             "manifest": {"coverage": {
@@ -57,10 +57,16 @@ class DiffRuleTests(TestCase):
             }},
         }
         self.assertTrue(_ocr_needs_resume(payload))
-        self.assertEqual(OCR_RESUME_CONCURRENCY, 2)
+        self.assertEqual(OCR_RESUME_CONCURRENCY, 4)
         self.assertEqual(_ocr_diagnostics(payload)["coverage"], 50.0)
         payload["manifest"]["coverage"]["failed"] = []
         self.assertFalse(_ocr_needs_resume(payload))
+
+    def test_ocr_timeout_budget_scales_with_monthly_change_size(self):
+        self.assertEqual(_ocr_timeout_budget(800), (20, 10))
+        self.assertEqual(_ocr_timeout_budget(1219), (40, 20))
+        self.assertEqual(_ocr_timeout_budget(5000), (60, 30))
+        self.assertEqual(_ocr_timeout_budget(9000), (80, 40))
 
     def test_same_commit_rerun_reuses_report_and_rebuilds_drafts(self):
         from .services import _cache_report_complete

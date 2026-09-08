@@ -33,10 +33,7 @@ SENSITIVE_CONFIG_KEYS = {"enabled", "enable", "auth", "authentication", "authori
 # OpenCodeReview 参数统一维护。内网自建模型不限制 token；OCR 需要保留原生上下文，
 # 否则多轮工具调用可能在上下文压缩阶段提前结束。
 OCR_CONCURRENCY = 6
-OCR_TIMEOUT_SECONDS = {"standard": 30 * 60, "deep": 30 * 60}
-OCR_PRIMARY_TIMEOUT_MINUTES = 20
-OCR_RESUME_TIMEOUT_MINUTES = 8
-OCR_RESUME_CONCURRENCY = 2
+OCR_RESUME_CONCURRENCY = 4
 OCR_GRACEFUL_STOP_SECONDS = 20
 OCR_WORKSPACE_ROOT = Path(os.environ.get("OCR_WORKSPACE_ROOT", "/app/data/code-analysis-repositories"))
 LOW_VALUE_FILE_PATTERNS = (
@@ -46,6 +43,33 @@ LOW_VALUE_FILE_PATTERNS = (
     "dist/**", "build/**", "coverage/**", "vendor/**", "node_modules/**",
     "**/dist/**", "**/build/**", "**/coverage/**", "**/vendor/**", "**/node_modules/**",
 )
+
+
+def _ocr_timeout_budget(changed_lines):
+    """按月度迭代规模分配 OCR 首轮和续审预算（分钟）。"""
+    if changed_lines <= 1000:
+        return 20, 10
+    if changed_lines <= 3000:
+        return 40, 20
+    if changed_lines <= 8000:
+        return 60, 30
+    return 80, 40
+
+
+def _git_changed_lines(root, base_ref, head_ref):
+    """从 Git numstat 估算实际变更行；二进制文件不计入行数。"""
+    result = subprocess.run(
+        ["git", "-C", str(root), "--no-pager", "diff", "--numstat", base_ref, head_ref],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=45,
+    )
+    if result.returncode != 0:
+        return 0
+    total = 0
+    for line in result.stdout.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            total += int(parts[0]) + int(parts[1])
+    return total
 
 
 def _is_low_value_file(path):
@@ -609,6 +633,9 @@ def _run_open_code_review(task):
         return [], 0, "未启用 OCR：没有可用 LLM 配置", False, 0, {}
     try:
         with _ocr_repository(task) as (root, base_ref, head_ref):
+            changed_lines = _git_changed_lines(root, base_ref, head_ref)
+            primary_timeout, resume_timeout = _ocr_timeout_budget(changed_lines)
+            total_timeout = primary_timeout + resume_timeout
             env = os.environ.copy()
             env.update({"OCR_LLM_URL": config.api_url, "OCR_LLM_TOKEN": config.api_key, "OCR_LLM_MODEL": config.name, "OCR_LLM_PROTOCOL": "openai"})
             # 不传 --max-tokens，使用 OCR/模型的原生上下文上限；人为设为 5k/8k 会使
@@ -622,12 +649,12 @@ def _run_open_code_review(task):
                 "--format", "json", "--audience", "agent",
                 "--concurrency", str(OCR_CONCURRENCY),
                 "--exclude", ",".join(LOW_VALUE_FILE_PATTERNS),
-                "--timeout", str(OCR_PRIMARY_TIMEOUT_MINUTES),
+                "--timeout", str(primary_timeout),
                 "--output", str(output_path),
             ]
             result, timed_out = _run_ocr_process(
                 command, cwd=root, env=env, task=task,
-                timeout=OCR_PRIMARY_TIMEOUT_MINUTES * 60 + OCR_GRACEFUL_STOP_SECONDS,
+                timeout=primary_timeout * 60 + OCR_GRACEFUL_STOP_SECONDS,
             )
             output_text = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
             payload = _load_ocr_payload(output_text or result.stdout)
@@ -646,7 +673,7 @@ def _run_open_code_review(task):
                     "--format", "json", "--audience", "agent",
                     "--concurrency", str(OCR_RESUME_CONCURRENCY),
                     "--exclude", ",".join(LOW_VALUE_FILE_PATTERNS),
-                    "--timeout", str(OCR_RESUME_TIMEOUT_MINUTES),
+                    "--timeout", str(resume_timeout),
                     "--resume", parent_session_id,
                     "--output", str(output_path),
                 ]
@@ -654,7 +681,7 @@ def _run_open_code_review(task):
                     output_path.unlink(missing_ok=True)
                     resume_result, resume_timed_out = _run_ocr_process(
                         resume_command, cwd=root, env=env, task=task,
-                        timeout=OCR_RESUME_TIMEOUT_MINUTES * 60 + OCR_GRACEFUL_STOP_SECONDS,
+                        timeout=resume_timeout * 60 + OCR_GRACEFUL_STOP_SECONDS,
                     )
                     resumed_text = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
                     resumed_payload = _load_ocr_payload(resumed_text or resume_result.stdout)
@@ -676,6 +703,10 @@ def _run_open_code_review(task):
                     "recovered_files": max(0, resume_detail.get("before_failed", 0) - diagnostics.get("failed", 0)),
                 })
             diagnostics["resume"] = resume_detail
+            diagnostics["timeout_budget"] = {
+                "changed_lines": changed_lines, "primary_minutes": primary_timeout,
+                "resume_minutes": resume_timeout, "total_minutes": total_timeout,
+            }
         # OCR 会把 complete / partial / failed 都序列化为 JSON。只要收到了
         # 结构化输出，就保留 OCR 的真实覆盖情况，不能回退为旧的全量 Diff 扫描。
         status = payload.get("status")
@@ -694,7 +725,7 @@ def _run_open_code_review(task):
         # 部分 OpenAI 兼容服务在“无评论”时返回 comments: null，而非 []。
         findings = [{"key": f"ocr:{x.get('path')}:{x.get('start_line')}:{index}", "change": x.get("content", "OCR 审查提示"), "file": x.get("path", ""), "severity": severity.get(x.get("severity"), "medium"), "source": "ocr_ai", "confidence": 0.85, "verified": True, "line_start": x.get("start_line"), "evidence": x.get("existing_code") or x.get("content", ""), "impact": f"OCR 分类：{x.get('category') or 'other'}；建议结合上下文确认并回归"} for index, x in enumerate(payload.get("comments") or [])]
         if timed_out:
-            note = f"OpenCodeReview 已达到 30 分钟上限，保留已完成结果（选中 {selected}，完成 {completed}，复用 {reused}，失败 {failed}，覆盖 {review_coverage}%）"
+            note = f"OpenCodeReview 已达到本次 {total_timeout} 分钟动态上限，保留已完成结果（选中 {selected}，完成 {completed}，复用 {reused}，失败 {failed}，覆盖 {review_coverage}%）"
         elif status == "failed":
             note = f"OpenCodeReview 未获得可用覆盖（{payload.get('message') or result.stderr[-500:] or '请检查模型服务或 OCR 输出'}）"
         elif review_coverage < 100:
