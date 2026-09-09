@@ -11,10 +11,24 @@ from rest_framework.test import APIClient
 
 from projects.models import Project, ProjectMember
 from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
-from .services import DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, LocalGitClient, _diff_line_stats, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _reuse_cached_result, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repository, run_analysis
+from .serializers import ProjectRepositorySerializer
+from .services import DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, LocalGitClient, _diff_line_stats, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _reuse_cached_result, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, run_analysis
 
 
 class DiffRuleTests(TestCase):
+    def test_local_repository_does_not_require_gitlab_project_id(self):
+        user = User.objects.create_user("local-repository-user")
+        project = Project.objects.create(name="本地仓库项目", creator=user)
+        serializer = ProjectRepositorySerializer(data={
+            "project": project.id, "source_type": "local_git", "name": "本地仓库",
+            "path_with_namespace": "demo_repositories/repo",
+            "local_path": "demo_repositories/repo", "default_branch": "dev",
+        })
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        repository = serializer.save()
+        self.assertEqual(repository.gitlab_project_id, "")
+        self.assertIsNone(repository.connection)
+
     def test_json_sanitizer_escapes_database_unsupported_control_chars(self):
         value = _sanitize_json_value({"text": "null:\x00 bell:\x07 keep:\t\n"})
         self.assertEqual(value["text"], "null:\\u0000 bell:\\u0007 keep:\t\n")
@@ -123,6 +137,18 @@ class DiffRuleTests(TestCase):
             self.assertEqual(result_path.read_text(encoding="utf-8"), "{}")
             self.assertFalse(result_path.is_relative_to(source_repository))
 
+    def test_repository_cleanup_only_removes_matching_marked_ocr_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            matching, unrelated = root / "task-1", root / "task-2"
+            matching.mkdir(); unrelated.mkdir()
+            (matching / ".repository-id").write_text("12", encoding="utf-8")
+            (unrelated / ".repository-id").write_text("13", encoding="utf-8")
+            with patch("code_analysis.services.OCR_WORKSPACE_ROOT", root):
+                self.assertEqual(remove_ocr_repositories_for_repository(12), 1)
+            self.assertFalse(matching.exists())
+            self.assertTrue(unrelated.exists())
+
     def test_deleted_excel_annotation_is_deterministic_risk(self):
         findings = _parse_diff("@@ -1,2 +1 @@\n-    @Excel(name = \"证券代码\")\n     private String code;", "Quote.java", DEFAULT_ANNOTATIONS)
         self.assertEqual(findings[0]["change"], "删除 @Excel 注解")
@@ -223,6 +249,61 @@ class AnalysisLifecycleTests(TransactionTestCase):
         credential = UserGitLabCredential(project=self.project, connection=self.connection, user=self.user)
         credential.set_token("read-only-token")
         credential.save()
+
+    @patch("code_analysis.services.GitLabClient.commits")
+    def test_repository_lists_latest_forty_commits(self, commits):
+        commits.return_value = [{
+            "id": "a" * 40, "short_id": "a" * 8, "title": "latest change",
+            "author_name": "tester", "authored_date": "2026-09-09T10:00:00+08:00",
+        }]
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.get(f"/api/code-analysis/repositories/{self.repository.id}/commits/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data[0]["title"], "latest change")
+        commits.assert_called_once_with(self.repository.gitlab_project_id, self.repository.default_branch, limit=40)
+
+    @patch("code_analysis.services.GitLabClient.commit")
+    def test_repository_validates_and_resolves_both_commit_refs(self, commit):
+        commit.side_effect = [{"id": "a" * 40}, {"id": "b" * 40}]
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.post(
+            f"/api/code-analysis/repositories/{self.repository.id}/validate-refs/",
+            {"base_sha": "feature~1", "head_sha": "feature"}, format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {"valid": True, "base_sha": "a" * 40, "head_sha": "b" * 40})
+        self.assertEqual(commit.call_count, 2)
+
+    def test_repository_rejects_empty_commit_refs_before_task_creation(self):
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.post(
+            f"/api/code-analysis/repositories/{self.repository.id}/validate-refs/",
+            {"base_sha": "", "head_sha": ""}, format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Commit", response.data["detail"])
+
+    @patch("code_analysis.views.remove_ocr_repositories_for_repository")
+    def test_repository_without_analysis_records_can_be_deleted(self, cleanup):
+        repository_id = self.repository.id
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.delete(f"/api/code-analysis/repositories/{repository_id}/")
+        self.assertIn(response.status_code, {200, 204})
+        self.assertFalse(ProjectRepository.objects.filter(pk=repository_id).exists())
+        cleanup.assert_called_once_with(repository_id)
+
+    @patch("code_analysis.views.remove_ocr_repositories_for_repository")
+    def test_repository_with_analysis_records_must_not_be_deleted(self, cleanup):
+        AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="a", head_sha="b",
+        )
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.delete(f"/api/code-analysis/repositories/{self.repository.id}/")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["analysis_task_count"], 1)
+        self.assertTrue(ProjectRepository.objects.filter(pk=self.repository.id).exists())
+        cleanup.assert_not_called()
 
     @patch("code_analysis.services.GitLabClient.merge_request_changes")
     def test_quick_analysis_generates_two_reports_and_deletes_cascade(self, changes):

@@ -106,6 +106,17 @@ class GitLabClient:
     def merge_requests(self, project_id):
         return self.get(f"/projects/{quote(str(project_id), safe='')}/merge_requests", {"state": "opened", "per_page": 100})
 
+    def commits(self, project_id, ref_name=None, limit=40):
+        params = {"per_page": min(max(int(limit), 1), 40)}
+        if ref_name:
+            params["ref_name"] = ref_name
+        return self.get(f"/projects/{quote(str(project_id), safe='')}/repository/commits", params)
+
+    def commit(self, project_id, ref):
+        return self.get(
+            f"/projects/{quote(str(project_id), safe='')}/repository/commits/{quote(str(ref), safe='')}"
+        )
+
     def merge_request_changes(self, project_id, iid):
         return self.get(f"/projects/{quote(str(project_id), safe='')}/merge_requests/{iid}/changes")
 
@@ -142,6 +153,21 @@ class LocalGitClient:
 
     def resolve(self, ref):
         return self._git("rev-parse", "--verify", f"{ref}^{{commit}}").strip()
+
+    def commits(self, limit=40):
+        output = self._git(
+            "log", f"--max-count={min(max(int(limit), 1), 40)}",
+            "--date=iso-strict", "--format=%H%x1f%h%x1f%s%x1f%an%x1f%aI",
+        )
+        commits = []
+        for line in output.splitlines():
+            parts = line.split("\x1f", 4)
+            if len(parts) == 5:
+                commits.append({
+                    "id": parts[0], "short_id": parts[1], "title": parts[2],
+                    "author_name": parts[3], "authored_date": parts[4],
+                })
+        return commits
 
     def compare(self, base_ref, head_ref):
         base_sha, head_sha = self.resolve(base_ref), self.resolve(head_ref)
@@ -187,6 +213,29 @@ def remove_ocr_repository(task_id):
         shutil.rmtree(target)
 
 
+def remove_ocr_repositories_for_repository(repository_id):
+    """清理已无审查记录仓库的残留 OCR 目录。
+
+    仅删除内部标记明确匹配的任务目录，不会触碰 /workspace 下的本地源仓库。
+    """
+    root = OCR_WORKSPACE_ROOT.resolve()
+    if not root.exists():
+        return 0
+    removed = 0
+    for target in root.iterdir():
+        if not target.is_dir() or target.parent.resolve() != root:
+            continue
+        marker = target / ".repository-id"
+        try:
+            matched = marker.read_text(encoding="utf-8").strip() == str(repository_id)
+        except (FileNotFoundError, OSError):
+            matched = False
+        if matched:
+            shutil.rmtree(target)
+            removed += 1
+    return removed
+
+
 def _ocr_result_path(task):
     """返回独立的可写结果路径，绝不向只读的被审查仓库写文件。"""
     root = OCR_WORKSPACE_ROOT.resolve()
@@ -210,6 +259,7 @@ def _managed_gitlab_repository(task):
     OCR_WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     root = OCR_WORKSPACE_ROOT / str(task.pk)
     root.mkdir(mode=0o700, exist_ok=True)
+    (root / ".repository-id").write_text(str(task.repository_id), encoding="utf-8")
     askpass = root / "git-askpass.sh"
     askpass.write_text(
         "#!/bin/sh\ncase \"$1\" in *Username*) printf '%s\\n' oauth2 ;; *) printf '%s\\n' \"$OCR_GITLAB_TOKEN\" ;; esac\n",

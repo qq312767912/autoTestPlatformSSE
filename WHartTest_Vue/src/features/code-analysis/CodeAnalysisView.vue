@@ -198,7 +198,19 @@
         <a-form-item label="代码仓库" required><a-select v-model="form.repository" @change="onRepositoryChange"><a-option v-for="r in repositories" :key="r.id" :value="r.id">{{ r.name }} · {{ r.source_type === 'local_git' ? '本地 Git' : r.path_with_namespace }}</a-option></a-select></a-form-item>
         <a-form-item label="分析来源"><a-radio-group v-model="form.source_type" type="button"><a-radio v-if="selectedRepository?.source_type !== 'local_git'" value="merge_request">Merge Request</a-radio><a-radio value="commits">两个分支 / Commit</a-radio></a-radio-group></a-form-item>
         <a-form-item v-if="form.source_type === 'merge_request'" label="Merge Request" required><a-select v-model="form.merge_request_iid" :loading="mrLoading"><a-option v-for="mr in mergeRequests" :key="mr.iid" :value="mr.iid">!{{ mr.iid }} {{ mr.title }}</a-option></a-select></a-form-item>
-        <template v-else><a-form-item label="基准 Commit" required><a-input v-model="form.base_sha" /></a-form-item><a-form-item label="目标 Commit" required><a-input v-model="form.head_sha" /></a-form-item></template>
+        <template v-else>
+          <a-form-item label="基准 Commit" required>
+            <a-select v-model="form.base_sha" :loading="commitLoading" allow-search allow-create placeholder="选择最近提交，或输入 SHA / 分支名">
+              <a-option v-for="commit in repositoryCommits" :key="`base-${commit.id}`" :value="commit.id">{{ commitLabel(commit) }}</a-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item label="目标 Commit" required>
+            <a-select v-model="form.head_sha" :loading="commitLoading" allow-search allow-create placeholder="选择最近提交，或输入 SHA / 分支名">
+              <a-option v-for="commit in repositoryCommits" :key="`head-${commit.id}`" :value="commit.id">{{ commitLabel(commit) }}</a-option>
+            </a-select>
+          </a-form-item>
+          <div class="commit-hint">已加载当前仓库最近 {{ repositoryCommits.length }} 次提交；点击确定后会先校验 Commit 是否存在。</div>
+        </template>
         <a-form-item label="需求文档（可选）"><a-select v-model="form.requirement_document_ids" multiple allow-clear placeholder="可选择多篇已上传的需求文档" :max-tag-count="2"><a-option v-for="doc in projectDocuments" :key="doc.id" :value="doc.id">{{ doc.title }}</a-option></a-select></a-form-item>
         <a-form-item label="接口文档（可选）"><a-select v-model="form.api_document_ids" multiple allow-clear placeholder="可选择多篇已上传的接口/设计文档" :max-tag-count="2"><a-option v-for="doc in projectDocuments" :key="doc.id" :value="doc.id">{{ doc.title }}</a-option></a-select></a-form-item>
         <a-form-item>
@@ -223,6 +235,15 @@
           <a-form :model="tokenForm" layout="vertical"><a-form-item label="GitLab连接"><a-select v-model="tokenForm.connection"><a-option v-for="c in connections" :key="c.id" :value="c.id">{{ c.name }}</a-option></a-select></a-form-item><a-form-item label="Personal Access Token"><a-input-password v-model="tokenForm.token" placeholder="仅用于当前用户只读访问" /></a-form-item><a-button type="primary" @click="saveToken">加密保存</a-button></a-form>
         </a-tab-pane>
       </a-tabs>
+      <a-divider />
+      <section class="repository-settings">
+        <div class="repository-settings-title"><b>已关联代码仓库</b><small>有审查记录的仓库需先删除全部记录</small></div>
+        <a-empty v-if="!repositories.length" description="当前项目暂无代码仓库" />
+        <div v-for="repo in repositories" :key="`setting-${repo.id}`" class="repository-setting-row">
+          <div><b>{{ repo.name }}</b><small>{{ repo.source_type === 'local_git' ? `本地 Git · ${repo.local_path}` : `GitLab · ${repo.path_with_namespace}` }}</small></div>
+          <div class="repository-setting-actions"><span>{{ repo.analysis_task_count || 0 }} 条审查记录</span><a-button status="danger" type="text" size="small" @click="removeRepository(repo)"><template #icon><icon-delete /></template>删除</a-button></div>
+        </div>
+      </section>
     </a-modal>
   </div>
 </template>
@@ -233,14 +254,14 @@ import { Message, Modal } from '@arco-design/web-vue';
 import { IconDelete, IconDownload, IconFile, IconPlus, IconQuestionCircle, IconRefresh, IconSettings } from '@arco-design/web-vue/es/icon';
 import { useProjectStore } from '@/store/projectStore';
 import { useAuthStore } from '@/store/authStore';
-import type { AnalysisExecutionLog, AnalysisTask, CodeRepository, GitLabConnection, MergeRequest } from './types';
+import type { AnalysisExecutionLog, AnalysisTask, CodeRepository, GitLabConnection, MergeRequest, RepositoryCommit } from './types';
 import * as api from './service';
 
 const projectStore = useProjectStore();
 const authStore = useAuthStore();
 const isPlatformAdmin = computed(() => !!authStore.currentUser?.is_staff);
-const tasks = ref<AnalysisTask[]>([]), repositories = ref<CodeRepository[]>([]), connections = ref<GitLabConnection[]>([]), mergeRequests = ref<MergeRequest[]>([]), projectDocuments = ref<any[]>([]);
-const loading = ref(false), submitting = ref(false), mrLoading = ref(false), createVisible = ref(false), configVisible = ref(false);
+const tasks = ref<AnalysisTask[]>([]), repositories = ref<CodeRepository[]>([]), connections = ref<GitLabConnection[]>([]), mergeRequests = ref<MergeRequest[]>([]), repositoryCommits = ref<RepositoryCommit[]>([]), projectDocuments = ref<any[]>([]);
+const loading = ref(false), submitting = ref(false), mrLoading = ref(false), commitLoading = ref(false), createVisible = ref(false), configVisible = ref(false);
 const selectedTask = ref<AnalysisTask|null>(null);
 const executionLogs = ref<AnalysisExecutionLog[]>([]);
 const testcaseModules = ref<any[]>([]), convertVisible = ref(false), converting = ref(false), convertModuleId = ref<number|undefined>(), convertingDraft = ref<any>(null);
@@ -250,7 +271,7 @@ const testPriorityFilter = ref<string|undefined>();
 const testTypeFilter = ref<string[]>([]);
 const diffVisible = ref(false), diffLoading = ref(false), diffTitle = ref('代码 Diff'), diffText = ref(''), diffNotice = ref(''), diffNoticeType = ref<'success'|'warning'|'info'>('info');
 const patchLoadingKey = ref('');
-const form = reactive<any>({ repository:null, source_type:'commits', merge_request_iid:null, base_sha:'HEAD~1', head_sha:'HEAD', requirement_document_ids:[], api_document_ids:[], mode:'standard' });
+const form = reactive<any>({ repository:null, source_type:'commits', merge_request_iid:null, base_sha:undefined, head_sha:undefined, requirement_document_ids:[], api_document_ids:[], mode:'standard' });
 const connectionForm = reactive<any>({ name:'内网 GitLab', base_url:'', verify_ssl:true, is_active:true });
 const repoForm = reactive<any>({ connection:null, gitlab_project_id:'', name:'', path_with_namespace:'', default_branch:'main' });
 const localRepoForm = reactive<any>({ name:'当前工作区', local_path:'.' });
@@ -373,6 +394,7 @@ const sourceLabel = (t:AnalysisTask) => t.source_type === 'merge_request' ? `MR 
 const shortSha = (sha:string) => sha ? sha.slice(0, 12) : '-';
 const modeLabel = (mode:string) => ({quick:'快速模式',standard:'标准模式',deep:'深度模式'} as any)[mode] || mode;
 const formatTime = (value?:string) => value ? new Date(value).toLocaleString('zh-CN', {hour12:false}) : '-';
+const commitLabel = (commit:RepositoryCommit) => `${commit.short_id || commit.id.slice(0,8)} · ${commit.title || '无提交说明'}${commit.authored_date ? ` · ${formatTime(commit.authored_date)}` : ''}`;
 const severityColor = (value:string) => ({high:'red',medium:'orange',low:'blue'} as any)[value] || 'gray';
 const severityLabel = (value:string) => ({high:'高风险',medium:'中风险',low:'低风险'} as any)[value] || value;
 const sourceName = (value:string) => ({machine_rule:'机器规则',static_scan:'静态分析',ocr_ai:'OCR Agent 审查',ai_analysis:'AI待确认提示',machine_ai:'机器+AI'} as any)[value] || value;
@@ -410,12 +432,52 @@ async function openSuggestedPatch(item:any){
 async function loadBase(){ const id=projectStore.currentProjectId; if(!id)return; [connections.value,repositories.value,projectDocuments.value]=await Promise.all([api.getConnections(),api.getRepositories(id),api.getProjectDocuments(id)]); }
 async function refreshExecutionLogs(){if(!selectedTask.value)return;try{executionLogs.value=await api.getExecutionLogs(selectedTask.value.id)}catch{executionLogs.value=[]}}
 async function loadTasks(silent=false){ const id=projectStore.currentProjectId;if(!id && !isPlatformAdmin.value)return;if(!silent)loading.value=true;try{tasks.value=await api.getTasks(isPlatformAdmin.value ? undefined : id!);if(selectedTask.value){selectedTask.value=tasks.value.find(task=>task.id===selectedTask.value?.id)||null;await refreshExecutionLogs()}}catch(e:any){if(!silent)Message.error(e.message)}finally{if(!silent)loading.value=false} }
-async function openCreate(){ await loadBase(); if(!repositories.value.length){configVisible.value=true;Message.info('请先关联本地 Git 仓库或完成 GitLab 配置');return} createVisible.value=true; }
-async function onRepositoryChange(v:any){mergeRequests.value=[];form.merge_request_iid=null;const repo=repositories.value.find(item=>item.id===v);if(!repo)return;if(repo.source_type==='local_git'){form.source_type='commits';return}mrLoading.value=true;try{mergeRequests.value=await api.getMergeRequests(Number(v))}catch(e:any){Message.error(`读取MR失败：${e.message}`)}finally{mrLoading.value=false}}
-async function submitTask(){ const project=projectStore.currentProjectId;if(!project)return;submitting.value=true;try{const task=await api.createTask({...form,project});createVisible.value=false;await api.runTask(task.id);Message.success('分析任务已提交，可在列表查看进度');await loadTasks()}catch(e:any){Message.error(e.message||'提交分析失败');await loadTasks()}finally{submitting.value=false} }
+async function openCreate(){
+  await loadBase();
+  if(!repositories.value.length){configVisible.value=true;Message.info('请先关联本地 Git 仓库或完成 GitLab 配置');return}
+  form.repository=null;form.source_type='commits';form.base_sha=undefined;form.head_sha=undefined;form.merge_request_iid=null;
+  repositoryCommits.value=[];mergeRequests.value=[];
+  createVisible.value=true;
+}
+async function onRepositoryChange(v:any){
+  mergeRequests.value=[];repositoryCommits.value=[];form.merge_request_iid=null;form.base_sha=undefined;form.head_sha=undefined;
+  const repo=repositories.value.find(item=>item.id===v);if(!repo)return;
+  if(repo.source_type==='local_git')form.source_type='commits';
+  commitLoading.value=true;
+  const commitRequest=api.getRepositoryCommits(Number(v)).then(items=>{repositoryCommits.value=items}).catch((e:any)=>{Message.error(`读取最近提交失败：${e.message}`)}).finally(()=>{commitLoading.value=false});
+  if(repo.source_type==='local_git'){await commitRequest;return}
+  mrLoading.value=true;
+  const mrRequest=api.getMergeRequests(Number(v)).then(items=>{mergeRequests.value=items}).catch((e:any)=>{Message.error(`读取MR失败：${e.message}`)}).finally(()=>{mrLoading.value=false});
+  await Promise.all([commitRequest,mrRequest]);
+}
+async function submitTask(){
+  const project=projectStore.currentProjectId;if(!project)return;
+  if(!form.repository){Message.warning('请选择代码仓库');return}
+  if(form.source_type==='commits'&&(!form.base_sha||!form.head_sha)){Message.warning('请选择或输入基准 Commit 和目标 Commit');return}
+  submitting.value=true;
+  try{
+    const payload={...form,project};
+    if(form.source_type==='commits'){
+      const resolved=await api.validateRepositoryRefs(Number(form.repository),form.base_sha,form.head_sha);
+      payload.base_sha=resolved.base_sha;payload.head_sha=resolved.head_sha;
+    }
+    const task=await api.createTask(payload);createVisible.value=false;await api.runTask(task.id);
+    Message.success('分析任务已提交，可在列表查看进度');await loadTasks();
+  }catch(e:any){Message.error(e.message||'提交分析失败');await loadTasks()}finally{submitting.value=false}
+}
 async function addConnection(){try{await api.createConnection(connectionForm);connections.value=await api.getConnections();Message.success('连接已保存')}catch(e:any){Message.error(e.message)} }
 async function addRepository(){const project=projectStore.currentProjectId;if(!project)return;try{await api.createRepository({...repoForm,project});repositories.value=await api.getRepositories(project);Message.success('仓库已关联')}catch(e:any){Message.error(e.message)} }
 async function addLocalRepository(){const project=projectStore.currentProjectId;if(!project)return;try{await api.createRepository({project,source_type:'local_git',name:localRepoForm.name,path_with_namespace:localRepoForm.local_path,local_path:localRepoForm.local_path,default_branch:'main'});repositories.value=await api.getRepositories(project);Message.success('本地 Git 仓库已关联')}catch(e:any){Message.error(e.message)} }
+function removeRepository(repo:CodeRepository){
+  const taskCount=repo.analysis_task_count||0;
+  if(taskCount){Message.warning(`该仓库仍有 ${taskCount} 条审查记录，请先在审查列表中全部删除`);return}
+  Modal.warning({
+    title:'删除代码仓库？',
+    content:`将删除“${repo.name}”的关联配置，并清理镜像内由平台拉取的残留代码目录。`,
+    hideCancel:false,
+    onOk:async()=>{try{await api.deleteRepository(repo.id);repositories.value=repositories.value.filter(item=>item.id!==repo.id);Message.success('代码仓库及平台拉取目录已删除')}catch(e:any){Message.error(e.message||'删除代码仓库失败')}}
+  })
+}
 async function saveToken(){const project=projectStore.currentProjectId;if(!project)return;try{await api.saveCredential({...tokenForm,project});tokenForm.token='';Message.success('Token已加密保存')}catch(e:any){Message.error(e.message)} }
 async function cancelAnalysis(task:AnalysisTask){try{await api.cancelTask(task.id);Message.success('已取消分析任务');await loadTasks(true)}catch(e:any){Message.error(e.message||'取消失败')}}
 async function rerunAnalysis(task:AnalysisTask){try{await api.runTask(task.id);Message.success('已重新提交分析任务');await loadTasks(true)}catch(e:any){Message.error(e.message||'重跑失败')}}
@@ -432,6 +494,8 @@ onBeforeUnmount(()=>{if(pollTimer)window.clearInterval(pollTimer)});
 </script>
 
 <style scoped>
+.repository-settings{display:flex;flex-direction:column;gap:8px}.repository-settings-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:4px}.repository-settings-title small{color:#8792a2}.repository-setting-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 12px;border:1px solid #e5eaf0;border-radius:8px;background:#f9fbfc}.repository-setting-row>div:first-child{min-width:0}.repository-setting-row b,.repository-setting-row small{display:block}.repository-setting-row small{margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8792a2}.repository-setting-actions{display:flex;align-items:center;gap:8px;white-space:nowrap}.repository-setting-actions>span{color:#8792a2;font-size:12px}
+.commit-hint{margin:-8px 0 16px;color:#8792a2;font-size:12px;line-height:1.5}
 .patch-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:11px}.patch-actions .diff-link{margin-top:0}.fix-link{color:#16827d}.diff-notice{margin-bottom:12px}
 .ocr-status-alert{margin:0 0 14px}.ocr-status-alert b{margin-right:8px}.ocr-status-alert span{line-height:1.6}.finding-detail{display:grid;grid-template-columns:52px minmax(0,1fr);gap:6px;margin-top:12px;color:#526273;line-height:1.65}.finding-detail b{color:#344054}
 .ocr-fallback-note{margin-top:10px;padding:9px;border-radius:7px;background:#eef8f3;color:#376b55;font-size:11px}

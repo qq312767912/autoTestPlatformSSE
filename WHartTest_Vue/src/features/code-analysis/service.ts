@@ -1,5 +1,5 @@
 import http, { request } from '@/utils/request';
-import type { AnalysisTask, AnalysisExecutionLog, CodeRepository, GitLabConnection, MergeRequest } from './types';
+import type { AnalysisTask, AnalysisExecutionLog, CodeRepository, GitLabConnection, MergeRequest, RepositoryCommit } from './types';
 
 const base = '/code-analysis';
 const list = <T>(value: any): T[] => Array.isArray(value) ? value : (value?.results || []);
@@ -8,8 +8,11 @@ export async function getConnections() { const r = await request<any>({ url: `${
 export async function createConnection(data: Partial<GitLabConnection>) { const r = await request<GitLabConnection>({ url: `${base}/connections/`, method: 'POST', data }); if (!r.success) throw new Error(r.error); return r.data!; }
 export async function getRepositories(project: number) { const r = await request<any>({ url: `${base}/repositories/`, method: 'GET', params: { project } }); if (!r.success) throw new Error(r.error); return list<CodeRepository>(r.data); }
 export async function createRepository(data: any) { const r = await request<CodeRepository>({ url: `${base}/repositories/`, method: 'POST', data }); if (!r.success) throw new Error(r.error); return r.data!; }
+export async function deleteRepository(id: number) { const r = await request({ url: `${base}/repositories/${id}/`, method: 'DELETE' }); if (!r.success) throw new Error(r.error); }
 export async function saveCredential(data: { project:number; connection:number; token:string }) { const r = await request<any>({ url: `${base}/credentials/`, method: 'POST', data }); if (!r.success) throw new Error(r.error); return r.data; }
 export async function getMergeRequests(repository: number) { const r = await request<any>({ url: `${base}/repositories/${repository}/merge-requests/`, method: 'GET' }); if (!r.success) throw new Error(r.error); return list<MergeRequest>(r.data); }
+export async function getRepositoryCommits(repository: number) { const r = await request<any>({ url: `${base}/repositories/${repository}/commits/`, method: 'GET' }); if (!r.success) throw new Error(r.error); return list<RepositoryCommit>(r.data); }
+export async function validateRepositoryRefs(repository: number, base_sha: string, head_sha: string) { const r = await request<any>({ url: `${base}/repositories/${repository}/validate-refs/`, method: 'POST', data: { base_sha, head_sha } }); if (!r.success) throw new Error(r.error); return r.data; }
 export async function getTasks(project?: number) { const r = await request<any>({ url: `${base}/tasks/`, method: 'GET', params: project ? { project } : undefined }); if (!r.success) throw new Error(r.error); return list<AnalysisTask>(r.data); }
 export async function getProjectDocuments(project: number) { const r = await request<any>({ url: '/requirements/documents/', method: 'GET', params: { project, page_size: 100 } }); if (!r.success) throw new Error(r.error); return list<any>(r.data); }
 export async function createTask(data: any) { const r = await request<AnalysisTask>({ url: `${base}/tasks/`, method: 'POST', data }); if (!r.success) throw new Error(r.error); return r.data!; }

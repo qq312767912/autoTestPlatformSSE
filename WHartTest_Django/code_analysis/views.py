@@ -11,7 +11,7 @@ from django.db.models import Q
 from projects.models import ProjectMember
 from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
 from .serializers import AnalysisTaskExecutionLogSerializer, AnalysisTaskSerializer, CredentialSerializer, GitLabConnectionSerializer, ProjectRepositorySerializer, TestRequirementDraftSerializer
-from .services import GitLabClient, generate_suggested_patch, normalize_test_point_for_display, remove_ocr_repository
+from .services import GitLabClient, LocalGitClient, generate_suggested_patch, normalize_test_point_for_display, remove_ocr_repositories_for_repository, remove_ocr_repository
 
 
 def _can_access(user, project_id):
@@ -41,13 +41,87 @@ class ProjectRepositoryViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         if not _can_access(self.request.user, self.request.data.get("project")): raise PermissionDenied()
         serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        repo = self.get_object()
+        if not _can_access(request.user, repo.project_id):
+            raise PermissionDenied("无权删除该代码仓库")
+        task_count = repo.analysis_tasks.count()
+        if task_count:
+            return Response(
+                {
+                    "detail": f"该仓库仍有 {task_count} 条审查记录，请先删除全部审查记录",
+                    "analysis_task_count": task_count,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        remove_ocr_repositories_for_repository(repo.id)
+        repo.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    def _gitlab_client(self, repo, user):
+        try:
+            credential = UserGitLabCredential.objects.get(
+                project=repo.project, connection=repo.connection, user=user,
+            )
+        except UserGitLabCredential.DoesNotExist:
+            raise PermissionDenied("请先配置当前用户的 GitLab Token")
+        return GitLabClient(repo.connection, credential.get_token())
+
+    @action(detail=True, methods=["get"], url_path="commits")
+    def commits(self, request, pk=None):
+        repo = self.get_object()
+        try:
+            if repo.source_type == "local_git":
+                data = LocalGitClient(repo.local_path).commits(limit=40)
+            else:
+                data = self._gitlab_client(repo, request.user).commits(
+                    repo.gitlab_project_id, repo.default_branch, limit=40,
+                )
+            return Response(data)
+        except PermissionDenied:
+            raise
+        except Exception as exc:
+            return Response(
+                {"detail": f"读取最近提交失败：{exc}"}, status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    @action(detail=True, methods=["post"], url_path="validate-refs")
+    def validate_refs(self, request, pk=None):
+        repo = self.get_object()
+        base_ref = str(request.data.get("base_sha") or "").strip()
+        head_ref = str(request.data.get("head_sha") or "").strip()
+        if not base_ref or not head_ref:
+            return Response(
+                {"detail": "请选择或输入基准 Commit 和目标 Commit"}, status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            if repo.source_type == "local_git":
+                client = LocalGitClient(repo.local_path)
+                base_sha, head_sha = client.resolve(base_ref), client.resolve(head_ref)
+            else:
+                client = self._gitlab_client(repo, request.user)
+                base_sha = client.commit(repo.gitlab_project_id, base_ref)["id"]
+                head_sha = client.commit(repo.gitlab_project_id, head_ref)["id"]
+        except PermissionDenied:
+            raise
+        except Exception as exc:
+            return Response(
+                {"detail": f"Commit 校验失败，请确认提交存在且当前用户有权访问：{exc}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if base_sha == head_sha:
+            return Response(
+                {"detail": "基准 Commit 和目标 Commit 不能相同"}, status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({"valid": True, "base_sha": base_sha, "head_sha": head_sha})
+
     @action(detail=True, methods=["get"], url_path="merge-requests")
     def merge_requests(self, request, pk=None):
         repo = self.get_object()
         if repo.source_type != "gitlab":
             return Response({"detail": "本地 Git 仓库不支持读取 Merge Request"}, status=status.HTTP_400_BAD_REQUEST)
-        credential = UserGitLabCredential.objects.get(project=repo.project, connection=repo.connection, user=request.user)
-        data = GitLabClient(repo.connection, credential.get_token()).merge_requests(repo.gitlab_project_id)
+        data = self._gitlab_client(repo, request.user).merge_requests(repo.gitlab_project_id)
         return Response(data)
 
 

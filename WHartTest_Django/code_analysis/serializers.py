@@ -11,9 +11,23 @@ class GitLabConnectionSerializer(serializers.ModelSerializer):
 
 class ProjectRepositorySerializer(serializers.ModelSerializer):
     connection_name = serializers.CharField(source="connection.name", read_only=True, default=None)
+    analysis_task_count = serializers.SerializerMethodField()
+    connection = serializers.PrimaryKeyRelatedField(
+        queryset=GitLabConnection.objects.all(), required=False, allow_null=True, default=None,
+    )
+    gitlab_project_id = serializers.CharField(required=False, allow_blank=True, default="")
     class Meta:
         model = ProjectRepository
         fields = "__all__"
+        # 本地 Git 不存在 GitLab 项目 ID；必须先允许字段缺省，随后再根据
+        # source_type 执行条件校验，否则 DRF 会在 validate() 前直接返回 400。
+        extra_kwargs = {
+            "gitlab_project_id": {"required": False, "allow_blank": True},
+            "connection": {"required": False, "allow_null": True},
+        }
+
+    def get_analysis_task_count(self, obj):
+        return obj.analysis_tasks.count()
 
     def validate(self, attrs):
         source_type = attrs.get("source_type", getattr(self.instance, "source_type", "gitlab"))

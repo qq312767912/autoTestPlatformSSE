@@ -1,6 +1,7 @@
 export interface GitLabConnection { id: number; name: string; base_url: string; verify_ssl: boolean; is_active: boolean }
-export interface CodeRepository { id: number; project: number; source_type: 'gitlab'|'local_git'; connection?: number; connection_name?: string; name: string; path_with_namespace: string; gitlab_project_id?: string; local_path?: string; default_branch: string }
+export interface CodeRepository { id: number; project: number; source_type: 'gitlab'|'local_git'; connection?: number; connection_name?: string; name: string; path_with_namespace: string; gitlab_project_id?: string; local_path?: string; default_branch: string; analysis_task_count?: number }
 export interface MergeRequest { iid: number; title: string; source_branch: string; target_branch: string; author?: { name: string } }
+export interface RepositoryCommit { id: string; short_id: string; title: string; author_name?: string; authored_date?: string }
 export interface AnalysisExecutionLog { id: number; event: string; message: string; detail?: Record<string, any>; actor_name: string; created_at: string }
 export interface TestRequirementDraft { id: number; title: string; status: 'draft'|'accepted'|'ignored'|'converted'; converted_test_case?: number|null }
 export interface Finding { key: string; change: string; file: string; severity: string; source: string; confidence: number; evidence: string; impact: string; recommendation?: string; line_start?: number; verified?: boolean; suggested_patch?: string; patch_status?: 'applicable'|'reference'; patch_validation_message?: string }
