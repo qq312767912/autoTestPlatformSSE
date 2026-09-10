@@ -97,7 +97,6 @@ RUN mkdir -p /root/.cache/fastembed
 FROM ${PYTHON_BASE_IMAGE}
 
 ARG OCI_REVISION
-LABEL org.opencontainers.image.revision="${OCI_REVISION}"
 
 ARG ALPINE_MIRROR=https://dl-cdn.alpinelinux.org/alpine
 ARG HF_ENDPOINT=https://huggingface.co
@@ -207,6 +206,8 @@ RUN find /app -type f \( -name "*.sqlite*" -o -name "*.db" -o -name "*.sql" \) -
     true
 
 RUN mkdir -p media static nltk_data /var/log
+
+LABEL org.opencontainers.image.revision="${OCI_REVISION}"
 
 EXPOSE 8000
 ENTRYPOINT ["/app/entrypoint.sh"]
