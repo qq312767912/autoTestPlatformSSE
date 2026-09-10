@@ -7,6 +7,7 @@ class GitLabConnectionSerializer(serializers.ModelSerializer):
     class Meta:
         model = GitLabConnection
         fields = "__all__"
+        read_only_fields = ["verify_ssl"]
 
 
 class ProjectRepositorySerializer(serializers.ModelSerializer):

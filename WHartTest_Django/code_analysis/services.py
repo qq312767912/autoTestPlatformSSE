@@ -92,7 +92,9 @@ def _ensure_not_cancelled(task):
 class GitLabClient:
     def __init__(self, connection, token):
         self.base_url = connection.base_url.rstrip("/")
-        self.verify = connection.verify_ssl
+        # 公司内网 GitLab 可能使用自签名证书或以 IP 访问，所有 API 请求
+        # 永久跳过 TLS 证书校验，不再受历史连接配置影响。
+        self.verify = False
         self.headers = {"PRIVATE-TOKEN": token, "Accept": "application/json"}
 
     def get(self, path, params=None):
@@ -270,6 +272,7 @@ def _managed_gitlab_repository(task):
     env.update({
         "GIT_ASKPASS": str(askpass),
         "GIT_TERMINAL_PROMPT": "0",
+        "GIT_SSL_NO_VERIFY": "true",
         "OCR_GITLAB_TOKEN": token,
     })
     if not (root / ".git").exists():

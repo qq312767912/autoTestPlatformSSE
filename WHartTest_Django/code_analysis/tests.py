@@ -11,11 +11,27 @@ from rest_framework.test import APIClient
 
 from projects.models import Project, ProjectMember
 from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
-from .serializers import ProjectRepositorySerializer
-from .services import DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, LocalGitClient, _diff_line_stats, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _reuse_cached_result, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, run_analysis
+from .serializers import GitLabConnectionSerializer, ProjectRepositorySerializer
+from .services import DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _diff_line_stats, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _reuse_cached_result, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, run_analysis
 
 
 class DiffRuleTests(TestCase):
+    def test_gitlab_connections_always_disable_ssl_verification(self):
+        serializer = GitLabConnectionSerializer(data={
+            "name": "内网 GitLab", "base_url": "https://10.10.11.59", "verify_ssl": True,
+        })
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        connection = serializer.save()
+        self.assertFalse(connection.verify_ssl)
+        self.assertFalse(GitLabClient(connection, "token").verify)
+
+    @patch("code_analysis.services.requests.get")
+    def test_gitlab_api_requests_never_verify_ssl(self, request_get):
+        request_get.return_value.json.return_value = {"version": "test"}
+        connection = SimpleNamespace(base_url="https://10.10.11.59", verify_ssl=True)
+        GitLabClient(connection, "token").get("/version")
+        self.assertFalse(request_get.call_args.kwargs["verify"])
+
     def test_local_repository_does_not_require_gitlab_project_id(self):
         user = User.objects.create_user("local-repository-user")
         project = Project.objects.create(name="本地仓库项目", creator=user)

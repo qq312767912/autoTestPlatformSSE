@@ -18,13 +18,19 @@ def _credential_cipher():
 class GitLabConnection(models.Model):
     name = models.CharField(max_length=100)
     base_url = models.URLField(max_length=500)
-    verify_ssl = models.BooleanField(default=True)
+    # 内网 GitLab 使用自签名证书或直接以 IP 访问，平台统一跳过证书校验。
+    # 字段继续保留用于兼容历史数据和 API，但不再允许配置为开启校验。
+    verify_ssl = models.BooleanField(default=False, editable=False)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["name"]
+
+    def save(self, *args, **kwargs):
+        self.verify_ssl = False
+        super().save(*args, **kwargs)
 
 
 class ProjectRepository(models.Model):
