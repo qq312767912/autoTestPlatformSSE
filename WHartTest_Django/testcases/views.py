@@ -21,16 +21,58 @@ from .models import (
     TestSuite,
     TestExecution,
     TestCaseResult,
+    TestCaseReview,
 )
 from .serializers import (
     TestCaseSerializer,
     TestCaseListSerializer,
     TestCaseModuleSerializer,
     TestCaseScreenshotSerializer,
+    TestCaseReviewSerializer,
 )
 from .permissions import IsProjectMemberForTestCase, IsProjectMemberForTestCaseModule
 from .filters import TestCaseFilter  # 导入自定义过滤器
 from wharttest_django.pagination import StandardPagination
+
+from .review_tasks import execute_testcase_review
+
+
+class TestCaseReviewViewSet(viewsets.ModelViewSet):
+    """项目内测试用例文件审查任务。"""
+
+    serializer_class = TestCaseReviewSerializer
+    permission_classes = [permissions.IsAuthenticated, IsProjectMemberForTestCase]
+    parser_classes = [MultiPartParser, FormParser]
+    pagination_class = StandardPagination
+    http_method_names = ["get", "post", "delete", "head", "options"]
+
+    def get_queryset(self):
+        return TestCaseReview.objects.filter(project_id=self.kwargs.get("project_pk")).select_related("creator")
+
+    def perform_create(self, serializer):
+        project = get_object_or_404(Project, pk=self.kwargs.get("project_pk"))
+        review = serializer.save(project=project, creator=self.request.user)
+        async_result = execute_testcase_review.delay(review.id)
+        review.celery_task_id = async_result.id or ""
+        review.save(update_fields=["celery_task_id", "updated_at"])
+
+    @action(detail=True, methods=["post"], url_path="retry")
+    def retry(self, request, *args, **kwargs):
+        review = self.get_object()
+        if review.status in {"pending", "running"}:
+            return Response({"detail": "任务仍在执行中"}, status=status.HTTP_409_CONFLICT)
+        review.status = "pending"
+        review.current_step = "等待重试"
+        review.progress = 0
+        review.error_message = ""
+        review.completed_at = None
+        if review.report_file:
+            review.report_file.delete(save=False)
+            review.report_file = None
+        async_result = execute_testcase_review.delay(review.id)
+        review.celery_task_id = async_result.id or ""
+        review.save()
+        return Response(self.get_serializer(review).data)
 
 # 确保导入项目自定义的权限类
 from wharttest_django.permissions import HasModelPermission, permission_required

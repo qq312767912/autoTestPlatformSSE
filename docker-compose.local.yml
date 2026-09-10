@@ -181,6 +181,8 @@ services:
     container_name: wharttest-frontend
     ports:
       - "0.0.0.0:8913:80"
+    volumes:
+      - ./data/media:/app/data/media:ro
     depends_on:
       - backend
     networks:

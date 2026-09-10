@@ -42,6 +42,7 @@ from testcases.views import (
     TestCaseModuleViewSet,
     TestSuiteViewSet,
     TestExecutionViewSet,
+    TestCaseReviewViewSet,
 )
 
 # 导入技能视图集。
@@ -92,6 +93,7 @@ projects_router = NestedSimpleRouter(router, r"projects", lookup="project")
 
 # 注册项目下测试用例路由。
 projects_router.register(r"testcases", TestCaseViewSet, basename="project-testcases")
+projects_router.register(r"testcase-reviews", TestCaseReviewViewSet, basename="project-testcase-reviews")
 
 # 注册项目下用例模块路由。
 projects_router.register(

@@ -5,6 +5,9 @@ import logging
 import asyncio
 import re
 from celery import shared_task
+
+# Celery autodiscover 只加载 tasks.py；导入用例审查任务完成注册。
+from .review_tasks import execute_testcase_review  # noqa: F401
 from django.utils import timezone
 from django.db import transaction
 from datetime import datetime

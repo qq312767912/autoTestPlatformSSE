@@ -8,10 +8,13 @@ from .models import (
     TestSuite,
     TestExecution,
     TestCaseResult,
+    TestCaseReview,
 )
 from projects.models import Project  # 确保导入Project模型以便进行校验
 from accounts.serializers import UserDetailSerializer  # 用于显示创建者信息
 from django.db import transaction
+import os
+from skills.models import Skill
 
 
 class TestCaseStepSerializer(serializers.ModelSerializer):
@@ -671,3 +674,63 @@ class TestExecutionCreateSerializer(serializers.Serializer):
             return value
         except TestSuite.DoesNotExist:
             raise serializers.ValidationError("测试套件不存在")
+
+
+class TestCaseReviewSerializer(serializers.ModelSerializer):
+    creator_name = serializers.CharField(source="creator.username", read_only=True)
+    source_url = serializers.SerializerMethodField()
+    report_url = serializers.SerializerMethodField()
+    selected_skill = serializers.PrimaryKeyRelatedField(queryset=Skill.objects.filter(is_active=True), required=False, allow_null=True)
+
+    class Meta:
+        model = TestCaseReview
+        fields = [
+            "id", "project", "creator", "creator_name", "source_file", "source_url",
+            "source_name", "business_context", "review_mode", "selected_skill", "skill_name", "custom_rules",
+            "status", "current_step", "progress",
+            "report_file", "report_url", "summary", "error_message", "celery_task_id",
+            "started_at", "completed_at", "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "id", "project", "creator", "source_url", "skill_name", "status", "current_step", "progress",
+            "report_file", "report_url", "summary", "error_message", "celery_task_id",
+            "started_at", "completed_at", "created_at", "updated_at",
+        ]
+        extra_kwargs = {"source_file": {"write_only": True}, "source_name": {"required": False}}
+
+    def validate_source_file(self, value):
+        extension = os.path.splitext(value.name)[1].lower()
+        if extension not in {".xlsx", ".csv"}:
+            raise serializers.ValidationError("目前支持 .xlsx 和 .csv 测试用例文件")
+        if value.size > 50 * 1024 * 1024:
+            raise serializers.ValidationError("文件不能超过 50MB")
+        return value
+
+    def create(self, validated_data):
+        from .review_service import build_skill_snapshot
+        source = validated_data["source_file"]
+        validated_data["source_name"] = source.name
+        mode = validated_data.get("review_mode", "general")
+        skill = validated_data.get("selected_skill")
+        if mode == "specified" and not skill:
+            raise serializers.ValidationError({"selected_skill": "指定 Skill 审查必须选择一个已启用的 Skill"})
+        if mode == "general":
+            skill = Skill.objects.filter(name="test-case-clarity-review", is_active=True).first()
+            validated_data["selected_skill"] = skill
+        validated_data["skill_name"] = skill.name if skill else "test-case-clarity-review"
+        validated_data["skill_snapshot"] = build_skill_snapshot(skill)
+        return super().create(validated_data)
+
+    @staticmethod
+    def _url(request, field):
+        if not field:
+            return None
+        # 保持同源相对地址；反向代理常只传主机名而不传外部端口，
+        # build_absolute_uri 会在 8913 部署下生成错误的 80 端口链接。
+        return field.url
+
+    def get_source_url(self, obj):
+        return self._url(self.context.get("request"), obj.source_file)
+
+    def get_report_url(self, obj):
+        return self._url(self.context.get("request"), obj.report_file)

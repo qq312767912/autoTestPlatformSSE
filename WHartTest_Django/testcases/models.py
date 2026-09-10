@@ -4,6 +4,15 @@ from django.utils.translation import gettext_lazy as _
 from django.core.exceptions import ValidationError
 from projects.models import Project # 确保从正确的应用导入Project模型
 import os
+import uuid
+
+
+def testcase_review_source_path(instance, filename):
+    return f"testcase_reviews/{instance.project_id}/{instance.id or uuid.uuid4().hex}/source/{filename}"
+
+
+def testcase_review_report_path(instance, filename):
+    return f"testcase_reviews/{instance.project_id}/{instance.id}/reports/{filename}"
 
 
 def testcase_screenshot_path(instance, filename):
@@ -472,3 +481,51 @@ class TestCaseResult(models.Model):
         if self.started_at and self.completed_at:
             return (self.completed_at - self.started_at).total_seconds()
         return self.execution_time
+
+
+class TestCaseReview(models.Model):
+    """一次测试用例文件质量审查任务。"""
+
+    STATUS_CHOICES = [
+        ("pending", _("等待中")),
+        ("running", _("审查中")),
+        ("completed", _("已完成")),
+        ("failed", _("失败")),
+    ]
+    MODE_CHOICES = [("general", _("通用审查")), ("specified", _("指定 Skill 审查"))]
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="testcase_reviews")
+    creator = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name="created_testcase_reviews")
+    source_file = models.FileField(upload_to=testcase_review_source_path, max_length=500)
+    source_name = models.CharField(max_length=255)
+    business_context = models.TextField(blank=True, default="")
+    review_mode = models.CharField(max_length=20, choices=MODE_CHOICES, default="general")
+    selected_skill = models.ForeignKey("skills.Skill", on_delete=models.SET_NULL, null=True, blank=True, related_name="testcase_reviews")
+    skill_name = models.CharField(max_length=255, default="test-case-clarity-review")
+    skill_snapshot = models.TextField(blank=True, default="")
+    custom_rules = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    current_step = models.CharField(max_length=255, blank=True, default="等待执行")
+    progress = models.PositiveSmallIntegerField(default=0)
+    report_file = models.FileField(upload_to=testcase_review_report_path, max_length=500, blank=True, null=True)
+    summary = models.JSONField(default=dict, blank=True)
+    error_message = models.TextField(blank=True, default="")
+    celery_task_id = models.CharField(max_length=255, blank=True, default="")
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = _("用例审查")
+        verbose_name_plural = _("用例审查")
+
+    def delete(self, *args, **kwargs):
+        source = self.source_file
+        report = self.report_file
+        super().delete(*args, **kwargs)
+        if source:
+            source.delete(save=False)
+        if report:
+            report.delete(save=False)
