@@ -15,6 +15,7 @@ import json
 import time
 import mimetypes
 import re
+import uuid
 from typing import Optional
 
 from langchain_core.tools import tool as langchain_tool
@@ -153,20 +154,8 @@ def _prepare_skill_artifacts_dir(
     case_dir_key: Optional[str] = None,
 ) -> str:
     artifacts_dir = _build_skill_artifacts_dir(project_id, case_dir_key)
-    if not case_dir_key:
-        os.makedirs(artifacts_dir, exist_ok=True)
-        return artifacts_dir
-
-    should_clear = False
-    if os.path.exists(artifacts_dir):
-        latest = _dir_latest_mtime(artifacts_dir)
-        if latest and time.time() - latest > _SKILL_DIR_STALE_SECONDS:
-            should_clear = True
-
-    if should_clear:
-        shutil.rmtree(artifacts_dir, ignore_errors=True)
-        logger.info(f"[execute_skill_script] 清空旧产物目录: {artifacts_dir}")
-
+    # 产物 URL 会被保存在历史聊天消息中，不能像临时截图一样按时间清空。
+    # 每次 Skill 执行都使用独立目录，避免同名文件覆盖历史下载链接。
     os.makedirs(artifacts_dir, exist_ok=True)
     return artifacts_dir
 
@@ -213,7 +202,7 @@ def _path_to_media_url(file_path: str) -> Optional[str]:
         return None
 
 
-def _build_artifact_payload(file_path: str) -> Optional[dict[str, object]]:
+def _build_artifact_payload(file_path: str, display_name: Optional[str] = None) -> Optional[dict[str, object]]:
     media_url = _path_to_media_url(file_path)
     if not media_url:
         return None
@@ -224,7 +213,7 @@ def _build_artifact_payload(file_path: str) -> Optional[dict[str, object]]:
 
     payload: dict[str, object] = {
         "type": "file",
-        "name": os.path.basename(file_path),
+        "name": display_name or os.path.basename(file_path),
         "url": media_url,
         "path": os.path.relpath(file_path, settings.MEDIA_ROOT).replace(os.sep, "/"),
         "mime_type": mime_type or "application/octet-stream",
@@ -292,7 +281,19 @@ def _collect_skill_artifacts(
     def add_file(file_path: Optional[str]) -> None:
         if not file_path or not _is_allowed_artifact_file(file_path):
             return
-        payload = _build_artifact_payload(file_path)
+        source_path = os.path.abspath(file_path)
+        stable_path = source_path
+        try:
+            artifact_root = os.path.abspath(artifacts_dir)
+            if os.path.commonpath([artifact_root, source_path]) != artifact_root:
+                os.makedirs(artifact_root, exist_ok=True)
+                stable_path = os.path.join(artifact_root, os.path.basename(source_path))
+                if os.path.abspath(stable_path) != source_path:
+                    shutil.copy2(source_path, stable_path)
+        except (OSError, ValueError) as exc:
+            logger.warning("[execute_skill_script] 持久化产物失败 %s: %s", source_path, exc)
+            return
+        payload = _build_artifact_payload(stable_path, display_name=os.path.basename(source_path))
         if not payload:
             return
         media_url = str(payload.get("url") or "")
@@ -521,6 +522,8 @@ def get_skill_tools(
             case_dir_key = None
             if current_test_case_id:
                 case_dir_key = str(current_test_case_id)
+            elif current_chat_session_id:
+                case_dir_key = current_chat_session_id
             elif session_id:
                 case_dir_key = session_id
 
@@ -529,9 +532,12 @@ def get_skill_tools(
                 case_dir_key=case_dir_key,
             )
             env["SCREENSHOT_DIR"] = screenshots_dir
+            # 一次工具调用对应一个不可覆盖的产物目录；聊天会话 ID
+            # 保证可追溯，随机执行 ID 保证同名文件不会破坏旧消息链接。
+            artifact_dir_key = f"{case_dir_key or '_default'}_{uuid.uuid4().hex}"
             artifacts_dir = _prepare_skill_artifacts_dir(
                 project_id=current_project_id,
-                case_dir_key=case_dir_key,
+                case_dir_key=artifact_dir_key,
             )
             env["SKILL_OUTPUT_DIR"] = artifacts_dir
             env["ARTIFACT_DIR"] = artifacts_dir

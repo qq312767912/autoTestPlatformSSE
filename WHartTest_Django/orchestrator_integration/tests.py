@@ -24,6 +24,7 @@ from .builtin_tools.skill_tools import (
     _collect_skill_artifacts,
     _build_skill_screenshots_dir,
     _finalize_skill_result,
+    _prepare_skill_artifacts_dir,
     _prepare_skill_screenshots_dir,
     _SKILL_DIR_STALE_SECONDS,
     _sanitize_runtime_path_segment,
@@ -342,16 +343,32 @@ class SkillScreenshotDirectoryTests(SimpleTestCase):
                 with open(generated_file, "w", encoding="utf-8") as f:
                     f.write("<mxfile></mxfile>")
 
+                artifacts_dir = os.path.join(temp_media_root, "skill_runtime", "artifacts", "1", "s1")
                 artifacts = _collect_skill_artifacts(
                     "已帮你生成 draw.io 文件：order-payment-flow.drawio",
                     skill_dir=skill_dir,
-                    artifacts_dir=os.path.join(temp_media_root, "skill_runtime", "artifacts", "1", "s1"),
+                    artifacts_dir=artifacts_dir,
                     artifacts_before={},
                 )
+                self.assertEqual(len(artifacts), 1)
+                self.assertEqual(artifacts[0]["name"], "order-payment-flow.drawio")
+                self.assertEqual(
+                    artifacts[0]["url"],
+                    "/media/skill_runtime/artifacts/1/s1/order-payment-flow.drawio",
+                )
+                self.assertTrue(os.path.exists(os.path.join(artifacts_dir, "order-payment-flow.drawio")))
 
-        self.assertEqual(len(artifacts), 1)
-        self.assertEqual(artifacts[0]["name"], "order-payment-flow.drawio")
-        self.assertEqual(artifacts[0]["url"], "/media/skills/1/11/order-payment-flow.drawio")
+    def test_prepare_skill_artifacts_dir_never_deletes_historical_files(self):
+        with tempfile.TemporaryDirectory() as temp_media_root:
+            with override_settings(MEDIA_ROOT=temp_media_root):
+                artifacts_dir = _prepare_skill_artifacts_dir(1, "historical-run")
+                historical_file = os.path.join(artifacts_dir, "report.xlsx")
+                with open(historical_file, "w", encoding="utf-8") as handle:
+                    handle.write("historical")
+                old = time.time() - _SKILL_DIR_STALE_SECONDS - 60
+                os.utime(historical_file, (old, old))
+                self.assertEqual(_prepare_skill_artifacts_dir(1, "historical-run"), artifacts_dir)
+                self.assertTrue(os.path.exists(historical_file))
 
     def test_finalize_skill_result_wraps_output_with_file_payload(self):
         with tempfile.TemporaryDirectory() as temp_media_root:
@@ -370,7 +387,7 @@ class SkillScreenshotDirectoryTests(SimpleTestCase):
                 )
 
         self.assertIn('"type": "file"', wrapped)
-        self.assertIn('/media/skills/1/11/demo.drawio', wrapped)
+        self.assertIn('/media/skill_runtime/artifacts/1/s1/demo.drawio', wrapped)
 
 
 class TerminalOutputSanitizerTests(SimpleTestCase):
