@@ -227,9 +227,16 @@
         </a-tab-pane>
         <a-tab-pane key="connection" title="GitLab连接">
           <a-form :model="connectionForm" layout="vertical"><a-form-item label="名称"><a-input v-model="connectionForm.name" /></a-form-item><a-form-item label="GitLab地址"><a-input v-model="connectionForm.base_url" placeholder="https://gitlab.example.com" /></a-form-item><a-button type="primary" @click="addConnection">保存连接</a-button></a-form>
+          <a-divider />
+          <div class="repository-settings-title"><b>已配置 GitLab 连接</b><small>删除只影响平台配置，不会影响 GitLab 服务</small></div>
+          <a-empty v-if="!connections.length" description="暂无 GitLab 连接" />
+          <div v-for="connection in connections" :key="`connection-${connection.id}`" class="repository-setting-row">
+            <div><b>{{ connection.name }}</b><small>{{ connection.base_url }}</small></div>
+            <div class="repository-setting-actions"><span>{{ connectionRepositoryCount(connection.id) }} 个仓库</span><a-button v-if="isPlatformAdmin" status="danger" type="text" size="small" @click="removeConnection(connection)"><template #icon><icon-delete /></template>删除</a-button></div>
+          </div>
         </a-tab-pane>
         <a-tab-pane key="repository" title="项目仓库">
-          <a-form :model="repoForm" layout="vertical"><a-form-item label="GitLab连接"><a-select v-model="repoForm.connection"><a-option v-for="c in connections" :key="c.id" :value="c.id">{{ c.name }}</a-option></a-select></a-form-item><a-form-item label="GitLab项目ID"><a-input v-model="repoForm.gitlab_project_id" /></a-form-item><a-form-item label="仓库名称"><a-input v-model="repoForm.name" /></a-form-item><a-form-item label="项目路径"><a-input v-model="repoForm.path_with_namespace" /></a-form-item><a-button type="primary" @click="addRepository">关联仓库</a-button></a-form>
+          <a-form :model="repoForm" layout="vertical"><a-form-item label="GitLab连接"><a-select v-model="repoForm.connection"><a-option v-for="c in connections" :key="c.id" :value="c.id">{{ c.name }}</a-option></a-select></a-form-item><a-form-item label="GitLab项目ID"><a-input v-model="repoForm.gitlab_project_id" /></a-form-item><a-form-item label="仓库名称"><a-input v-model="repoForm.name" /></a-form-item><a-form-item label="项目路径"><a-input v-model="repoForm.path_with_namespace" /></a-form-item><a-form-item label="默认分支"><a-input v-model="repoForm.default_branch" placeholder="例如 master、main 或 develop" /><template #extra>读取提交时会以 GitLab 项目的真实默认分支自动校正。</template></a-form-item><a-button type="primary" @click="addRepository">关联仓库</a-button></a-form>
         </a-tab-pane>
         <a-tab-pane key="token" title="我的Token">
           <a-form :model="tokenForm" layout="vertical"><a-form-item label="GitLab连接"><a-select v-model="tokenForm.connection"><a-option v-for="c in connections" :key="c.id" :value="c.id">{{ c.name }}</a-option></a-select></a-form-item><a-form-item label="Personal Access Token"><a-input-password v-model="tokenForm.token" placeholder="仅用于当前用户只读访问" /></a-form-item><a-button type="primary" @click="saveToken">加密保存</a-button></a-form>
@@ -237,11 +244,11 @@
       </a-tabs>
       <a-divider />
       <section class="repository-settings">
-        <div class="repository-settings-title"><b>已关联代码仓库</b><small>有审查记录的仓库需先删除全部记录</small></div>
+        <div class="repository-settings-title"><b>已关联代码仓库</b><small>删除平台关联不会删除 GitLab 上的真实仓库</small></div>
         <a-empty v-if="!repositories.length" description="当前项目暂无代码仓库" />
         <div v-for="repo in repositories" :key="`setting-${repo.id}`" class="repository-setting-row">
-          <div><b>{{ repo.name }}</b><small>{{ repo.source_type === 'local_git' ? `本地 Git · ${repo.local_path}` : `GitLab · ${repo.path_with_namespace}` }}</small></div>
-          <div class="repository-setting-actions"><span>{{ repo.analysis_task_count || 0 }} 条审查记录</span><a-button status="danger" type="text" size="small" @click="removeRepository(repo)"><template #icon><icon-delete /></template>删除</a-button></div>
+          <div><b>{{ repo.name }}</b><small>{{ repo.source_type === 'local_git' ? `本地 Git · ${repo.local_path}` : `GitLab · ${repo.path_with_namespace}` }}</small><a-input v-if="repo.source_type === 'gitlab'" v-model="repo.default_branch" size="small" style="margin-top:8px;width:180px" placeholder="默认分支" /></div>
+          <div class="repository-setting-actions"><span>{{ repo.analysis_task_count || 0 }} 条审查记录</span><a-button v-if="repo.source_type === 'gitlab'" type="text" size="small" @click="saveRepositoryBranch(repo)">保存分支</a-button><a-button status="danger" type="text" size="small" @click="removeRepository(repo)"><template #icon><icon-delete /></template>删除</a-button></div>
         </div>
       </section>
     </a-modal>
@@ -276,6 +283,7 @@ const connectionForm = reactive<any>({ name:'内网 GitLab', base_url:'', verify
 const repoForm = reactive<any>({ connection:null, gitlab_project_id:'', name:'', path_with_namespace:'', default_branch:'main' });
 const localRepoForm = reactive<any>({ name:'当前工作区', local_path:'.' });
 const selectedRepository = computed(() => repositories.value.find(item => item.id === form.repository));
+const errorText = (error:any, fallback='操作失败') => error?.error || error?.message || error?.detail || fallback;
 const severityOrder:Record<string,number> = { high:0, medium:1, low:2 };
 const riskType = (item:any) => {
   const key = item.key || '';
@@ -444,10 +452,10 @@ async function onRepositoryChange(v:any){
   const repo=repositories.value.find(item=>item.id===v);if(!repo)return;
   if(repo.source_type==='local_git')form.source_type='commits';
   commitLoading.value=true;
-  const commitRequest=api.getRepositoryCommits(Number(v)).then(items=>{repositoryCommits.value=items}).catch((e:any)=>{Message.error(`读取最近提交失败：${e.message}`)}).finally(()=>{commitLoading.value=false});
+  const commitRequest=api.getRepositoryCommits(Number(v)).then(items=>{repositoryCommits.value=items;return loadBase()}).catch((e:any)=>{Message.error(`读取最近提交失败：${errorText(e)}`)}).finally(()=>{commitLoading.value=false});
   if(repo.source_type==='local_git'){await commitRequest;return}
   mrLoading.value=true;
-  const mrRequest=api.getMergeRequests(Number(v)).then(items=>{mergeRequests.value=items}).catch((e:any)=>{Message.error(`读取MR失败：${e.message}`)}).finally(()=>{mrLoading.value=false});
+  const mrRequest=api.getMergeRequests(Number(v)).then(items=>{mergeRequests.value=items}).catch((e:any)=>{Message.error(`读取MR失败：${errorText(e)}`)}).finally(()=>{mrLoading.value=false});
   await Promise.all([commitRequest,mrRequest]);
 }
 async function submitTask(){
@@ -470,13 +478,22 @@ async function addRepository(){const project=projectStore.currentProjectId;if(!p
 async function addLocalRepository(){const project=projectStore.currentProjectId;if(!project)return;try{await api.createRepository({project,source_type:'local_git',name:localRepoForm.name,path_with_namespace:localRepoForm.local_path,local_path:localRepoForm.local_path,default_branch:'main'});repositories.value=await api.getRepositories(project);Message.success('本地 Git 仓库已关联')}catch(e:any){Message.error(e.message)} }
 function removeRepository(repo:CodeRepository){
   const taskCount=repo.analysis_task_count||0;
-  if(taskCount){Message.warning(`该仓库仍有 ${taskCount} 条审查记录，请先在审查列表中全部删除`);return}
   Modal.warning({
     title:'删除代码仓库？',
-    content:`将删除“${repo.name}”的关联配置，并清理镜像内由平台拉取的残留代码目录。`,
+    content:`将删除“${repo.name}”的平台关联、${taskCount} 条审查记录和平台缓存代码。GitLab 上的真实仓库不会被删除。`,
     hideCancel:false,
     onOk:async()=>{try{await api.deleteRepository(repo.id);repositories.value=repositories.value.filter(item=>item.id!==repo.id);Message.success('代码仓库及平台拉取目录已删除')}catch(e:any){Message.error(e.message||'删除代码仓库失败')}}
   })
+}
+async function saveRepositoryBranch(repo:CodeRepository){
+  const branch=String(repo.default_branch||'').trim();
+  if(!branch){Message.warning('默认分支不能为空');return}
+  try{const saved=await api.updateRepository(repo.id,{default_branch:branch});Object.assign(repo,saved);Message.success('默认分支已保存')}catch(e:any){Message.error(errorText(e,'保存默认分支失败'))}
+}
+const connectionRepositoryCount=(connectionId:number)=>repositories.value.filter(repo=>repo.connection===connectionId).length;
+function removeConnection(connection:GitLabConnection){
+  const repositoryCount=connectionRepositoryCount(connection.id);
+  Modal.warning({title:'删除 GitLab 连接？',content:repositoryCount?`该连接仍被 ${repositoryCount} 个项目仓库使用，请先删除这些仓库关联。`:`将删除“${connection.name}”的平台连接和已保存的用户 Token，不会影响 GitLab 服务。`,hideCancel:false,okButtonProps:{disabled:repositoryCount>0},onOk:async()=>{try{await api.deleteConnection(connection.id);connections.value=connections.value.filter(item=>item.id!==connection.id);Message.success('GitLab 连接已删除')}catch(e:any){Message.error(errorText(e,'删除 GitLab 连接失败'))}}})
 }
 async function saveToken(){const project=projectStore.currentProjectId;if(!project)return;try{await api.saveCredential({...tokenForm,project});tokenForm.token='';Message.success('Token已加密保存')}catch(e:any){Message.error(e.message)} }
 async function cancelAnalysis(task:AnalysisTask){try{await api.cancelTask(task.id);Message.success('已取消分析任务');await loadTasks(true)}catch(e:any){Message.error(e.message||'取消失败')}}

@@ -13,7 +13,7 @@
     <section v-else class="content-card">
       <div class="section-head">
         <div><h2>审查记录</h2><span>报告按项目共享，原始文件不会被修改</span></div>
-        <a-button @click="load">刷新</a-button>
+        <a-button @click="() => load()">刷新</a-button>
       </div>
       <a-spin :loading="loading" style="width: 100%">
         <a-empty v-if="!loading && !reviews.length" description="还没有用例审查记录" />

@@ -267,7 +267,9 @@ class AnalysisLifecycleTests(TransactionTestCase):
         credential.save()
 
     @patch("code_analysis.services.GitLabClient.commits")
-    def test_repository_lists_latest_forty_commits(self, commits):
+    @patch("code_analysis.services.GitLabClient.project")
+    def test_repository_lists_latest_forty_commits(self, project, commits):
+        project.return_value = {"default_branch": "master"}
         commits.return_value = [{
             "id": "a" * 40, "short_id": "a" * 8, "title": "latest change",
             "author_name": "tester", "authored_date": "2026-09-09T10:00:00+08:00",
@@ -276,7 +278,9 @@ class AnalysisLifecycleTests(TransactionTestCase):
         response = client.get(f"/api/code-analysis/repositories/{self.repository.id}/commits/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data[0]["title"], "latest change")
-        commits.assert_called_once_with(self.repository.gitlab_project_id, self.repository.default_branch, limit=40)
+        commits.assert_called_once_with(self.repository.gitlab_project_id, "master", limit=40)
+        self.repository.refresh_from_db()
+        self.assertEqual(self.repository.default_branch, "master")
 
     @patch("code_analysis.services.GitLabClient.commit")
     def test_repository_validates_and_resolves_both_commit_refs(self, commit):
@@ -309,17 +313,32 @@ class AnalysisLifecycleTests(TransactionTestCase):
         cleanup.assert_called_once_with(repository_id)
 
     @patch("code_analysis.views.remove_ocr_repositories_for_repository")
-    def test_repository_with_analysis_records_must_not_be_deleted(self, cleanup):
-        AnalysisTask.objects.create(
+    def test_repository_with_analysis_records_deletes_platform_records(self, cleanup):
+        repository_id = self.repository.id
+        task = AnalysisTask.objects.create(
             project=self.project, repository=self.repository, creator=self.user,
             source_type="commits", base_sha="a", head_sha="b",
         )
         client = APIClient(); client.force_authenticate(self.user)
         response = client.delete(f"/api/code-analysis/repositories/{self.repository.id}/")
+        self.assertIn(response.status_code, {200, 204})
+        self.assertFalse(ProjectRepository.objects.filter(pk=repository_id).exists())
+        self.assertFalse(AnalysisTask.objects.filter(pk=task.id).exists())
+        cleanup.assert_called_once_with(repository_id)
+
+    def test_gitlab_connection_with_repository_cannot_be_deleted(self):
+        client = APIClient(); client.force_authenticate(User.objects.create_superuser("admin", password="secret"))
+        response = client.delete(f"/api/code-analysis/connections/{self.connection.id}/")
         self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.data["analysis_task_count"], 1)
-        self.assertTrue(ProjectRepository.objects.filter(pk=self.repository.id).exists())
-        cleanup.assert_not_called()
+        self.assertEqual(response.data["repository_count"], 1)
+        self.assertTrue(GitLabConnection.objects.filter(pk=self.connection.id).exists())
+
+    def test_unused_gitlab_connection_can_be_deleted(self):
+        unused = GitLabConnection.objects.create(name="unused", base_url="https://unused.local")
+        client = APIClient(); client.force_authenticate(User.objects.create_superuser("admin", password="secret"))
+        response = client.delete(f"/api/code-analysis/connections/{unused.id}/")
+        self.assertIn(response.status_code, {200, 204})
+        self.assertFalse(GitLabConnection.objects.filter(pk=unused.id).exists())
 
     @patch("code_analysis.services.GitLabClient.merge_request_changes")
     def test_quick_analysis_generates_two_reports_and_deletes_cascade(self, changes):

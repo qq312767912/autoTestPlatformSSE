@@ -99,7 +99,19 @@ class GitLabClient:
 
     def get(self, path, params=None):
         response = requests.get(f"{self.base_url}/api/v4{path}", headers=self.headers, params=params, timeout=45, verify=self.verify)
-        response.raise_for_status()
+        if not response.ok:
+            try:
+                payload = response.json()
+                detail = payload.get("message") or payload.get("error") or payload
+            except (ValueError, AttributeError):
+                detail = (response.text or response.reason or "").strip()
+            if response.status_code in {401, 403}:
+                hint = "Token 无效、已过期或缺少 read_api/read_repository 权限"
+            elif response.status_code == 404:
+                hint = "GitLab 项目 ID/路径不正确，或当前 Token 无权访问该项目"
+            else:
+                hint = "GitLab API 请求失败"
+            raise RuntimeError(f"{hint}（HTTP {response.status_code}：{detail}）")
         return response.json()
 
     def project(self, project_id):

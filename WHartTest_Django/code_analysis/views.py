@@ -26,7 +26,20 @@ class GitLabConnectionViewSet(viewsets.ModelViewSet):
         if not self.request.user.is_superuser: raise PermissionDenied("仅系统管理员可维护GitLab连接")
     def perform_create(self, serializer): self._admin(); serializer.save()
     def perform_update(self, serializer): self._admin(); serializer.save()
-    def perform_destroy(self, instance): self._admin(); instance.delete()
+    def destroy(self, request, *args, **kwargs):
+        self._admin()
+        connection = self.get_object()
+        repository_count = connection.repositories.count()
+        if repository_count:
+            return Response(
+                {
+                    "detail": f"该 GitLab 连接仍被 {repository_count} 个项目仓库使用，请先删除关联的项目仓库",
+                    "repository_count": repository_count,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        connection.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class ProjectRepositoryViewSet(viewsets.ModelViewSet):
@@ -46,15 +59,6 @@ class ProjectRepositoryViewSet(viewsets.ModelViewSet):
         repo = self.get_object()
         if not _can_access(request.user, repo.project_id):
             raise PermissionDenied("无权删除该代码仓库")
-        task_count = repo.analysis_tasks.count()
-        if task_count:
-            return Response(
-                {
-                    "detail": f"该仓库仍有 {task_count} 条审查记录，请先删除全部审查记录",
-                    "analysis_task_count": task_count,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
         remove_ocr_repositories_for_repository(repo.id)
         repo.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -68,6 +72,16 @@ class ProjectRepositoryViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("请先配置当前用户的 GitLab Token")
         return GitLabClient(repo.connection, credential.get_token())
 
+    @staticmethod
+    def _sync_gitlab_default_branch(repo, client):
+        """以 GitLab 项目元数据为准，自动修正历史记录中写死的 main。"""
+        project = client.project(repo.gitlab_project_id)
+        default_branch = str(project.get("default_branch") or "").strip()
+        if default_branch and repo.default_branch != default_branch:
+            repo.default_branch = default_branch
+            repo.save(update_fields=["default_branch", "updated_at"])
+        return default_branch or repo.default_branch or None
+
     @action(detail=True, methods=["get"], url_path="commits")
     def commits(self, request, pk=None):
         repo = self.get_object()
@@ -75,9 +89,9 @@ class ProjectRepositoryViewSet(viewsets.ModelViewSet):
             if repo.source_type == "local_git":
                 data = LocalGitClient(repo.local_path).commits(limit=40)
             else:
-                data = self._gitlab_client(repo, request.user).commits(
-                    repo.gitlab_project_id, repo.default_branch, limit=40,
-                )
+                client = self._gitlab_client(repo, request.user)
+                default_branch = self._sync_gitlab_default_branch(repo, client)
+                data = client.commits(repo.gitlab_project_id, default_branch, limit=40)
             return Response(data)
         except PermissionDenied:
             raise
