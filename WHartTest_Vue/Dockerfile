@@ -1,6 +1,7 @@
 # 第一阶段：构建阶段
 ARG NODE_BASE_IMAGE=node:20-alpine
 ARG NGINX_BASE_IMAGE=nginx:alpine
+ARG OCI_REVISION=unknown
 FROM ${NODE_BASE_IMAGE} AS builder
 
 ARG NPM_REGISTRY=https://registry.npmjs.org
@@ -40,6 +41,9 @@ RUN npx vite build --mode production
 
 # 第二阶段：运行阶段
 FROM ${NGINX_BASE_IMAGE}
+
+ARG OCI_REVISION
+LABEL org.opencontainers.image.revision="${OCI_REVISION}"
 
 # 复制自定义 nginx 配置
 COPY nginx.conf /etc/nginx/conf.d/default.conf
