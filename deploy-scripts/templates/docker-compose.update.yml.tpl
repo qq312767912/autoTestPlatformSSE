@@ -1,0 +1,123 @@
+x-actuator-common: &actuator-common
+  image: __ACTUATOR_IMAGE__
+  pull_policy: never
+  entrypoint: ["/usr/local/bin/python3.12"]
+  command: ["/app/main.py"]
+  restart: unless-stopped
+  init: true
+  shm_size: "${ACTUATOR_SHM_SIZE:-1gb}"
+  mem_limit: "${ACTUATOR_MEMORY_LIMIT:-2g}"
+  cpus: "${ACTUATOR_CPU_LIMIT:-1.0}"
+  environment: &actuator-environment
+    WHARTTEST_ACTUATOR_WS_URL: ws://backend:8000/ws/ui/actuator/
+    WHARTTEST_ACTUATOR_API_URL: http://backend:8000
+    WHARTTEST_ACTUATOR_API_USERNAME: ${ACTUATOR_API_USERNAME:-admin}
+    WHARTTEST_ACTUATOR_API_PASSWORD_FILE: /run/secrets/actuator_api_password
+    WHARTTEST_ACTUATOR_USE_GUI: "false"
+    WHARTTEST_ACTUATOR_HEADLESS: "true"
+    WHARTTEST_ACTUATOR_PERSISTENT: "false"
+    WHARTTEST_ACTUATOR_BROWSER_TYPE: chromium
+    WHARTTEST_ACTUATOR_TRACE_ENABLED: "true"
+  secrets:
+    - actuator_api_password
+  volumes:
+    - __PLATFORM_DIR__/offline-images/data:/app/data
+  extra_hosts: &internal-site-hosts
+    - "www.test.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+    - "www.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+    - "static.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+    - "static.test.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+    - "media.sseinfo.com:${SSE_TEST_HOST_IP:-10.122.215.111}"
+  networks:
+    - wharttest-network
+
+# 与内网当前 docker-compose.offline.yml 叠加使用。
+services:
+  backend:
+    image: __BACKEND_IMAGE__
+    extra_hosts: *internal-site-hosts
+    volumes:
+      - __PLATFORM_DIR__/update_platform_version/deploy_env/supervisord.single-worker.conf:/app/supervisord.conf:ro
+    environment:
+      VISION_MCP_URL: http://vision-mcp:8010/mcp
+      VISION_API_BASE_URL: ${VISION_API_BASE_URL:-}
+      VISION_MCP_BASE_URL: ${VISION_MCP_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      VISION_API_CHAT_PATH: ${VISION_API_CHAT_PATH:-}
+      VISION_MCP_CHAT_COMPLETIONS_PATH: ${VISION_MCP_CHAT_COMPLETIONS_PATH:-/chat/completions}
+      VISION_API_KEY: ${VISION_API_KEY:-}
+      VISION_MCP_API_KEY: ${VISION_MCP_API_KEY:-}
+      VISION_MODEL: ${VISION_MODEL:-}
+      VISION_MCP_MODEL: ${VISION_MCP_MODEL:-glm-4.6v-flash}
+      VISION_API_TIMEOUT_SECONDS: ${VISION_API_TIMEOUT_SECONDS:-}
+      VISION_MCP_TIMEOUT_SECONDS: ${VISION_MCP_TIMEOUT_SECONDS:-120}
+
+  frontend:
+    image: __FRONTEND_IMAGE__
+    volumes:
+      - __PLATFORM_DIR__/offline-images/data/media:/app/data/media:ro
+
+  playwright-mcp:
+    extra_hosts: *internal-site-hosts
+    entrypoint: ["/bin/sh", "/opt/wharttest/playwright-mcp-entrypoint.sh"]
+    command: ["--no-sandbox", "--host", "0.0.0.0", "--allowed-hosts", "*"]
+    volumes:
+      - __PLATFORM_DIR__/update_platform_version/deploy_env/playwright-mcp-entrypoint.sh:/opt/wharttest/playwright-mcp-entrypoint.sh:ro
+      - __PLATFORM_DIR__/update_platform_version/deploy_env/playwright-mcp-config.template.json:/opt/wharttest/playwright-mcp-config.template.json:ro
+
+  vision-mcp:
+    image: __VISION_IMAGE__
+    container_name: wharttest-vision-mcp
+    environment:
+      VISION_MCP_BASE_URL: ${VISION_MCP_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      VISION_MCP_CHAT_COMPLETIONS_PATH: ${VISION_MCP_CHAT_COMPLETIONS_PATH:-/chat/completions}
+      VISION_MCP_API_KEY: ${VISION_MCP_API_KEY:-}
+      VISION_MCP_MODEL: ${VISION_MCP_MODEL:-glm-4.6v-flash}
+      VISION_MCP_OCR_PROVIDER: ${VISION_MCP_OCR_PROVIDER:-rapidocr}
+      VISION_MCP_TRANSPORT: streamable-http
+      VISION_MCP_HOST: 0.0.0.0
+      VISION_MCP_PORT: 8010
+      VISION_MCP_PATH: /mcp
+      VISION_MCP_TIMEOUT_SECONDS: ${VISION_MCP_TIMEOUT_SECONDS:-120}
+      VISION_MCP_MAX_RETRIES: ${VISION_MCP_MAX_RETRIES:-2}
+    ports:
+      - "8923:8010"
+    volumes:
+      - __PLATFORM_DIR__/offline-images/data:/app/data
+      - __PLATFORM_DIR__/offline-images/data/playwright-screenshots:/tmp/playwright-output:ro
+    networks:
+      - wharttest-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,urllib.error; r=urllib.request.Request('http://127.0.0.1:8010/mcp', method='GET');\ntry: urllib.request.urlopen(r, timeout=5)\nexcept urllib.error.HTTPError as e: raise SystemExit(0 if e.code < 500 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  actuator-01:
+    <<: *actuator-common
+    container_name: wharttest-actuator-01
+    environment:
+      <<: *actuator-environment
+      WHARTTEST_ACTUATOR_ID: actuator-01
+      WHARTTEST_ACTUATOR_NAME: 内网执行器-01
+
+  actuator-02:
+    <<: *actuator-common
+    container_name: wharttest-actuator-02
+    environment:
+      <<: *actuator-environment
+      WHARTTEST_ACTUATOR_ID: actuator-02
+      WHARTTEST_ACTUATOR_NAME: 内网执行器-02
+
+  actuator-03:
+    <<: *actuator-common
+    container_name: wharttest-actuator-03
+    environment:
+      <<: *actuator-environment
+      WHARTTEST_ACTUATOR_ID: actuator-03
+      WHARTTEST_ACTUATOR_NAME: 内网执行器-03
+
+secrets:
+  actuator_api_password:
+    file: __PLATFORM_DIR__/update_platform_version/deploy_env/secrets/actuator_api_password
