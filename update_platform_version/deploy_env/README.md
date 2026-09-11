@@ -51,6 +51,15 @@ bash 05-verify.sh
 Backend 重启后执行器会按自身重连机制重新注册；如未恢复，再单独执行
 `07-start-actuators.sh`。
 
+`05-verify.sh` 会验证容器和 HTTP 状态、数据库迁移、Celery Worker 及代码审查/用例审查
+任务注册、OpenCodeReview、共享媒体文件实际下载、Vision OCR、三个执行器的测试域名解析与
+HTTP 访问，以及 Backend WebSocket 注册表中的在线执行器数量。默认还会执行一次最小真实
+OpenCodeReview 模型调用（会消耗少量 Token，最长 4 分钟）；仅在排查其他基础设施时可跳过：
+
+```bash
+VERIFY_OCR_LIVE=0 bash 05-verify.sh
+```
+
 `07-start-actuators.sh` 在密钥文件缺失时会优先从仍在运行的执行器恢复；
 无法恢复时才隐藏提示输入平台当前密码。密码仅写入权限为 `600` 的
 `secrets/actuator_api_password`，不会写进镜像、YAML 或 Git。三个容器分别为：
