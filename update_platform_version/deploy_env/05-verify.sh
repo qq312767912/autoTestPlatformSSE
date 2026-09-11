@@ -124,11 +124,26 @@ with tempfile.TemporaryDirectory(prefix="ocr-verify-") as directory:
     root = Path(directory)
     def git(*args): subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True)
     git("init"); git("config", "user.email", "verify@wharttest.local"); git("config", "user.name", "WHartTest Verify")
-    source = root / "sample.py"
-    source.write_text("def divide(a, b):\n    return a / b\n", encoding="utf-8")
-    git("add", "sample.py"); git("commit", "-m", "base")
-    source.write_text("def divide(a, b):\n    return 0 if b == 0 else a / b\n", encoding="utf-8")
-    git("add", "sample.py"); git("commit", "-m", "head")
+    source = root / "UserExportVO.java"
+    source.write_text(
+        "import cn.afterturn.easypoi.excel.annotation.Excel;\n\n"
+        "public class UserExportVO {\n"
+        "    @Excel(name = \"姓名\")\n"
+        "    private String name;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    git("add", "UserExportVO.java"); git("commit", "-m", "base")
+    source.write_text(
+        "import cn.afterturn.easypoi.excel.annotation.Excel;\n\n"
+        "public class UserExportVO {\n"
+        "    @Excel(name = \"姓名\")\n"
+        "    private String name;\n\n"
+        "    private String phone;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    git("add", "UserExportVO.java"); git("commit", "-m", "add export phone field")
     output = root / "result.json"
     result = subprocess.run(
         ["ocr", "review", "--from", "HEAD~1", "--to", "HEAD", "--format", "json", "--audience", "agent",
@@ -143,7 +158,12 @@ with tempfile.TemporaryDirectory(prefix="ocr-verify-") as directory:
     accepted = {"success", "complete", "completed", "partial", "partial_success", "completed_with_warnings"}
     if payload.get("status") not in accepted:
         raise SystemExit("OpenCodeReview 状态异常：" + str(payload.get("status") or payload.get("message")))
-    print("OpenCodeReview 最小真实调用成功，状态=" + str(payload.get("status")))
+    comments = payload.get("comments") or []
+    review_text = json.dumps(comments, ensure_ascii=False).lower()
+    expected_terms = ("excel", "导出", "注解", "annotation")
+    if not comments or not any(term in review_text for term in expected_terms):
+        raise SystemExit("OpenCodeReview 调用成功，但未识别新增导出字段缺少 Excel 注解")
+    print("OpenCodeReview 最小真实调用成功，并识别到 Excel 导出注解遗漏；状态=" + str(payload.get("status")))
 PY
   echo "[通过] OpenCodeReview 到当前 LLM 的真实调用链路"
 else

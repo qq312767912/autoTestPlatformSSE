@@ -54,7 +54,9 @@ Backend 重启后执行器会按自身重连机制重新注册；如未恢复，
 `05-verify.sh` 会验证容器和 HTTP 状态、数据库迁移、Celery Worker 及代码审查/用例审查
 任务注册、OpenCodeReview、共享媒体文件实际下载、Vision OCR、三个执行器的测试域名解析与
 HTTP 访问，以及 Backend WebSocket 注册表中的在线执行器数量。默认还会执行一次最小真实
-OpenCodeReview 模型调用（会消耗少量 Token，最长 4 分钟）；仅在排查其他基础设施时可跳过：
+OpenCodeReview 模型调用：临时构造 Java 导出 DTO 新增字段却遗漏 Excel 注解的变更，并验证
+审查结果确实识别该问题（不强制风险等级）。该检查会消耗少量 Token，最长 4 分钟；
+仅在排查其他基础设施时可跳过：
 
 ```bash
 VERIFY_OCR_LIVE=0 bash 05-verify.sh
