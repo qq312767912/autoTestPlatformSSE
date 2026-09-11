@@ -165,7 +165,7 @@ log "工作目录: $(pwd)"
 log "Compose 文件: $COMPOSE_FILE"
 
 # 创建必要的数据目录
-mkdir -p data/postgres data/redis data/qdrant data/playwright-screenshots
+mkdir -p data/postgres data/redis data/qdrant data/playwright-screenshots data/media
 
 # 检查并停止旧容器
 if docker compose -f "$COMPOSE_FILE" ps -q 2>/dev/null | grep -q .; then
@@ -187,6 +187,15 @@ echo "============================================"
 
 sleep 5
 docker compose -f "$COMPOSE_FILE" ps
+
+# Skill/Agent 生成文件通过前端 Nginx 的 /media/ 路由下载。前端必须与
+# 后端共享同一媒体目录，否则聊天中能看到附件名称但浏览器下载会 404。
+FRONTEND_MEDIA_SOURCE="$(docker inspect wharttest-frontend --format '{{range .Mounts}}{{if eq .Destination "/app/data/media"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)"
+if [ -z "$FRONTEND_MEDIA_SOURCE" ]; then
+  error "前端缺少 /app/data/media 挂载，Skill 生成文件将无法下载"
+  exit 1
+fi
+log "前端媒体目录已挂载: ${FRONTEND_MEDIA_SOURCE} -> /app/data/media"
 
 echo ""
 echo "============================================"

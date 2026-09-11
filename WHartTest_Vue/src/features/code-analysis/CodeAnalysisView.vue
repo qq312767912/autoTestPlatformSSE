@@ -209,7 +209,7 @@
               <a-option v-for="commit in repositoryCommits" :key="`head-${commit.id}`" :value="commit.id">{{ commitLabel(commit) }}</a-option>
             </a-select>
           </a-form-item>
-          <div class="commit-hint">已加载当前仓库最近 {{ repositoryCommits.length }} 次提交；点击确定后会先校验 Commit 是否存在。</div>
+          <div class="commit-hint">已加载当前仓库最近 {{ repositoryCommits.length }} 次提交；也可直接输入不同分支名或 Commit SHA，点击确定后会先校验。</div>
         </template>
         <a-form-item label="需求文档（可选）"><a-select v-model="form.requirement_document_ids" multiple allow-clear placeholder="可选择多篇已上传的需求文档" :max-tag-count="2"><a-option v-for="doc in projectDocuments" :key="doc.id" :value="doc.id">{{ doc.title }}</a-option></a-select></a-form-item>
         <a-form-item label="接口文档（可选）"><a-select v-model="form.api_document_ids" multiple allow-clear placeholder="可选择多篇已上传的接口/设计文档" :max-tag-count="2"><a-option v-for="doc in projectDocuments" :key="doc.id" :value="doc.id">{{ doc.title }}</a-option></a-select></a-form-item>
@@ -236,7 +236,7 @@
           </div>
         </a-tab-pane>
         <a-tab-pane key="repository" title="项目仓库">
-          <a-form :model="repoForm" layout="vertical"><a-form-item label="GitLab连接"><a-select v-model="repoForm.connection"><a-option v-for="c in connections" :key="c.id" :value="c.id">{{ c.name }}</a-option></a-select></a-form-item><a-form-item label="GitLab项目ID"><a-input v-model="repoForm.gitlab_project_id" /></a-form-item><a-form-item label="仓库名称"><a-input v-model="repoForm.name" /></a-form-item><a-form-item label="项目路径"><a-input v-model="repoForm.path_with_namespace" /></a-form-item><a-form-item label="默认分支"><a-input v-model="repoForm.default_branch" placeholder="例如 master、main 或 develop" /><template #extra>读取提交时会以 GitLab 项目的真实默认分支自动校正。</template></a-form-item><a-button type="primary" @click="addRepository">关联仓库</a-button></a-form>
+          <a-form :model="repoForm" layout="vertical"><a-form-item label="GitLab项目ID或完整路径"><a-input v-model="repoForm.gitlab_project_id" placeholder="推荐填写 group/subgroup/project" /><template #extra>当前用户 Token 必须对该项目具有读取权限。</template></a-form-item><a-form-item label="GitLab连接"><a-select v-model="repoForm.connection"><a-option v-for="c in connections" :key="c.id" :value="c.id">{{ c.name }}</a-option></a-select></a-form-item><a-form-item label="仓库名称"><a-input v-model="repoForm.name" /></a-form-item><a-form-item label="项目路径"><a-input v-model="repoForm.path_with_namespace" /></a-form-item><a-form-item label="默认分支"><a-input v-model="repoForm.default_branch" placeholder="例如 master、main 或 develop" /><template #extra>校验仓库时会以 GitLab 项目的真实信息自动校正。</template></a-form-item><a-button type="primary" @click="addRepository">关联仓库</a-button></a-form>
         </a-tab-pane>
         <a-tab-pane key="token" title="我的Token">
           <a-form :model="tokenForm" layout="vertical"><a-form-item label="GitLab连接"><a-select v-model="tokenForm.connection"><a-option v-for="c in connections" :key="c.id" :value="c.id">{{ c.name }}</a-option></a-select></a-form-item><a-form-item label="Personal Access Token"><a-input-password v-model="tokenForm.token" placeholder="仅用于当前用户只读访问" /></a-form-item><a-button type="primary" @click="saveToken">加密保存</a-button></a-form>
@@ -247,8 +247,8 @@
         <div class="repository-settings-title"><b>已关联代码仓库</b><small>删除平台关联不会删除 GitLab 上的真实仓库</small></div>
         <a-empty v-if="!repositories.length" description="当前项目暂无代码仓库" />
         <div v-for="repo in repositories" :key="`setting-${repo.id}`" class="repository-setting-row">
-          <div><b>{{ repo.name }}</b><small>{{ repo.source_type === 'local_git' ? `本地 Git · ${repo.local_path}` : `GitLab · ${repo.path_with_namespace}` }}</small><a-input v-if="repo.source_type === 'gitlab'" v-model="repo.default_branch" size="small" style="margin-top:8px;width:180px" placeholder="默认分支" /></div>
-          <div class="repository-setting-actions"><span>{{ repo.analysis_task_count || 0 }} 条审查记录</span><a-button v-if="repo.source_type === 'gitlab'" type="text" size="small" @click="saveRepositoryBranch(repo)">保存分支</a-button><a-button status="danger" type="text" size="small" @click="removeRepository(repo)"><template #icon><icon-delete /></template>删除</a-button></div>
+          <div><b>{{ repo.name }}</b><small>{{ repo.source_type === 'local_git' ? `本地 Git · ${repo.local_path}` : `GitLab · ${repo.path_with_namespace}` }}</small><div v-if="repo.source_type === 'gitlab'" class="repository-edit-fields"><a-input v-model="repo.gitlab_project_id" size="small" placeholder="项目 ID 或 group/project" /><a-input v-model="repo.default_branch" size="small" placeholder="默认分支" /></div></div>
+          <div class="repository-setting-actions"><span>{{ repo.analysis_task_count || 0 }} 条审查记录</span><a-button v-if="repo.source_type === 'gitlab'" type="text" size="small" @click="validateRepository(repo)">保存并校验</a-button><a-button status="danger" type="text" size="small" @click="removeRepository(repo)"><template #icon><icon-delete /></template>删除</a-button></div>
         </div>
       </section>
     </a-modal>
@@ -452,10 +452,10 @@ async function onRepositoryChange(v:any){
   const repo=repositories.value.find(item=>item.id===v);if(!repo)return;
   if(repo.source_type==='local_git')form.source_type='commits';
   commitLoading.value=true;
-  const commitRequest=api.getRepositoryCommits(Number(v)).then(items=>{repositoryCommits.value=items;return loadBase()}).catch((e:any)=>{Message.error(`读取最近提交失败：${errorText(e)}`)}).finally(()=>{commitLoading.value=false});
+  const commitRequest=api.getRepositoryCommits(Number(v)).then(items=>{repositoryCommits.value=items;return loadBase()}).catch((e:any)=>{Message.error(errorText(e,'读取最近提交失败'))}).finally(()=>{commitLoading.value=false});
   if(repo.source_type==='local_git'){await commitRequest;return}
   mrLoading.value=true;
-  const mrRequest=api.getMergeRequests(Number(v)).then(items=>{mergeRequests.value=items}).catch((e:any)=>{Message.error(`读取MR失败：${errorText(e)}`)}).finally(()=>{mrLoading.value=false});
+  const mrRequest=api.getMergeRequests(Number(v)).then(items=>{mergeRequests.value=items}).catch((e:any)=>{Message.error(errorText(e,'读取 Merge Request 失败'))}).finally(()=>{mrLoading.value=false});
   await Promise.all([commitRequest,mrRequest]);
 }
 async function submitTask(){
@@ -490,6 +490,17 @@ async function saveRepositoryBranch(repo:CodeRepository){
   if(!branch){Message.warning('默认分支不能为空');return}
   try{const saved=await api.updateRepository(repo.id,{default_branch:branch});Object.assign(repo,saved);Message.success('默认分支已保存')}catch(e:any){Message.error(errorText(e,'保存默认分支失败'))}
 }
+async function validateRepository(repo:CodeRepository){
+  const projectId=String(repo.gitlab_project_id||'').trim();
+  if(!projectId){Message.warning('请输入 GitLab 项目数字 ID 或完整路径');return}
+  try{
+    const saved=await api.updateRepository(repo.id,{gitlab_project_id:projectId,default_branch:String(repo.default_branch||'').trim()||'main'});
+    Object.assign(repo,saved);
+    const result=await api.validateRepositoryAccess(repo.id);
+    Object.assign(repo,result.repository||{});
+    Message.success('GitLab 项目访问正常，仓库信息已同步');
+  }catch(e:any){Message.error(errorText(e,'GitLab 项目校验失败'))}
+}
 const connectionRepositoryCount=(connectionId:number)=>repositories.value.filter(repo=>repo.connection===connectionId).length;
 function removeConnection(connection:GitLabConnection){
   const repositoryCount=connectionRepositoryCount(connection.id);
@@ -512,6 +523,7 @@ onBeforeUnmount(()=>{if(pollTimer)window.clearInterval(pollTimer)});
 
 <style scoped>
 .repository-settings{display:flex;flex-direction:column;gap:8px}.repository-settings-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:4px}.repository-settings-title small{color:#8792a2}.repository-setting-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 12px;border:1px solid #e5eaf0;border-radius:8px;background:#f9fbfc}.repository-setting-row>div:first-child{min-width:0}.repository-setting-row b,.repository-setting-row small{display:block}.repository-setting-row small{margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8792a2}.repository-setting-actions{display:flex;align-items:center;gap:8px;white-space:nowrap}.repository-setting-actions>span{color:#8792a2;font-size:12px}
+.repository-edit-fields{display:flex;gap:8px;margin-top:8px}.repository-edit-fields>:first-child{width:260px}.repository-edit-fields>:last-child{width:130px}
 .commit-hint{margin:-8px 0 16px;color:#8792a2;font-size:12px;line-height:1.5}
 .patch-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:11px}.patch-actions .diff-link{margin-top:0}.fix-link{color:#16827d}.diff-notice{margin-bottom:12px}
 .ocr-status-alert{margin:0 0 14px}.ocr-status-alert b{margin-right:8px}.ocr-status-alert span{line-height:1.6}.finding-detail{display:grid;grid-template-columns:52px minmax(0,1fr);gap:6px;margin-top:12px;color:#526273;line-height:1.65}.finding-detail b{color:#344054}

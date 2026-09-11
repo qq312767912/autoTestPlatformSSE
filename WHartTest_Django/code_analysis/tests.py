@@ -303,6 +303,29 @@ class AnalysisLifecycleTests(TransactionTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("Commit", response.data["detail"])
 
+    @patch("code_analysis.services.GitLabClient.merge_requests")
+    def test_merge_request_error_is_returned_as_json(self, merge_requests):
+        merge_requests.side_effect = RuntimeError("404 Project Not Found")
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.get(f"/api/code-analysis/repositories/{self.repository.id}/merge-requests/")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("404 Project Not Found", response.data["detail"])
+
+    @patch("code_analysis.services.GitLabClient.project")
+    def test_repository_access_validation_syncs_gitlab_metadata(self, project):
+        project.return_value = {
+            "name": "Autotest API",
+            "path_with_namespace": "source-sse_projects/Autotest_API",
+            "default_branch": "master",
+        }
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.post(f"/api/code-analysis/repositories/{self.repository.id}/validate-access/")
+        self.assertEqual(response.status_code, 200)
+        self.repository.refresh_from_db()
+        self.assertEqual(self.repository.path_with_namespace, "source-sse_projects/Autotest_API")
+        self.assertEqual(self.repository.default_branch, "master")
+        self.assertEqual(response.data["repository"]["name"], "Autotest API")
+
     @patch("code_analysis.views.remove_ocr_repositories_for_repository")
     def test_repository_without_analysis_records_can_be_deleted(self, cleanup):
         repository_id = self.repository.id

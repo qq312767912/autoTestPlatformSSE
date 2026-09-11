@@ -135,8 +135,38 @@ class ProjectRepositoryViewSet(viewsets.ModelViewSet):
         repo = self.get_object()
         if repo.source_type != "gitlab":
             return Response({"detail": "本地 Git 仓库不支持读取 Merge Request"}, status=status.HTTP_400_BAD_REQUEST)
-        data = self._gitlab_client(repo, request.user).merge_requests(repo.gitlab_project_id)
-        return Response(data)
+        try:
+            data = self._gitlab_client(repo, request.user).merge_requests(repo.gitlab_project_id)
+            return Response(data)
+        except PermissionDenied:
+            raise
+        except Exception as exc:
+            return Response({"detail": f"读取 Merge Request 失败：{exc}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=["post"], url_path="validate-access")
+    def validate_access(self, request, pk=None):
+        repo = self.get_object()
+        if repo.source_type != "gitlab":
+            return Response({"detail": "本地 Git 仓库无需校验 GitLab 访问权限"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            project = self._gitlab_client(repo, request.user).project(repo.gitlab_project_id)
+            update_fields = []
+            values = {
+                "name": str(project.get("name") or repo.name).strip(),
+                "path_with_namespace": str(project.get("path_with_namespace") or repo.path_with_namespace).strip(),
+                "default_branch": str(project.get("default_branch") or repo.default_branch or "main").strip(),
+            }
+            for field, value in values.items():
+                if value and getattr(repo, field) != value:
+                    setattr(repo, field, value)
+                    update_fields.append(field)
+            if update_fields:
+                repo.save(update_fields=[*update_fields, "updated_at"])
+            return Response({"success": True, "detail": "GitLab 项目访问正常", "repository": self.get_serializer(repo).data})
+        except PermissionDenied:
+            raise
+        except Exception as exc:
+            return Response({"detail": f"GitLab 项目校验失败：{exc}"}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class CredentialViewSet(viewsets.ModelViewSet):

@@ -40,6 +40,8 @@ class ProjectRepositorySerializer(serializers.ModelSerializer):
             attrs["gitlab_project_id"] = ""
         elif not (attrs.get("connection") or getattr(self.instance, "connection", None)):
             raise serializers.ValidationError({"connection": "GitLab 仓库必须选择连接"})
+        elif not (attrs.get("gitlab_project_id", getattr(self.instance, "gitlab_project_id", "")) or "").strip():
+            raise serializers.ValidationError({"gitlab_project_id": "请输入 GitLab 项目数字 ID 或完整路径"})
         return attrs
 
 
