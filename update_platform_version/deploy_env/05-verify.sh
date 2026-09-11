@@ -23,6 +23,15 @@ curl -fsS http://127.0.0.1:8912/admin/login/ >/dev/null
 curl -fsS http://127.0.0.1:8913/ >/dev/null
 echo "[通过] Backend 和 Frontend HTTP 检查"
 
+media_source='/projects/ai-test-platform/offline-images/data/media'
+frontend_mounts="$(docker inspect wharttest-frontend --format '{{range .Mounts}}{{println .Source "|" .Destination "|" .RW}}{{end}}')"
+echo "$frontend_mounts" | grep -F -- "$media_source | /app/data/media | false" >/dev/null || {
+  echo "[失败] Frontend 未只读挂载 Backend 的共享媒体目录，请执行 15-fix-artifact-download-volume.sh" >&2
+  exit 1
+}
+docker exec wharttest-frontend test -d /app/data/media
+echo "[通过] Skill 交付物下载媒体卷"
+
 # 在真实信创宿主机内验证 OCR 的 ARM64 二进制依赖能够加载。
 docker exec wharttest-vision-mcp python -c \
   'import onnxruntime; from rapidocr_onnxruntime import RapidOCR; RapidOCR(); print("Vision OCR runtime OK")'

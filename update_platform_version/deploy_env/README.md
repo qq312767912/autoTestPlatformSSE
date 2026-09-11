@@ -97,6 +97,22 @@ bash 14-fix-playwright-mcp-browser.sh
 
 脚本会自动使用 Playwright MCP 镜像中已有的 Chromium/Chrome，不会联网安装浏览器，且只重建 `playwright-mcp` 容器。
 
+## Skill 生成文件下载修复
+
+`docker-compose.update.yml` 已将 Backend 的持久化媒体目录以只读方式挂载到 Frontend：
+
+```text
+/projects/ai-test-platform/offline-images/data/media -> /app/data/media:ro
+```
+
+如果平台生成的 Excel、报告等文件提示“无法从网站提取文件”，执行：
+
+```bash
+bash 15-fix-artifact-download-volume.sh
+```
+
+该脚本只重建 Frontend，不会重启 Backend、数据库或执行器；`05-verify.sh` 会自动检查此挂载。
+
 只停止执行器而不影响平台其他服务：
 
 ```bash
