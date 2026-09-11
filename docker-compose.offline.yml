@@ -74,6 +74,11 @@ services:
       - ./skills:/app/bundled_skills:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "www.test.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "www.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "static.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "static.test.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "media.sseinfo.com:${SSE_TEST_HOST_IP:-10.122.215.111}"
     environment:
       - DATABASE_TYPE=${DATABASE_TYPE:-postgres}
       - DATABASE_PATH=${DATABASE_PATH:-/app/data/db.sqlite3}
@@ -206,6 +211,12 @@ services:
       - ./data/playwright-screenshots:/tmp/playwright-output
       - ./config/playwright-mcp-entrypoint.sh:/opt/wharttest/playwright-mcp-entrypoint.sh:ro
       - ./config/playwright-mcp-config.template.json:/opt/wharttest/playwright-mcp-config.template.json:ro
+    extra_hosts:
+      - "www.test.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "www.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "static.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "static.test.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "media.sseinfo.com:${SSE_TEST_HOST_IP:-10.122.215.111}"
     networks:
       - wharttest-network
     restart: unless-stopped
