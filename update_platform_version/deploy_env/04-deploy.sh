@@ -30,20 +30,9 @@ wait_healthy() {
   return 1
 }
 
-echo "[升级] 启动 Vision MCP"
-"${compose[@]}" up -d --no-deps vision-mcp
-wait_healthy wharttest-vision-mcp 180
-
 echo "[升级] 替换 Backend（入口脚本会执行数据库迁移）"
 "${compose[@]}" up -d --no-deps backend
 wait_healthy wharttest-backend 300
 
-echo "[升级] 替换 Frontend"
-"${compose[@]}" up -d --no-deps frontend
-wait_healthy wharttest-frontend 180
-
-echo "[升级] 逐个更新三个执行器"
-# 统一走 07 脚本，确保密钥恢复、ARM64 镜像校验和逐个重建逻辑只有一份。
-bash "$UPDATE_DIR/07-start-actuators.sh"
-
-echo "升级完成。请执行 05-verify.sh，并进行登录、文档解析、用例生成等人工验收。"
+echo "Backend 升级完成；Frontend、Vision MCP、Actuator 均保持运行。"
+echo "请执行 05-verify.sh，并进行登录、代码审查、用例审查等人工验收。"

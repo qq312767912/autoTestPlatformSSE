@@ -44,9 +44,12 @@ bash 01-precheck.sh
 bash 02-backup.sh
 bash 03-import-images.sh
 bash 04-deploy.sh
-bash 07-start-actuators.sh
 bash 05-verify.sh
 ```
+
+本次 `04-deploy.sh` 只替换 Backend，不重启 Frontend、Vision MCP 或三个 Actuator。
+Backend 重启后执行器会按自身重连机制重新注册；如未恢复，再单独执行
+`07-start-actuators.sh`。
 
 `07-start-actuators.sh` 在密钥文件缺失时会优先从仍在运行的执行器恢复；
 无法恢复时才隐藏提示输入平台当前密码。密码仅写入权限为 `600` 的
