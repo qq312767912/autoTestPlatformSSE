@@ -1132,7 +1132,10 @@ class PlaywrightExecutor:
                     base_url = config.env_config.get('base_url', '') or ''
                 if base_url:
                     logger.info(f"导航到环境 base_url: {base_url}")
-                    await self._page.goto(base_url, wait_until="networkidle")
+                    # 动态站点可能存在轮询、埋点或长连接，networkidle 会一直
+                    # 等不到网络完全空闲并在页面已可用时误报超时。这里只等待
+                    # DOM 构建完成，具体控件是否可操作由后续步骤显式等待。
+                    await self._page.goto(base_url, wait_until="domcontentloaded")
 
                 for page_step in config.page_steps:
                     if self._stop_requested:
@@ -1407,7 +1410,8 @@ class PlaywrightExecutor:
                 base_url = config.env_config.get('base_url', '') or ''
             if base_url:
                 logger.info(f"[并发] 导航到环境 base_url: {base_url}")
-                await page.goto(base_url, wait_until="networkidle")
+                # 与单用例执行保持一致，避免持续网络请求导致导航误超时。
+                await page.goto(base_url, wait_until="domcontentloaded")
 
             for page_step in config.page_steps:
                 if self._stop_requested:
