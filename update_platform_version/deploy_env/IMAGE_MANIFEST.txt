@@ -1,10 +1,12 @@
 WHartTest 内网 ARM64 增量升级镜像
-应用版本: ecff56e4-r1 + actuator-r4
+应用版本: backend 430787c8-r1 + frontend ecff56e4-r1 + actuator-r4
 
-wharttest-250-backend:update-ecff56e4-r1-arm64
+wharttest-250-backend:update-430787c8-r1-arm64
   platform: linux/arm64
-  image ID: sha256:a59ee48b5f8629e99aba032b18b906dbe0a1fa01fb538b3b0e01dc16bf16834f
-  build: WHartTest_Django/Dockerfile.alpine
+  image ID: sha256:2df382eda20986d00b5643dcc7d88696a0b797fc1999eee68feab61572104a43
+  image size: 946409118 bytes
+  build: WHartTest_Django/Dockerfile（完整构建）
+  runtime: OpenCodeReview v1.11.4 / Celery concurrency 8
 
 wharttest-250-frontend:update-ecff56e4-r1-arm64
   platform: linux/arm64

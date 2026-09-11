@@ -2,7 +2,7 @@
 set -euo pipefail
 
 expected=(
-  'wharttest-backend|wharttest-250-backend:update-ecff56e4-r1-arm64'
+  'wharttest-backend|wharttest-250-backend:update-430787c8-r1-arm64'
   'wharttest-frontend|wharttest-250-frontend:update-ecff56e4-r1-arm64'
   'wharttest-vision-mcp|wharttest-250-vision-mcp:update-01339484-arm64-r2'
   'wharttest-mcp|wharttest-250-mcp-alpine:latest'
@@ -22,6 +22,10 @@ done
 curl -fsS http://127.0.0.1:8912/admin/login/ >/dev/null
 curl -fsS http://127.0.0.1:8913/ >/dev/null
 echo "[通过] Backend 和 Frontend HTTP 检查"
+
+docker exec wharttest-backend sh -c \
+  'command -v ocr >/dev/null && ocr --version && grep -q -- "--concurrency=8" /app/supervisord.conf'
+echo "[通过] Backend OpenCodeReview 与 Celery 并发 8"
 
 media_source='/projects/ai-test-platform/offline-images/data/media'
 frontend_mounts="$(docker inspect wharttest-frontend --format '{{range .Mounts}}{{println .Source "|" .Destination "|" .RW}}{{end}}')"

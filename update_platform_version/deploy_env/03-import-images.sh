@@ -35,7 +35,7 @@ for first_part in "$IMAGES_DIR"/*.tar.gz.partaa; do
 done
 
 images=(
-  wharttest-250-backend:update-ecff56e4-r1-arm64
+  wharttest-250-backend:update-430787c8-r1-arm64
   wharttest-250-frontend:update-ecff56e4-r1-arm64
   wharttest-250-vision-mcp:update-01339484-arm64-r2
   wharttest-250-actuator:update-178fb3ed-arm64-r4
@@ -44,12 +44,19 @@ images=(
 for image in "${images[@]}"; do
   platform="$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')"
   [ "$platform" = "linux/arm64" ] || { echo "镜像架构错误：$image ($platform)" >&2; exit 1; }
-  revision="$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
   case "$image" in
-    wharttest-250-backend:*|wharttest-250-frontend:*) expected_revision="ecff56e40673d502bd85e702dbf4e11ef969f2af" ;;
+    wharttest-250-backend:*)
+      echo "[验证] Backend OpenCodeReview 与 Celery 配置"
+      docker run --rm --entrypoint /bin/sh "$image" -c \
+        'command -v ocr >/dev/null && ocr --version && grep -q -- "--concurrency=8" /app/supervisord.conf'
+      echo "[通过] $image $platform（OCR 与 Celery 并发 8）"
+      continue
+      ;;
+    wharttest-250-frontend:*) expected_revision="ecff56e40673d502bd85e702dbf4e11ef969f2af" ;;
     wharttest-250-actuator:*) expected_revision="178fb3ed-networkidle-fix" ;;
     *) expected_revision="01339484c66c281fdddaea22683a68c40b7835bd" ;;
   esac
+  revision="$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
   [ "$revision" = "$expected_revision" ] || { echo "镜像代码版本错误：$image ($revision)" >&2; exit 1; }
   echo "[通过] $image $platform $revision"
 done
