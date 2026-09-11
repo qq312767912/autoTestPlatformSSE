@@ -13,7 +13,7 @@ TEMPLATE="$SCRIPT_DIR/templates/docker-compose.update.yml.tpl"
 OUTPUT="$1"
 BACKEND_IMAGE="$2"
 FRONTEND_IMAGE="$3"
-ACTUATOR_IMAGE="${4:-wharttest-250-actuator:update-01339484-arm64-r3}"
+ACTUATOR_IMAGE="${4:-wharttest-250-actuator:update-178fb3ed-arm64-r4}"
 VISION_IMAGE="${5:-wharttest-250-vision-mcp:update-01339484-arm64-r2}"
 PLATFORM_DIR="${6:-/projects/ai-test-platform}"
 

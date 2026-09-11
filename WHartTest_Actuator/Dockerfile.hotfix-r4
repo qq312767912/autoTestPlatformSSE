@@ -1,0 +1,13 @@
+FROM wharttest-250-actuator:update-01339484-arm64-r3
+
+ARG BUILD_REVISION=unknown
+
+LABEL org.opencontainers.image.title="WHartTest Actuator" \
+      org.opencontainers.image.revision="${BUILD_REVISION}"
+
+# 基于内网已验证的 R3 运行环境，仅替换导航超时修复代码。
+COPY executor.py /app/executor.py
+
+RUN python -m py_compile /app/executor.py \
+    && grep -q 'wait_until="domcontentloaded"' /app/executor.py \
+    && test "$(grep -c 'wait_until="domcontentloaded"' /app/executor.py)" -eq 2

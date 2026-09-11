@@ -21,6 +21,11 @@ qdrant-v1.16.0-arm64-64k-offline/
 *.tar.gz.*
 *.tar.gz.sha256
 
+# 内网部署配置可提交，但运行时密钥和日志禁止进入 Git。
+update_platform_version/deploy_env/secrets/*
+!update_platform_version/deploy_env/secrets/.gitkeep
+update_platform_version/deploy_env/logs/
+
 # IDE / Editor
 .vscode/
 .idea/

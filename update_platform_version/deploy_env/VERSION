@@ -1,0 +1,3 @@
+release=update-ecff56e4-r1-arm64-actuator-r4
+git_commit=ecff56e40673d502bd85e702dbf4e11ef969f2af
+platform=linux/arm64

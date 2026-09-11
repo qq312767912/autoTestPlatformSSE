@@ -1,0 +1,30 @@
+WHartTest 内网 ARM64 增量升级镜像
+应用版本: ecff56e4-r1 + actuator-r4
+
+wharttest-250-backend:update-ecff56e4-r1-arm64
+  platform: linux/arm64
+  image ID: sha256:a59ee48b5f8629e99aba032b18b906dbe0a1fa01fb538b3b0e01dc16bf16834f
+  build: WHartTest_Django/Dockerfile.alpine
+
+wharttest-250-frontend:update-ecff56e4-r1-arm64
+  platform: linux/arm64
+  image ID: sha256:8aaa12f3ea873710ba9e1f80af14811f7130f250ada682b867faac4586b5e9ee
+  build: WHartTest_Vue/Dockerfile
+
+wharttest-250-vision-mcp:update-01339484-arm64-r2
+  source revision: 01339484c66c281fdddaea22683a68c40b7835bd
+  platform: linux/arm64
+  image ID: sha256:435c042f3b76fb73ce24d095a0b43615a471bf6e12a00631a179aaa9e00dfa27
+  build: WHartTest_Vision_MCP/Dockerfile.alpine
+  runtime: Alpine edge / musl / native aarch64 ONNX Runtime
+
+wharttest-250-actuator:update-178fb3ed-arm64-r4
+  source revision: 178fb3ed-networkidle-fix
+  platform: linux/arm64
+  image ID: sha256:83e9819ccbf441e08f22790aa2d3e71f9a8380ebd6df328f90224530caabdc38
+  image size: 500521612 bytes (Docker 本地内容大小)
+  build: WHartTest_Actuator/Dockerfile.hotfix-r4 (base: update-01339484-arm64-r3)
+  runtime: Python 3.12 / Playwright 1.61.0 / Alpine system Chromium / musl ARM64
+  compatibility: Kylin ARM64 64KB page / avoids Debian image-layer read failure
+  deployment: one image, three isolated containers
+  fix: use domcontentloaded instead of networkidle for dynamic site navigation
