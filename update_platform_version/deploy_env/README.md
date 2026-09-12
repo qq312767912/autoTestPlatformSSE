@@ -47,7 +47,7 @@ bash 04-deploy.sh
 bash 05-verify.sh
 ```
 
-本次 `04-deploy.sh` 只替换 Backend，不重启 Frontend、Vision MCP 或三个 Actuator。
+本次 `04-deploy.sh` 同时替换 Backend 和 Frontend，不重启 Vision MCP 或三个 Actuator。
 Backend 重启后执行器会按自身重连机制重新注册；如未恢复，再单独执行
 `07-start-actuators.sh`。
 
@@ -61,9 +61,6 @@ OpenCodeReview 模型调用：临时构造 Java 导出 DTO 新增字段却遗漏
 ```bash
 VERIFY_OCR_LIVE=0 bash 05-verify.sh
 ```
-
-本次仅替换 Backend，因此检查脚本同时兼容内网继续复用的 Frontend `latest` 标签和
-此前增量发布使用的 `update-ecff56e4-r1-arm64` 标签。
 
 `07-start-actuators.sh` 在密钥文件缺失时会优先从仍在运行的执行器恢复；
 无法恢复时才隐藏提示输入平台当前密码。密码仅写入权限为 `600` 的
@@ -83,6 +80,7 @@ VERIFY_OCR_LIVE=0 bash 05-verify.sh
 
 ```text
 ../images/backend-347a4e12-alpine-r1-arm64.tar.gz.part000 ...（以实际分卷数为准）
+../images/frontend-ecff56e4-r1-arm64.tar.gz.part000
 ../images/actuator-update-178fb3ed-arm64-r4.tar.gz.partaa ... partab
 ```
 
@@ -91,7 +89,7 @@ VERIFY_OCR_LIVE=0 bash 05-verify.sh
 OpenCodeReview，并将 Celery 并发调整为 8。Supervisor 的日志和 PID 分别写入
 `/app/data/logs` 与 `/app/data/run`，通过已有数据卷落在
 `/projects/ai-test-platform/offline-images/data`，不再写入 `/var`。
-本次仅需新增传输 Backend 分卷；Frontend、Vision MCP、Actuator 继续复用内网已导入镜像。
+本次需传输 Backend 分卷和 Frontend 镜像；Vision MCP、Actuator 继续复用内网已导入镜像。
 如果只补充执行器镜像，可直接执行：
 
 ```bash

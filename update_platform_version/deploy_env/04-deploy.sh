@@ -30,9 +30,10 @@ wait_healthy() {
   return 1
 }
 
-echo "[升级] 替换 Backend（入口脚本会执行数据库迁移）"
-"${compose[@]}" up -d --no-deps backend
+echo "[升级] 替换 Backend 和 Frontend（Backend 入口脚本会执行数据库迁移）"
+"${compose[@]}" up -d --no-deps backend frontend
 wait_healthy wharttest-backend 300
+wait_healthy wharttest-frontend 180
 
-echo "Backend 升级完成；Frontend、Vision MCP、Actuator 均保持运行。"
+echo "Backend 和 Frontend 升级完成；Vision MCP、Actuator 均保持运行。"
 echo "请执行 05-verify.sh，并进行登录、代码审查、用例审查等人工验收。"

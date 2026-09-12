@@ -16,14 +16,7 @@ expected=(
 for entry in "${expected[@]}"; do
   IFS='|' read -r container image <<< "$entry"
   actual="$(docker inspect "$container" --format '{{.Config.Image}}')"
-  if [ "$container" = "wharttest-frontend" ]; then
-    case "$actual" in
-      wharttest-250-frontend:latest|wharttest-250-frontend:update-ecff56e4-r1-arm64) ;;
-      *) echo "[失败] $container 不是可复用的 WHartTest 前端镜像，实际为 $actual" >&2; exit 1 ;;
-    esac
-  else
-    [ "$actual" = "$image" ] || { echo "[失败] $container 应为 $image，实际为 $actual" >&2; exit 1; }
-  fi
+  [ "$actual" = "$image" ] || { echo "[失败] $container 应为 $image，实际为 $actual" >&2; exit 1; }
   state="$(docker inspect "$container" --format '{{.State.Status}}')"
   [ "$state" = "running" ] || { echo "[失败] $container 状态为 $state" >&2; exit 1; }
   echo "[通过] $container -> $actual"
