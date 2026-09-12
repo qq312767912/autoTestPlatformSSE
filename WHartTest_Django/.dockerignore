@@ -52,6 +52,7 @@ README.md
 docs/
 *.md
 !THIRD_PARTY_NOTICES.md
+!bundled_skills/**/*.md
 LICENSE
 
 # 测试

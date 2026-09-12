@@ -276,6 +276,7 @@ COPY testcase_templates/ /app/testcase_templates/
 COPY testcases/ /app/testcases/
 COPY utils/ /app/utils/
 COPY wharttest_django/ /app/wharttest_django/
+COPY bundled_skills/ /app/bundled_skills/
 
 # 清理不必要的文件
 RUN find /app -type f \( -name "*.sqlite*" -o -name "*.db" -o -name "*.sql" \) -delete && \

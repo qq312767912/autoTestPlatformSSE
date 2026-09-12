@@ -200,6 +200,8 @@ RUN npm config set registry "${NPM_REGISTRY}" 2>/dev/null && \
       *) agent-browser install 2>/dev/null || true ;; \
     esac || echo "WARN: agent-browser not available"
 
+COPY bundled_skills/ /app/bundled_skills/
+
 # 清理
 RUN find /app -type f \( -name "*.sqlite*" -o -name "*.db" -o -name "*.sql" \) -delete 2>/dev/null; \
     find /app -type d \( -name ".venv" -o -name "venv" -o -name "__pycache__" -o -name ".git" -o -name "*.egg-info" \) -exec rm -rf {} + 2>/dev/null; \

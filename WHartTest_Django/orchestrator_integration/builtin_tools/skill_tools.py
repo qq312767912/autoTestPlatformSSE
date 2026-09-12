@@ -16,6 +16,7 @@ import time
 import mimetypes
 import re
 import uuid
+from pathlib import Path
 from typing import Optional
 
 from langchain_core.tools import tool as langchain_tool
@@ -464,7 +465,28 @@ def get_skill_tools(
             if not skill.skill_content:
                 return f"错误: Skill '{skill_name}' 没有 SKILL.md 内容"
 
-            return skill.skill_content
+            content = skill.skill_content
+            skill_dir = skill.get_full_path()
+            if skill_dir and os.path.isdir(skill_dir):
+                references_dir = Path(skill_dir) / "references"
+                if references_dir.is_dir():
+                    for reference_file in sorted(references_dir.rglob("*.md")):
+                        relative_name = reference_file.relative_to(skill_dir).as_posix()
+                        try:
+                            reference_content = reference_file.read_text(encoding="utf-8")
+                        except (OSError, UnicodeDecodeError) as exc:
+                            logger.warning(
+                                "[read_skill_content] 跳过无法读取的参考文件: %s (%s)",
+                                reference_file,
+                                exc,
+                            )
+                            continue
+                        content += (
+                            f"\n\n---\n# 已内联参考文件：{relative_name}\n\n"
+                            f"{reference_content}"
+                        )
+
+            return content
 
         except Exception as e:
             logger.error(f"[read_skill_content] 读取失败: {e}", exc_info=True)

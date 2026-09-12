@@ -14,6 +14,10 @@ python manage.py migrate --noinput
 echo "Creating default admin user if it does not exist..."
 python manage.py init_admin
 
-# 3. 启动 supervisord 来管理所有服务
+# 3. 同步镜像内置 Skills（包括 references、scripts 等完整目录）
+echo "Synchronizing bundled skills..."
+python manage.py init_skills
+
+# 4. 启动 supervisord 来管理所有服务
 echo "Starting supervisord..."
 exec supervisord -c /app/supervisord.conf
