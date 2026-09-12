@@ -142,6 +142,12 @@ bash 06-rollback-app.sh
 
 如果新版已执行了与旧版不兼容的数据库迁移，不能只回退镜像，需要人工确认后恢复 `backups/` 下的 PostgreSQL 备份。本包不会自动覆盖数据库。
 
+Backend 出现 `restarting` 或 8912 无法连接时，不要反复部署，先采集诊断日志：
+
+```bash
+bash 16-diagnose-backend-restart.sh
+```
+
 ## 禁止操作
 
 升级和回退过程中不要执行：
