@@ -9,6 +9,7 @@ from django.db import transaction
 from django.db.models import Q
 
 from projects.models import ProjectMember
+from wharttest_django.permissions import HasModelPermission, permission_required
 from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
 from .serializers import AnalysisTaskExecutionLogSerializer, AnalysisTaskSerializer, CredentialSerializer, GitLabConnectionSerializer, ProjectRepositorySerializer, TestRequirementDraftSerializer
 from .services import GitLabClient, LocalGitClient, generate_suggested_patch, normalize_test_point_for_display, remove_ocr_repositories_for_repository, remove_ocr_repository
@@ -21,7 +22,7 @@ def _can_access(user, project_id):
 class GitLabConnectionViewSet(viewsets.ModelViewSet):
     queryset = GitLabConnection.objects.all()
     serializer_class = GitLabConnectionSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModelPermission]
     def _admin(self):
         if not self.request.user.is_superuser: raise PermissionDenied("仅系统管理员可维护GitLab连接")
     def perform_create(self, serializer): self._admin(); serializer.save()
@@ -44,7 +45,7 @@ class GitLabConnectionViewSet(viewsets.ModelViewSet):
 
 class ProjectRepositoryViewSet(viewsets.ModelViewSet):
     serializer_class = ProjectRepositorySerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModelPermission]
     def get_queryset(self):
         qs = ProjectRepository.objects.select_related("project", "connection")
         if not (self.request.user.is_superuser or self.request.user.is_staff):
@@ -101,6 +102,7 @@ class ProjectRepositoryViewSet(viewsets.ModelViewSet):
             )
 
     @action(detail=True, methods=["post"], url_path="validate-refs")
+    @permission_required("code_analysis.view_projectrepository")
     def validate_refs(self, request, pk=None):
         repo = self.get_object()
         base_ref = str(request.data.get("base_sha") or "").strip()
@@ -144,6 +146,7 @@ class ProjectRepositoryViewSet(viewsets.ModelViewSet):
             return Response({"detail": f"读取 Merge Request 失败：{exc}"}, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=["post"], url_path="validate-access")
+    @permission_required("code_analysis.change_projectrepository")
     def validate_access(self, request, pk=None):
         repo = self.get_object()
         if repo.source_type != "gitlab":
@@ -171,7 +174,7 @@ class ProjectRepositoryViewSet(viewsets.ModelViewSet):
 
 class CredentialViewSet(viewsets.ModelViewSet):
     serializer_class = CredentialSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModelPermission]
     def get_queryset(self):
         qs = UserGitLabCredential.objects.filter(user=self.request.user)
         project_id = self.request.query_params.get("project")
@@ -180,6 +183,7 @@ class CredentialViewSet(viewsets.ModelViewSet):
         if not _can_access(self.request.user, self.request.data.get("project")): raise PermissionDenied()
         serializer.save()
     @action(detail=False, methods=["post"], url_path="test")
+    @permission_required("code_analysis.change_usergitlabcredential")
     def test_connection(self, request):
         project_id, connection_id, token = request.data.get("project"), request.data.get("connection"), request.data.get("token")
         if not _can_access(request.user, project_id): raise PermissionDenied()
@@ -192,7 +196,7 @@ class CredentialViewSet(viewsets.ModelViewSet):
 
 class AnalysisTaskViewSet(viewsets.ModelViewSet):
     serializer_class = AnalysisTaskSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModelPermission]
     def get_queryset(self):
         qs = AnalysisTask.objects.select_related("project", "repository", "creator", "executor").prefetch_related("test_requirement_drafts")
         if not (self.request.user.is_superuser or self.request.user.is_staff):
@@ -214,6 +218,7 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
         remove_ocr_repository(task_id)
         return Response(status=status.HTTP_204_NO_CONTENT)
     @action(detail=True, methods=["post"])
+    @permission_required("code_analysis.change_analysistask")
     def run(self, request, pk=None):
         force_refresh = request.data.get("force_refresh", True)
         if not isinstance(force_refresh, bool):
@@ -240,6 +245,7 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
             task.save(update_fields=["celery_task_id", "updated_at"])
         return Response(self.get_serializer(task).data, status=status.HTTP_202_ACCEPTED)
     @action(detail=True, methods=["post"])
+    @permission_required("code_analysis.change_analysistask")
     def cancel(self, request, pk=None):
         task = self.get_object()
         if task.status in {"completed", "failed", "cancelled"}:
@@ -271,6 +277,7 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
         return Response({"file": file_path, "base_sha": task.base_sha, "head_sha": task.head_sha, "diff": raw_diff})
 
     @action(detail=True, methods=["post"], url_path="suggested-patch")
+    @permission_required("code_analysis.change_analysistask")
     def suggested_patch(self, request, pk=None):
         """按需生成单条修复建议；仅校验补丁，不修改被审查仓库。"""
         task = self.get_object()
@@ -446,13 +453,14 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
 
 class TestRequirementDraftViewSet(viewsets.ModelViewSet):
     serializer_class = TestRequirementDraftSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModelPermission]
     def get_queryset(self):
         qs = TestRequirementDraft.objects.select_related("task__project")
         if not self.request.user.is_superuser: qs = qs.filter(task__project__members__user=self.request.user)
         return qs
 
     @action(detail=True, methods=["post"])
+    @permission_required("code_analysis.change_testrequirementdraft")
     def accept(self, request, pk=None):
         draft = self.get_object()
         if draft.status == "converted":
@@ -462,6 +470,7 @@ class TestRequirementDraftViewSet(viewsets.ModelViewSet):
         return Response(self.get_serializer(draft).data)
 
     @action(detail=True, methods=["post"])
+    @permission_required("code_analysis.change_testrequirementdraft")
     def ignore(self, request, pk=None):
         draft = self.get_object()
         if draft.status == "converted":
@@ -471,6 +480,7 @@ class TestRequirementDraftViewSet(viewsets.ModelViewSet):
         return Response(self.get_serializer(draft).data)
 
     @action(detail=True, methods=["post"])
+    @permission_required("code_analysis.change_testrequirementdraft")
     def convert(self, request, pk=None):
         """将确认的测试需求转为项目正式用例，并保持可追溯关联。"""
         draft = self.get_object()

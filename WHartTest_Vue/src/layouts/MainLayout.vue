@@ -491,8 +491,8 @@ const hasRequirementsPermission = computed(() => {
   return authStore.hasPermission('requirements.view_requirementdocument');
 });
 
-// 代码审查的后端接口还会按项目成员身份做二次隔离。
-const hasCodeAnalysisPermission = computed(() => !!authStore.currentUser);
+// 菜单权限与后端模型权限保持一致，后端还会按项目成员身份做二次隔离。
+const hasCodeAnalysisPermission = computed(() => authStore.hasPermission('code_analysis.view_analysistask'));
 
 const hasTestcasesPermission = computed(() => {
   return authStore.hasPermission('testcases.view_testcase');

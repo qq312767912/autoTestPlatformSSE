@@ -7,8 +7,8 @@
         <p>对代码变更进行多维审查，识别风险、评估业务影响，并生成可执行的测试需求与回归建议。</p>
       </div>
       <div class="hero-actions">
-        <a-button @click="configVisible = true"><template #icon><icon-settings /></template>审查源配置</a-button>
-        <a-button type="primary" @click="openCreate"><template #icon><icon-plus /></template>新建分析</a-button>
+        <a-button v-if="canViewRepositories || canViewConnections || canManageCredentials" @click="configVisible = true"><template #icon><icon-settings /></template>审查源配置</a-button>
+        <a-button v-if="canAddTasks && canViewRepositories" type="primary" @click="openCreate"><template #icon><icon-plus /></template>新建分析</a-button>
       </div>
     </header>
 
@@ -30,9 +30,9 @@
           <div class="task-score"><span>测试点</span><b>{{ task.test_report?.summary?.test_point_count || 0 }}</b></div>
           <a-tag :color="statusColor(task.status)">{{ statusLabel(task.status) }}</a-tag>
           <a-progress :percent="task.progress / 100" :show-text="false" size="small" style="width:90px" />
-          <a-button v-if="isRunning(task)" type="text" status="warning" @click.stop="cancelAnalysis(task)">取消</a-button>
-          <a-button v-else-if="canRerun(task)" type="text" status="success" @click.stop="rerunAnalysis(task)">重跑</a-button>
-          <a-button type="text" status="danger" @click.stop="removeTask(task)"><icon-delete /></a-button>
+          <a-button v-if="canChangeTasks && isRunning(task)" type="text" status="warning" @click.stop="cancelAnalysis(task)">取消</a-button>
+          <a-button v-else-if="canChangeTasks && canRerun(task)" type="text" status="success" @click.stop="rerunAnalysis(task)">重跑</a-button>
+          <a-button v-if="canDeleteTasks" type="text" status="danger" @click.stop="removeTask(task)"><icon-delete /></a-button>
         </div>
       </a-spin>
     </section>
@@ -225,30 +225,30 @@
         <a-tab-pane key="local" title="本地 Git（开发测试）">
           <a-form :model="localRepoForm" layout="vertical"><a-alert type="info" style="margin-bottom:14px">仅能读取容器内 <code>/workspace</code> 挂载目录。仓库根目录填 <code>.</code>；子目录示例：<code>demo_repositories/项目名</code>。不支持绝对路径或 <code>../</code>。</a-alert><a-form-item label="仓库名称"><a-input v-model="localRepoForm.name" /></a-form-item><a-form-item label="本地路径"><a-input v-model="localRepoForm.local_path" placeholder=".（仓库根目录）" /></a-form-item><a-button type="primary" @click="addLocalRepository">关联本地仓库</a-button></a-form>
         </a-tab-pane>
-        <a-tab-pane key="connection" title="GitLab连接">
-          <a-form :model="connectionForm" layout="vertical"><a-form-item label="名称"><a-input v-model="connectionForm.name" /></a-form-item><a-form-item label="GitLab地址"><a-input v-model="connectionForm.base_url" placeholder="https://gitlab.example.com" /></a-form-item><a-button type="primary" @click="addConnection">保存连接</a-button></a-form>
+        <a-tab-pane v-if="canViewConnections" key="connection" title="GitLab连接">
+          <a-form v-if="canAddConnections" :model="connectionForm" layout="vertical"><a-form-item label="名称"><a-input v-model="connectionForm.name" /></a-form-item><a-form-item label="GitLab地址"><a-input v-model="connectionForm.base_url" placeholder="https://gitlab.example.com" /></a-form-item><a-button type="primary" @click="addConnection">保存连接</a-button></a-form>
           <a-divider />
           <div class="repository-settings-title"><b>已配置 GitLab 连接</b><small>删除只影响平台配置，不会影响 GitLab 服务</small></div>
           <a-empty v-if="!connections.length" description="暂无 GitLab 连接" />
           <div v-for="connection in connections" :key="`connection-${connection.id}`" class="repository-setting-row">
             <div><b>{{ connection.name }}</b><small>{{ connection.base_url }}</small></div>
-            <div class="repository-setting-actions"><span>{{ connectionRepositoryCount(connection.id) }} 个仓库</span><a-button v-if="isPlatformAdmin" status="danger" type="text" size="small" @click="removeConnection(connection)"><template #icon><icon-delete /></template>删除</a-button></div>
+            <div class="repository-setting-actions"><span>{{ connectionRepositoryCount(connection.id) }} 个仓库</span><a-button v-if="canDeleteConnections" status="danger" type="text" size="small" @click="removeConnection(connection)"><template #icon><icon-delete /></template>删除</a-button></div>
           </div>
         </a-tab-pane>
-        <a-tab-pane key="repository" title="项目仓库">
-          <a-form :model="repoForm" layout="vertical"><a-form-item label="GitLab项目ID或完整路径"><a-input v-model="repoForm.gitlab_project_id" placeholder="推荐填写 group/subgroup/project" /><template #extra>当前用户 Token 必须对该项目具有读取权限。</template></a-form-item><a-form-item label="GitLab连接"><a-select v-model="repoForm.connection"><a-option v-for="c in connections" :key="c.id" :value="c.id">{{ c.name }}</a-option></a-select></a-form-item><a-form-item label="仓库名称"><a-input v-model="repoForm.name" /></a-form-item><a-form-item label="项目路径"><a-input v-model="repoForm.path_with_namespace" /></a-form-item><a-form-item label="默认分支"><a-input v-model="repoForm.default_branch" placeholder="例如 master、main 或 develop" /><template #extra>校验仓库时会以 GitLab 项目的真实信息自动校正。</template></a-form-item><a-button type="primary" @click="addRepository">关联仓库</a-button></a-form>
+        <a-tab-pane v-if="canViewRepositories" key="repository" title="项目仓库">
+          <a-form v-if="canAddRepositories" :model="repoForm" layout="vertical"><a-form-item label="GitLab项目ID或完整路径"><a-input v-model="repoForm.gitlab_project_id" placeholder="推荐填写 group/subgroup/project" /><template #extra>当前用户 Token 必须对该项目具有读取权限。</template></a-form-item><a-form-item label="GitLab连接"><a-select v-model="repoForm.connection"><a-option v-for="c in connections" :key="c.id" :value="c.id">{{ c.name }}</a-option></a-select></a-form-item><a-form-item label="仓库名称"><a-input v-model="repoForm.name" /></a-form-item><a-form-item label="项目路径"><a-input v-model="repoForm.path_with_namespace" /></a-form-item><a-form-item label="默认分支"><a-input v-model="repoForm.default_branch" placeholder="例如 master、main 或 develop" /><template #extra>校验仓库时会以 GitLab 项目的真实信息自动校正。</template></a-form-item><a-button type="primary" @click="addRepository">关联仓库</a-button></a-form>
         </a-tab-pane>
-        <a-tab-pane key="token" title="我的Token">
+        <a-tab-pane v-if="canManageCredentials" key="token" title="我的Token">
           <a-form :model="tokenForm" layout="vertical"><a-form-item label="GitLab连接"><a-select v-model="tokenForm.connection"><a-option v-for="c in connections" :key="c.id" :value="c.id">{{ c.name }}</a-option></a-select></a-form-item><a-form-item label="Personal Access Token"><a-input-password v-model="tokenForm.token" placeholder="仅用于当前用户只读访问" /></a-form-item><a-button type="primary" @click="saveToken">加密保存</a-button></a-form>
         </a-tab-pane>
       </a-tabs>
       <a-divider />
-      <section class="repository-settings">
+      <section v-if="canViewRepositories" class="repository-settings">
         <div class="repository-settings-title"><b>已关联代码仓库</b><small>删除平台关联不会删除 GitLab 上的真实仓库</small></div>
         <a-empty v-if="!repositories.length" description="当前项目暂无代码仓库" />
         <div v-for="repo in repositories" :key="`setting-${repo.id}`" class="repository-setting-row">
-          <div><b>{{ repo.name }}</b><small>{{ repo.source_type === 'local_git' ? `本地 Git · ${repo.local_path}` : `GitLab · ${repo.path_with_namespace}` }}</small><div v-if="repo.source_type === 'gitlab'" class="repository-edit-fields"><a-input v-model="repo.gitlab_project_id" size="small" placeholder="项目 ID 或 group/project" /><a-input v-model="repo.default_branch" size="small" placeholder="默认分支" /></div></div>
-          <div class="repository-setting-actions"><span>{{ repo.analysis_task_count || 0 }} 条审查记录</span><a-button v-if="repo.source_type === 'gitlab'" type="text" size="small" @click="validateRepository(repo)">保存并校验</a-button><a-button status="danger" type="text" size="small" @click="removeRepository(repo)"><template #icon><icon-delete /></template>删除</a-button></div>
+          <div><b>{{ repo.name }}</b><small>{{ repo.source_type === 'local_git' ? `本地 Git · ${repo.local_path}` : `GitLab · ${repo.path_with_namespace}` }}</small><div v-if="canChangeRepositories && repo.source_type === 'gitlab'" class="repository-edit-fields"><a-input v-model="repo.gitlab_project_id" size="small" placeholder="项目 ID 或 group/project" /><a-input v-model="repo.default_branch" size="small" placeholder="默认分支" /></div></div>
+          <div class="repository-setting-actions"><span>{{ repo.analysis_task_count || 0 }} 条审查记录</span><a-button v-if="canChangeRepositories && repo.source_type === 'gitlab'" type="text" size="small" @click="validateRepository(repo)">保存并校验</a-button><a-button v-if="canDeleteRepositories" status="danger" type="text" size="small" @click="removeRepository(repo)"><template #icon><icon-delete /></template>删除</a-button></div>
         </div>
       </section>
     </a-modal>
@@ -267,6 +267,17 @@ import * as api from './service';
 const projectStore = useProjectStore();
 const authStore = useAuthStore();
 const isPlatformAdmin = computed(() => !!authStore.currentUser?.is_staff);
+const canAddTasks = computed(() => authStore.hasPermission('code_analysis.add_analysistask'));
+const canChangeTasks = computed(() => authStore.hasPermission('code_analysis.change_analysistask'));
+const canDeleteTasks = computed(() => authStore.hasPermission('code_analysis.delete_analysistask'));
+const canViewRepositories = computed(() => authStore.hasPermission('code_analysis.view_projectrepository'));
+const canAddRepositories = computed(() => authStore.hasPermission('code_analysis.add_projectrepository'));
+const canChangeRepositories = computed(() => authStore.hasPermission('code_analysis.change_projectrepository'));
+const canDeleteRepositories = computed(() => authStore.hasPermission('code_analysis.delete_projectrepository'));
+const canViewConnections = computed(() => authStore.hasPermission('code_analysis.view_gitlabconnection'));
+const canAddConnections = computed(() => authStore.hasPermission('code_analysis.add_gitlabconnection'));
+const canDeleteConnections = computed(() => authStore.hasPermission('code_analysis.delete_gitlabconnection'));
+const canManageCredentials = computed(() => authStore.hasPermission('code_analysis.add_usergitlabcredential') || authStore.hasPermission('code_analysis.change_usergitlabcredential'));
 const tasks = ref<AnalysisTask[]>([]), repositories = ref<CodeRepository[]>([]), connections = ref<GitLabConnection[]>([]), mergeRequests = ref<MergeRequest[]>([]), repositoryCommits = ref<RepositoryCommit[]>([]), projectDocuments = ref<any[]>([]);
 const loading = ref(false), submitting = ref(false), mrLoading = ref(false), commitLoading = ref(false), createVisible = ref(false), configVisible = ref(false);
 const selectedTask = ref<AnalysisTask|null>(null);
@@ -437,7 +448,14 @@ async function openSuggestedPatch(item:any){
     diffNotice.value=applicable?'纯审阅模式：该补丁已通过 git apply --check，但平台不会自动修改仓库。':`纯审阅模式：该建议仅供参考，未通过可应用性校验。${generated.patch_validation_message ? ` ${generated.patch_validation_message}` : ''}`;
   }catch(e:any){diffNoticeType.value='warning';diffNotice.value=e.message||'建议修复生成失败';Message.error(diffNotice.value)}finally{diffLoading.value=false;patchLoadingKey.value=''}
 }
-async function loadBase(){ const id=projectStore.currentProjectId; if(!id)return; [connections.value,repositories.value,projectDocuments.value]=await Promise.all([api.getConnections(),api.getRepositories(id),api.getProjectDocuments(id)]); }
+async function loadBase(){
+  const id=projectStore.currentProjectId;if(!id)return;
+  [connections.value,repositories.value,projectDocuments.value]=await Promise.all([
+    canViewConnections.value ? api.getConnections() : Promise.resolve([]),
+    canViewRepositories.value ? api.getRepositories(id) : Promise.resolve([]),
+    api.getProjectDocuments(id),
+  ]);
+}
 async function refreshExecutionLogs(){if(!selectedTask.value)return;try{executionLogs.value=await api.getExecutionLogs(selectedTask.value.id)}catch{executionLogs.value=[]}}
 async function loadTasks(silent=false){ const id=projectStore.currentProjectId;if(!id && !isPlatformAdmin.value)return;if(!silent)loading.value=true;try{tasks.value=await api.getTasks(isPlatformAdmin.value ? undefined : id!);if(selectedTask.value){selectedTask.value=tasks.value.find(task=>task.id===selectedTask.value?.id)||null;await refreshExecutionLogs()}}catch(e:any){if(!silent)Message.error(e.message)}finally{if(!silent)loading.value=false} }
 async function openCreate(){

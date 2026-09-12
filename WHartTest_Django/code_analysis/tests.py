@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from django.contrib.auth.models import User
+from django.contrib.auth.models import Permission, User
 from django.test import SimpleTestCase, TestCase, TransactionTestCase
 from rest_framework.test import APIClient
 
@@ -250,8 +250,19 @@ class LocalGitClientTests(SimpleTestCase):
 
 
 class AnalysisLifecycleTests(TransactionTestCase):
+    @staticmethod
+    def grant_code_analysis_permissions(user, *codenames):
+        permissions = Permission.objects.filter(
+            content_type__app_label="code_analysis",
+            codename__in=codenames,
+        )
+        user.user_permissions.add(*permissions)
+
     def setUp(self):
         self.user = User.objects.create_user("tester", password="secret")
+        self.user.user_permissions.add(
+            *Permission.objects.filter(content_type__app_label="code_analysis")
+        )
         self.project = Project.objects.create(name="交易平台", creator=self.user)
         ProjectMember.objects.create(project=self.project, user=self.user, role="member")
         self.connection = GitLabConnection.objects.create(name="内网", base_url="https://gitlab.local")
@@ -355,6 +366,22 @@ class AnalysisLifecycleTests(TransactionTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.data["repository_count"], 1)
         self.assertTrue(GitLabConnection.objects.filter(pk=self.connection.id).exists())
+
+    def test_code_review_api_rejects_member_without_model_permission(self):
+        member = User.objects.create_user("member-without-code-review-permission")
+        ProjectMember.objects.create(project=self.project, user=member, role="member")
+        client = APIClient(); client.force_authenticate(member)
+        self.assertEqual(client.get("/api/code-analysis/tasks/").status_code, 403)
+        self.assertEqual(client.get("/api/code-analysis/repositories/").status_code, 403)
+
+    def test_code_review_view_permission_still_respects_project_membership(self):
+        member = User.objects.create_user("member-with-code-review-permission")
+        self.grant_code_analysis_permissions(member, "view_analysistask")
+        client = APIClient(); client.force_authenticate(member)
+        response = client.get("/api/code-analysis/tasks/")
+        self.assertEqual(response.status_code, 200)
+        items = response.data.get("results", response.data) if isinstance(response.data, dict) else response.data
+        self.assertEqual(items, [])
 
     def test_unused_gitlab_connection_can_be_deleted(self):
         unused = GitLabConnection.objects.create(name="unused", base_url="https://unused.local")
@@ -523,6 +550,7 @@ class AnalysisLifecycleTests(TransactionTestCase):
             source_type="commits", base_sha="c", head_sha="d",
         )
         admin = User.objects.create_user("platform-admin", password="secret", is_staff=True)
+        self.grant_code_analysis_permissions(admin, "view_analysistask")
         client = APIClient(); client.force_authenticate(admin)
         response = client.get("/api/code-analysis/tasks/")
         self.assertEqual(response.status_code, 200)
@@ -532,6 +560,7 @@ class AnalysisLifecycleTests(TransactionTestCase):
 
     def test_project_member_can_read_another_members_reports_diff_and_logs(self):
         member = User.objects.create_user("reviewer", password="secret")
+        self.grant_code_analysis_permissions(member, "view_analysistask")
         ProjectMember.objects.create(project=self.project, user=member, role="member")
         task = AnalysisTask.objects.create(
             project=self.project, repository=self.repository, creator=self.user,
@@ -549,6 +578,7 @@ class AnalysisLifecycleTests(TransactionTestCase):
     @patch("code_analysis.tasks.run_code_analysis.delay")
     def test_project_member_can_rerun_task_with_own_executor(self, delay):
         member = User.objects.create_user("reviewer", password="secret")
+        self.grant_code_analysis_permissions(member, "view_analysistask", "change_analysistask")
         ProjectMember.objects.create(project=self.project, user=member, role="member")
         task = AnalysisTask.objects.create(
             project=self.project, repository=self.repository, creator=self.user,
@@ -568,6 +598,7 @@ class AnalysisLifecycleTests(TransactionTestCase):
 
     def test_project_member_can_edit_another_members_test_draft(self):
         member = User.objects.create_user("reviewer", password="secret")
+        self.grant_code_analysis_permissions(member, "change_testrequirementdraft")
         ProjectMember.objects.create(project=self.project, user=member, role="member")
         task = AnalysisTask.objects.create(project=self.project, repository=self.repository, creator=self.user, source_type="commits", base_sha="a", head_sha="b")
         draft = TestRequirementDraft.objects.create(task=task, title="旧标题")
@@ -580,6 +611,7 @@ class AnalysisLifecycleTests(TransactionTestCase):
     def test_project_member_can_accept_ignore_and_convert_draft_to_testcase(self):
         from testcases.models import TestCase, TestCaseModule
         member = User.objects.create_user("reviewer2", password="secret")
+        self.grant_code_analysis_permissions(member, "change_testrequirementdraft")
         ProjectMember.objects.create(project=self.project, user=member, role="member")
         task = AnalysisTask.objects.create(project=self.project, repository=self.repository, creator=self.user, source_type="commits", base_sha="a", head_sha="b")
         draft = TestRequirementDraft.objects.create(task=task, title="验证导出权限", objective="以无权限账号发起导出", expected_result="接口拒绝且页面无导出入口", priority="high", test_type="安全回归")
