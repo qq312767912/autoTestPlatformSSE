@@ -59,6 +59,15 @@ bash 17-diagnose-testcase-review.sh
 
 脚本只读取 Backend、Celery 和最近审查记录，日志写入 `deploy_env/logs`，不会修改任务或数据库。
 
+针对小文件也超时的情况，可以进一步执行：
+
+```bash
+bash 18-diagnose-small-testcase-review.sh
+```
+
+默认检查最新一条审查记录；也可通过 `REVIEW_ID=8` 指定记录。脚本会统计 Excel 实际非空行、
+估算新旧版本分片数，并对当前激活模型发起一次30秒零重试的最小 `OK` 调用。脚本不会输出 API Key。
+
 `05-verify.sh` 会验证容器和 HTTP 状态、数据库迁移、Celery Worker 及代码审查/用例审查
 任务注册、OpenCodeReview、共享媒体文件实际下载、Vision OCR、三个执行器的测试域名解析与
 HTTP 访问，以及 Backend WebSocket 注册表中的在线执行器数量。默认还会执行一次最小真实
