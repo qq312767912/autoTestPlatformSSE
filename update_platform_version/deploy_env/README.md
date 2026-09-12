@@ -69,6 +69,19 @@ bash 18-diagnose-small-testcase-review.sh
 估算新旧版本分片数，并对当前激活模型发起一次60秒、最多256输出 Token、零重试的最小
 `OK` 调用，同时报告推理内容长度。脚本不会输出 API Key。
 
+## 用例审查免构建热修复
+
+当前 Backend 镜像不变时，可直接应用 `hotfix/` 中的只读代码覆盖层：
+
+```bash
+bash 19-apply-testcase-review-hotfix.sh
+bash 05-verify.sh
+```
+
+脚本只重新创建 Backend，并在其恢复后重新拉起三个执行器；不会重启数据库、Frontend 或
+Vision MCP，不会修改数据卷。热修复已写入 `docker-compose.update.yml`，后续使用这组 Compose
+文件重建 Backend 时仍会生效。
+
 `05-verify.sh` 会验证容器和 HTTP 状态、数据库迁移、Celery Worker 及代码审查/用例审查
 任务注册、OpenCodeReview、共享媒体文件实际下载、Vision OCR、三个执行器的测试域名解析与
 HTTP 访问，以及 Backend WebSocket 注册表中的在线执行器数量。默认还会执行一次最小真实

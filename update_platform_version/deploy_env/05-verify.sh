@@ -33,6 +33,17 @@ docker exec wharttest-backend sh -c \
   'grep -q "Alpine Linux" /etc/os-release && command -v ocr >/dev/null && ocr --version && grep -q -- "--concurrency=8" /app/supervisord.conf && grep -q "/app/data/logs" /app/supervisord.conf && ! grep -q "/var/log" /app/supervisord.conf'
 echo "[通过] Backend Alpine、OpenCodeReview、Celery 并发 8，运行日志不写 /var"
 
+docker exec wharttest-backend /opt/venv/bin/python -c '
+from pathlib import Path
+service = Path("/app/testcases/review_service.py").read_text(encoding="utf-8")
+assert "chunk_size = 25" in service
+assert "max_workers = min(2" in service
+assert "config.request_timeout" in service
+assert "max_retries=0" in service
+assert Path("/app/bundled_skills/test-case-clarity-review/references/review-rules.md").is_file()
+'
+echo "[通过] 用例审查超时、重试、分片与完整 Skill 热修复"
+
 celery_ping="$(docker exec wharttest-backend timeout 20 celery -A wharttest_django inspect ping --timeout=10)"
 echo "$celery_ping" | grep -q 'pong' || { echo "[失败] Celery Worker 未响应 ping" >&2; exit 1; }
 registered="$(docker exec wharttest-backend timeout 30 celery -A wharttest_django inspect registered --timeout=15)"

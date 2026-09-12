@@ -39,6 +39,13 @@ services:
     image: wharttest-250-backend:update-347a4e12-alpine-r1-arm64
     volumes:
       - /projects/ai-test-platform/update_platform_version/deploy_env/supervisord.single-worker.conf:/app/supervisord.conf:ro
+      # 用例审查热修复覆盖层：无需重建 Backend 镜像，可随 Compose 重建持续生效。
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/requirements/services.py:/app/requirements/services.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/review_service.py:/app/testcases/review_service.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/views.py:/app/testcases/views.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/management:/app/testcases/management:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/orchestrator_integration/builtin_tools/skill_tools.py:/app/orchestrator_integration/builtin_tools/skill_tools.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/bundled_skills:/app/bundled_skills:ro
     environment:
       VISION_MCP_URL: http://vision-mcp:8010/mcp
       VISION_API_BASE_URL: ${VISION_API_BASE_URL:-}
