@@ -47,9 +47,9 @@ bash 04-deploy.sh
 bash 05-verify.sh
 ```
 
-本次 `04-deploy.sh` 同时替换 Backend 和 Frontend，不重启 Vision MCP 或三个 Actuator。
-Backend 重启后执行器会按自身重连机制重新注册；如未恢复，再单独执行
-`07-start-actuators.sh`。
+本次 `04-deploy.sh` 同时替换 Backend 和 Frontend，不重启 Vision MCP。Backend 网络恢复后，
+脚本会自动重新拉起并检查三个执行器，避免执行器在 Backend 短暂不可达期间退出后无法恢复。
+如需单独恢复执行器，也可以执行 `07-start-actuators.sh`。
 
 `05-verify.sh` 会验证容器和 HTTP 状态、数据库迁移、Celery Worker 及代码审查/用例审查
 任务注册、OpenCodeReview、共享媒体文件实际下载、Vision OCR、三个执行器的测试域名解析与

@@ -35,5 +35,11 @@ echo "[升级] 替换 Backend 和 Frontend（Backend 入口脚本会执行数据
 wait_healthy wharttest-backend 300
 wait_healthy wharttest-frontend 180
 
-echo "Backend 和 Frontend 升级完成；Vision MCP、Actuator 均保持运行。"
+echo "[恢复] Backend 网络恢复后重新拉起三个执行器"
+"${compose[@]}" up -d --no-deps actuator-01 actuator-02 actuator-03
+wait_healthy wharttest-actuator-01 180
+wait_healthy wharttest-actuator-02 180
+wait_healthy wharttest-actuator-03 180
+
+echo "Backend、Frontend 升级完成，三个执行器已恢复；Vision MCP 保持运行。"
 echo "请执行 05-verify.sh，并进行登录、代码审查、用例审查等人工验收。"
