@@ -298,10 +298,11 @@ def run_testcase_review(review_id):
     if review.custom_rules.strip():
         skill_prompt += "\n\n# 本次用户指定的审查规则（在不违反质量边界的前提下优先执行）\n" + review.custom_rules.strip()
     issues, pending, governance = [], [], []
-    # 限制单次请求体和输出规模，最多三路并发处理大文件。
-    chunk_size = 40
+    # 内网模型网关通常有固定的 120 秒上游限制；每批 25 行可以控制
+    # JSON 输出规模，最多两路并发也不会瞬间压满私有模型服务。
+    chunk_size = 25
     chunks = [rows[i:i + chunk_size] for i in range(0, len(rows), chunk_size)]
-    max_workers = min(3, len(chunks))
+    max_workers = min(2, len(chunks))
 
     def review_one(index, chunk):
         llm = create_llm_instance(

@@ -18,6 +18,11 @@ python manage.py init_admin
 echo "Synchronizing bundled skills..."
 python manage.py init_skills
 
-# 4. 启动 supervisord 来管理所有服务
+# 4. Backend/Worker 被替换时，已确认接收但未完成的任务不会再次入队；
+#    将长期无心跳的旧任务收尾为失败，允许用户重新执行。
+echo "Recovering stale testcase review records..."
+python manage.py recover_stale_testcase_reviews --minutes 15
+
+# 5. 启动 supervisord 来管理所有服务
 echo "Starting supervisord..."
 exec supervisord -c /app/supervisord.conf
