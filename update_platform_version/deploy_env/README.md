@@ -51,6 +51,14 @@ bash 05-verify.sh
 脚本会自动重新拉起并检查三个执行器，避免执行器在 Backend 短暂不可达期间退出后无法恢复。
 如需单独恢复执行器，也可以执行 `07-start-actuators.sh`。
 
+如果用例审查长时间停在某个分片，执行：
+
+```bash
+bash 17-diagnose-testcase-review.sh
+```
+
+脚本只读取 Backend、Celery 和最近审查记录，日志写入 `deploy_env/logs`，不会修改任务或数据库。
+
 `05-verify.sh` 会验证容器和 HTTP 状态、数据库迁移、Celery Worker 及代码审查/用例审查
 任务注册、OpenCodeReview、共享媒体文件实际下载、Vision OCR、三个执行器的测试域名解析与
 HTTP 访问，以及 Backend WebSocket 注册表中的在线执行器数量。默认还会执行一次最小真实
