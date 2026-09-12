@@ -14,7 +14,7 @@ from prompts.models import UserPrompt
 logger = logging.getLogger(__name__)
 
 
-def create_llm_instance(active_config, temperature=0.1):
+def create_llm_instance(active_config, temperature=0.1, timeout=120, max_retries=3):
     """
     根据配置创建LLM实例
     统一使用OpenAI兼容格式，支持所有兼容的服务商
@@ -26,8 +26,8 @@ def create_llm_instance(active_config, temperature=0.1):
         "temperature": temperature,
         "api_key": active_config.api_key,
         "base_url": active_config.api_url,
-        "max_retries": 3,
-        "timeout": 120,
+        "max_retries": max_retries,
+        "timeout": timeout,
     }
     llm = ChatOpenAI(**llm_kwargs)
     logger.info(

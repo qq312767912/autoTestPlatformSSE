@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -103,7 +104,14 @@ def _review_chunk(llm, skill_prompt, rows, business_context):
         f"输出结构示例：{json.dumps(schema, ensure_ascii=False)}\n"
         f"待审查数据：{json.dumps(rows, ensure_ascii=False)}"
     )
-    response = safe_llm_invoke(llm, [SystemMessage(content=skill_prompt), HumanMessage(content=prompt)])
+    # ChatOpenAI 的内部重试在本功能中已关闭；这里只保留两次显式尝试，
+    # 避免“内部重试 × 外层重试”令单个分片无响应十几分钟。
+    response = safe_llm_invoke(
+        llm,
+        [SystemMessage(content=skill_prompt), HumanMessage(content=prompt)],
+        max_retries=2,
+        retry_delay=2,
+    )
     return _extract_json(response.content)
 
 
@@ -286,18 +294,45 @@ def run_testcase_review(review_id):
     config = LLMConfig.objects.filter(is_active=True).first()
     if not config:
         raise ValueError("没有已启用的 LLM 配置")
-    llm = create_llm_instance(config, temperature=0.1)
     skill_prompt = _skill_prompt(review)
     if review.custom_rules.strip():
         skill_prompt += "\n\n# 本次用户指定的审查规则（在不违反质量边界的前提下优先执行）\n" + review.custom_rules.strip()
     issues, pending, governance = [], [], []
-    chunk_size = 80
+    # 限制单次请求体和输出规模，最多三路并发处理大文件。
+    chunk_size = 40
     chunks = [rows[i:i + chunk_size] for i in range(0, len(rows), chunk_size)]
-    for index, chunk in enumerate(chunks, 1):
-        review.current_step = f"Skill 审查 {index}/{len(chunks)}"
-        review.progress = 10 + int(index / len(chunks) * 75)
-        review.save(update_fields=["current_step", "progress", "updated_at"])
-        result = _review_chunk(llm, skill_prompt, chunk, review.business_context)
+    max_workers = min(3, len(chunks))
+
+    def review_one(index, chunk):
+        llm = create_llm_instance(
+            config,
+            temperature=0.1,
+            timeout=90,
+            max_retries=0,
+        )
+        return index, _review_chunk(llm, skill_prompt, chunk, review.business_context)
+
+    review.current_step = f"Skill 审查 0/{len(chunks)}（并发 {max_workers}）"
+    review.progress = 10
+    review.save(update_fields=["current_step", "progress", "updated_at"])
+    completed = 0
+    ordered_results = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(review_one, index, chunk)
+            for index, chunk in enumerate(chunks, 1)
+        ]
+        for future in as_completed(futures):
+            index, result = future.result()
+            ordered_results[index] = result
+            completed += 1
+            review.current_step = f"Skill 审查 {completed}/{len(chunks)}（并发 {max_workers}）"
+            review.progress = 10 + int(completed / len(chunks) * 75)
+            review.save(update_fields=["current_step", "progress", "updated_at"])
+
+    # 按原始分片顺序汇总，保证报告顺序稳定可追溯。
+    for index in range(1, len(chunks) + 1):
+        result = ordered_results[index]
         issues.extend(result.get("issues") or [])
         pending.extend(result.get("pending_confirmations") or [])
         governance.extend(result.get("governance_suggestions") or [])

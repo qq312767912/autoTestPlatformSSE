@@ -8,6 +8,8 @@ from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.http import HttpResponse
 from django.conf import settings
+from django.utils import timezone
+from datetime import timedelta
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -59,7 +61,9 @@ class TestCaseReviewViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="retry")
     def retry(self, request, *args, **kwargs):
         review = self.get_object()
-        if review.status in {"pending", "running"}:
+        stale_before = timezone.now() - timedelta(minutes=15)
+        is_stale = review.status == "running" and review.updated_at < stale_before
+        if review.status in {"pending", "running"} and not is_stale:
             return Response({"detail": "任务仍在执行中"}, status=status.HTTP_409_CONFLICT)
         review.status = "pending"
         review.current_step = "等待重试"
