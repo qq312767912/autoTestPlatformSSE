@@ -285,7 +285,7 @@ RUN find /app -type f \( -name "*.sqlite*" -o -name "*.db" -o -name "*.sql" \) -
     find /opt/venv -type f -name "*.pyo" -delete 2>/dev/null || true
 
 # 创建必要的目录
-RUN mkdir -p media static nltk_data /var/log
+RUN mkdir -p media static nltk_data /app/data/logs /app/data/run
 
 # 暴露端口
 EXPOSE 8000

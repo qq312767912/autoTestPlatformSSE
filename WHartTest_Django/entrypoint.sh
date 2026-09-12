@@ -3,6 +3,9 @@
 # 确保脚本在任何命令失败时退出
 set -e
 
+# 所有运行日志和 PID 均落到持久化 /app/data，不占用容器 /var。
+mkdir -p /app/data/logs /app/data/run
+
 # 1. 数据库迁移
 echo "Applying database migrations..."
 python manage.py migrate --noinput

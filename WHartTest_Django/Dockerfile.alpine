@@ -190,9 +190,11 @@ COPY utils/ /app/utils/
 COPY wharttest_django/ /app/wharttest_django/
 
 # Playwright 在 Alpine ARM64 上不可用，UI 自动化由独立的 playwright-mcp 服务提供
-# agent-browser 在 ARM64 上跳过浏览器安装
+# agent-browser 在 ARM64 上跳过浏览器安装；OpenCodeReview CLI 必须完整安装，
+# 代码审查会直接调用 `ocr review`。
 RUN npm config set registry "${NPM_REGISTRY}" 2>/dev/null && \
-    npm install -g agent-browser 2>/dev/null && \
+    npm install -g agent-browser @alibaba-group/open-code-review && \
+    command -v ocr >/dev/null && ocr --version && \
     case "$(uname -m)" in \
       aarch64|arm64) echo "Skipping agent-browser browser install on ARM64" ;; \
       *) agent-browser install 2>/dev/null || true ;; \
@@ -205,7 +207,7 @@ RUN find /app -type f \( -name "*.sqlite*" -o -name "*.db" -o -name "*.sql" \) -
     find /opt/venv -type f -name "*.pyc" -delete 2>/dev/null; \
     true
 
-RUN mkdir -p media static nltk_data /var/log
+RUN mkdir -p media static nltk_data /app/data/logs /app/data/run
 
 LABEL org.opencontainers.image.revision="${OCI_REVISION}"
 
