@@ -1,6 +1,6 @@
 # WHartTest 内网 ARM64 增量升级包
 
-应用版本：Backend `dev@430787c8-r1`，Frontend `dev@ecff56e4-r1`
+应用版本：Backend `dev@347a4e12-alpine-r1`，Frontend `dev@ecff56e4-r1`
 
 Vision MCP 继续复用 `01339484` 版本镜像；Actuator 使用包含动态页面导航修复的 R4 镜像。
 
@@ -79,13 +79,16 @@ VERIFY_OCR_LIVE=0 bash 05-verify.sh
 300 MB 的传输限制，大镜像使用 `.part000` 起的分卷。
 
 ```text
-../images/backend-430787c8-r1-arm64.tar.gz.part000 ... part003
+../images/backend-347a4e12-alpine-r1-arm64.tar.gz.part000 ...（以实际分卷数为准）
 ../images/actuator-update-178fb3ed-arm64-r4.tar.gz.partaa ... partab
 ```
 
 `03-import-images.sh` 可以自动按顺序合并并导入，无需手工生成 520 MB 的完整文件。
-新版 Backend 为完整 ARM64 构建，已包含 OpenCodeReview v1.11.4，并将 Celery 并发调整为 8。
-本次仅需新增传输 Backend 的四个分卷；Frontend、Vision MCP、Actuator 继续复用内网已导入镜像。
+新版 Backend 为完整 Alpine/musl ARM64 构建，适配麒麟 ARM64 64KB 页环境，已包含
+OpenCodeReview，并将 Celery 并发调整为 8。Supervisor 的日志和 PID 分别写入
+`/app/data/logs` 与 `/app/data/run`，通过已有数据卷落在
+`/projects/ai-test-platform/offline-images/data`，不再写入 `/var`。
+本次仅需新增传输 Backend 分卷；Frontend、Vision MCP、Actuator 继续复用内网已导入镜像。
 如果只补充执行器镜像，可直接执行：
 
 ```bash

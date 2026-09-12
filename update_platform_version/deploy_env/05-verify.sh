@@ -5,7 +5,7 @@ VERIFY_OCR_LIVE="${VERIFY_OCR_LIVE:-1}"
 TEST_HOSTNAME="${TEST_HOSTNAME:-www.test.sse.com.cn}"
 
 expected=(
-  'wharttest-backend|wharttest-250-backend:update-430787c8-r1-arm64'
+  'wharttest-backend|wharttest-250-backend:update-347a4e12-alpine-r1-arm64'
   'wharttest-frontend|wharttest-250-frontend:update-ecff56e4-r1-arm64'
   'wharttest-vision-mcp|wharttest-250-vision-mcp:update-01339484-arm64-r2'
   'wharttest-mcp|wharttest-250-mcp-alpine:latest'
@@ -30,8 +30,8 @@ docker exec wharttest-backend /opt/venv/bin/python /app/manage.py migrate --chec
 echo "[通过] 数据库迁移状态"
 
 docker exec wharttest-backend sh -c \
-  'command -v ocr >/dev/null && ocr --version && grep -q -- "--concurrency=8" /app/supervisord.conf'
-echo "[通过] Backend OpenCodeReview 与 Celery 并发 8"
+  'grep -q "Alpine Linux" /etc/os-release && command -v ocr >/dev/null && ocr --version && grep -q -- "--concurrency=8" /app/supervisord.conf && grep -q "/app/data/logs" /app/supervisord.conf && ! grep -q "/var/log" /app/supervisord.conf'
+echo "[通过] Backend Alpine、OpenCodeReview、Celery 并发 8，运行日志不写 /var"
 
 celery_ping="$(docker exec wharttest-backend timeout 20 celery -A wharttest_django inspect ping --timeout=10)"
 echo "$celery_ping" | grep -q 'pong' || { echo "[失败] Celery Worker 未响应 ping" >&2; exit 1; }

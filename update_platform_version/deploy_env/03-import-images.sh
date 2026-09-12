@@ -11,9 +11,6 @@ fi
 
 cd "$UPDATE_DIR"
 sha256sum -c SHA256SUMS
-if [ -f actuator-update-178fb3ed-arm64-r4.sha256 ]; then
-  (cd "$UPDATE_DIR/../.." && sha256sum -c "$UPDATE_DIR/actuator-update-178fb3ed-arm64-r4.sha256")
-fi
 
 shopt -s nullglob
 for archive in "$IMAGES_DIR"/*.tar.gz; do
@@ -35,7 +32,7 @@ for first_part in "$IMAGES_DIR"/*.tar.gz.partaa; do
 done
 
 images=(
-  wharttest-250-backend:update-430787c8-r1-arm64
+  wharttest-250-backend:update-347a4e12-alpine-r1-arm64
   wharttest-250-frontend:update-ecff56e4-r1-arm64
   wharttest-250-vision-mcp:update-01339484-arm64-r2
   wharttest-250-actuator:update-178fb3ed-arm64-r4
@@ -46,10 +43,10 @@ for image in "${images[@]}"; do
   [ "$platform" = "linux/arm64" ] || { echo "镜像架构错误：$image ($platform)" >&2; exit 1; }
   case "$image" in
     wharttest-250-backend:*)
-      echo "[验证] Backend OpenCodeReview 与 Celery 配置"
+      echo "[验证] Backend Alpine、OpenCodeReview、Celery 与持久化日志配置"
       docker run --rm --entrypoint /bin/sh "$image" -c \
-        'command -v ocr >/dev/null && ocr --version && grep -q -- "--concurrency=8" /app/supervisord.conf'
-      echo "[通过] $image $platform（OCR 与 Celery 并发 8）"
+        'grep -q "Alpine Linux" /etc/os-release && command -v ocr >/dev/null && ocr --version && grep -q -- "--concurrency=8" /app/supervisord.conf && grep -q "/app/data/logs" /app/supervisord.conf && ! grep -q "/var/log" /app/supervisord.conf'
+      echo "[通过] $image $platform（Alpine、OCR、Celery 并发 8、日志不写 /var）"
       continue
       ;;
     wharttest-250-frontend:*) expected_revision="ecff56e40673d502bd85e702dbf4e11ef969f2af" ;;

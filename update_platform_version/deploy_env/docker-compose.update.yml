@@ -36,7 +36,7 @@ x-actuator-common: &actuator-common
 # 与内网当前 docker-compose.offline.yml 叠加使用，覆盖升级服务并新增三个执行器。
 services:
   backend:
-    image: wharttest-250-backend:update-430787c8-r1-arm64
+    image: wharttest-250-backend:update-347a4e12-alpine-r1-arm64
     volumes:
       - /projects/ai-test-platform/update_platform_version/deploy_env/supervisord.single-worker.conf:/app/supervisord.conf:ro
     environment:

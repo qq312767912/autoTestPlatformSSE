@@ -11,6 +11,12 @@ ok() { echo "[通过] $*"; }
 command -v docker >/dev/null 2>&1 || fail "未安装 Docker"
 docker info >/dev/null 2>&1 || fail "Docker 未运行或当前用户无访问权限"
 
+docker_root="$(docker info --format '{{.DockerRootDir}}')"
+case "$docker_root" in
+  /var|/var/*) echo "[警告] Docker Root Dir 位于 $docker_root，镜像层仍由 Docker 写入 /var；业务日志和交付物不会写入 /var。" ;;
+  *) ok "Docker Root Dir 不在 /var：$docker_root" ;;
+esac
+
 case "$(uname -m)" in
   aarch64|arm64) ok "宿主机架构为 $(uname -m)" ;;
   *) fail "宿主机不是 ARM64：$(uname -m)" ;;

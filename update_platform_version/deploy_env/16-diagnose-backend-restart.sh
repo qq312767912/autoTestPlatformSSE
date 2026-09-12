@@ -5,7 +5,7 @@ UPDATE_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$UPDATE_DIR/logs"
 LOG_FILE="$LOG_DIR/backend-restart-$(date '+%Y%m%d-%H%M%S').log"
 BACKEND_CONTAINER="${BACKEND_CONTAINER:-wharttest-backend}"
-EXPECTED_IMAGE="${EXPECTED_BACKEND_IMAGE:-wharttest-250-backend:update-430787c8-r1-arm64}"
+EXPECTED_IMAGE="${EXPECTED_BACKEND_IMAGE:-wharttest-250-backend:update-347a4e12-alpine-r1-arm64}"
 BASE_COMPOSE="${BASE_COMPOSE:-/projects/ai-test-platform/offline-images/docker-compose.offline.yml}"
 UPDATE_COMPOSE="$UPDATE_DIR/docker-compose.update.yml"
 
@@ -19,8 +19,17 @@ echo "采集时间：$(date '+%F %T %z')"
 
 section "Docker 与宿主机资源"
 docker version --format 'client={{.Client.Version}} server={{.Server.Version}}' 2>&1 || true
-docker info --format 'arch={{.Architecture}} cpus={{.NCPU}} memory={{.MemTotal}} driver={{.Driver}}' 2>&1 || true
-df -h / /var/lib/docker 2>&1 || df -h 2>&1 || true
+docker info --format 'arch={{.Architecture}} cpus={{.NCPU}} memory={{.MemTotal}} driver={{.Driver}} docker_root={{.DockerRootDir}}' 2>&1 || true
+docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+if [ -n "$docker_root" ]; then
+  df -h / "$docker_root" 2>&1 || df -h 2>&1 || true
+  case "$docker_root" in
+    /var|/var/*) echo "[警告] Docker Root Dir 仍位于 /var：$docker_root；镜像层仍会占用 /var 空间。" ;;
+    *) echo "[通过] Docker Root Dir 不在 /var：$docker_root" ;;
+  esac
+else
+  df -h / 2>&1 || true
+fi
 
 section "Backend 容器状态"
 docker ps -a --no-trunc --filter "name=^/${BACKEND_CONTAINER}$" 2>&1 || true
