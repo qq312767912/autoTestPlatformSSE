@@ -66,7 +66,8 @@ bash 18-diagnose-small-testcase-review.sh
 ```
 
 默认检查最新一条审查记录；也可通过 `REVIEW_ID=8` 指定记录。脚本会统计 Excel 实际非空行、
-估算新旧版本分片数，并对当前激活模型发起一次30秒零重试的最小 `OK` 调用。脚本不会输出 API Key。
+估算新旧版本分片数，并对当前激活模型发起一次60秒、最多256输出 Token、零重试的最小
+`OK` 调用，同时报告推理内容长度。脚本不会输出 API Key。
 
 `05-verify.sh` 会验证容器和 HTTP 状态、数据库迁移、Celery Worker 及代码审查/用例审查
 任务注册、OpenCodeReview、共享媒体文件实际下载、Vision OCR、三个执行器的测试域名解析与

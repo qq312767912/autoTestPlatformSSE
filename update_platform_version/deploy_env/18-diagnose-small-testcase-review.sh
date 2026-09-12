@@ -88,7 +88,7 @@ print(json.dumps({
 }, ensure_ascii=False, indent=2))
 ' || true
 
-section "30 秒最小模型真实调用（零重试，只要求回复 OK）"
+section "60 秒最小模型真实调用（零重试，只要求回复 OK）"
 docker exec "$BACKEND_CONTAINER" /opt/venv/bin/python /app/manage.py shell -c '
 import json
 import time
@@ -104,20 +104,25 @@ else:
         client = OpenAI(
             api_key=config.api_key or "EMPTY",
             base_url=config.api_url,
-            timeout=30.0,
+            timeout=60.0,
             max_retries=0,
         )
         response = client.chat.completions.create(
             model=config.name,
             messages=[{"role": "user", "content": "只回复两个字母：OK"}],
             temperature=0,
-            max_tokens=8,
+            max_tokens=256,
         )
-        content = response.choices[0].message.content if response.choices else ""
+        message = response.choices[0].message if response.choices else None
+        content = message.content if message else ""
+        reasoning = getattr(message, "reasoning_content", None) if message else None
+        if reasoning is None and message is not None:
+            reasoning = (getattr(message, "model_extra", None) or {}).get("reasoning_content")
         print(json.dumps({
-            "ok": True,
+            "ok": bool(content),
             "elapsed_seconds": round(time.monotonic() - started, 3),
             "content": content,
+            "reasoning_content_length": len(reasoning or ""),
             "finish_reason": response.choices[0].finish_reason if response.choices else None,
         }, ensure_ascii=False, indent=2))
     except Exception as exc:

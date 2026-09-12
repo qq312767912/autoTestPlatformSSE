@@ -104,12 +104,12 @@ def _review_chunk(llm, skill_prompt, rows, business_context):
         f"输出结构示例：{json.dumps(schema, ensure_ascii=False)}\n"
         f"待审查数据：{json.dumps(rows, ensure_ascii=False)}"
     )
-    # ChatOpenAI 的内部重试在本功能中已关闭；这里只保留两次显式尝试，
-    # 避免“内部重试 × 外层重试”令单个分片无响应十几分钟。
+    # ChatOpenAI 的内部重试在本功能中已关闭。审查请求可能生成较长 JSON，
+    # 单次失败后由用户明确重试整项任务，避免同一分片重复占用模型数十分钟。
     response = safe_llm_invoke(
         llm,
         [SystemMessage(content=skill_prompt), HumanMessage(content=prompt)],
-        max_retries=2,
+        max_retries=1,
         retry_delay=2,
     )
     return _extract_json(response.content)
@@ -303,17 +303,21 @@ def run_testcase_review(review_id):
     chunk_size = 25
     chunks = [rows[i:i + chunk_size] for i in range(0, len(rows), chunk_size)]
     max_workers = min(2, len(chunks))
+    review_timeout = max(30, min(int(config.request_timeout or 120), 600))
 
     def review_one(index, chunk):
         llm = create_llm_instance(
             config,
             temperature=0.1,
-            timeout=90,
+            timeout=review_timeout,
             max_retries=0,
         )
         return index, _review_chunk(llm, skill_prompt, chunk, review.business_context)
 
-    review.current_step = f"Skill 审查 0/{len(chunks)}（并发 {max_workers}）"
+    review.current_step = (
+        f"Skill 审查 0/{len(chunks)}（并发 {max_workers}，"
+        f"单次最长 {review_timeout} 秒）"
+    )
     review.progress = 10
     review.save(update_fields=["current_step", "progress", "updated_at"])
     completed = 0
@@ -327,7 +331,10 @@ def run_testcase_review(review_id):
             index, result = future.result()
             ordered_results[index] = result
             completed += 1
-            review.current_step = f"Skill 审查 {completed}/{len(chunks)}（并发 {max_workers}）"
+            review.current_step = (
+                f"Skill 审查 {completed}/{len(chunks)}（并发 {max_workers}，"
+                f"单次最长 {review_timeout} 秒）"
+            )
             review.progress = 10 + int(completed / len(chunks) * 75)
             review.save(update_fields=["current_step", "progress", "updated_at"])
 
