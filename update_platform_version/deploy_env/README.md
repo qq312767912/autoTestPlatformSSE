@@ -62,6 +62,9 @@ OpenCodeReview 模型调用：临时构造 Java 导出 DTO 新增字段却遗漏
 VERIFY_OCR_LIVE=0 bash 05-verify.sh
 ```
 
+本次仅替换 Backend，因此检查脚本同时兼容内网继续复用的 Frontend `latest` 标签和
+此前增量发布使用的 `update-ecff56e4-r1-arm64` 标签。
+
 `07-start-actuators.sh` 在密钥文件缺失时会优先从仍在运行的执行器恢复；
 无法恢复时才隐藏提示输入平台当前密码。密码仅写入权限为 `600` 的
 `secrets/actuator_api_password`，不会写进镜像、YAML 或 Git。三个容器分别为：
