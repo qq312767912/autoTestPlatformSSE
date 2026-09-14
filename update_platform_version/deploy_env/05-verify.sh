@@ -36,13 +36,16 @@ echo "[通过] Backend Alpine、OpenCodeReview、Celery 并发 8，运行日志�
 docker exec wharttest-backend /opt/venv/bin/python -c '
 from pathlib import Path
 service = Path("/app/testcases/review_service.py").read_text(encoding="utf-8")
-assert "chunk_size = 25" in service
-assert "max_workers = min(2" in service
+assert "TESTCASE_REVIEW_CHUNK_SIZE = 10" in service
+assert "TESTCASE_REVIEW_CHUNK_ATTEMPTS = 2" in service
+assert "串行小分片" in service
+assert "\"_checkpoint\"" in service
+assert "def _is_case_header" in service
 assert "config.request_timeout" in service
 assert "max_retries=0" in service
 assert Path("/app/bundled_skills/test-case-clarity-review/references/review-rules.md").is_file()
 '
-echo "[通过] 用例审查超时、重试、分片与完整 Skill 热修复"
+echo "[通过] 用例审查表头识别、10行串行分片、断点续审与完整 Skill 热修复"
 
 celery_ping="$(docker exec wharttest-backend timeout 20 celery -A wharttest_django inspect ping --timeout=10)"
 echo "$celery_ping" | grep -q 'pong' || { echo "[失败] Celery Worker 未响应 ping" >&2; exit 1; }

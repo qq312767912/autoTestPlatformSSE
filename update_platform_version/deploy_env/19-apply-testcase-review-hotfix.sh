@@ -56,8 +56,11 @@ docker exec wharttest-backend /opt/venv/bin/python -c '
 from pathlib import Path
 service = Path("/app/testcases/review_service.py").read_text(encoding="utf-8")
 skill_tool = Path("/app/orchestrator_integration/builtin_tools/skill_tools.py").read_text(encoding="utf-8")
-assert "chunk_size = 25" in service
-assert "max_workers = min(2" in service
+assert "TESTCASE_REVIEW_CHUNK_SIZE = 10" in service
+assert "TESTCASE_REVIEW_CHUNK_ATTEMPTS = 2" in service
+assert "串行小分片" in service
+assert "\"_checkpoint\"" in service
+assert "def _is_case_header" in service
 assert "config.request_timeout" in service
 assert "max_retries=0" in service
 assert "已内联参考文件" in skill_tool
@@ -68,4 +71,4 @@ print("testcase review hotfix OK")
 echo "[恢复] Backend 重建期间可能退出的三个执行器"
 "${compose[@]}" up -d --no-deps actuator-01 actuator-02 actuator-03
 
-echo "热修复已生效。请重新发起小用例审查；如仍失败，执行 18-diagnose-small-testcase-review.sh。"
+echo "热修复已生效。请对失败记录点击重试；已完成分片会从断点继续。"

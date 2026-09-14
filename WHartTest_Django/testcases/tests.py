@@ -96,8 +96,8 @@ class TestCaseReviewReportTests(TestCase):
             sheet.append(["TC-1", "登录", "输入账号密码", "登录成功"])
             workbook.save(source)
             rows = _read_rows(source)
-            self.assertEqual(rows[1]["sheet"], "登录")
-            self.assertEqual(rows[1]["row"], 2)
+            self.assertEqual(rows[0]["sheet"], "登录")
+            self.assertEqual(rows[0]["row"], 2)
 
             user = get_user_model().objects.create_user(username="report-user")
             project = Project.objects.create(name="Report Project", creator=user)

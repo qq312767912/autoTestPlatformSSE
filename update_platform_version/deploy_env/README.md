@@ -82,6 +82,17 @@ bash 05-verify.sh
 Vision MCP，不会修改数据卷。热修复已写入 `docker-compose.update.yml`，后续使用这组 Compose
 文件重建 Backend 时仍会生效。
 
+针对大 Excel 在内网模型网关超时的增量修复，也可使用语义更明确的入口：
+
+```bash
+bash 20-apply-large-testcase-review-hotfix.sh
+bash 05-verify.sh
+```
+
+该脚本会调用 `19-apply-testcase-review-hotfix.sh`，将审查改为表头驱动的有效用例
+识别、10 行串行分片和单分片两次尝试。每个成功分片都会保存检查点，
+失败记录在页面点击“重试”后只继续未完成分片。
+
 `05-verify.sh` 会验证容器和 HTTP 状态、数据库迁移、Celery Worker 及代码审查/用例审查
 任务注册、OpenCodeReview、共享媒体文件实际下载、Vision OCR、三个执行器的测试域名解析与
 HTTP 访问，以及 Backend WebSocket 注册表中的在线执行器数量。默认还会执行一次最小真实

@@ -1,13 +1,14 @@
 """基于 test-case-clarity-review Skill 的测试用例文件审查。"""
 
 import csv
+import hashlib
 import json
 import logging
 import re
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from time import sleep
 
 from django.core.files.base import ContentFile
 from django.utils import timezone
@@ -24,6 +25,72 @@ from .models import TestCaseReview
 logger = logging.getLogger(__name__)
 
 FALLBACK_SKILL = """审查测试用例的可执行性与验收清晰度。不要凭空补造业务规则；未知标准标记为待业务确认。按风险检查前置条件、测试数据、步骤、预期、业务结果、边界异常、数据一致性、证据与可维护性。"""
+TESTCASE_REVIEW_CHUNK_SIZE = 10
+TESTCASE_REVIEW_CHUNK_ATTEMPTS = 2
+
+HEADER_ALIASES = {
+    "identity": ("编号", "用例id", "用例编号", "用例名称", "测试用例", "caseid", "casename"),
+    "module": ("模块", "所属用例库", "一级模块", "功能模块"),
+    "precondition": ("前置条件", "前置", "测试数据"),
+    "steps": ("步骤", "步骤描述", "操作步骤", "测试步骤"),
+    "expected": ("预期", "预期结果", "期望结果", "期望输出", "验收标准"),
+    "priority": ("优先级", "用例等级"),
+}
+
+
+def _normalized_header(value):
+    return re.sub(r"[\s_\-/:：]+", "", str(value or "")).lower()
+
+
+def _header_categories(cells):
+    categories = set()
+    for cell in cells:
+        normalized = _normalized_header(cell)
+        if not normalized:
+            continue
+        for category, aliases in HEADER_ALIASES.items():
+            if any(_normalized_header(alias) == normalized for alias in aliases):
+                categories.add(category)
+                break
+    return categories
+
+
+def _is_case_header(cells):
+    categories = _header_categories(cells)
+    return (
+        {"steps", "expected"}.issubset(categories)
+        or ("identity" in categories and bool(categories & {"steps", "expected", "precondition"}))
+    )
+
+
+def _case_rows(sheet_name, source_rows):
+    """在一个工作表中识别一个或多个用例表头，过滤封面、评审记录和分组标题行。"""
+    rows = []
+    headers = None
+    for row_number, cells in source_rows:
+        if _is_case_header(cells):
+            headers = cells
+            continue
+        if headers is None:
+            continue
+        width = max(len(headers), len(cells))
+        padded_headers = [*headers, *([""] * (width - len(headers)))]
+        padded_cells = [*cells, *([""] * (width - len(cells)))]
+        columns = {
+            header: value
+            for header, value in zip(padded_headers, padded_cells)
+            if header and value
+        }
+        # 只有一个值的行通常是“Chrome 系列”等分组标题，不是用例。
+        if len(columns) < 2:
+            continue
+        rows.append({
+            "sheet": sheet_name,
+            "row": row_number,
+            "cells": cells,
+            "columns": columns,
+        })
+    return rows
 
 
 def build_skill_snapshot(skill=None):
@@ -60,18 +127,22 @@ def _read_rows(path):
         workbook = load_workbook(path, read_only=True, data_only=True)
         try:
             for sheet in workbook.worksheets:
+                source_rows = []
                 for row_number, values in enumerate(sheet.iter_rows(values_only=True), 1):
                     cells = [str(value).strip() if value is not None else "" for value in values]
                     if any(cells):
-                        rows.append({"sheet": sheet.title, "row": row_number, "cells": cells})
+                        source_rows.append((row_number, cells))
+                rows.extend(_case_rows(sheet.title, source_rows))
         finally:
             workbook.close()
     else:
         with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+            source_rows = []
             for row_number, values in enumerate(csv.reader(handle), 1):
                 cells = [str(value).strip() for value in values]
                 if any(cells):
-                    rows.append({"sheet": "CSV", "row": row_number, "cells": cells})
+                    source_rows.append((row_number, cells))
+            rows.extend(_case_rows("CSV", source_rows))
     return rows
 
 
@@ -99,7 +170,7 @@ def _review_chunk(llm, skill_prompt, rows, business_context):
     prompt = (
         "请严格按下方 Skill 审查这些测试用例行。只输出一个 JSON 对象，不要 Markdown。"
         "同一根因在同一用例内合并；高风险必须语义复核；识别并跳过表头，不要把表头当作测试用例。"
-        "行内容是按原表列顺序提供的。\n"
+        "每行 columns 已按识别到的原表头映射，cells 保留原列顺序。\n"
         f"业务背景：{business_context or '未提供；未知业务规则必须标为待业务确认'}\n"
         f"输出结构示例：{json.dumps(schema, ensure_ascii=False)}\n"
         f"待审查数据：{json.dumps(rows, ensure_ascii=False)}"
@@ -123,8 +194,7 @@ def _write_report(review, rows, issues, pending, governance):
     type_counts = Counter(str(item.get("issue_type") or "其他") for item in issues)
     module_counts = Counter(str(item.get("module") or "未标注模块") for item in issues)
     issue_rows = {(str(item.get("sheet")), int(item.get("row") or 0)) for item in issues}
-    sheet_count = len({str(row.get("sheet")) for row in rows})
-    estimated_cases = max(len(rows) - sheet_count, 0)
+    estimated_cases = len(rows)
     top_issue = type_counts.most_common(1)[0][0] if type_counts else "未发现明确问题"
     summary_rows = [
         ("源文件", review.source_name), ("扫描时间", timezone.localtime().strftime("%Y-%m-%d %H:%M:%S")),
@@ -298,11 +368,10 @@ def run_testcase_review(review_id):
     if review.custom_rules.strip():
         skill_prompt += "\n\n# 本次用户指定的审查规则（在不违反质量边界的前提下优先执行）\n" + review.custom_rules.strip()
     issues, pending, governance = [], [], []
-    # 内网模型网关通常有固定的 120 秒上游限制；每批 25 行可以控制
-    # JSON 输出规模，最多两路并发也不会瞬间压满私有模型服务。
-    chunk_size = 25
+    # 内网模型网关会在长 JSON 生成时触发上游超时。小分片串行调用，
+    # 用更可预期的总耗时换取内网网关的稳定性。
+    chunk_size = TESTCASE_REVIEW_CHUNK_SIZE
     chunks = [rows[i:i + chunk_size] for i in range(0, len(rows), chunk_size)]
-    max_workers = min(2, len(chunks))
     review_timeout = max(30, min(int(config.request_timeout or 120), 600))
 
     def review_one(index, chunk):
@@ -312,31 +381,58 @@ def run_testcase_review(review_id):
             timeout=review_timeout,
             max_retries=0,
         )
-        return index, _review_chunk(llm, skill_prompt, chunk, review.business_context)
+        last_error = None
+        for attempt in range(1, TESTCASE_REVIEW_CHUNK_ATTEMPTS + 1):
+            try:
+                return _review_chunk(llm, skill_prompt, chunk, review.business_context)
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "用例审查分片失败 review=%s chunk=%s/%s attempt=%s/%s error=%s: %s",
+                    review.id, index, len(chunks), attempt, TESTCASE_REVIEW_CHUNK_ATTEMPTS,
+                    type(exc).__name__, exc,
+                )
+                if attempt < TESTCASE_REVIEW_CHUNK_ATTEMPTS:
+                    sleep(2)
+        raise RuntimeError(
+            f"第 {index}/{len(chunks)} 批模型调用失败（已尝试 {TESTCASE_REVIEW_CHUNK_ATTEMPTS} 次）："
+            f"{type(last_error).__name__}: {last_error}"
+        ) from last_error
 
     review.current_step = (
-        f"Skill 审查 0/{len(chunks)}（并发 {max_workers}，"
+        f"Skill 审查 0/{len(chunks)}（串行小分片，"
         f"单次最长 {review_timeout} 秒）"
     )
     review.progress = 10
     review.save(update_fields=["current_step", "progress", "updated_at"])
-    completed = 0
-    ordered_results = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [
-            executor.submit(review_one, index, chunk)
-            for index, chunk in enumerate(chunks, 1)
-        ]
-        for future in as_completed(futures):
-            index, result = future.result()
-            ordered_results[index] = result
-            completed += 1
-            review.current_step = (
-                f"Skill 审查 {completed}/{len(chunks)}（并发 {max_workers}，"
-                f"单次最长 {review_timeout} 秒）"
-            )
-            review.progress = 10 + int(completed / len(chunks) * 75)
-            review.save(update_fields=["current_step", "progress", "updated_at"])
+    signature = hashlib.sha256(json.dumps({
+        "rows": rows,
+        "skill": skill_prompt,
+        "business_context": review.business_context,
+        "custom_rules": review.custom_rules,
+        "chunk_size": chunk_size,
+    }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    checkpoint = (review.summary or {}).get("_checkpoint") or {}
+    ordered_results = {
+        int(index): result
+        for index, result in (checkpoint.get("results") or {}).items()
+    } if checkpoint.get("signature") == signature else {}
+
+    for index, chunk in enumerate(chunks, 1):
+        if index not in ordered_results:
+            ordered_results[index] = review_one(index, chunk)
+            review.summary = {"_checkpoint": {
+                "signature": signature,
+                "total_chunks": len(chunks),
+                "results": {str(key): value for key, value in ordered_results.items()},
+            }}
+        completed = len(ordered_results)
+        review.current_step = (
+            f"Skill 审查 {completed}/{len(chunks)}（串行小分片，"
+            f"单次最长 {review_timeout} 秒）"
+        )
+        review.progress = 10 + int(completed / len(chunks) * 75)
+        review.save(update_fields=["summary", "current_step", "progress", "updated_at"])
 
     # 按原始分片顺序汇总，保证报告顺序稳定可追溯。
     for index in range(1, len(chunks) + 1):

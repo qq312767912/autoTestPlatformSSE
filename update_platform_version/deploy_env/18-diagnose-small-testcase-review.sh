@@ -28,6 +28,7 @@ import os
 from pathlib import Path
 from openpyxl import load_workbook
 from testcases.models import TestCaseReview
+from testcases.review_service import _read_rows
 
 requested = (os.environ.get("REVIEW_ID") or "").strip()
 query = TestCaseReview.objects.order_by("-created_at")
@@ -65,8 +66,9 @@ else:
         "error": review.error_message[:2000],
         "nonempty_rows": nonempty_rows,
         "nonempty_rows_by_sheet": sheet_rows,
+        "recognized_case_rows": len(_read_rows(path)) if Path(path).exists() else 0,
         "old_backend_chunks_80_rows": (nonempty_rows + 79) // 80 if nonempty_rows else 0,
-        "new_backend_chunks_25_rows": (nonempty_rows + 24) // 25 if nonempty_rows else 0,
+        "new_backend_chunks_10_rows_upper_bound": (nonempty_rows + 9) // 10 if nonempty_rows else 0,
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 ' || true
