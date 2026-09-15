@@ -35,6 +35,15 @@ echo "[通过] Backend Alpine、OpenCodeReview、Celery 并发 8，运行日志�
 
 docker exec wharttest-backend /opt/venv/bin/python -c '
 from pathlib import Path
+service = Path("/app/code_analysis/services.py").read_text(encoding="utf-8")
+assert "OCR_CONCURRENCY = 1" in service
+assert "OCR_RESUME_CONCURRENCY = 1" in service
+assert "def _invalid_ocr_result_reason" in service
+'
+echo "[通过] OpenCodeReview 单并发与超时原因保留热修复"
+
+docker exec wharttest-backend /opt/venv/bin/python -c '
+from pathlib import Path
 service = Path("/app/testcases/review_service.py").read_text(encoding="utf-8")
 assert "TESTCASE_REVIEW_CHUNK_SIZE = 10" in service
 assert "TESTCASE_REVIEW_CHUNK_ATTEMPTS = 2" in service

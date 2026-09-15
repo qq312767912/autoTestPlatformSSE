@@ -12,7 +12,7 @@ from rest_framework.test import APIClient
 from projects.models import Project, ProjectMember
 from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
 from .serializers import GitLabConnectionSerializer, ProjectRepositorySerializer
-from .services import DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _diff_line_stats, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _reuse_cached_result, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, run_analysis
+from .services import DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _diff_line_stats, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _reuse_cached_result, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, run_analysis
 
 
 class DiffRuleTests(TestCase):
@@ -50,8 +50,9 @@ class DiffRuleTests(TestCase):
         self.assertEqual(value["text"], "null:\\u0000 bell:\\u0007 keep:\t\n")
         self.assertNotIn("\x00", value["text"])
 
-    def test_ocr_uses_six_workers(self):
-        self.assertEqual(OCR_CONCURRENCY, 6)
+    def test_ocr_uses_single_worker_for_slow_internal_models(self):
+        self.assertEqual(OCR_CONCURRENCY, 1)
+        self.assertEqual(OCR_RESUME_CONCURRENCY, 1)
 
     def test_low_value_files_are_filtered(self):
         self.assertTrue(_is_low_value_file("frontend/package-lock.json"))
@@ -87,10 +88,18 @@ class DiffRuleTests(TestCase):
             }},
         }
         self.assertTrue(_ocr_needs_resume(payload))
-        self.assertEqual(OCR_RESUME_CONCURRENCY, 4)
+        self.assertEqual(OCR_RESUME_CONCURRENCY, 1)
         self.assertEqual(_ocr_diagnostics(payload)["coverage"], 50.0)
         payload["manifest"]["coverage"]["failed"] = []
         self.assertFalse(_ocr_needs_resume(payload))
+
+    def test_invalid_ocr_result_preserves_timeout_reason(self):
+        result = SimpleNamespace(returncode=-15, stderr="upstream did not finish")
+        reason = _invalid_ocr_result_reason({}, result, True, 20, Path("result.json"))
+        self.assertIn("超过 20 分钟", reason)
+        self.assertIn("未生成有效 JSON", reason)
+        self.assertIn("退出码 -15", reason)
+        self.assertIn("upstream did not finish", reason)
 
     def test_ocr_timeout_budget_scales_with_monthly_change_size(self):
         self.assertEqual(_ocr_timeout_budget(800), (20, 10))

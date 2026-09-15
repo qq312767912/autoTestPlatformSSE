@@ -93,6 +93,28 @@ bash 05-verify.sh
 识别、10 行串行分片和单分片两次尝试。每个成功分片都会保存检查点，
 失败记录在页面点击“重试”后只继续未完成分片。
 
+若多个代码审查任务连续显示“OpenCodeReview 平台调用失败”，执行：
+
+```bash
+bash 21-diagnose-code-analysis-ocr.sh
+# 指定某条任务时：
+TASK_ID=<代码审查任务UUID> bash 21-diagnose-code-analysis-ocr.sh
+```
+
+脚本会采集任务保存的 OCR 失败原因、执行记录、结果文件结构、Celery/OCR 进程、
+相关 Worker 日志和一次 60 秒最小模型调用，不输出 GitLab Token 或模型密钥。
+
+确认内网低算力导致 OpenCodeReview 多并发超时后，执行单并发热修复：
+
+```bash
+bash 22-apply-code-analysis-ocr-hotfix.sh
+bash 05-verify.sh
+```
+
+该脚本不更换镜像和数据卷，只重新创建 Backend。OpenCodeReview 首轮与续审均改为
+单并发；若达到动态时间上限仍未生成 JSON，任务会保存超时分钟数、退出码、结果文件
+状态和最后错误，不再只记录“返回状态 empty”。
+
 `05-verify.sh` 会验证容器和 HTTP 状态、数据库迁移、Celery Worker 及代码审查/用例审查
 任务注册、OpenCodeReview、共享媒体文件实际下载、Vision OCR、三个执行器的测试域名解析与
 HTTP 访问，以及 Backend WebSocket 注册表中的在线执行器数量。默认还会执行一次最小真实
