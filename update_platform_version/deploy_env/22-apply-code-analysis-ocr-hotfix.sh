@@ -5,15 +5,19 @@ BASE_COMPOSE="${BASE_COMPOSE:-/projects/ai-test-platform/offline-images/docker-c
 UPDATE_DIR="$(cd "$(dirname "$0")" && pwd)"
 UPDATE_COMPOSE="$UPDATE_DIR/docker-compose.update.yml"
 HOTFIX_FILE="$UPDATE_DIR/hotfix/code_analysis/services.py"
+HOTFIX_VIEW="$UPDATE_DIR/hotfix/code_analysis/views.py"
 
 fail() { echo "[失败] $*" >&2; exit 1; }
 
 [ -f "$BASE_COMPOSE" ] || fail "找不到当前内网 YAML：$BASE_COMPOSE"
 [ -f "$UPDATE_COMPOSE" ] || fail "找不到升级覆盖 YAML：$UPDATE_COMPOSE"
 [ -f "$HOTFIX_FILE" ] || fail "缺少代码审查热修复文件：$HOTFIX_FILE"
+[ -f "$HOTFIX_VIEW" ] || fail "缺少代码审查取消接口热修复文件：$HOTFIX_VIEW"
 
 grep -q 'OCR_CONCURRENCY = 1' "$HOTFIX_FILE" || fail "热修复文件不是单并发版本"
 grep -q 'def _invalid_ocr_result_reason' "$HOTFIX_FILE" || fail "热修复文件缺少超时原因诊断"
+grep -q 'def terminate_ocr_processes' "$HOTFIX_FILE" || fail "热修复文件缺少 OCR 子进程清理"
+grep -q 'terminate=True' "$HOTFIX_VIEW" || fail "热修复文件缺少 Celery 运行任务终止"
 
 compose=(docker compose -p offline-images -f "$BASE_COMPOSE" -f "$UPDATE_COMPOSE")
 "${compose[@]}" config --quiet
@@ -41,14 +45,17 @@ echo "[验证] 容器内热修复代码"
 docker exec wharttest-backend /opt/venv/bin/python -c '
 from pathlib import Path
 service = Path("/app/code_analysis/services.py").read_text(encoding="utf-8")
+view = Path("/app/code_analysis/views.py").read_text(encoding="utf-8")
 assert "OCR_CONCURRENCY = 1" in service
 assert "OCR_RESUME_CONCURRENCY = 1" in service
 assert "def _invalid_ocr_result_reason" in service
-print("code analysis OCR hotfix OK")
+assert "def terminate_ocr_processes" in service
+assert "terminate=True" in view
+print("code analysis OCR and cancellation hotfix OK")
 '
 
 echo "[恢复] 确保三个执行器保持运行并重新连接 Backend"
 "${compose[@]}" up -d --no-deps actuator-01 actuator-02 actuator-03
 
-echo "[完成] 新任务将以单并发执行 OpenCodeReview；超时或空结果会保存明确原因。"
+echo "[完成] 新任务将以单并发执行 OpenCodeReview；取消/删除会停止 Celery 任务和 OCR 进程组。"
 echo "如需诊断，执行：bash 21-diagnose-code-analysis-ocr.sh"

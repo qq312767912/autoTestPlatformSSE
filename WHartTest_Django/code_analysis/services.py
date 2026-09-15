@@ -86,9 +86,37 @@ class AnalysisCancelled(Exception):
 
 
 def _ensure_not_cancelled(task):
-    task.refresh_from_db(fields=["status"])
+    try:
+        task.refresh_from_db(fields=["status"])
+    except AnalysisTask.DoesNotExist as exc:
+        # 用户可能在取消后立即删除记录。对后台任务而言，
+        # “记录不存在”与“已取消”语义相同，必须进入子进程清理分支。
+        raise AnalysisCancelled("分析任务已删除") from exc
     if task.status == "cancelled":
         raise AnalysisCancelled("用户已取消分析")
+
+
+def terminate_ocr_processes(task_id):
+    """终止指定任务启动的 OCR 进程组，避免 Celery 子进程被终止后 OCR 孤儿化。"""
+    marker = f"/code-analysis-repositories/{task_id}/"
+    terminated_groups = set()
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return 0
+    for cmdline_path in proc_root.glob("[0-9]*/cmdline"):
+        try:
+            command = cmdline_path.read_bytes().replace(b"\0", b" ").decode(errors="replace")
+            if marker not in command or "ocr" not in command or "review" not in command:
+                continue
+            pid = int(cmdline_path.parent.name)
+            process_group = os.getpgid(pid)
+            if process_group in terminated_groups:
+                continue
+            os.killpg(process_group, signal.SIGTERM)
+            terminated_groups.add(process_group)
+        except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
+            continue
+    return len(terminated_groups)
 
 
 class GitLabClient:

@@ -12,7 +12,7 @@ from rest_framework.test import APIClient
 from projects.models import Project, ProjectMember
 from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
 from .serializers import GitLabConnectionSerializer, ProjectRepositorySerializer
-from .services import DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _diff_line_stats, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _reuse_cached_result, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, run_analysis
+from .services import AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _diff_line_stats, _ensure_not_cancelled, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _reuse_cached_result, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, run_analysis
 
 
 class DiffRuleTests(TestCase):
@@ -286,6 +286,15 @@ class AnalysisLifecycleTests(TransactionTestCase):
         credential.set_token("read-only-token")
         credential.save()
 
+    def test_deleted_task_is_treated_as_cancelled(self):
+        task = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="a", head_sha="b",
+        )
+        task.delete()
+        with self.assertRaises(AnalysisCancelled):
+            _ensure_not_cancelled(task)
+
     @patch("code_analysis.services.GitLabClient.commits")
     @patch("code_analysis.services.GitLabClient.project")
     def test_repository_lists_latest_forty_commits(self, project, commits):
@@ -500,16 +509,22 @@ class AnalysisLifecycleTests(TransactionTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data[0]["event"], "completed")
 
+    @patch("code_analysis.views.current_app.control.revoke")
+    @patch("code_analysis.views.terminate_ocr_processes")
     @patch("code_analysis.views.remove_ocr_repository")
-    def test_deleting_analysis_also_deletes_its_ocr_repository(self, remove_repository):
+    def test_deleting_analysis_stops_worker_and_deletes_its_ocr_repository(
+        self, remove_repository, terminate_ocr, revoke,
+    ):
         task = AnalysisTask.objects.create(
             project=self.project, repository=self.repository, creator=self.user,
-            source_type="commits", base_sha="a", head_sha="b",
+            source_type="commits", base_sha="a", head_sha="b", celery_task_id="celery-delete-1",
         )
         client = APIClient(); client.force_authenticate(self.user)
         response = client.delete(f"/api/code-analysis/tasks/{task.id}/")
         self.assertIn(response.status_code, {200, 204})
         self.assertFalse(AnalysisTask.objects.filter(pk=task.id).exists())
+        terminate_ocr.assert_called_once_with(task.id)
+        revoke.assert_called_once_with("celery-delete-1", terminate=True, signal="SIGTERM")
         remove_repository.assert_called_once_with(task.id)
 
     def test_gitlab_ocr_repository_is_shallow_persisted_until_explicit_removal(self):
@@ -646,7 +661,8 @@ class AnalysisLifecycleTests(TransactionTestCase):
         self.assertIn("未关联", note)
 
     @patch("code_analysis.views.current_app.control.revoke")
-    def test_cancel_marks_task_and_revokes_queued_job(self, revoke):
+    @patch("code_analysis.views.terminate_ocr_processes")
+    def test_cancel_marks_task_and_terminates_running_job(self, terminate_ocr, revoke):
         task = AnalysisTask.objects.create(
             project=self.project,
             repository=self.repository,
@@ -661,4 +677,5 @@ class AnalysisLifecycleTests(TransactionTestCase):
         self.assertEqual(response.status_code, 200)
         task.refresh_from_db()
         self.assertEqual(task.status, "cancelled")
-        revoke.assert_called_once_with("celery-job-2", terminate=False)
+        terminate_ocr.assert_called_once_with(task.id)
+        revoke.assert_called_once_with("celery-job-2", terminate=True, signal="SIGTERM")

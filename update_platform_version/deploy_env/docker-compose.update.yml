@@ -42,6 +42,7 @@ services:
       # 用例审查热修复覆盖层：无需重建 Backend 镜像，可随 Compose 重建持续生效。
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/requirements/services.py:/app/requirements/services.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/services.py:/app/code_analysis/services.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/views.py:/app/code_analysis/views.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/review_service.py:/app/testcases/review_service.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/views.py:/app/testcases/views.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/management:/app/testcases/management:ro
