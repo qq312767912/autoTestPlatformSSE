@@ -37,11 +37,16 @@ docker exec wharttest-backend /opt/venv/bin/python -c '
 from pathlib import Path
 service = Path("/app/code_analysis/services.py").read_text(encoding="utf-8")
 view = Path("/app/code_analysis/views.py").read_text(encoding="utf-8")
+tasks = Path("/app/code_analysis/tasks.py").read_text(encoding="utf-8")
+models = Path("/app/code_analysis/models.py").read_text(encoding="utf-8")
 assert "OCR_CONCURRENCY = 1" in service
 assert "OCR_RESUME_CONCURRENCY = 1" in service
 assert "def _invalid_ocr_result_reason" in service
 assert "def terminate_ocr_processes" in service
 assert "terminate=True" in view
+assert "def retry_ocr" in view
+assert "def _claim_global_slot" in tasks
+assert "(\"degraded\", \"降级完成\")" in models
 '
 echo "[通过] OpenCodeReview 单并发与超时原因保留热修复"
 

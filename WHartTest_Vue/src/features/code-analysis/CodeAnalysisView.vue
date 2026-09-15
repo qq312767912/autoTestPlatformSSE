@@ -88,6 +88,7 @@
         <a-tab-pane key="change" title="代码审查报告">
           <div class="report-toolbar"><div><h3>风险与影响</h3><p>确定性规则与 AI 风险提示的融合结果</p></div><a-button type="outline" @click="download(selectedTask, 'change')"><template #icon><icon-download /></template>下载报告</a-button></div>
           <a-alert v-if="ocrStatusNotice" :type="ocrStatusNotice.type" class="ocr-status-alert"><b>{{ ocrStatusNotice.title }}</b><span>{{ ocrStatusNotice.message }}</span></a-alert>
+          <a-button v-if="canChangeTasks && canRetryOcr(selectedTask)" class="ocr-retry-button" type="outline" status="warning" @click="retryOcr(selectedTask)"><icon-refresh /> 单独重试 OCR</a-button>
           <a-collapse v-if="ocrDiagnostics" :bordered="false" class="ocr-diagnostics">
             <a-collapse-item key="ocr-diagnostics" header="OCR 完整度与失败明细">
               <div class="ocr-diagnostic-summary">
@@ -406,9 +407,9 @@ const riskHighPriorityCount = computed(() => riskTestRequirements.value.filter(i
 const tokenForm = reactive<any>({ connection:null, token:'' });
 const highRiskTotal = computed(() => tasks.value.reduce((n,t) => n + (t.change_report?.summary?.high_risk_count || 0), 0));
 const testPointTotal = computed(() => tasks.value.reduce((n,t) => n + (t.test_report?.summary?.test_point_count || 0), 0));
-const completionRate = computed(() => tasks.value.length ? Math.round(tasks.value.filter(t => t.status === 'completed').length / tasks.value.length * 100) : 0);
-const statusLabel = (s:string) => ({pending:'待执行',fetching:'获取代码中',machine_analyzing:'机器分析中',ai_analyzing:'AI分析中',generating_tests:'生成测试报告中',completed:'已完成',partial:'部分完成',failed:'失败',cancelled:'已取消'} as any)[s] || s;
-const statusColor = (s:string) => ({completed:'green',failed:'red',partial:'orange',cancelled:'gray'} as any)[s] || 'arcoblue';
+const completionRate = computed(() => tasks.value.length ? Math.round(tasks.value.filter(t => ['completed','degraded'].includes(t.status)).length / tasks.value.length * 100) : 0);
+const statusLabel = (s:string) => ({pending:'待执行',queued:'排队中',fetching:'获取代码中',machine_analyzing:'机器分析中',ai_analyzing:'AI分析中',generating_tests:'生成测试报告中',completed:'已完成',degraded:'降级完成',partial:'部分完成',failed:'失败',cancelled:'已取消'} as any)[s] || s;
+const statusColor = (s:string) => ({completed:'green',degraded:'orange',queued:'arcoblue',failed:'red',partial:'orange',cancelled:'gray'} as any)[s] || 'arcoblue';
 const sourceLabel = (t:AnalysisTask) => t.source_type === 'merge_request' ? `MR !${t.merge_request_iid}` : `${t.base_sha.slice(0,7)} → ${t.head_sha.slice(0,7)}`;
 const shortSha = (sha:string) => sha ? sha.slice(0, 12) : '-';
 const modeLabel = (mode:string) => ({quick:'快速模式',standard:'标准模式',deep:'深度模式'} as any)[mode] || mode;
@@ -420,10 +421,11 @@ const sourceName = (value:string) => ({machine_rule:'机器规则',static_scan:'
 const confidenceText = (value:number) => Number.isFinite(value) ? `置信度 ${Math.round(value * 100)}%` : '置信度未知';
 const priorityLabel = (value:string) => ({high:'高优先级',medium:'中优先级',low:'低优先级'} as any)[value] || value;
 const priorityColor = (value:string) => ({high:'red',medium:'orange',low:'blue'} as any)[value] || 'gray';
-const executionEventLabel = (event:string) => ({created:'已创建',queued:'已入队',started:'开始执行',stage_finished:'阶段结束',completed:'已完成',partial:'部分完成',failed:'执行失败',cancelled:'已取消'} as any)[event] || event;
-const terminalStatuses = new Set(['completed','partial','failed','cancelled']);
+const executionEventLabel = (event:string) => ({created:'已创建',queued:'已入队',started:'开始执行',stage_finished:'阶段结束',completed:'已完成',degraded:'降级完成',partial:'部分完成',failed:'执行失败',cancelled:'已取消'} as any)[event] || event;
+const terminalStatuses = new Set(['completed','degraded','partial','failed','cancelled']);
 const isRunning = (task:AnalysisTask) => !terminalStatuses.has(task.status);
-const canRerun = (task:AnalysisTask) => ['completed','partial','failed','cancelled'].includes(task.status);
+const canRerun = (task:AnalysisTask) => ['completed','degraded','partial','failed','cancelled'].includes(task.status);
+const canRetryOcr = (task:AnalysisTask) => ['completed','degraded','partial'].includes(task.status) && ['failed','partial'].includes(task.change_report?.ocr_status?.status || '');
 const draftStatus = (item:any) => selectedTask.value?.test_requirement_drafts?.find(draft => draft.id === item.id)?.status || 'draft';
 const draftStatusLabel = (value:string) => ({draft:'待处理',accepted:'已采纳',ignored:'已忽略',converted:'已转正式用例'} as any)[value] || value;
 const draftStatusColor = (value:string) => ({draft:'arcoblue',accepted:'green',ignored:'gray',converted:'purple'} as any)[value] || 'gray';
@@ -527,6 +529,7 @@ function removeConnection(connection:GitLabConnection){
 async function saveToken(){const project=projectStore.currentProjectId;if(!project)return;try{await api.saveCredential({...tokenForm,project});tokenForm.token='';Message.success('Token已加密保存')}catch(e:any){Message.error(e.message)} }
 async function cancelAnalysis(task:AnalysisTask){try{await api.cancelTask(task.id);Message.success('已取消分析任务');await loadTasks(true)}catch(e:any){Message.error(e.message||'取消失败')}}
 async function rerunAnalysis(task:AnalysisTask){try{await api.runTask(task.id);Message.success('已重新提交分析任务');await loadTasks(true)}catch(e:any){Message.error(e.message||'重跑失败')}}
+async function retryOcr(task:AnalysisTask){try{await api.retryTaskOcr(task.id);Message.success('OCR 重试已进入队列');await loadTasks(true)}catch(e:any){Message.error(e.message||'OCR 重试失败')}}
 async function acceptDraft(item:any){try{await api.acceptTestRequirement(item.id);Message.success('测试需求已采纳');await loadTasks(true)}catch(e:any){Message.error(e.message||'采纳失败')}}
 async function ignoreDraft(item:any){try{await api.ignoreTestRequirement(item.id);Message.success('测试需求已忽略');await loadTasks(true)}catch(e:any){Message.error(e.message||'忽略失败')}}
 async function openConvert(item:any){const project=projectStore.currentProjectId;if(!project)return;try{testcaseModules.value=await api.getTestcaseModules(project);convertingDraft.value=item;convertModuleId.value=undefined;convertVisible.value=true}catch(e:any){Message.error(e.message||'读取用例模块失败')}}
@@ -544,7 +547,7 @@ onBeforeUnmount(()=>{if(pollTimer)window.clearInterval(pollTimer)});
 .repository-edit-fields{display:flex;gap:8px;margin-top:8px}.repository-edit-fields>:first-child{width:260px}.repository-edit-fields>:last-child{width:130px}
 .commit-hint{margin:-8px 0 16px;color:#8792a2;font-size:12px;line-height:1.5}
 .patch-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:11px}.patch-actions .diff-link{margin-top:0}.fix-link{color:#16827d}.diff-notice{margin-bottom:12px}
-.ocr-status-alert{margin:0 0 14px}.ocr-status-alert b{margin-right:8px}.ocr-status-alert span{line-height:1.6}.finding-detail{display:grid;grid-template-columns:52px minmax(0,1fr);gap:6px;margin-top:12px;color:#526273;line-height:1.65}.finding-detail b{color:#344054}
+.ocr-status-alert{margin:0 0 10px}.ocr-retry-button{margin:0 0 14px}.ocr-status-alert b{margin-right:8px}.ocr-status-alert span{line-height:1.6}.finding-detail{display:grid;grid-template-columns:52px minmax(0,1fr);gap:6px;margin-top:12px;color:#526273;line-height:1.65}.finding-detail b{color:#344054}
 .ocr-fallback-note{margin-top:10px;padding:9px;border-radius:7px;background:#eef8f3;color:#376b55;font-size:11px}
 .ocr-resume-note{margin-top:10px;padding:9px;border-radius:7px;background:#eef5ff;color:#315f91;font-size:11px}
 .ocr-diagnostics{margin:-5px 0 14px;border:1px solid #e3eaf0;border-radius:9px;background:#fbfcfd}.ocr-diagnostic-summary{display:grid;grid-template-columns:repeat(6,1fr);gap:7px}.ocr-diagnostic-summary span{padding:8px;border-radius:7px;background:#eef4f6;color:#667085;font-size:11px}.ocr-diagnostic-summary b{display:block;margin-top:2px;color:#243746;font-size:16px}.ocr-diagnostic-summary .failed b{color:#d9485f}.ocr-failure-types{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin-top:12px;color:#445365;font-size:12px}.ocr-group-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:12px}.ocr-group-list article{padding:10px;border:1px solid #e5eaf0;border-radius:8px;background:#fff}.ocr-group-list article>div{display:flex;justify-content:space-between;gap:8px}.ocr-group-list small{display:block;margin-top:5px;color:#7b8795}.ocr-group-list p,.ocr-tool-failure p{margin:5px 0 0;color:#9a5b43;font-size:11px;line-height:1.5;overflow-wrap:anywhere}.ocr-retry-note,.ocr-tool-failure{margin-top:10px;padding:9px;border-radius:7px;background:#f6f8fa;color:#657486;font-size:11px}.ocr-tool-failure b{color:#8e4b3b}@media(max-width:900px){.ocr-diagnostic-summary{grid-template-columns:repeat(3,1fr)}.ocr-group-list{grid-template-columns:1fr}}

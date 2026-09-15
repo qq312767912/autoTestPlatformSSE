@@ -6,7 +6,6 @@ from rest_framework.response import Response
 from django.http import HttpResponse
 from celery import current_app
 from django.db import transaction
-from django.db.models import Q
 
 from projects.models import ProjectMember
 from wharttest_django.permissions import HasModelPermission, permission_required
@@ -237,22 +236,36 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
         with transaction.atomic():
             task = AnalysisTask.objects.select_for_update().get(pk=pk)
             if not _can_access(request.user, task.project_id): raise PermissionDenied("仅项目成员可执行分析")
-            if task.status not in {"pending", "completed", "failed", "partial", "cancelled"}:
+            if task.status not in {"pending", "completed", "degraded", "failed", "partial", "cancelled"}:
                 return Response({"detail": "分析任务正在执行，请完成或取消后再重跑"}, status=status.HTTP_409_CONFLICT)
-            running = AnalysisTask.objects.filter(repository=task.repository).filter(
-                Q(status__in={"fetching", "machine_analyzing", "ai_analyzing", "generating_tests"}) |
-                (Q(status="pending") & ~Q(celery_task_id=""))
-            ).exclude(pk=task.pk).exists()
-            if running:
-                return Response({"detail": "该仓库已有审查任务正在运行，请完成或取消后再发起"}, status=status.HTTP_409_CONFLICT)
-            retrying = task.status in {"completed", "failed", "partial", "cancelled"}
+            retrying = task.status in {"completed", "degraded", "failed", "partial", "cancelled"}
             removed = task.test_requirement_drafts.filter(status="draft").delete()[0]
-            task.status, task.progress, task.current_step, task.error_message, task.executor = "pending", 0, "等待后台执行", "", request.user
+            task.status, task.progress, task.current_step, task.error_message, task.executor = "queued", 0, "排队中", "", request.user
             task.save(update_fields=["status", "progress", "current_step", "error_message", "executor", "updated_at"])
             AnalysisTaskExecutionLog.objects.create(task=task, event="queued", actor=request.user, message="重新提交审查任务" if retrying else "审查任务已进入队列", detail={"cleared_drafts": removed})
             from .tasks import run_code_analysis
             async_result = run_code_analysis.delay(str(task.id), force_refresh=force_refresh)
             task.celery_task_id = async_result.id
+            task.save(update_fields=["celery_task_id", "updated_at"])
+        return Response(self.get_serializer(task).data, status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=["post"], url_path="retry-ocr")
+    @permission_required("code_analysis.change_analysistask")
+    def retry_ocr(self, request, pk=None):
+        with transaction.atomic():
+            task = AnalysisTask.objects.select_for_update().get(pk=pk)
+            if not _can_access(request.user, task.project_id):
+                raise PermissionDenied("仅项目成员可重试 OCR")
+            if task.status not in {"completed", "degraded", "partial"}:
+                return Response({"detail": "当前任务尚未完成，不能单独重试 OCR"}, status=status.HTTP_409_CONFLICT)
+            if (task.change_report.get("ocr_status") or {}).get("status") not in {"failed", "partial"}:
+                return Response({"detail": "OCR 审查已完成，无需重试"}, status=status.HTTP_409_CONFLICT)
+            task.status, task.progress, task.current_step, task.executor = "queued", 0, "OCR 重试排队中", request.user
+            task.save(update_fields=["status", "progress", "current_step", "executor", "updated_at"])
+            AnalysisTaskExecutionLog.objects.create(task=task, event="queued", actor=request.user, message="OCR 重试已进入队列")
+            from .tasks import retry_code_analysis_ocr
+            result = retry_code_analysis_ocr.delay(str(task.id))
+            task.celery_task_id = result.id
             task.save(update_fields=["celery_task_id", "updated_at"])
         return Response(self.get_serializer(task).data, status=status.HTTP_202_ACCEPTED)
     @action(detail=True, methods=["post"])

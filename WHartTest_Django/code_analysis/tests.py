@@ -12,7 +12,7 @@ from rest_framework.test import APIClient
 from projects.models import Project, ProjectMember
 from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
 from .serializers import GitLabConnectionSerializer, ProjectRepositorySerializer
-from .services import AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _diff_line_stats, _ensure_not_cancelled, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _reuse_cached_result, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, run_analysis
+from .services import AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _diff_line_stats, _ensure_not_cancelled, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _reuse_cached_result, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, retry_ocr_analysis, run_analysis
 
 
 class DiffRuleTests(TestCase):
@@ -102,10 +102,10 @@ class DiffRuleTests(TestCase):
         self.assertIn("upstream did not finish", reason)
 
     def test_ocr_timeout_budget_scales_with_monthly_change_size(self):
-        self.assertEqual(_ocr_timeout_budget(800), (20, 10))
-        self.assertEqual(_ocr_timeout_budget(1219), (40, 20))
-        self.assertEqual(_ocr_timeout_budget(5000), (60, 30))
-        self.assertEqual(_ocr_timeout_budget(9000), (80, 40))
+        self.assertEqual(_ocr_timeout_budget(800), (60, 30))
+        self.assertEqual(_ocr_timeout_budget(1219), (70, 35))
+        self.assertEqual(_ocr_timeout_budget(5000), (80, 40))
+        self.assertEqual(_ocr_timeout_budget(9000), (100, 50))
 
     def test_same_commit_rerun_reuses_report_and_rebuilds_drafts(self):
         from .services import _cache_report_complete
@@ -295,6 +295,46 @@ class AnalysisLifecycleTests(TransactionTestCase):
         with self.assertRaises(AnalysisCancelled):
             _ensure_not_cancelled(task)
 
+    def test_global_slot_allows_only_one_running_analysis(self):
+        from .tasks import _claim_global_slot
+        active = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="a", head_sha="b", status="ai_analyzing",
+        )
+        queued = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="c", head_sha="d", status="queued",
+        )
+        self.assertEqual(_claim_global_slot(queued.id, "准备执行"), "queued")
+        queued.refresh_from_db()
+        self.assertEqual((queued.status, queued.current_step), ("queued", "排队中"))
+        active.status = "completed"
+        active.save(update_fields=["status"])
+        self.assertEqual(_claim_global_slot(queued.id, "准备执行"), "claimed")
+        queued.refresh_from_db()
+        self.assertEqual((queued.status, queued.current_step), ("fetching", "准备执行"))
+
+    @patch("code_analysis.services._analysis_stage")
+    def test_failed_standalone_ocr_retry_keeps_degraded_report(self, analysis_stage):
+        analysis_stage.return_value = (
+            [], 0, "OCR 超时", False, 0,
+            {"failure_type_counts": {"timeout": 1}, "failure_details": [{"type": "timeout"}]},
+        )
+        task = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="a", head_sha="b", status="degraded",
+            change_report={
+                "summary": {"risk_count": 1, "high_risk_count": 0},
+                "findings": [{"key": "machine:1", "severity": "medium", "source": "machine_rule", "impact": "影响"}],
+                "ocr_status": {"status": "failed"},
+            },
+        )
+        retry_ocr_analysis(task)
+        task.refresh_from_db()
+        self.assertEqual(task.status, "degraded")
+        self.assertEqual(task.change_report["ocr_status"]["message"], "OCR 超时")
+        self.assertEqual(task.change_report["summary"]["risk_count"], 1)
+
     @patch("code_analysis.services.GitLabClient.commits")
     @patch("code_analysis.services.GitLabClient.project")
     def test_repository_lists_latest_forty_commits(self, project, commits):
@@ -458,7 +498,7 @@ class AnalysisLifecycleTests(TransactionTestCase):
         response = client.post(f"/api/code-analysis/tasks/{task.id}/run/")
         self.assertEqual(response.status_code, 202)
         task.refresh_from_db()
-        self.assertEqual(task.current_step, "等待后台执行")
+        self.assertEqual((task.status, task.current_step), ("queued", "排队中"))
         self.assertEqual(task.celery_task_id, "celery-job-1")
         delay.assert_called_once_with(str(task.id), force_refresh=True)
         self.assertEqual(list(task.execution_logs.values_list("event", flat=True)), ["queued"])
@@ -484,11 +524,12 @@ class AnalysisLifecycleTests(TransactionTestCase):
         generate.assert_called_once()
 
     @patch("code_analysis.tasks.run_code_analysis.delay")
-    def test_running_repository_rejects_duplicate_queue(self, delay):
+    def test_second_analysis_is_accepted_as_queued(self, delay):
+        delay.return_value = SimpleNamespace(id="queued-job")
         current = AnalysisTask.objects.create(
             project=self.project, repository=self.repository, creator=self.user,
             source_type="commits", base_sha="a" * 40, head_sha="b" * 40,
-            status="pending", celery_task_id="already-queued",
+            status="ai_analyzing", celery_task_id="already-running",
         )
         task = AnalysisTask.objects.create(
             project=self.project, repository=self.repository, creator=self.user,
@@ -496,10 +537,27 @@ class AnalysisLifecycleTests(TransactionTestCase):
         )
         client = APIClient(); client.force_authenticate(self.user)
         response = client.post(f"/api/code-analysis/tasks/{task.id}/run/")
-        self.assertEqual(response.status_code, 409)
-        self.assertIn("正在运行", response.data["detail"])
-        delay.assert_not_called()
-        self.assertEqual(current.status, "pending")
+        self.assertEqual(response.status_code, 202)
+        task.refresh_from_db()
+        self.assertEqual((task.status, task.current_step), ("queued", "排队中"))
+        delay.assert_called_once_with(str(task.id), force_refresh=True)
+        self.assertEqual(current.status, "ai_analyzing")
+
+    @patch("code_analysis.tasks.retry_code_analysis_ocr.delay")
+    def test_failed_ocr_can_be_retried_without_full_analysis(self, delay):
+        delay.return_value = SimpleNamespace(id="ocr-retry-job")
+        task = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="a", head_sha="b", status="degraded",
+            change_report={"ocr_status": {"status": "failed", "message": "timeout"}},
+        )
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.post(f"/api/code-analysis/tasks/{task.id}/retry-ocr/")
+        self.assertEqual(response.status_code, 202)
+        task.refresh_from_db()
+        self.assertEqual((task.status, task.current_step), ("queued", "OCR 重试排队中"))
+        self.assertEqual(task.celery_task_id, "ocr-retry-job")
+        delay.assert_called_once_with(str(task.id))
 
     def test_execution_logs_are_visible_to_project_member(self):
         task = AnalysisTask.objects.create(project=self.project, repository=self.repository, creator=self.user, source_type="commits", base_sha="a", head_sha="b")

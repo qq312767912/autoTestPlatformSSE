@@ -6,6 +6,8 @@ UPDATE_DIR="$(cd "$(dirname "$0")" && pwd)"
 UPDATE_COMPOSE="$UPDATE_DIR/docker-compose.update.yml"
 HOTFIX_FILE="$UPDATE_DIR/hotfix/code_analysis/services.py"
 HOTFIX_VIEW="$UPDATE_DIR/hotfix/code_analysis/views.py"
+HOTFIX_TASKS="$UPDATE_DIR/hotfix/code_analysis/tasks.py"
+HOTFIX_MODELS="$UPDATE_DIR/hotfix/code_analysis/models.py"
 
 fail() { echo "[失败] $*" >&2; exit 1; }
 
@@ -13,11 +15,16 @@ fail() { echo "[失败] $*" >&2; exit 1; }
 [ -f "$UPDATE_COMPOSE" ] || fail "找不到升级覆盖 YAML：$UPDATE_COMPOSE"
 [ -f "$HOTFIX_FILE" ] || fail "缺少代码审查热修复文件：$HOTFIX_FILE"
 [ -f "$HOTFIX_VIEW" ] || fail "缺少代码审查取消接口热修复文件：$HOTFIX_VIEW"
+[ -f "$HOTFIX_TASKS" ] || fail "缺少代码审查队列热修复文件：$HOTFIX_TASKS"
+[ -f "$HOTFIX_MODELS" ] || fail "缺少代码审查状态热修复文件：$HOTFIX_MODELS"
 
 grep -q 'OCR_CONCURRENCY = 1' "$HOTFIX_FILE" || fail "热修复文件不是单并发版本"
 grep -q 'def _invalid_ocr_result_reason' "$HOTFIX_FILE" || fail "热修复文件缺少超时原因诊断"
 grep -q 'def terminate_ocr_processes' "$HOTFIX_FILE" || fail "热修复文件缺少 OCR 子进程清理"
 grep -q 'terminate=True' "$HOTFIX_VIEW" || fail "热修复文件缺少 Celery 运行任务终止"
+grep -q 'def retry_ocr' "$HOTFIX_VIEW" || fail "热修复文件缺少 OCR 单独重试接口"
+grep -q 'def _claim_global_slot' "$HOTFIX_TASKS" || fail "热修复文件缺少全局单任务队列"
+grep -q '("degraded", "降级完成")' "$HOTFIX_MODELS" || fail "热修复文件缺少降级完成状态"
 
 compose=(docker compose -p offline-images -f "$BASE_COMPOSE" -f "$UPDATE_COMPOSE")
 "${compose[@]}" config --quiet
@@ -46,16 +53,21 @@ docker exec wharttest-backend /opt/venv/bin/python -c '
 from pathlib import Path
 service = Path("/app/code_analysis/services.py").read_text(encoding="utf-8")
 view = Path("/app/code_analysis/views.py").read_text(encoding="utf-8")
+tasks = Path("/app/code_analysis/tasks.py").read_text(encoding="utf-8")
+models = Path("/app/code_analysis/models.py").read_text(encoding="utf-8")
 assert "OCR_CONCURRENCY = 1" in service
 assert "OCR_RESUME_CONCURRENCY = 1" in service
 assert "def _invalid_ocr_result_reason" in service
 assert "def terminate_ocr_processes" in service
 assert "terminate=True" in view
-print("code analysis OCR and cancellation hotfix OK")
+assert "def retry_ocr" in view
+assert "def _claim_global_slot" in tasks
+assert "(\"degraded\", \"降级完成\")" in models
+print("code analysis queue, OCR retry and cancellation hotfix OK")
 '
 
 echo "[恢复] 确保三个执行器保持运行并重新连接 Backend"
 "${compose[@]}" up -d --no-deps actuator-01 actuator-02 actuator-03
 
-echo "[完成] 新任务将以单并发执行 OpenCodeReview；取消/删除会停止 Celery 任务和 OCR 进程组。"
+echo "[完成] 代码审查已全局串行化；支持降级完成、OCR 单独重试与取消进程清理。"
 echo "如需诊断，执行：bash 21-diagnose-code-analysis-ocr.sh"

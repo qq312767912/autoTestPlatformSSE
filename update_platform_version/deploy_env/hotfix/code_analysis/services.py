@@ -50,12 +50,12 @@ LOW_VALUE_FILE_PATTERNS = (
 def _ocr_timeout_budget(changed_lines):
     """按月度迭代规模分配 OCR 首轮和续审预算（分钟）。"""
     if changed_lines <= 1000:
-        return 20, 10
-    if changed_lines <= 3000:
-        return 40, 20
-    if changed_lines <= 8000:
         return 60, 30
-    return 80, 40
+    if changed_lines <= 3000:
+        return 70, 35
+    if changed_lines <= 8000:
+        return 80, 40
+    return 100, 50
 
 
 def _git_changed_lines(root, base_ref, head_ref):
@@ -1389,6 +1389,63 @@ def _reuse_cached_result(task, original_base_sha, original_head_sha):
     return True
 
 
+def retry_ocr_analysis(task: AnalysisTask):
+    """只重跑 OpenCodeReview，保留既有机器规则、降级 AI 结果和测试报告。"""
+    _ensure_not_cancelled(task)
+    AnalysisTaskExecutionLog.objects.create(task=task, event="started", message="OCR 单独重试开始")
+    task.status, task.progress, task.current_step = "ai_analyzing", 65, "单独重试 OCR 审查"
+    task.save(update_fields=["status", "progress", "current_step", "updated_at"])
+    findings, tokens, note, usable, coverage, diagnostics = _analysis_stage(
+        task.pk, "OCR单独重试", _run_open_code_review, task,
+    )
+    report = json.loads(json.dumps(task.change_report or {}, ensure_ascii=False))
+    existing = [item for item in report.get("findings") or [] if item.get("source") != "ocr_ai"]
+    if usable:
+        findings, chinese_tokens, chinese_note = _normalize_ocr_findings(task, findings)
+        combined = _deduplicate_findings([*existing, *findings])
+        note = f"{note}；{chinese_note}" if chinese_note else note
+        tokens += chinese_tokens
+        ocr_status = {
+            "status": "completed" if coverage >= 100 else "partial",
+            "message": "OCR 审查重试完成" if coverage >= 100 else note,
+            "coverage": coverage, "diagnostics": diagnostics,
+        }
+        final_status = "completed" if coverage >= 100 else "degraded"
+    else:
+        combined = existing
+        ocr_status = {"status": "failed", "message": note, "coverage": 0, "diagnostics": diagnostics}
+        final_status = "degraded"
+
+    severity_counts, source_counts = {}, {}
+    for finding in combined:
+        severity = finding.get("severity", "medium")
+        source = finding.get("source", "unknown")
+        severity_counts[severity] = severity_counts.get(severity, 0) + 1
+        source_counts[source] = source_counts.get(source, 0) + 1
+    summary = report.setdefault("summary", {})
+    summary.update({
+        "risk_count": len(combined),
+        "high_risk_count": sum(1 for item in combined if item.get("severity") == "high"),
+        "severity_counts": severity_counts, "source_counts": source_counts,
+    })
+    report["findings"] = combined
+    report["impact_summary"] = sorted({item.get("impact") for item in combined if item.get("impact")})
+    report["ocr_status"] = ocr_status
+    task.change_report = _sanitize_json_value(report)
+    task.status, task.progress = final_status, 100
+    task.current_step = "OCR 重试完成" if usable else "OCR 重试失败，保留降级报告"
+    task.token_usage += tokens
+    task.completed_at = timezone.now()
+    task.save(update_fields=[
+        "change_report", "status", "progress", "current_step", "token_usage", "completed_at", "updated_at",
+    ])
+    AnalysisTaskExecutionLog.objects.create(
+        task=task, event=final_status,
+        message="OCR 单独重试完成" if usable else "OCR 单独重试失败，已保留降级报告",
+        detail={"ocr_coverage": coverage, **diagnostics},
+    )
+
+
 def run_analysis(task: AnalysisTask, force_refresh=False):
     original_base_sha, original_head_sha = task.base_sha, task.head_sha
     _ensure_not_cancelled(task)
@@ -1606,11 +1663,13 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         task.ai_coverage = ai_coverage
         task.token_usage = token_usage
         ai_incomplete = task.mode != "quick" and bool(analyzable_diffs) and (ai_failed or ai_coverage < 100 or iteration_incomplete)
-        final_status = "partial" if ai_incomplete else "completed"
+        ocr_degraded = task.mode != "quick" and not ocr_completed and not ai_incomplete
+        final_status = "partial" if ai_incomplete else ("degraded" if ocr_degraded else "completed")
         task.status, task.progress, task.current_step, task.completed_at = final_status, 100, "分析完成", timezone.now()
         task.save()
         AnalysisTaskExecutionLog.objects.create(
-            task=task, event=final_status, message="分析完成" if final_status == "completed" else "分析部分完成，请查看覆盖缺口",
+            task=task, event=final_status,
+            message=("分析完成" if final_status == "completed" else "OCR 失败，AI 降级分析已完成" if final_status == "degraded" else "分析部分完成，请查看覆盖缺口"),
             detail={"machine_coverage": task.machine_coverage, "ai_coverage": task.ai_coverage, "risk_count": len(findings)},
         )
         return task
