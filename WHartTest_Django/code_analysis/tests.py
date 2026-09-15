@@ -10,7 +10,7 @@ from django.test import SimpleTestCase, TestCase, TransactionTestCase
 from rest_framework.test import APIClient
 
 from projects.models import Project, ProjectMember
-from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
+from .models import AnalysisTask, AnalysisTaskExecutionLog, CodeAnalysisLLMConfig, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
 from .serializers import GitLabConnectionSerializer, ProjectRepositorySerializer
 from .services import AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _diff_line_stats, _ensure_not_cancelled, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _reuse_cached_result, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, retry_ocr_analysis, run_analysis
 
@@ -285,6 +285,35 @@ class AnalysisLifecycleTests(TransactionTestCase):
         credential = UserGitLabCredential(project=self.project, connection=self.connection, user=self.user)
         credential.set_token("read-only-token")
         credential.save()
+        self.llm_config = CodeAnalysisLLMConfig(
+            config_name="代码审查专用", name="internal-review-model",
+            api_url="http://llm.internal/v1", request_timeout=600, max_retries=2,
+        )
+        self.llm_config.set_api_key("review-secret")
+        self.llm_config.save()
+
+    def test_code_analysis_llm_key_is_encrypted_and_never_returned(self):
+        self.assertNotEqual(self.llm_config.encrypted_api_key, "review-secret")
+        self.assertEqual(self.llm_config.get_api_key(), "review-secret")
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.get("/api/code-analysis/llm-config/")
+        self.assertEqual(response.status_code, 200)
+        item = (response.data.get("results") or response.data)[0] if isinstance(response.data, dict) else response.data[0]
+        self.assertNotIn("api_key", item)
+        self.assertTrue(item["has_api_key"])
+
+    @patch("code_analysis.tasks.run_code_analysis.delay")
+    def test_non_quick_analysis_requires_dedicated_llm(self, delay):
+        self.llm_config.delete()
+        task = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="a", head_sha="b", mode="standard",
+        )
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.post(f"/api/code-analysis/tasks/{task.id}/run/")
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("代码审查专用 LLM", response.data["detail"])
+        delay.assert_not_called()
 
     def test_deleted_task_is_treated_as_cancelled(self):
         task = AnalysisTask.objects.create(

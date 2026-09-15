@@ -36,7 +36,7 @@ x-actuator-common: &actuator-common
 # 与内网当前 docker-compose.offline.yml 叠加使用，覆盖升级服务并新增三个执行器。
 services:
   backend:
-    image: wharttest-250-backend:update-347a4e12-alpine-r1-arm64
+    image: wharttest-250-backend:update-0757e97f-code-review-llm-r2-arm64
     volumes:
       - /projects/ai-test-platform/update_platform_version/deploy_env/supervisord.single-worker.conf:/app/supervisord.conf:ro
       # 用例审查热修复覆盖层：无需重建 Backend 镜像，可随 Compose 重建持续生效。
@@ -45,6 +45,9 @@ services:
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/views.py:/app/code_analysis/views.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/tasks.py:/app/code_analysis/tasks.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/models.py:/app/code_analysis/models.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/serializers.py:/app/code_analysis/serializers.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/urls.py:/app/code_analysis/urls.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/migrations/0012_codeanalysisllmconfig.py:/app/code_analysis/migrations/0012_codeanalysisllmconfig.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/review_service.py:/app/testcases/review_service.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/views.py:/app/testcases/views.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/management:/app/testcases/management:ro
@@ -64,7 +67,7 @@ services:
       VISION_MCP_TIMEOUT_SECONDS: ${VISION_MCP_TIMEOUT_SECONDS:-120}
 
   frontend:
-    image: wharttest-250-frontend:update-ecff56e4-r1-arm64
+    image: wharttest-250-frontend:update-0757e97f-code-review-llm-r2-arm64
     # 与后端共享持久化媒体目录，确保 Skill 生成的交付物可由 Nginx 下载。
     volumes:
       - /projects/ai-test-platform/offline-images/data/media:/app/data/media:ro

@@ -5,8 +5,8 @@ VERIFY_OCR_LIVE="${VERIFY_OCR_LIVE:-1}"
 TEST_HOSTNAME="${TEST_HOSTNAME:-www.test.sse.com.cn}"
 
 expected=(
-  'wharttest-backend|wharttest-250-backend:update-347a4e12-alpine-r1-arm64'
-  'wharttest-frontend|wharttest-250-frontend:update-ecff56e4-r1-arm64'
+  'wharttest-backend|wharttest-250-backend:update-0757e97f-code-review-llm-r2-arm64'
+  'wharttest-frontend|wharttest-250-frontend:update-0757e97f-code-review-llm-r2-arm64'
   'wharttest-vision-mcp|wharttest-250-vision-mcp:update-01339484-arm64-r2'
   'wharttest-mcp|wharttest-250-mcp-alpine:latest'
   'wharttest-qdrant|qdrant-kylin-arm64:v1.16.0-page64k'
@@ -39,6 +39,8 @@ service = Path("/app/code_analysis/services.py").read_text(encoding="utf-8")
 view = Path("/app/code_analysis/views.py").read_text(encoding="utf-8")
 tasks = Path("/app/code_analysis/tasks.py").read_text(encoding="utf-8")
 models = Path("/app/code_analysis/models.py").read_text(encoding="utf-8")
+serializers = Path("/app/code_analysis/serializers.py").read_text(encoding="utf-8")
+urls = Path("/app/code_analysis/urls.py").read_text(encoding="utf-8")
 assert "OCR_CONCURRENCY = 1" in service
 assert "OCR_RESUME_CONCURRENCY = 1" in service
 assert "def _invalid_ocr_result_reason" in service
@@ -47,8 +49,12 @@ assert "terminate=True" in view
 assert "def retry_ocr" in view
 assert "def _claim_global_slot" in tasks
 assert "(\"degraded\", \"降级完成\")" in models
+assert "class CodeAnalysisLLMConfig" in models
+assert "class CodeAnalysisLLMConfigSerializer" in serializers
+assert 'router.register("llm-config"' in urls
+assert "def _get_code_analysis_llm_config" in service
 '
-echo "[通过] OpenCodeReview 单并发与超时原因保留热修复"
+echo "[通过] OpenCodeReview 单并发、超时诊断与代码审查专用 LLM 配置"
 
 docker exec wharttest-backend /opt/venv/bin/python -c '
 from pathlib import Path
@@ -145,10 +151,10 @@ from pathlib import Path
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "wharttest_django.settings")
 import django
 django.setup()
-from langgraph_integration.models import LLMConfig
-config = LLMConfig.objects.filter(is_active=True).first()
+from code_analysis.models import CodeAnalysisLLMConfig
+config = CodeAnalysisLLMConfig.objects.filter(is_active=True).first()
 if not config:
-    raise SystemExit("没有已激活的 LLM 配置")
+    raise SystemExit("没有已启用的代码审查专用 LLM 配置")
 env = os.environ.copy()
 env.update({"OCR_LLM_URL": config.api_url, "OCR_LLM_TOKEN": config.api_key, "OCR_LLM_MODEL": config.name, "OCR_LLM_PROTOCOL": "openai"})
 with tempfile.TemporaryDirectory(prefix="ocr-verify-") as directory:

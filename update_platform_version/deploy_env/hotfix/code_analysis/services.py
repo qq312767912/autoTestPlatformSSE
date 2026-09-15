@@ -47,6 +47,17 @@ LOW_VALUE_FILE_PATTERNS = (
 )
 
 
+def _get_code_analysis_llm_config():
+    """只解析代码审查专属配置，禁止隐式回退到平台通用 LLM。"""
+    from .models import CodeAnalysisLLMConfig
+    config = CodeAnalysisLLMConfig.objects.filter(is_active=True).first()
+    if not config:
+        raise ValueError("尚未配置并启用代码审查专用 LLM")
+    if not config.api_key:
+        raise ValueError("代码审查专用 LLM 缺少 API Key")
+    return config
+
+
 def _ocr_timeout_budget(changed_lines):
     """按月度迭代规模分配 OCR 首轮和续审预算（分钟）。"""
     if changed_lines <= 1000:
@@ -740,10 +751,10 @@ def _run_open_code_review(task):
     """调用 OCR CLI；GitLab 使用个人 Token维护任务独占浅仓库。"""
     if task.mode == "quick":
         return [], 0, "快速模式未启用 OCR", False, 0, {}
-    from langgraph_integration.models import LLMConfig
-    config = LLMConfig.objects.filter(is_active=True).first()
-    if not config:
-        return [], 0, "未启用 OCR：没有可用 LLM 配置", False, 0, {}
+    try:
+        config = _get_code_analysis_llm_config()
+    except Exception as exc:
+        return [], 0, f"未启用 OCR：{exc}", False, 0, {}
     try:
         with _ocr_repository(task) as (root, base_ref, head_ref):
             changed_lines = _git_changed_lines(root, base_ref, head_ref)
@@ -862,10 +873,9 @@ def _normalize_ocr_findings(task, findings):
     """把 OCR 的英文评论整理为中文审查结论，不改变其原始代码证据。"""
     if not findings:
         return findings, 0, ""
-    from langgraph_integration.models import LLMConfig
     from langgraph_integration.views import create_llm_instance
     try:
-        config = LLMConfig.objects.get(is_active=True)
+        config = _get_code_analysis_llm_config()
         source = [{key: item.get(key) for key in ("key", "file", "change", "impact", "evidence")} for item in findings]
         prompt = (
             "你是中文代码审查编辑。将以下 OCR 审查意见改写成简明、可复核的中文。"
@@ -936,12 +946,11 @@ def _generate_fix_patches(task, findings, analyzable_diffs, review_client=None):
         for finding in findings:
             finding.update({"suggested_patch": "", "patch_status": "reference", "patch_validation_message": "快速模式不生成 AI 修复建议"})
         return 0, "快速模式未生成建议修复"
-    from langgraph_integration.models import LLMConfig
     from langgraph_integration.views import create_llm_instance
     for finding in findings:
         finding.update({"suggested_patch": "", "patch_status": "reference", "patch_validation_message": "未生成有效补丁"})
     try:
-        config = LLMConfig.objects.get(is_active=True)
+        config = _get_code_analysis_llm_config()
         diff_by_path = {item.get("path", ""): item.get("diff", "") for item in analyzable_diffs}
         source = []
         for finding in findings[:40]:
@@ -1049,10 +1058,9 @@ def _run_iteration_test_design(task, analyzable_diffs, findings):
     """基于本次 Diff 生成迭代测试点；风险仅作为补充约束，而非逐条转换。"""
     if task.mode == "quick" or not analyzable_diffs:
         return {}, [], 0, "快速模式未生成 AI 迭代测试点"
-    from langgraph_integration.models import LLMConfig
     from langgraph_integration.views import create_llm_instance
     try:
-        config = LLMConfig.objects.get(is_active=True)
+        config = _get_code_analysis_llm_config()
         max_chars = 18000 if task.mode == "standard" else 50000
         diff_context = "\n\n".join(f"文件：{item['path']}\n{item['diff'][:7000]}" for item in analyzable_diffs)[:max_chars]
         risks = [{key: item.get(key) for key in ("file", "change", "severity", "impact")} for item in findings if item.get("severity") in {"high", "medium"}][:40]
@@ -1121,10 +1129,9 @@ def _run_risk_test_design(task, findings):
     source_findings = [item for item in source_findings if item["key"] not in points]
     if not source_findings:
         return points, 0, "风险排查点已随代码审查同步生成"
-    from langgraph_integration.models import LLMConfig
     from langgraph_integration.views import create_llm_instance
     try:
-        config = LLMConfig.objects.get(is_active=True)
+        config = _get_code_analysis_llm_config()
         source = [
             {key: item.get(key, "") for key in ("key", "change", "file", "severity", "impact", "evidence", "recommendation")}
             for item in source_findings
@@ -1162,13 +1169,12 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
     """只向模型发送受控的小批量Diff；任何失败均降级为机器结果。"""
     if task.mode == "quick" or not analyzable_diffs:
         return [], [], [], 0, 0, "快速模式不调用LLM"
-    from langgraph_integration.models import LLMConfig
     from langgraph_integration.views import create_llm_instance
 
     try:
-        config = LLMConfig.objects.get(is_active=True)
-    except (LLMConfig.DoesNotExist, LLMConfig.MultipleObjectsReturned):
-        return [], [], [], 0, 0, "没有唯一启用的LLM配置，已仅生成机器分析结果"
+        config = _get_code_analysis_llm_config()
+    except Exception as exc:
+        return [], [], [], 0, 0, f"代码审查专用 LLM 不可用，已仅生成机器分析结果：{exc}"
 
     max_files = 24 if task.mode == "standard" else 60
     max_chars = 5000 if task.mode == "standard" else 9000
@@ -1278,11 +1284,10 @@ def _run_context_test_enrichment(task, findings):
     api_ids = list(task.api_document_ids or []) or ([task.api_document_id] if task.api_document_id else [])
     if not (requirement_ids or api_ids):
         return [], [], 0, "未关联需求或接口文档，未执行业务上下文补充"
-    from langgraph_integration.models import LLMConfig
     from langgraph_integration.views import create_llm_instance
     from requirements.models import RequirementDocument
     try:
-        config = LLMConfig.objects.get(is_active=True)
+        config = _get_code_analysis_llm_config()
         document_ids = list(dict.fromkeys(requirement_ids + api_ids))
         documents = RequirementDocument.objects.filter(project=task.project, id__in=document_ids).values("title", "content")
         context = "\n\n".join(f"文档：{item['title']}\n{(item['content'] or '')[:8000]}" for item in documents)

@@ -1,3 +1,3 @@
-release=update-347a4e12-alpine-r1-arm64-actuator-r4
-git_commit=347a4e12
+release=update-0757e97f-code-review-llm-r2-arm64-actuator-r4
+git_commit=0757e97f
 platform=linux/arm64

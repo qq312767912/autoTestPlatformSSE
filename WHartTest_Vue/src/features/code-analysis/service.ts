@@ -4,6 +4,22 @@ import type { AnalysisTask, AnalysisExecutionLog, CodeRepository, GitLabConnecti
 const base = '/code-analysis';
 const list = <T>(value: any): T[] => Array.isArray(value) ? value : (value?.results || []);
 
+export interface CodeAnalysisLlmConfig {
+  id?: number;
+  config_name: string;
+  name: string;
+  api_url: string;
+  api_key?: string;
+  has_api_key?: boolean;
+  request_timeout: number;
+  max_retries: number;
+  is_active: boolean;
+}
+
+export async function getCodeAnalysisLlmConfig() { const r = await request<any>({ url: `${base}/llm-config/`, method: 'GET' }); if (!r.success) throw new Error(r.error); return list<CodeAnalysisLlmConfig>(r.data)[0] || null; }
+export async function saveCodeAnalysisLlmConfig(data: CodeAnalysisLlmConfig) { const r = await request<CodeAnalysisLlmConfig>({ url: data.id ? `${base}/llm-config/${data.id}/` : `${base}/llm-config/`, method: data.id ? 'PATCH' : 'POST', data }); if (!r.success) throw new Error(r.error); return r.data!; }
+export async function testCodeAnalysisLlmConfig(id: number) { const r = await request<any>({ url: `${base}/llm-config/${id}/test-connection/`, method: 'POST' }); if (!r.success) throw new Error(r.error); return r.data; }
+
 export async function getConnections() { const r = await request<any>({ url: `${base}/connections/`, method: 'GET' }); if (!r.success) throw new Error(r.error); return list<GitLabConnection>(r.data); }
 export async function createConnection(data: Partial<GitLabConnection>) { const r = await request<GitLabConnection>({ url: `${base}/connections/`, method: 'POST', data }); if (!r.success) throw new Error(r.error); return r.data!; }
 export async function deleteConnection(id: number) { const r = await request({ url: `${base}/connections/${id}/`, method: 'DELETE' }); if (!r.success) throw new Error(r.error); }

@@ -9,8 +9,8 @@ from django.db import transaction
 
 from projects.models import ProjectMember
 from wharttest_django.permissions import HasModelPermission, permission_required
-from .models import AnalysisTask, AnalysisTaskExecutionLog, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
-from .serializers import AnalysisTaskExecutionLogSerializer, AnalysisTaskSerializer, CredentialSerializer, GitLabConnectionSerializer, ProjectRepositorySerializer, TestRequirementDraftSerializer
+from .models import AnalysisTask, AnalysisTaskExecutionLog, CodeAnalysisLLMConfig, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
+from .serializers import AnalysisTaskExecutionLogSerializer, AnalysisTaskSerializer, CodeAnalysisLLMConfigSerializer, CredentialSerializer, GitLabConnectionSerializer, ProjectRepositorySerializer, TestRequirementDraftSerializer
 from .services import GitLabClient, LocalGitClient, generate_suggested_patch, normalize_test_point_for_display, remove_ocr_repositories_for_repository, remove_ocr_repository, terminate_ocr_processes
 
 
@@ -26,6 +26,24 @@ def _stop_analysis_task(task):
     terminate_ocr_processes(task.pk)
     if task.celery_task_id:
         current_app.control.revoke(task.celery_task_id, terminate=True, signal="SIGTERM")
+
+
+class CodeAnalysisLLMConfigViewSet(viewsets.ModelViewSet):
+    queryset = CodeAnalysisLLMConfig.objects.order_by("pk")
+    serializer_class = CodeAnalysisLLMConfigSerializer
+    permission_classes = [IsAuthenticated, HasModelPermission]
+
+    @action(detail=True, methods=["post"], url_path="test-connection")
+    def test_connection(self, request, pk=None):
+        from langgraph_integration.views import create_llm_instance
+        config = self.get_object()
+        try:
+            response = create_llm_instance(config, temperature=0.1).invoke("只回复 OK")
+            if getattr(response, "content", None):
+                return Response({"message": "代码审查 LLM 连接测试成功"})
+            return Response({"detail": "模型没有返回有效内容"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            return Response({"detail": f"连接测试失败：{exc}"}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class GitLabConnectionViewSet(viewsets.ModelViewSet):
@@ -233,6 +251,9 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
         force_refresh = request.data.get("force_refresh", True)
         if not isinstance(force_refresh, bool):
             return Response({"detail": "force_refresh 必须为布尔值"}, status=status.HTTP_400_BAD_REQUEST)
+        preview = self.get_object()
+        if preview.mode != "quick" and not CodeAnalysisLLMConfig.objects.filter(is_active=True).exclude(encrypted_api_key="").exists():
+            return Response({"detail": "请先由管理员配置并启用代码审查专用 LLM"}, status=status.HTTP_409_CONFLICT)
         with transaction.atomic():
             task = AnalysisTask.objects.select_for_update().get(pk=pk)
             if not _can_access(request.user, task.project_id): raise PermissionDenied("仅项目成员可执行分析")
@@ -252,6 +273,8 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="retry-ocr")
     @permission_required("code_analysis.change_analysistask")
     def retry_ocr(self, request, pk=None):
+        if not CodeAnalysisLLMConfig.objects.filter(is_active=True).exclude(encrypted_api_key="").exists():
+            return Response({"detail": "请先由管理员配置并启用代码审查专用 LLM"}, status=status.HTTP_409_CONFLICT)
         with transaction.atomic():
             task = AnalysisTask.objects.select_for_update().get(pk=pk)
             if not _can_access(request.user, task.project_id):

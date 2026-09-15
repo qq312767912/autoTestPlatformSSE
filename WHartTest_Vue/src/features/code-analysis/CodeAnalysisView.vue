@@ -7,6 +7,7 @@
         <p>对代码变更进行多维审查，识别风险、评估业务影响，并生成可执行的测试需求与回归建议。</p>
       </div>
       <div class="hero-actions">
+        <a-button v-if="isPlatformAdmin" @click="openLlmConfig"><template #icon><icon-settings /></template>审查模型配置</a-button>
         <a-button v-if="canViewRepositories || canViewConnections || canManageCredentials" @click="configVisible = true"><template #icon><icon-settings /></template>审查源配置</a-button>
         <a-button v-if="canAddTasks && canViewRepositories" type="primary" @click="openCreate"><template #icon><icon-plus /></template>新建分析</a-button>
       </div>
@@ -189,6 +190,22 @@
       <a-form layout="vertical"><a-form-item label="目标用例模块" required><a-select v-model="convertModuleId" placeholder="选择当前项目下的用例模块"><a-option v-for="module in testcaseModules" :key="module.id" :value="module.id">{{ module.name }}</a-option></a-select></a-form-item></a-form>
     </a-modal>
 
+    <a-modal v-model:visible="llmConfigVisible" title="代码审查专用 LLM" :ok-loading="llmConfigSaving" width="680px" @ok="saveLlmConfig">
+      <a-alert type="info" style="margin-bottom:16px">此配置只用于代码审查、OpenCodeReview、迭代总结和风险测试点，不影响平台对话及其他 AI 功能。API Key 加密保存且不会回显。</a-alert>
+      <a-form :model="llmConfigForm" layout="vertical">
+        <a-form-item label="配置名称" required><a-input v-model="llmConfigForm.config_name" placeholder="例如：内网代码审查模型" /></a-form-item>
+        <a-form-item label="API URL" required><a-input v-model="llmConfigForm.api_url" placeholder="例如：http://模型服务/v1" /></a-form-item>
+        <a-form-item label="模型名称" required><a-input v-model="llmConfigForm.name" placeholder="填写模型服务中的真实模型 ID" /></a-form-item>
+        <a-form-item label="API Key" :required="!llmConfigForm.has_api_key"><a-input-password v-model="llmConfigForm.api_key" :placeholder="llmConfigForm.has_api_key ? '已配置，留空保持原密钥' : '请输入 API Key'" /></a-form-item>
+        <a-row :gutter="16">
+          <a-col :span="10"><a-form-item label="单次请求超时（秒）"><a-input-number v-model="llmConfigForm.request_timeout" :min="30" :max="7200" /></a-form-item></a-col>
+          <a-col :span="8"><a-form-item label="最大重试次数"><a-input-number v-model="llmConfigForm.max_retries" :min="0" :max="10" /></a-form-item></a-col>
+          <a-col :span="6"><a-form-item label="启用"><a-switch v-model="llmConfigForm.is_active" /></a-form-item></a-col>
+        </a-row>
+        <a-space><a-button :disabled="!llmConfigForm.id" :loading="llmConfigTesting" @click="testLlmConfig">测试连接</a-button><a-tag v-if="llmConfigForm.has_api_key" color="green">密钥已配置</a-tag></a-space>
+      </a-form>
+    </a-modal>
+
     <a-modal v-model:visible="diffVisible" :title="diffTitle" width="960px" :footer="false" unmount-on-close>
       <a-alert v-if="diffNotice" :type="diffNoticeType" class="diff-notice">{{ diffNotice }}</a-alert>
       <a-spin :loading="diffLoading" style="width:100%"><div v-if="diffLines.length" class="diff-view"><div v-for="(line, index) in diffLines" :key="index" class="diff-line" :class="diffLineClass(line)"><span>{{ index + 1 }}</span><code>{{ line || ' ' }}</code></div></div><a-empty v-else-if="!diffLoading" description="未生成可展示的建议修复补丁" /></a-spin>
@@ -281,6 +298,7 @@ const canDeleteConnections = computed(() => authStore.hasPermission('code_analys
 const canManageCredentials = computed(() => authStore.hasPermission('code_analysis.add_usergitlabcredential') || authStore.hasPermission('code_analysis.change_usergitlabcredential'));
 const tasks = ref<AnalysisTask[]>([]), repositories = ref<CodeRepository[]>([]), connections = ref<GitLabConnection[]>([]), mergeRequests = ref<MergeRequest[]>([]), repositoryCommits = ref<RepositoryCommit[]>([]), projectDocuments = ref<any[]>([]);
 const loading = ref(false), submitting = ref(false), mrLoading = ref(false), commitLoading = ref(false), createVisible = ref(false), configVisible = ref(false);
+const llmConfigVisible = ref(false), llmConfigSaving = ref(false), llmConfigTesting = ref(false);
 const selectedTask = ref<AnalysisTask|null>(null);
 const executionLogs = ref<AnalysisExecutionLog[]>([]);
 const testcaseModules = ref<any[]>([]), convertVisible = ref(false), converting = ref(false), convertModuleId = ref<number|undefined>(), convertingDraft = ref<any>(null);
@@ -294,6 +312,7 @@ const form = reactive<any>({ repository:null, source_type:'commits', merge_reque
 const connectionForm = reactive<any>({ name:'内网 GitLab', base_url:'', verify_ssl:true, is_active:true });
 const repoForm = reactive<any>({ connection:null, gitlab_project_id:'', name:'', path_with_namespace:'', default_branch:'main' });
 const localRepoForm = reactive<any>({ name:'当前工作区', local_path:'.' });
+const llmConfigForm = reactive<api.CodeAnalysisLlmConfig>({ config_name:'代码审查 LLM', name:'', api_url:'', api_key:'', has_api_key:false, request_timeout:600, max_retries:2, is_active:true });
 const selectedRepository = computed(() => repositories.value.find(item => item.id === form.repository));
 const errorText = (error:any, fallback='操作失败') => error?.error || error?.message || error?.detail || fallback;
 const severityOrder:Record<string,number> = { high:0, medium:1, low:2 };
@@ -437,6 +456,9 @@ const iterationConclusion = (task:AnalysisTask) => {
   return '未发现明显高风险变化，建议完成常规变更回归';
 };
 async function download(task:AnalysisTask,type:'change'|'test'){try{await api.downloadReport(task.id,type);Message.success('报告下载已开始')}catch(e:any){Message.error(e.message||'报告下载失败')}}
+async function openLlmConfig(){llmConfigVisible.value=true;try{const config=await api.getCodeAnalysisLlmConfig();Object.assign(llmConfigForm,{id:undefined,config_name:'代码审查 LLM',name:'',api_url:'',api_key:'',has_api_key:false,request_timeout:600,max_retries:2,is_active:true},config||{},{api_key:''})}catch(e:any){Message.error(e.message||'读取代码审查模型配置失败')}}
+async function saveLlmConfig(){if(!llmConfigForm.config_name||!llmConfigForm.api_url||!llmConfigForm.name||(!llmConfigForm.api_key&&!llmConfigForm.has_api_key)){Message.warning('请完整填写代码审查模型配置');return}llmConfigSaving.value=true;try{const saved=await api.saveCodeAnalysisLlmConfig({...llmConfigForm});Object.assign(llmConfigForm,saved,{api_key:''});llmConfigVisible.value=false;Message.success('代码审查专用 LLM 已保存')}catch(e:any){Message.error(e.message||'保存代码审查模型配置失败')}finally{llmConfigSaving.value=false}}
+async function testLlmConfig(){if(!llmConfigForm.id)return;llmConfigTesting.value=true;try{const result=await api.testCodeAnalysisLlmConfig(llmConfigForm.id);Message.success(result?.message||'连接测试成功')}catch(e:any){Message.error(e.message||'连接测试失败')}finally{llmConfigTesting.value=false}}
 async function openDiff(item:any){if(!selectedTask.value)return;diffVisible.value=true;diffLoading.value=true;diffText.value='';diffNotice.value='';diffTitle.value=`相关 Diff · ${item.file || '变更文件'}`;try{const payload=await api.getTaskDiff(selectedTask.value.id,item.file);diffText.value=relevantDiffFragment(payload?.diff||'',item.line_start,item.evidence)}catch(e:any){Message.error(e.message||'读取 Diff 失败')}finally{diffLoading.value=false}}
 async function openSuggestedPatch(item:any){
   if(!selectedTask.value || patchLoadingKey.value)return;

@@ -15,6 +15,54 @@ def _credential_cipher():
     return Fernet(base64.urlsafe_b64encode(digest))
 
 
+class CodeAnalysisLLMConfig(models.Model):
+    """代码审查专用的全局 OpenAI 兼容模型配置（单例）。"""
+
+    config_name = models.CharField(max_length=255, default="代码审查 LLM", verbose_name="配置名称")
+    name = models.CharField(max_length=255, verbose_name="模型名称")
+    api_url = models.URLField(max_length=2048, verbose_name="API 地址")
+    encrypted_api_key = models.TextField(blank=True, default="", verbose_name="加密 API Key")
+    request_timeout = models.PositiveIntegerField(default=600, verbose_name="请求超时秒数")
+    max_retries = models.PositiveSmallIntegerField(default=2, verbose_name="最大重试次数")
+    is_active = models.BooleanField(default=True, verbose_name="是否启用")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "代码审查 LLM 配置"
+        verbose_name_plural = "代码审查 LLM 配置"
+
+    def save(self, *args, **kwargs):
+        if not self.pk:
+            existing = type(self).objects.order_by("pk").first()
+            if existing:
+                self.pk = existing.pk
+        super().save(*args, **kwargs)
+
+    def set_api_key(self, value):
+        self.encrypted_api_key = _credential_cipher().encrypt(value.encode()).decode() if value else ""
+
+    def get_api_key(self):
+        if not self.encrypted_api_key:
+            return ""
+        try:
+            return _credential_cipher().decrypt(self.encrypted_api_key.encode()).decode()
+        except (InvalidToken, ValueError) as exc:
+            raise ValidationError("代码审查 LLM API Key 无法解密，请重新配置") from exc
+
+    @property
+    def api_key(self):
+        return self.get_api_key()
+
+    @property
+    def provider(self):
+        return "openai_compatible"
+
+    @property
+    def has_api_key(self):
+        return bool(self.encrypted_api_key)
+
+
 class GitLabConnection(models.Model):
     name = models.CharField(max_length=100)
     base_url = models.URLField(max_length=500)

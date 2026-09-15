@@ -148,8 +148,8 @@ grep -Eai "$pattern" /app/data/logs/worker_err.log /app/data/logs/worker_out.log
 section "当前模型配置（不输出密钥）"
 docker exec "$BACKEND_CONTAINER" /opt/venv/bin/python /app/manage.py shell -c '
 import json
-from langgraph_integration.models import LLMConfig
-config = LLMConfig.objects.filter(is_active=True).first()
+from code_analysis.models import CodeAnalysisLLMConfig
+config = CodeAnalysisLLMConfig.objects.filter(is_active=True).first()
 print(json.dumps({
     "id": config.id if config else None,
     "name": config.config_name if config else None,
@@ -168,12 +168,12 @@ if [ "$RUN_LLM_PROBE" = "1" ]; then
 import json
 import time
 from openai import OpenAI
-from langgraph_integration.models import LLMConfig
-config = LLMConfig.objects.filter(is_active=True).first()
+from code_analysis.models import CodeAnalysisLLMConfig
+config = CodeAnalysisLLMConfig.objects.filter(is_active=True).first()
 started = time.monotonic()
 try:
     if not config:
-        raise RuntimeError("没有已激活的模型配置")
+        raise RuntimeError("没有已启用的代码审查专用 LLM 配置")
     response = OpenAI(
         api_key=config.api_key or "EMPTY", base_url=config.api_url,
         timeout=60.0, max_retries=0,
