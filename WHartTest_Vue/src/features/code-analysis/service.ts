@@ -16,9 +16,22 @@ export interface CodeAnalysisLlmConfig {
   is_active: boolean;
 }
 
+export interface PlatformLlmConfigOption {
+  id: number;
+  config_name: string;
+  name: string;
+  api_url: string;
+  request_timeout: number;
+  max_retries: number;
+  is_active: boolean;
+  has_api_key: boolean;
+}
+
 export async function getCodeAnalysisLlmConfig() { const r = await request<any>({ url: `${base}/llm-config/`, method: 'GET' }); if (!r.success) throw new Error(r.error); return list<CodeAnalysisLlmConfig>(r.data)[0] || null; }
 export async function saveCodeAnalysisLlmConfig(data: CodeAnalysisLlmConfig) { const r = await request<CodeAnalysisLlmConfig>({ url: data.id ? `${base}/llm-config/${data.id}/` : `${base}/llm-config/`, method: data.id ? 'PATCH' : 'POST', data }); if (!r.success) throw new Error(r.error); return r.data!; }
 export async function testCodeAnalysisLlmConfig(id: number) { const r = await request<any>({ url: `${base}/llm-config/${id}/test-connection/`, method: 'POST' }); if (!r.success) throw new Error(r.error); return r.data; }
+export async function getPlatformLlmConfigs() { const r = await request<any>({ url: `${base}/llm-config/platform-configs/`, method: 'GET' }); if (!r.success) throw new Error(r.error); return list<PlatformLlmConfigOption>(r.data); }
+export async function copyPlatformLlmConfig(sourceConfigId: number) { const r = await request<CodeAnalysisLlmConfig>({ url: `${base}/llm-config/copy-from-platform/`, method: 'POST', data: { source_config_id: sourceConfigId } }); if (!r.success) throw new Error(r.error); return r.data!; }
 
 export async function getConnections() { const r = await request<any>({ url: `${base}/connections/`, method: 'GET' }); if (!r.success) throw new Error(r.error); return list<GitLabConnection>(r.data); }
 export async function createConnection(data: Partial<GitLabConnection>) { const r = await request<GitLabConnection>({ url: `${base}/connections/`, method: 'POST', data }); if (!r.success) throw new Error(r.error); return r.data!; }
@@ -27,7 +40,7 @@ export async function getRepositories(project: number) { const r = await request
 export async function createRepository(data: any) { const r = await request<CodeRepository>({ url: `${base}/repositories/`, method: 'POST', data }); if (!r.success) throw new Error(r.error); return r.data!; }
 export async function updateRepository(id: number, data: Partial<CodeRepository>) { const r = await request<CodeRepository>({ url: `${base}/repositories/${id}/`, method: 'PATCH', data }); if (!r.success) throw new Error(r.error); return r.data!; }
 export async function deleteRepository(id: number) { const r = await request({ url: `${base}/repositories/${id}/`, method: 'DELETE' }); if (!r.success) throw new Error(r.error); }
-export async function validateRepositoryAccess(id: number) { const r = await request<any>({ url: `${base}/repositories/${id}/validate-access/`, method: 'POST' }); if (!r.success) throw new Error(r.error); return r.data; }
+export async function validateRepositoryAccess(id: number, data?: { gitlab_project_id?: string; default_branch?: string }) { const r = await request<any>({ url: `${base}/repositories/${id}/validate-access/`, method: 'POST', data }); if (!r.success) throw new Error(r.error); return r.data; }
 export async function saveCredential(data: { project:number; connection:number; token:string }) { const r = await request<any>({ url: `${base}/credentials/`, method: 'POST', data }); if (!r.success) throw new Error(r.error); return r.data; }
 export async function getMergeRequests(repository: number) { const r = await request<any>({ url: `${base}/repositories/${repository}/merge-requests/`, method: 'GET' }); if (!r.success) throw new Error(r.error); return list<MergeRequest>(r.data); }
 export async function getRepositoryCommits(repository: number) { const r = await request<any>({ url: `${base}/repositories/${repository}/commits/`, method: 'GET' }); if (!r.success) throw new Error(r.error); return list<RepositoryCommit>(r.data); }

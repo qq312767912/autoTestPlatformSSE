@@ -749,8 +749,8 @@ def _invalid_ocr_result_reason(payload, result, timed_out, timeout_minutes, outp
 
 def _run_open_code_review(task):
     """调用 OCR CLI；GitLab 使用个人 Token维护任务独占浅仓库。"""
-    if task.mode == "quick":
-        return [], 0, "快速模式未启用 OCR", False, 0, {}
+    if task.mode != "deep":
+        return [], 0, f"{task.get_mode_display()}模式未启用 OCR", False, 0, {}
     try:
         config = _get_code_analysis_llm_config()
     except Exception as exc:
@@ -1119,6 +1119,8 @@ def _run_risk_test_design(task, findings):
     风险测试点的唯一事实来源是代码审查报告，避免再次从 Diff 泛化出
     “验证核心流程”这类没有落点的模板化描述。
     """
+    if task.mode == "quick":
+        return {}, 0, "快速模式仅执行规则扫描，风险测试点使用规则化内容"
     source_findings = _risk_findings_for_tests(findings)
     if not source_findings:
         return {}, 0, "代码审查报告没有高风险或中风险，无需生成风险排查点"
@@ -1312,23 +1314,27 @@ def _run_context_test_enrichment(task, findings):
 
 
 def _cache_report_complete(task):
-    """不复用 OCR 失败或缺少迭代分析的历史结果。"""
+    """按分析模式校验缓存：只有深度模式必须具备完整 OCR 结果。"""
     change, report = task.change_report or {}, task.test_report or {}
     if not change or not report or not task.raw_diff:
         return False
     if task.mode == "quick":
         return True
-    ocr = change.get("ocr_status") or {}
     summary = report.get("iteration_summary") or {}
-    return (
-        ocr.get("status") == "completed" and ocr.get("coverage") == 100
-        and bool(summary.get("title")) and bool(summary.get("change_groups"))
+    ai_complete = (
+        bool(summary.get("title")) and bool(summary.get("change_groups"))
         and any(
             point.get("test_type") == "迭代验证"
             and all(point.get(key) for key in ("title", "objective", "expected_result"))
             for point in report.get("test_requirements", [])
         )
     )
+    if not ai_complete:
+        return False
+    if task.mode == "standard":
+        return True
+    ocr = change.get("ocr_status") or {}
+    return ocr.get("status") == "completed" and ocr.get("coverage") == 100
 
 
 def _reuse_cached_result(task, original_base_sha, original_head_sha):
@@ -1396,6 +1402,8 @@ def _reuse_cached_result(task, original_base_sha, original_head_sha):
 
 def retry_ocr_analysis(task: AnalysisTask):
     """只重跑 OpenCodeReview，保留既有机器规则、降级 AI 结果和测试报告。"""
+    if task.mode != "deep":
+        raise ValueError("只有深度模式支持单独重试 OCR")
     _ensure_not_cancelled(task)
     AnalysisTaskExecutionLog.objects.create(task=task, event="started", message="OCR 单独重试开始")
     task.status, task.progress, task.current_step = "ai_analyzing", 65, "单独重试 OCR 审查"
@@ -1515,86 +1523,76 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
             static_notes = [f"静态检查不可用：{exc}"]
 
         _ensure_not_cancelled(task)
-        task.status, task.progress, task.current_step = "ai_analyzing", 65, "分批分析语义风险"
-        task.save(update_fields=["status", "progress", "current_step", "updated_at"])
         ai_failed = False
-        # 迭代需求来自 Diff，不依赖 OCR 风险；两项可同时执行。
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="iteration-design")
-        ocr_note, ocr_completed, ocr_coverage, ocr_diagnostics = "OCR 尚未执行", False, 0, {}
-        iteration_future = executor.submit(
-            _analysis_stage, task.pk, "迭代需求分析", _run_iteration_test_design,
-            task, analyzable_diffs, list(findings),
+        ocr_note, ocr_completed, ocr_coverage, ocr_diagnostics = (
+            f"{task.get_mode_display()}模式未启用 OCR", False, 0, {}
         )
-        try:
-            ocr_findings, ocr_tokens, ocr_note, ocr_completed, ocr_coverage, ocr_diagnostics = _analysis_stage(task.pk, "OCR审查", _run_open_code_review, task)
-            if ocr_completed:
-                ocr_findings, chinese_tokens, chinese_note = _normalize_ocr_findings(task, ocr_findings)
-                findings.extend(ocr_findings)
-                ai_findings, iteration_test_points, impact_modules, enrichment_tokens, enrichment_note = [], [], [], 0, ""
-                fallback_tokens, fallback_note = 0, ""
-                failed_paths = {item.get("path") for item in ocr_diagnostics.get("failure_details", []) if item.get("path")}
-                fallback_diffs = [item for item in analyzable_diffs if item.get("path") in failed_paths]
-                if fallback_diffs:
-                    try:
-                        fallback_findings, _unused_points, fallback_modules, fallback_tokens, fallback_coverage, fallback_note = _run_ai_batches(
-                            task, fallback_diffs, findings,
-                            client if task.repository.source_type != "local_git" else None,
-                        )
-                        findings.extend(fallback_findings)
-                        impact_modules.extend(fallback_modules)
-                        selected_count = int(ocr_diagnostics.get("selected") or len(analyzable_diffs) or 1)
-                        ocr_covered = int(ocr_diagnostics.get("completed") or 0) + int(ocr_diagnostics.get("reused") or 0)
-                        fallback_covered = len(fallback_diffs) * fallback_coverage / 100
-                        effective_coverage = round(min(100, (ocr_covered + fallback_covered) / selected_count * 100), 1)
-                        ocr_diagnostics["fallback"] = {
-                            "triggered": True, "status": "completed" if fallback_coverage >= 100 else "partial",
-                            "files": sorted(failed_paths), "file_count": len(fallback_diffs),
-                            "coverage": fallback_coverage, "effective_coverage": effective_coverage,
-                            "note": fallback_note,
-                        }
-                    except AnalysisCancelled:
-                        raise
-                    except Exception as fallback_exc:
-                        # OCR 已完成的分组仍然有效；补审失败不能中断迭代总结和测试点生成。
-                        fallback_coverage, effective_coverage = 0, ocr_coverage
-                        fallback_note = f"OCR失败文件补审失败，已保留OCR完成结果：{fallback_exc}"
-                        ocr_diagnostics["fallback"] = {
-                            "triggered": True, "status": "failed", "files": sorted(failed_paths),
-                            "file_count": len(fallback_diffs), "coverage": 0,
-                            "effective_coverage": ocr_coverage, "note": fallback_note,
-                        }
-                else:
-                    fallback_coverage, effective_coverage = 0, ocr_coverage
-                    ocr_diagnostics["fallback"] = {"triggered": False, "file_count": 0, "coverage": 0, "effective_coverage": ocr_coverage}
-                document_test_points, document_modules, enrichment_tokens, enrichment_note = _run_context_test_enrichment(task, findings)
-                impact_modules.extend(document_modules)
-                token_usage, ai_coverage = ocr_tokens + chinese_tokens + fallback_tokens + enrichment_tokens, effective_coverage
-                ai_note = f"{ocr_note}；{chinese_note}；{fallback_note}；{enrichment_note}"
-            else:
-                ai_findings, _unused_points, impact_modules, token_usage, ai_coverage, ai_note = _run_ai_batches(task, analyzable_diffs, findings, client if task.repository.source_type != "local_git" else None)
-                ai_note = f"{ocr_note}；{ai_note}"
+        iteration_summary, iteration_test_points = {}, []
+        impact_modules, document_test_points = [], []
+        token_usage, ai_coverage = 0, 0
+        ai_note = ""
+        iteration_future = None
+        executor = None
+
+        if task.mode == "quick":
+            # 快速模式的承诺是零模型调用：不启动 AI、OCR、迭代总结或风险测试点模型。
+            task.status, task.progress, task.current_step = "generating_tests", 70, "整理规则扫描结果"
+            task.save(update_fields=["status", "progress", "current_step", "updated_at"])
+            ai_note = "快速模式仅执行规则扫描，未调用 AI 或 OCR"
+        else:
+            task.status, task.progress, task.current_step = "ai_analyzing", 65, "执行 AI 降级分析"
+            task.save(update_fields=["status", "progress", "current_step", "updated_at"])
+            # 标准与深度模式都必须跑 AI 分批分析；深度模式在此基础上额外跑 OCR。
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="iteration-design")
+            iteration_future = executor.submit(
+                _analysis_stage, task.pk, "迭代需求分析", _run_iteration_test_design,
+                task, analyzable_diffs, list(findings),
+            )
+            try:
+                ai_findings, _unused_points, impact_modules, ai_tokens, ai_coverage, ai_note = _analysis_stage(
+                    task.pk, "AI降级分析", _run_ai_batches,
+                    task, analyzable_diffs, findings,
+                    client if task.repository.source_type != "local_git" else None,
+                )
                 findings.extend(ai_findings)
+                token_usage += ai_tokens
+
+                if task.mode == "deep":
+                    ocr_findings, ocr_tokens, ocr_note, ocr_completed, ocr_coverage, ocr_diagnostics = _analysis_stage(
+                        task.pk, "OCR审查", _run_open_code_review, task,
+                    )
+                    token_usage += ocr_tokens
+                    if ocr_completed:
+                        ocr_findings, chinese_tokens, chinese_note = _normalize_ocr_findings(task, ocr_findings)
+                        findings.extend(ocr_findings)
+                        token_usage += chinese_tokens
+                        ocr_note = f"{ocr_note}；{chinese_note}" if chinese_note else ocr_note
+                    AnalysisTaskExecutionLog.objects.create(
+                        task=task, event="stage_finished", message="OCR 完整度诊断",
+                        detail={"stage": "OCR完整度", **ocr_diagnostics},
+                    )
+
                 document_test_points, document_modules, enrichment_tokens, enrichment_note = _run_context_test_enrichment(task, findings)
                 impact_modules.extend(document_modules)
                 token_usage += enrichment_tokens
-            AnalysisTaskExecutionLog.objects.create(
-                task=task, event="stage_finished", message="OCR 完整度诊断",
-                detail={"stage": "OCR完整度", **ocr_diagnostics},
-            )
-            iteration_summary, iteration_test_points, iteration_tokens, iteration_note = iteration_future.result()
-            iteration_test_points.extend(document_test_points)
-            token_usage += iteration_tokens
-            ai_note = f"{ai_note}；{iteration_note}"
-        except AnalysisCancelled:
-            raise
-        except Exception as exc:
-            ai_findings, iteration_summary, iteration_test_points, impact_modules, token_usage, ai_coverage = [], {}, [], [], 0, 0
-            ai_note, ai_failed = f"AI分析失败，已保留机器结果：{exc}", True
-            # 审查失败时仍保留独立生成的迭代需求。
-            iteration_summary, iteration_test_points, iteration_tokens, iteration_note = iteration_future.result()
-            token_usage += iteration_tokens
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+                iteration_summary, iteration_test_points, iteration_tokens, iteration_note = iteration_future.result()
+                iteration_test_points.extend(document_test_points)
+                token_usage += iteration_tokens
+                notes = [ai_note, enrichment_note, iteration_note]
+                if task.mode == "deep":
+                    notes.insert(1, ocr_note)
+                ai_note = "；".join(note for note in notes if note)
+            except AnalysisCancelled:
+                raise
+            except Exception as exc:
+                ai_failed = True
+                ai_note = f"AI分析失败，已保留机器结果：{exc}"
+                if iteration_future is not None:
+                    iteration_summary, iteration_test_points, iteration_tokens, iteration_note = iteration_future.result()
+                    token_usage += iteration_tokens
+                    ai_note = f"{ai_note}；{iteration_note}"
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
         _ensure_not_cancelled(task)
         task.status, task.progress, task.current_step = "generating_tests", 82, "生成测试分析报告"
@@ -1607,7 +1605,11 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
             finding.pop("suggested_patch", None)
             finding.pop("patch_status", None)
             finding.pop("patch_validation_message", None)
-        risk_test_points, risk_test_tokens, risk_test_note = _run_risk_test_design(task, findings)
+        if task.mode == "quick":
+            risk_test_points, risk_test_tokens = {}, 0
+            risk_test_note = "快速模式仅使用规则扫描结果生成规则化测试点"
+        else:
+            risk_test_points, risk_test_tokens, risk_test_note = _run_risk_test_design(task, findings)
         for finding in findings:
             finding.pop("_risk_test_point", None)
         token_usage += risk_test_tokens
@@ -1618,8 +1620,8 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         for finding in findings:
             severity_counts[finding["severity"]] = severity_counts.get(finding["severity"], 0) + 1
             source_counts[finding["source"]] = source_counts.get(finding["source"], 0) + 1
-        if task.mode == "quick":
-            ocr_status = {"status": "skipped", "message": "快速模式未启用 OCR", "coverage": 0, "diagnostics": ocr_diagnostics}
+        if task.mode != "deep":
+            ocr_status = {"status": "skipped", "message": f"{task.get_mode_display()}模式未启用 OCR", "coverage": 0, "diagnostics": ocr_diagnostics}
         elif ocr_completed and ocr_coverage >= 100:
             ocr_status = {"status": "completed", "message": "OCR 审查已完成", "coverage": ocr_coverage, "diagnostics": ocr_diagnostics}
         elif ocr_completed:
@@ -1668,13 +1670,14 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         task.ai_coverage = ai_coverage
         task.token_usage = token_usage
         ai_incomplete = task.mode != "quick" and bool(analyzable_diffs) and (ai_failed or ai_coverage < 100 or iteration_incomplete)
-        ocr_degraded = task.mode != "quick" and not ocr_completed and not ai_incomplete
+        # 深度模式明确包含 OCR；OCR 未完整覆盖时，即使 AI 已完成也应标识为降级完成。
+        ocr_degraded = task.mode == "deep" and (not ocr_completed or ocr_coverage < 100) and not ai_incomplete
         final_status = "partial" if ai_incomplete else ("degraded" if ocr_degraded else "completed")
         task.status, task.progress, task.current_step, task.completed_at = final_status, 100, "分析完成", timezone.now()
         task.save()
         AnalysisTaskExecutionLog.objects.create(
             task=task, event=final_status,
-            message=("分析完成" if final_status == "completed" else "OCR 失败，AI 降级分析已完成" if final_status == "degraded" else "分析部分完成，请查看覆盖缺口"),
+            message=("分析完成" if final_status == "completed" else "OCR 未完整，AI 降级分析已完成" if final_status == "degraded" else "分析部分完成，请查看覆盖缺口"),
             detail={"machine_coverage": task.machine_coverage, "ai_coverage": task.ai_coverage, "risk_count": len(findings)},
         )
         return task

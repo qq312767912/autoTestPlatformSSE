@@ -193,6 +193,18 @@
     <a-modal v-model:visible="llmConfigVisible" title="代码审查专用 LLM" :ok-loading="llmConfigSaving" width="680px" @ok="saveLlmConfig">
       <a-alert type="info" style="margin-bottom:16px">此配置只用于代码审查、OpenCodeReview、迭代总结和风险测试点，不影响平台对话及其他 AI 功能。API Key 加密保存且不会回显。</a-alert>
       <a-form :model="llmConfigForm" layout="vertical">
+        <a-form-item label="从已有 LLM 配置复制">
+          <div style="display:flex;gap:12px;width:100%">
+            <a-select v-model="selectedPlatformLlmId" :loading="platformLlmLoading" allow-clear placeholder="请选择已有配置" style="flex:1">
+              <a-option v-for="item in platformLlmConfigs" :key="item.id" :value="item.id">
+                {{ item.config_name }}（{{ item.name }}）{{ item.is_active ? ' · 当前启用' : '' }}
+              </a-option>
+            </a-select>
+            <a-button type="primary" :disabled="!selectedPlatformLlmId" :loading="platformLlmCopying" @click="usePlatformLlmConfig">复制并使用</a-button>
+          </div>
+          <template #extra>密钥由后端直接复制，不会发送到浏览器；复制后可在下方独立调整。</template>
+        </a-form-item>
+        <a-divider>或手工填写</a-divider>
         <a-form-item label="配置名称" required><a-input v-model="llmConfigForm.config_name" placeholder="例如：内网代码审查模型" /></a-form-item>
         <a-form-item label="API URL" required><a-input v-model="llmConfigForm.api_url" placeholder="例如：http://模型服务/v1" /></a-form-item>
         <a-form-item label="模型名称" required><a-input v-model="llmConfigForm.name" placeholder="填写模型服务中的真实模型 ID" /></a-form-item>
@@ -232,8 +244,9 @@
         <a-form-item label="需求文档（可选）"><a-select v-model="form.requirement_document_ids" multiple allow-clear placeholder="可选择多篇已上传的需求文档" :max-tag-count="2"><a-option v-for="doc in projectDocuments" :key="doc.id" :value="doc.id">{{ doc.title }}</a-option></a-select></a-form-item>
         <a-form-item label="接口文档（可选）"><a-select v-model="form.api_document_ids" multiple allow-clear placeholder="可选择多篇已上传的接口/设计文档" :max-tag-count="2"><a-option v-for="doc in projectDocuments" :key="doc.id" :value="doc.id">{{ doc.title }}</a-option></a-select></a-form-item>
         <a-form-item>
-          <template #label>分析模式 <a-tooltip position="right"><icon-question-circle class="mode-help" /><template #content><div class="mode-tooltip"><div><b>快速</b><span>仅规则扫描；最快、零 Token。适合提交前筛查。</span></div><div><b>标准</b><span>规则 + AI 分批分析；速度与质量均衡，适合日常审查。</span></div><div><b>深度</b><span>扩大 AI 覆盖范围；适合核心改造与发布前审查，耗时和 Token 较高。</span></div></div></template></a-tooltip></template>
+          <template #label>分析模式 <a-tooltip position="right"><icon-question-circle class="mode-help" /><template #content><div class="mode-tooltip"><div><b>快速</b><span>仅规则扫描，不调用模型。</span></div><div><b>标准</b><span>规则扫描 + AI 降级分析，不调用 OCR。</span></div><div><b>深度</b><span>规则扫描 + AI 降级分析 + OCR 分析。</span></div></div></template></a-tooltip></template>
           <a-radio-group v-model="form.mode" type="button"><a-radio value="quick">快速</a-radio><a-radio value="standard">标准</a-radio><a-radio value="deep">深度</a-radio></a-radio-group>
+          <div class="mode-description">{{ modeDescription }}</div>
         </a-form-item>
       </a-form>
     </a-modal>
@@ -254,7 +267,7 @@
           </div>
         </a-tab-pane>
         <a-tab-pane v-if="canViewRepositories" key="repository" title="项目仓库">
-          <a-form v-if="canAddRepositories" :model="repoForm" layout="vertical"><a-form-item label="GitLab项目ID或完整路径"><a-input v-model="repoForm.gitlab_project_id" placeholder="推荐填写 group/subgroup/project" /><template #extra>当前用户 Token 必须对该项目具有读取权限。</template></a-form-item><a-form-item label="GitLab连接"><a-select v-model="repoForm.connection"><a-option v-for="c in connections" :key="c.id" :value="c.id">{{ c.name }}</a-option></a-select></a-form-item><a-form-item label="仓库名称"><a-input v-model="repoForm.name" /></a-form-item><a-form-item label="项目路径"><a-input v-model="repoForm.path_with_namespace" /></a-form-item><a-form-item label="默认分支"><a-input v-model="repoForm.default_branch" placeholder="例如 master、main 或 develop" /><template #extra>校验仓库时会以 GitLab 项目的真实信息自动校正。</template></a-form-item><a-button type="primary" @click="addRepository">关联仓库</a-button></a-form>
+          <a-form v-if="canAddRepositories" :model="repoForm" layout="vertical"><a-form-item label="GitLab项目ID或完整路径"><a-input v-model="repoForm.gitlab_project_id" placeholder="推荐填写 group/subgroup/project" /><template #extra>当前用户 Token 必须对该项目具有读取权限。</template></a-form-item><a-form-item label="GitLab连接"><a-select v-model="repoForm.connection"><a-option v-for="c in connections" :key="c.id" :value="c.id">{{ c.name }}</a-option></a-select></a-form-item><a-form-item label="仓库名称"><a-input v-model="repoForm.name" /></a-form-item><a-form-item label="项目路径"><a-input v-model="repoForm.path_with_namespace" /></a-form-item><a-form-item label="默认分支"><a-input v-model="repoForm.default_branch" placeholder="例如 master、main 或 develop" /><template #extra>新建时默认为 master；保存并校验会确认该分支在 GitLab 中存在。</template></a-form-item><a-button type="primary" @click="addRepository">关联仓库</a-button></a-form>
         </a-tab-pane>
         <a-tab-pane v-if="canManageCredentials" key="token" title="我的Token">
           <a-form :model="tokenForm" layout="vertical"><a-form-item label="GitLab连接"><a-select v-model="tokenForm.connection"><a-option v-for="c in connections" :key="c.id" :value="c.id">{{ c.name }}</a-option></a-select></a-form-item><a-form-item label="Personal Access Token"><a-input-password v-model="tokenForm.token" placeholder="仅用于当前用户只读访问" /></a-form-item><a-button type="primary" @click="saveToken">加密保存</a-button></a-form>
@@ -299,6 +312,7 @@ const canManageCredentials = computed(() => authStore.hasPermission('code_analys
 const tasks = ref<AnalysisTask[]>([]), repositories = ref<CodeRepository[]>([]), connections = ref<GitLabConnection[]>([]), mergeRequests = ref<MergeRequest[]>([]), repositoryCommits = ref<RepositoryCommit[]>([]), projectDocuments = ref<any[]>([]);
 const loading = ref(false), submitting = ref(false), mrLoading = ref(false), commitLoading = ref(false), createVisible = ref(false), configVisible = ref(false);
 const llmConfigVisible = ref(false), llmConfigSaving = ref(false), llmConfigTesting = ref(false);
+const platformLlmConfigs = ref<api.PlatformLlmConfigOption[]>([]), platformLlmLoading = ref(false), platformLlmCopying = ref(false), selectedPlatformLlmId = ref<number>();
 const selectedTask = ref<AnalysisTask|null>(null);
 const executionLogs = ref<AnalysisExecutionLog[]>([]);
 const testcaseModules = ref<any[]>([]), convertVisible = ref(false), converting = ref(false), convertModuleId = ref<number|undefined>(), convertingDraft = ref<any>(null);
@@ -309,8 +323,13 @@ const testTypeFilter = ref<string[]>([]);
 const diffVisible = ref(false), diffLoading = ref(false), diffTitle = ref('代码 Diff'), diffText = ref(''), diffNotice = ref(''), diffNoticeType = ref<'success'|'warning'|'info'>('info');
 const patchLoadingKey = ref('');
 const form = reactive<any>({ repository:null, source_type:'commits', merge_request_iid:null, base_sha:undefined, head_sha:undefined, requirement_document_ids:[], api_document_ids:[], mode:'standard' });
+const modeDescription = computed(() => ({
+  quick:'仅规则扫描：速度最快，不调用 AI 或 OCR。',
+  standard:'规则扫描 + AI 降级分析：适合日常审查，不调用 OCR。',
+  deep:'规则扫描 + AI 降级分析 + OCR 分析：适合核心改造或发布前审查。',
+} as Record<string,string>)[form.mode] || '');
 const connectionForm = reactive<any>({ name:'内网 GitLab', base_url:'', verify_ssl:true, is_active:true });
-const repoForm = reactive<any>({ connection:null, gitlab_project_id:'', name:'', path_with_namespace:'', default_branch:'main' });
+const repoForm = reactive<any>({ connection:null, gitlab_project_id:'', name:'', path_with_namespace:'', default_branch:'master' });
 const localRepoForm = reactive<any>({ name:'当前工作区', local_path:'.' });
 const llmConfigForm = reactive<api.CodeAnalysisLlmConfig>({ config_name:'代码审查 LLM', name:'', api_url:'', api_key:'', has_api_key:false, request_timeout:600, max_retries:2, is_active:true });
 const selectedRepository = computed(() => repositories.value.find(item => item.id === form.repository));
@@ -444,7 +463,7 @@ const executionEventLabel = (event:string) => ({created:'已创建',queued:'已�
 const terminalStatuses = new Set(['completed','degraded','partial','failed','cancelled']);
 const isRunning = (task:AnalysisTask) => !terminalStatuses.has(task.status);
 const canRerun = (task:AnalysisTask) => ['completed','degraded','partial','failed','cancelled'].includes(task.status);
-const canRetryOcr = (task:AnalysisTask) => ['completed','degraded','partial'].includes(task.status) && ['failed','partial'].includes(task.change_report?.ocr_status?.status || '');
+const canRetryOcr = (task:AnalysisTask) => task.mode === 'deep' && ['completed','degraded','partial'].includes(task.status) && ['failed','partial'].includes(task.change_report?.ocr_status?.status || '');
 const draftStatus = (item:any) => selectedTask.value?.test_requirement_drafts?.find(draft => draft.id === item.id)?.status || 'draft';
 const draftStatusLabel = (value:string) => ({draft:'待处理',accepted:'已采纳',ignored:'已忽略',converted:'已转正式用例'} as any)[value] || value;
 const draftStatusColor = (value:string) => ({draft:'arcoblue',accepted:'green',ignored:'gray',converted:'purple'} as any)[value] || 'gray';
@@ -456,7 +475,8 @@ const iterationConclusion = (task:AnalysisTask) => {
   return '未发现明显高风险变化，建议完成常规变更回归';
 };
 async function download(task:AnalysisTask,type:'change'|'test'){try{await api.downloadReport(task.id,type);Message.success('报告下载已开始')}catch(e:any){Message.error(e.message||'报告下载失败')}}
-async function openLlmConfig(){llmConfigVisible.value=true;try{const config=await api.getCodeAnalysisLlmConfig();Object.assign(llmConfigForm,{id:undefined,config_name:'代码审查 LLM',name:'',api_url:'',api_key:'',has_api_key:false,request_timeout:600,max_retries:2,is_active:true},config||{},{api_key:''})}catch(e:any){Message.error(e.message||'读取代码审查模型配置失败')}}
+async function openLlmConfig(){llmConfigVisible.value=true;selectedPlatformLlmId.value=undefined;platformLlmLoading.value=true;try{const [config,options]=await Promise.all([api.getCodeAnalysisLlmConfig(),api.getPlatformLlmConfigs()]);platformLlmConfigs.value=options;Object.assign(llmConfigForm,{id:undefined,config_name:'代码审查 LLM',name:'',api_url:'',api_key:'',has_api_key:false,request_timeout:600,max_retries:2,is_active:true},config||{},{api_key:''})}catch(e:any){Message.error(e.message||'读取代码审查模型配置失败')}finally{platformLlmLoading.value=false}}
+async function usePlatformLlmConfig(){if(!selectedPlatformLlmId.value)return;platformLlmCopying.value=true;try{const saved=await api.copyPlatformLlmConfig(selectedPlatformLlmId.value);Object.assign(llmConfigForm,saved,{api_key:''});selectedPlatformLlmId.value=undefined;Message.success('已复制为代码审查专用配置，可继续调整或测试连接')}catch(e:any){Message.error(e.message||'复制 LLM 配置失败')}finally{platformLlmCopying.value=false}}
 async function saveLlmConfig(){if(!llmConfigForm.config_name||!llmConfigForm.api_url||!llmConfigForm.name||(!llmConfigForm.api_key&&!llmConfigForm.has_api_key)){Message.warning('请完整填写代码审查模型配置');return}llmConfigSaving.value=true;try{const saved=await api.saveCodeAnalysisLlmConfig({...llmConfigForm});Object.assign(llmConfigForm,saved,{api_key:''});llmConfigVisible.value=false;Message.success('代码审查专用 LLM 已保存')}catch(e:any){Message.error(e.message||'保存代码审查模型配置失败')}finally{llmConfigSaving.value=false}}
 async function testLlmConfig(){if(!llmConfigForm.id)return;llmConfigTesting.value=true;try{const result=await api.testCodeAnalysisLlmConfig(llmConfigForm.id);Message.success(result?.message||'连接测试成功')}catch(e:any){Message.error(e.message||'连接测试失败')}finally{llmConfigTesting.value=false}}
 async function openDiff(item:any){if(!selectedTask.value)return;diffVisible.value=true;diffLoading.value=true;diffText.value='';diffNotice.value='';diffTitle.value=`相关 Diff · ${item.file || '变更文件'}`;try{const payload=await api.getTaskDiff(selectedTask.value.id,item.file);diffText.value=relevantDiffFragment(payload?.diff||'',item.line_start,item.evidence)}catch(e:any){Message.error(e.message||'读取 Diff 失败')}finally{diffLoading.value=false}}
@@ -516,7 +536,7 @@ async function submitTask(){
   }catch(e:any){Message.error(e.message||'提交分析失败');await loadTasks()}finally{submitting.value=false}
 }
 async function addConnection(){try{await api.createConnection(connectionForm);connections.value=await api.getConnections();Message.success('连接已保存')}catch(e:any){Message.error(e.message)} }
-async function addRepository(){const project=projectStore.currentProjectId;if(!project)return;try{await api.createRepository({...repoForm,project});repositories.value=await api.getRepositories(project);Message.success('仓库已关联')}catch(e:any){Message.error(e.message)} }
+async function addRepository(){const project=projectStore.currentProjectId;if(!project)return;try{await api.createRepository({...repoForm,project});[repositories.value,connections.value]=await Promise.all([api.getRepositories(project),api.getConnections()]);Message.success('仓库已关联')}catch(e:any){Message.error(e.message)} }
 async function addLocalRepository(){const project=projectStore.currentProjectId;if(!project)return;try{await api.createRepository({project,source_type:'local_git',name:localRepoForm.name,path_with_namespace:localRepoForm.local_path,local_path:localRepoForm.local_path,default_branch:'main'});repositories.value=await api.getRepositories(project);Message.success('本地 Git 仓库已关联')}catch(e:any){Message.error(e.message)} }
 function removeRepository(repo:CodeRepository){
   const taskCount=repo.analysis_task_count||0;
@@ -524,7 +544,7 @@ function removeRepository(repo:CodeRepository){
     title:'删除代码仓库？',
     content:`将删除“${repo.name}”的平台关联、${taskCount} 条审查记录和平台缓存代码。GitLab 上的真实仓库不会被删除。`,
     hideCancel:false,
-    onOk:async()=>{try{await api.deleteRepository(repo.id);repositories.value=repositories.value.filter(item=>item.id!==repo.id);Message.success('代码仓库及平台拉取目录已删除')}catch(e:any){Message.error(e.message||'删除代码仓库失败')}}
+    onOk:async()=>{try{await api.deleteRepository(repo.id);repositories.value=repositories.value.filter(item=>item.id!==repo.id);connections.value=await api.getConnections();Message.success('代码仓库及平台拉取目录已删除')}catch(e:any){Message.error(e.message||'删除代码仓库失败')}}
   })
 }
 async function saveRepositoryBranch(repo:CodeRepository){
@@ -536,14 +556,12 @@ async function validateRepository(repo:CodeRepository){
   const projectId=String(repo.gitlab_project_id||'').trim();
   if(!projectId){Message.warning('请输入 GitLab 项目数字 ID 或完整路径');return}
   try{
-    const saved=await api.updateRepository(repo.id,{gitlab_project_id:projectId,default_branch:String(repo.default_branch||'').trim()||'main'});
-    Object.assign(repo,saved);
-    const result=await api.validateRepositoryAccess(repo.id);
+    const result=await api.validateRepositoryAccess(repo.id,{gitlab_project_id:projectId,default_branch:String(repo.default_branch||'').trim()||'master'});
     Object.assign(repo,result.repository||{});
-    Message.success('GitLab 项目访问正常，仓库信息已同步');
+    Message.success(result.detail||'GitLab 项目与配置分支校验通过');
   }catch(e:any){Message.error(errorText(e,'GitLab 项目校验失败'))}
 }
-const connectionRepositoryCount=(connectionId:number)=>repositories.value.filter(repo=>repo.connection===connectionId).length;
+const connectionRepositoryCount=(connectionId:number)=>connections.value.find(item=>item.id===connectionId)?.repository_count??repositories.value.filter(repo=>repo.connection===connectionId).length;
 function removeConnection(connection:GitLabConnection){
   const repositoryCount=connectionRepositoryCount(connection.id);
   Modal.warning({title:'删除 GitLab 连接？',content:repositoryCount?`该连接仍被 ${repositoryCount} 个项目仓库使用，请先删除这些仓库关联。`:`将删除“${connection.name}”的平台连接和已保存的用户 Token，不会影响 GitLab 服务。`,hideCancel:false,okButtonProps:{disabled:repositoryCount>0},onOk:async()=>{try{await api.deleteConnection(connection.id);connections.value=connections.value.filter(item=>item.id!==connection.id);Message.success('GitLab 连接已删除')}catch(e:any){Message.error(errorText(e,'删除 GitLab 连接失败'))}}})

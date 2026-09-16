@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from django.http import HttpResponse
 from celery import current_app
 from django.db import transaction
+from django.db.models import Count
 
 from projects.models import ProjectMember
 from wharttest_django.permissions import HasModelPermission, permission_required
@@ -33,6 +34,53 @@ class CodeAnalysisLLMConfigViewSet(viewsets.ModelViewSet):
     serializer_class = CodeAnalysisLLMConfigSerializer
     permission_classes = [IsAuthenticated, HasModelPermission]
 
+    @action(detail=False, methods=["get"], url_path="platform-configs")
+    def platform_configs(self, request):
+        """列出可复用的通用 LLM 配置，不向浏览器返回 API Key。"""
+        from langgraph_integration.models import LLMConfig
+
+        configs = LLMConfig.objects.order_by("-is_active", "config_name")
+        return Response([
+            {
+                "id": item.pk,
+                "config_name": item.config_name,
+                "name": item.name,
+                "api_url": item.api_url,
+                "request_timeout": item.request_timeout,
+                "max_retries": item.max_retries,
+                "is_active": item.is_active,
+                "has_api_key": bool(item.api_key),
+            }
+            for item in configs
+        ])
+
+    @action(detail=False, methods=["post"], url_path="copy-from-platform")
+    def copy_from_platform(self, request):
+        """在服务端复制通用配置，密钥全程不经过前端。"""
+        from langgraph_integration.models import LLMConfig
+
+        source_id = request.data.get("source_config_id")
+        try:
+            source = LLMConfig.objects.get(pk=source_id)
+        except (LLMConfig.DoesNotExist, TypeError, ValueError):
+            return Response({"detail": "所选 LLM 配置不存在"}, status=status.HTTP_400_BAD_REQUEST)
+        if not source.api_key:
+            return Response(
+                {"detail": "所选 LLM 配置没有 API Key，请改为手工配置"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        config = CodeAnalysisLLMConfig.objects.order_by("pk").first() or CodeAnalysisLLMConfig()
+        config.config_name = f"代码审查 - {source.config_name}"[:255]
+        config.name = source.name
+        config.api_url = source.api_url
+        config.request_timeout = max(30, min(source.request_timeout or 600, 7200))
+        config.max_retries = max(0, min(source.max_retries or 0, 10))
+        config.is_active = True
+        config.set_api_key(source.api_key)
+        config.save()
+        return Response(self.get_serializer(config).data)
+
     @action(detail=True, methods=["post"], url_path="test-connection")
     def test_connection(self, request, pk=None):
         from langgraph_integration.views import create_llm_instance
@@ -47,11 +95,12 @@ class CodeAnalysisLLMConfigViewSet(viewsets.ModelViewSet):
 
 
 class GitLabConnectionViewSet(viewsets.ModelViewSet):
-    queryset = GitLabConnection.objects.all()
+    queryset = GitLabConnection.objects.annotate(repository_count=Count("repositories", distinct=True))
     serializer_class = GitLabConnectionSerializer
     permission_classes = [IsAuthenticated, HasModelPermission]
     def _admin(self):
-        if not self.request.user.is_superuser: raise PermissionDenied("仅系统管理员可维护GitLab连接")
+        if not (self.request.user.is_superuser or self.request.user.is_staff):
+            raise PermissionDenied("仅平台管理员可维护 GitLab 连接")
     def perform_create(self, serializer): self._admin(); serializer.save()
     def perform_update(self, serializer): self._admin(); serializer.save()
     def destroy(self, request, *args, **kwargs):
@@ -101,14 +150,17 @@ class ProjectRepositoryViewSet(viewsets.ModelViewSet):
         return GitLabClient(repo.connection, credential.get_token())
 
     @staticmethod
-    def _sync_gitlab_default_branch(repo, client):
-        """以 GitLab 项目元数据为准，自动修正历史记录中写死的 main。"""
+    def _configured_gitlab_branch(repo, client):
+        """优先使用用户配置的分支；仅历史空值才回退到 GitLab 默认分支。"""
+        configured_branch = str(repo.default_branch or "").strip()
+        if configured_branch:
+            return configured_branch
         project = client.project(repo.gitlab_project_id)
-        default_branch = str(project.get("default_branch") or "").strip()
-        if default_branch and repo.default_branch != default_branch:
-            repo.default_branch = default_branch
+        configured_branch = str(project.get("default_branch") or "master").strip()
+        if configured_branch:
+            repo.default_branch = configured_branch
             repo.save(update_fields=["default_branch", "updated_at"])
-        return default_branch or repo.default_branch or None
+        return configured_branch
 
     @action(detail=True, methods=["get"], url_path="commits")
     def commits(self, request, pk=None):
@@ -118,8 +170,8 @@ class ProjectRepositoryViewSet(viewsets.ModelViewSet):
                 data = LocalGitClient(repo.local_path).commits(limit=40)
             else:
                 client = self._gitlab_client(repo, request.user)
-                default_branch = self._sync_gitlab_default_branch(repo, client)
-                data = client.commits(repo.gitlab_project_id, default_branch, limit=40)
+                configured_branch = self._configured_gitlab_branch(repo, client)
+                data = client.commits(repo.gitlab_project_id, configured_branch, limit=40)
             return Response(data)
         except PermissionDenied:
             raise
@@ -179,12 +231,20 @@ class ProjectRepositoryViewSet(viewsets.ModelViewSet):
         if repo.source_type != "gitlab":
             return Response({"detail": "本地 Git 仓库无需校验 GitLab 访问权限"}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            project = self._gitlab_client(repo, request.user).project(repo.gitlab_project_id)
+            client = self._gitlab_client(repo, request.user)
+            gitlab_project_id = str(request.data.get("gitlab_project_id") or repo.gitlab_project_id).strip()
+            project = client.project(gitlab_project_id)
+            configured_branch = str(request.data.get("default_branch") or repo.default_branch or "").strip()
+            if not configured_branch:
+                configured_branch = str(project.get("default_branch") or "master").strip()
+            # GitLab commit 查询同时支持分支名，用它确认用户配置的分支真实存在。
+            client.commit(gitlab_project_id, configured_branch)
             update_fields = []
             values = {
+                "gitlab_project_id": gitlab_project_id,
                 "name": str(project.get("name") or repo.name).strip(),
                 "path_with_namespace": str(project.get("path_with_namespace") or repo.path_with_namespace).strip(),
-                "default_branch": str(project.get("default_branch") or repo.default_branch or "main").strip(),
+                "default_branch": configured_branch,
             }
             for field, value in values.items():
                 if value and getattr(repo, field) != value:
@@ -192,7 +252,11 @@ class ProjectRepositoryViewSet(viewsets.ModelViewSet):
                     update_fields.append(field)
             if update_fields:
                 repo.save(update_fields=[*update_fields, "updated_at"])
-            return Response({"success": True, "detail": "GitLab 项目访问正常", "repository": self.get_serializer(repo).data})
+            return Response({
+                "success": True,
+                "detail": f"GitLab 项目访问正常，分支 {configured_branch} 已校验",
+                "repository": self.get_serializer(repo).data,
+            })
         except PermissionDenied:
             raise
         except Exception as exc:
@@ -279,6 +343,8 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
             task = AnalysisTask.objects.select_for_update().get(pk=pk)
             if not _can_access(request.user, task.project_id):
                 raise PermissionDenied("仅项目成员可重试 OCR")
+            if task.mode != "deep":
+                return Response({"detail": "只有深度模式支持单独重试 OCR"}, status=status.HTTP_409_CONFLICT)
             if task.status not in {"completed", "degraded", "partial"}:
                 return Response({"detail": "当前任务尚未完成，不能单独重试 OCR"}, status=status.HTTP_409_CONFLICT)
             if (task.change_report.get("ocr_status") or {}).get("status") not in {"failed", "partial"}:

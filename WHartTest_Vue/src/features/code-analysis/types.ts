@@ -1,4 +1,4 @@
-export interface GitLabConnection { id: number; name: string; base_url: string; verify_ssl: boolean; is_active: boolean }
+export interface GitLabConnection { id: number; name: string; base_url: string; verify_ssl: boolean; is_active: boolean; repository_count?: number }
 export interface CodeRepository { id: number; project: number; source_type: 'gitlab'|'local_git'; connection?: number; connection_name?: string; name: string; path_with_namespace: string; gitlab_project_id?: string; local_path?: string; default_branch: string; analysis_task_count?: number }
 export interface MergeRequest { iid: number; title: string; source_branch: string; target_branch: string; author?: { name: string } }
 export interface RepositoryCommit { id: string; short_id: string; title: string; author_name?: string; authored_date?: string }

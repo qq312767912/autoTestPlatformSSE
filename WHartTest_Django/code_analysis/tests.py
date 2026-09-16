@@ -10,6 +10,7 @@ from django.test import SimpleTestCase, TestCase, TransactionTestCase
 from rest_framework.test import APIClient
 
 from projects.models import Project, ProjectMember
+from langgraph_integration.models import LLMConfig
 from .models import AnalysisTask, AnalysisTaskExecutionLog, CodeAnalysisLLMConfig, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
 from .serializers import GitLabConnectionSerializer, ProjectRepositorySerializer
 from .services import AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _diff_line_stats, _ensure_not_cancelled, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _reuse_cached_result, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, retry_ocr_analysis, run_analysis
@@ -118,7 +119,7 @@ class DiffRuleTests(TestCase):
         point = {"title": "验证登录", "objective": "提交凭据", "expected_result": "登录成功", "priority": "high", "test_type": "迭代验证", "source_finding_key": "iteration-test:0", "status": "draft"}
         task = AnalysisTask.objects.create(
             project=project, repository=repository, creator=user, source_type="commits",
-            base_sha="a" * 40, head_sha="b" * 40, status="fetching", raw_diff="diff -- app.py\n+ok",
+            base_sha="a" * 40, head_sha="b" * 40, mode="deep", status="fetching", raw_diff="diff -- app.py\n+ok",
             change_report={"summary": {"risk_count": 1}, "findings": [], "ocr_status": {"status": "completed", "coverage": 100}},
             test_report={"summary": {"test_point_count": 1}, "iteration_summary": {"title": "登录变更", "change_groups": [{"name": "登录"}]}, "test_requirements": [point]},
             machine_coverage=100, ai_coverage=100,
@@ -130,6 +131,9 @@ class DiffRuleTests(TestCase):
         self.assertEqual(task.test_requirement_drafts.count(), 1)
         task.change_report["ocr_status"] = {"status": "partial", "coverage": 55.6}
         self.assertFalse(_cache_report_complete(task))
+        task.mode = "standard"
+        self.assertTrue(_cache_report_complete(task))
+        task.mode = "deep"
         task.change_report["ocr_status"] = {"status": "completed", "coverage": 100}
         task.test_report["iteration_summary"] = {}
         self.assertFalse(_cache_report_complete(task))
@@ -302,6 +306,30 @@ class AnalysisLifecycleTests(TransactionTestCase):
         self.assertNotIn("api_key", item)
         self.assertTrue(item["has_api_key"])
 
+    def test_copy_existing_llm_config_without_exposing_key(self):
+        source = LLMConfig.objects.create(
+            config_name="内网推理服务", provider="openai_compatible",
+            name="deepseek-v4-pro", api_url="http://model.internal/v1",
+            api_key="platform-secret", request_timeout=900, max_retries=3,
+        )
+        client = APIClient(); client.force_authenticate(self.user)
+
+        options = client.get("/api/code-analysis/llm-config/platform-configs/")
+        self.assertEqual(options.status_code, 200)
+        self.assertNotIn("api_key", options.data[0])
+        self.assertTrue(options.data[0]["has_api_key"])
+
+        response = client.post(
+            "/api/code-analysis/llm-config/copy-from-platform/",
+            {"source_config_id": source.pk}, format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("api_key", response.data)
+        self.llm_config.refresh_from_db()
+        self.assertEqual(self.llm_config.name, "deepseek-v4-pro")
+        self.assertEqual(self.llm_config.request_timeout, 900)
+        self.assertEqual(self.llm_config.get_api_key(), "platform-secret")
+
     @patch("code_analysis.tasks.run_code_analysis.delay")
     def test_non_quick_analysis_requires_dedicated_llm(self, delay):
         self.llm_config.delete()
@@ -351,7 +379,7 @@ class AnalysisLifecycleTests(TransactionTestCase):
         )
         task = AnalysisTask.objects.create(
             project=self.project, repository=self.repository, creator=self.user,
-            source_type="commits", base_sha="a", head_sha="b", status="degraded",
+            source_type="commits", base_sha="a", head_sha="b", mode="deep", status="degraded",
             change_report={
                 "summary": {"risk_count": 1, "high_risk_count": 0},
                 "findings": [{"key": "machine:1", "severity": "medium", "source": "machine_rule", "impact": "影响"}],
@@ -365,9 +393,9 @@ class AnalysisLifecycleTests(TransactionTestCase):
         self.assertEqual(task.change_report["summary"]["risk_count"], 1)
 
     @patch("code_analysis.services.GitLabClient.commits")
-    @patch("code_analysis.services.GitLabClient.project")
-    def test_repository_lists_latest_forty_commits(self, project, commits):
-        project.return_value = {"default_branch": "master"}
+    def test_repository_lists_latest_forty_commits_from_configured_branch(self, commits):
+        self.repository.default_branch = "develop"
+        self.repository.save(update_fields=["default_branch"])
         commits.return_value = [{
             "id": "a" * 40, "short_id": "a" * 8, "title": "latest change",
             "author_name": "tester", "authored_date": "2026-09-09T10:00:00+08:00",
@@ -376,9 +404,9 @@ class AnalysisLifecycleTests(TransactionTestCase):
         response = client.get(f"/api/code-analysis/repositories/{self.repository.id}/commits/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data[0]["title"], "latest change")
-        commits.assert_called_once_with(self.repository.gitlab_project_id, "master", limit=40)
+        commits.assert_called_once_with(self.repository.gitlab_project_id, "develop", limit=40)
         self.repository.refresh_from_db()
-        self.assertEqual(self.repository.default_branch, "master")
+        self.assertEqual(self.repository.default_branch, "develop")
 
     @patch("code_analysis.services.GitLabClient.commit")
     def test_repository_validates_and_resolves_both_commit_refs(self, commit):
@@ -409,20 +437,42 @@ class AnalysisLifecycleTests(TransactionTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("404 Project Not Found", response.data["detail"])
 
+    @patch("code_analysis.services.GitLabClient.commit")
     @patch("code_analysis.services.GitLabClient.project")
-    def test_repository_access_validation_syncs_gitlab_metadata(self, project):
+    def test_repository_access_validation_preserves_and_checks_configured_branch(self, project, commit):
         project.return_value = {
             "name": "Autotest API",
             "path_with_namespace": "source-sse_projects/Autotest_API",
             "default_branch": "master",
         }
         client = APIClient(); client.force_authenticate(self.user)
-        response = client.post(f"/api/code-analysis/repositories/{self.repository.id}/validate-access/")
+        response = client.post(
+            f"/api/code-analysis/repositories/{self.repository.id}/validate-access/",
+            {"gitlab_project_id": self.repository.gitlab_project_id, "default_branch": "release/2026"},
+            format="json",
+        )
         self.assertEqual(response.status_code, 200)
         self.repository.refresh_from_db()
         self.assertEqual(self.repository.path_with_namespace, "source-sse_projects/Autotest_API")
-        self.assertEqual(self.repository.default_branch, "master")
+        self.assertEqual(self.repository.default_branch, "release/2026")
         self.assertEqual(response.data["repository"]["name"], "Autotest API")
+        commit.assert_called_once_with(self.repository.gitlab_project_id, "release/2026")
+
+    @patch("code_analysis.services.GitLabClient.commit")
+    @patch("code_analysis.services.GitLabClient.project")
+    def test_repository_access_validation_rejects_missing_configured_branch(self, project, commit):
+        project.return_value = {"name": "service", "path_with_namespace": "group/service", "default_branch": "master"}
+        commit.side_effect = RuntimeError("404 Commit Not Found")
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.post(
+            f"/api/code-analysis/repositories/{self.repository.id}/validate-access/",
+            {"gitlab_project_id": self.repository.gitlab_project_id, "default_branch": "missing-branch"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("404 Commit Not Found", response.data["detail"])
+        self.repository.refresh_from_db()
+        self.assertEqual(self.repository.default_branch, "master")
 
     @patch("code_analysis.views.remove_ocr_repositories_for_repository")
     def test_repository_without_analysis_records_can_be_deleted(self, cleanup):
@@ -477,6 +527,23 @@ class AnalysisLifecycleTests(TransactionTestCase):
         self.assertIn(response.status_code, {200, 204})
         self.assertFalse(GitLabConnection.objects.filter(pk=unused.id).exists())
 
+    def test_staff_with_delete_permission_can_delete_unused_connection(self):
+        unused = GitLabConnection.objects.create(name="staff-unused", base_url="https://staff-unused.local")
+        staff = User.objects.create_user("platform-admin", password="secret", is_staff=True)
+        self.grant_code_analysis_permissions(staff, "delete_gitlabconnection")
+        client = APIClient(); client.force_authenticate(staff)
+        response = client.delete(f"/api/code-analysis/connections/{unused.id}/")
+        self.assertIn(response.status_code, {200, 204})
+        self.assertFalse(GitLabConnection.objects.filter(pk=unused.id).exists())
+
+    def test_connection_list_returns_global_repository_count(self):
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.get("/api/code-analysis/connections/")
+        self.assertEqual(response.status_code, 200)
+        items = response.data.get("results", response.data) if isinstance(response.data, dict) else response.data
+        connection = next(item for item in items if item["id"] == self.connection.id)
+        self.assertEqual(connection["repository_count"], 1)
+
     @patch("code_analysis.services.GitLabClient.merge_request_changes")
     def test_quick_analysis_generates_two_reports_and_deletes_cascade(self, changes):
         changes.return_value = {
@@ -511,6 +578,64 @@ class AnalysisLifecycleTests(TransactionTestCase):
         self.assertFalse(AnalysisTask.objects.filter(pk=task.id).exists())
         from .models import TestRequirementDraft
         self.assertFalse(TestRequirementDraft.objects.filter(pk=draft_id).exists())
+
+    def test_analysis_modes_use_the_expected_ai_and_ocr_stages(self):
+        diff_payload = {"diffs": [{
+            "old_path": "src/service.py", "new_path": "src/service.py",
+            "diff": "@@ -1 +1 @@\n-old_value = 1\n+new_value = 2",
+        }]}
+        iteration_summary = {
+            "title": "服务逻辑调整", "description": "变更服务参数",
+            "change_groups": [{"name": "服务逻辑", "description": "参数调整", "files": ["src/service.py"]}],
+        }
+        iteration_points = [{
+            "title": "验证服务参数", "objective": "执行变更后服务",
+            "expected_result": "服务使用新参数", "priority": "medium",
+        }]
+        with (
+            patch("code_analysis.services.GitLabClient.compare", return_value=diff_payload),
+            patch("code_analysis.review_mcp.CodeReviewMCP.run_static_checks", return_value=([], [])),
+            patch("code_analysis.services._analysis_stage", side_effect=lambda _task_id, _name, function, *args: function(*args)),
+            patch("code_analysis.services._run_ai_batches", return_value=([], [], [], 5, 100, "AI分析完成")) as ai_batches,
+            patch("code_analysis.services._run_open_code_review", return_value=([], 7, "OCR完成", True, 100, {"selected": 1, "completed": 1})) as ocr,
+            patch("code_analysis.services._normalize_ocr_findings", return_value=([], 0, "")),
+            patch("code_analysis.services._run_iteration_test_design", return_value=(iteration_summary, iteration_points, 3, "迭代分析完成")) as iteration,
+            patch("code_analysis.services._run_context_test_enrichment", return_value=([], [], 0, "无文档补充")) as context,
+            patch("code_analysis.services._run_risk_test_design", return_value=({}, 0, "无风险测试点")) as risk_design,
+        ):
+            expected = {
+                "quick": {"ai": 0, "ocr": 0, "iteration": 0, "context": 0, "risk": 0},
+                "standard": {"ai": 1, "ocr": 0, "iteration": 1, "context": 1, "risk": 1},
+                "deep": {"ai": 1, "ocr": 1, "iteration": 1, "context": 1, "risk": 1},
+            }
+            for index, (mode, calls) in enumerate(expected.items()):
+                ai_batches.reset_mock(); ocr.reset_mock(); iteration.reset_mock(); context.reset_mock(); risk_design.reset_mock()
+                task = AnalysisTask.objects.create(
+                    project=self.project, repository=self.repository, creator=self.user,
+                    source_type="commits", base_sha=f"base-{index}", head_sha=f"head-{index}", mode=mode,
+                )
+                run_analysis(task, force_refresh=True)
+                task.refresh_from_db()
+                self.assertEqual(task.status, "completed", mode)
+                self.assertEqual(ai_batches.call_count, calls["ai"], mode)
+                self.assertEqual(ocr.call_count, calls["ocr"], mode)
+                self.assertEqual(iteration.call_count, calls["iteration"], mode)
+                self.assertEqual(context.call_count, calls["context"], mode)
+                self.assertEqual(risk_design.call_count, calls["risk"], mode)
+                self.assertEqual(task.change_report["ocr_status"]["status"], "completed" if mode == "deep" else "skipped")
+
+    @patch("code_analysis.tasks.retry_code_analysis_ocr.delay")
+    def test_standard_analysis_cannot_retry_ocr(self, delay):
+        task = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="a", head_sha="b", mode="standard", status="degraded",
+            change_report={"ocr_status": {"status": "failed", "message": "legacy failure"}},
+        )
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.post(f"/api/code-analysis/tasks/{task.id}/retry-ocr/")
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("深度模式", response.data["detail"])
+        delay.assert_not_called()
 
     @patch("code_analysis.tasks.run_code_analysis.delay")
     def test_run_endpoint_queues_background_analysis(self, delay):
@@ -577,7 +702,7 @@ class AnalysisLifecycleTests(TransactionTestCase):
         delay.return_value = SimpleNamespace(id="ocr-retry-job")
         task = AnalysisTask.objects.create(
             project=self.project, repository=self.repository, creator=self.user,
-            source_type="commits", base_sha="a", head_sha="b", status="degraded",
+            source_type="commits", base_sha="a", head_sha="b", mode="deep", status="degraded",
             change_report={"ocr_status": {"status": "failed", "message": "timeout"}},
         )
         client = APIClient(); client.force_authenticate(self.user)

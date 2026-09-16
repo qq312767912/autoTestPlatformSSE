@@ -91,7 +91,7 @@ class ProjectRepository(models.Model):
     local_path = models.CharField(max_length=500, blank=True)
     name = models.CharField(max_length=255)
     path_with_namespace = models.CharField(max_length=500)
-    default_branch = models.CharField(max_length=255, default="main")
+    default_branch = models.CharField(max_length=255, default="master")
     languages = models.JSONField(default=list, blank=True)
     excluded_patterns = models.JSONField(default=list, blank=True)
     critical_annotations = models.JSONField(default=list, blank=True)

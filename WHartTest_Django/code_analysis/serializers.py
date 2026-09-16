@@ -44,10 +44,16 @@ class CodeAnalysisLLMConfigSerializer(serializers.ModelSerializer):
 
 
 class GitLabConnectionSerializer(serializers.ModelSerializer):
+    repository_count = serializers.SerializerMethodField()
+
     class Meta:
         model = GitLabConnection
         fields = "__all__"
         read_only_fields = ["verify_ssl"]
+
+    def get_repository_count(self, obj):
+        annotated = getattr(obj, "repository_count", None)
+        return annotated if annotated is not None else obj.repositories.count()
 
 
 class ProjectRepositorySerializer(serializers.ModelSerializer):
