@@ -5,8 +5,8 @@ VERIFY_OCR_LIVE="${VERIFY_OCR_LIVE:-1}"
 TEST_HOSTNAME="${TEST_HOSTNAME:-www.test.sse.com.cn}"
 
 expected=(
-  'wharttest-backend|wharttest-250-backend:update-0757e97f-code-review-llm-r2-arm64'
-  'wharttest-frontend|wharttest-250-frontend:update-0757e97f-code-review-llm-r2-arm64'
+  'wharttest-backend|wharttest-250-backend:update-1ed4e374-code-review-layout-r4-arm64'
+  'wharttest-frontend|wharttest-250-frontend:update-1ed4e374-code-review-layout-r4-arm64'
   'wharttest-vision-mcp|wharttest-250-vision-mcp:update-01339484-arm64-r2'
   'wharttest-mcp|wharttest-250-mcp-alpine:latest'
   'wharttest-qdrant|qdrant-kylin-arm64:v1.16.0-page64k'
@@ -47,14 +47,24 @@ assert "def _invalid_ocr_result_reason" in service
 assert "def terminate_ocr_processes" in service
 assert "terminate=True" in view
 assert "def retry_ocr" in view
+assert "def copy_from_platform" in view
+assert "repository_count=Count" in view
 assert "def _claim_global_slot" in tasks
 assert "(\"degraded\", \"降级完成\")" in models
 assert "class CodeAnalysisLLMConfig" in models
 assert "class CodeAnalysisLLMConfigSerializer" in serializers
-assert 'router.register("llm-config"' in urls
+assert "repository_count = serializers.SerializerMethodField" in serializers
+assert "router.register(\"llm-config\"" in urls
 assert "def _get_code_analysis_llm_config" in service
+assert "if task.mode != \"deep\"" in service
+assert "if task.mode != \"deep\"" in view
+assert "default_branch = models.CharField(max_length=255, default=\"master\")" in models
 '
-echo "[通过] OpenCodeReview 单并发、超时诊断与代码审查专用 LLM 配置"
+echo "[通过] OpenCodeReview 单并发、超时诊断、分析模式、master 默认分支、专用 LLM、已有配置复制及 GitLab 连接删除保护"
+
+docker exec wharttest-frontend sh -c \
+  'grep -R -q "impact-module-grid.*grid-template-columns:minmax(0,1fr)" /usr/share/nginx/html/assets/*.css'
+echo "[通过] 代码审查概览长模块名单列布局"
 
 docker exec wharttest-backend /opt/venv/bin/python -c '
 from pathlib import Path

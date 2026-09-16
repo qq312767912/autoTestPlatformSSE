@@ -1,18 +1,21 @@
 WHartTest 内网 ARM64 增量升级镜像
-应用版本: backend 0757e97f-code-review-llm-r2 + frontend 0757e97f-code-review-llm-r2 + actuator-r4
+应用版本: backend 1ed4e374-code-review-layout-r4 + frontend 1ed4e374-code-review-layout-r4 + actuator-r4
+源码基线: dev@1ed4e374
 
-wharttest-250-backend:update-0757e97f-code-review-llm-r2-arm64
+wharttest-250-backend:update-1ed4e374-code-review-layout-r4-arm64
   platform: linux/arm64
-  image ID: sha256:e020114acdafad639399716282323668e583df439a274973ed29b8a78fa73997
-  image size: 547090338 bytes
+  image ID: sha256:7ce00fc7c618b21e48955dfe3d2f54c0fff1275e60cdffc887c483e4eeedd815
+  image size: 547267020 bytes
   build: WHartTest_Django/Dockerfile.alpine（Alpine/musl ARM64 完整构建）
-  runtime: OpenCodeReview v1.12.2 / ocr CLI / Celery concurrency 8 / 代码审查专用 LLM
+  runtime: OpenCodeReview v1.12.3 / ocr CLI / Celery concurrency 8 / 代码审查专用 LLM
+  features: 快速/标准/深度分析模式 / 审查模型复用 / GitLab 连接安全删除 / master 默认分支
 
-wharttest-250-frontend:update-0757e97f-code-review-llm-r2-arm64
+wharttest-250-frontend:update-1ed4e374-code-review-layout-r4-arm64
   platform: linux/arm64
-  image ID: sha256:46a525041b999cbbd05f7d597cb67df1a1cbc681bd7877410891d3ae12ccaca6
-  image size: 33654791 bytes
+  image ID: sha256:77b66dbe4650e76a7eeff2bcd13c50ee4f64388e65c8d72b112f7e44c4481478
+  image size: 33661879 bytes
   build: WHartTest_Vue/Dockerfile
+  features: 代码审查模式选择 / 长模块名概览单列布局与安全换行
 
 wharttest-250-vision-mcp:update-01339484-arm64-r2
   source revision: 01339484c66c281fdddaea22683a68c40b7835bd

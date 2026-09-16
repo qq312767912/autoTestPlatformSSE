@@ -1,6 +1,6 @@
 # WHartTest 内网 ARM64 增量升级包
 
-应用版本：Backend `dev@0757e97f-code-review-llm-r2`，Frontend `dev@0757e97f-code-review-llm-r2`
+应用版本：Backend `dev@1ed4e374-code-review-layout-r4`，Frontend `dev@1ed4e374-code-review-layout-r4`
 
 Vision MCP 继续复用 `01339484` 版本镜像；Actuator 使用包含动态页面导航修复的 R4 镜像。
 
@@ -9,15 +9,18 @@ Vision MCP 继续复用 `01339484` 版本镜像；Actuator 使用包含动态页
 加密保存且接口永不回显；该配置仅供 OpenCodeReview、AI 风险分析和测试影响分析使用，
 不会改变平台对话模型。升级迁移会一次性复制当前启用的通用 LLM，避免首次升级中断，
 复制后两套配置互不影响。
+配置弹窗也可直接选择平台已有 LLM，并点击“复制并使用”。复制由 Backend 在服务端完成，
+已有 API Key 不会发送到浏览器；之后仍可单独调整代码审查模型参数。
+“代码仓库”页面支持删除未被项目仓库引用的 GitLab 连接；仍被引用时会明确提示关联仓库数量，
+避免误删正在使用的连接。
 
-本升级包替换或新增：
+本次需要新增传输并替换：
 
 - Backend
 - Frontend
-- Vision MCP（新增）
-- Actuator（新增一个 ARM64 镜像，运行三个相互隔离的执行器容器）
 
-Vision MCP 必须使用带 `-r2` 后缀的 Alpine 修正版；不再使用最初的 Debian 镜像。
+Vision MCP 继续复用带 `-r2` 后缀的 Alpine 修正版；三个执行器继续复用 R4 ARM64
+镜像。`03-import-images.sh` 和 `05-verify.sh` 仍会检查这些复用镜像与容器，确保依赖完整。
 
 继续复用内网当前的 PostgreSQL、Redis、Qdrant、MCP、Playwright MCP 和微信插件宿主镜像及数据卷。
 
@@ -153,8 +156,8 @@ VERIFY_OCR_LIVE=0 bash 05-verify.sh
 300 MB 的传输限制，大镜像使用 `.part000` 起的分卷。
 
 ```text
-../images/backend-0757e97f-code-review-llm-r2-arm64.tar.gz.part000 ...（以实际分卷数为准）
-../images/frontend-0757e97f-code-review-llm-r2-arm64.tar.gz.part000
+../images/backend-1ed4e374-code-review-layout-r4-arm64.tar.gz.part000 ...（以实际分卷数为准）
+../images/frontend-1ed4e374-code-review-layout-r4-arm64.tar.gz.part000
 ../images/actuator-update-178fb3ed-arm64-r4.tar.gz.partaa ... partab
 ```
 

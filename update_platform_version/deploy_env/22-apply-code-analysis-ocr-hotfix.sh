@@ -29,6 +29,7 @@ grep -q 'def _invalid_ocr_result_reason' "$HOTFIX_FILE" || fail "热修复文件
 grep -q 'def terminate_ocr_processes' "$HOTFIX_FILE" || fail "热修复文件缺少 OCR 子进程清理"
 grep -q 'terminate=True' "$HOTFIX_VIEW" || fail "热修复文件缺少 Celery 运行任务终止"
 grep -q 'def retry_ocr' "$HOTFIX_VIEW" || fail "热修复文件缺少 OCR 单独重试接口"
+grep -q 'def copy_from_platform' "$HOTFIX_VIEW" || fail "热修复文件缺少已有 LLM 配置复制接口"
 grep -q 'def _claim_global_slot' "$HOTFIX_TASKS" || fail "热修复文件缺少全局单任务队列"
 grep -q '("degraded", "降级完成")' "$HOTFIX_MODELS" || fail "热修复文件缺少降级完成状态"
 grep -q 'class CodeAnalysisLLMConfig' "$HOTFIX_MODELS" || fail "热修复文件缺少代码审查专用 LLM 模型"
@@ -74,11 +75,12 @@ assert "def _invalid_ocr_result_reason" in service
 assert "def terminate_ocr_processes" in service
 assert "terminate=True" in view
 assert "def retry_ocr" in view
+assert "def copy_from_platform" in view
 assert "def _claim_global_slot" in tasks
 assert "(\"degraded\", \"降级完成\")" in models
 assert "class CodeAnalysisLLMConfig" in models
 assert "class CodeAnalysisLLMConfigSerializer" in serializers
-assert 'router.register("llm-config"' in urls
+assert "router.register(\"llm-config\"" in urls
 assert "def _get_code_analysis_llm_config" in service
 print("code analysis queue, OCR retry and cancellation hotfix OK")
 '

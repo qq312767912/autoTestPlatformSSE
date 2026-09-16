@@ -133,6 +133,93 @@ else:
         }, ensure_ascii=False, indent=2))
 ' || true
 
+section "目标任务 Git Diff 与 OCR 文件筛选预览（不调用模型）"
+docker exec -i -e TASK_ID="$TASK_ID" -e OCR_NO_UPDATE=1 "$BACKEND_CONTAINER" /opt/venv/bin/python - <<'PY' || true
+import json
+import os
+import subprocess
+from pathlib import Path
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "wharttest_django.settings")
+import django
+django.setup()
+
+from code_analysis.models import AnalysisTask
+from code_analysis.services import LOW_VALUE_FILE_PATTERNS
+
+task_id = (os.environ.get("TASK_ID") or "").strip()
+task = AnalysisTask.objects.filter(pk=task_id).first() if task_id else None
+if not task:
+    print(json.dumps({"ok": False, "reason": "未找到目标任务"}, ensure_ascii=False))
+    raise SystemExit(0)
+
+root = Path("/app/data/code-analysis-repositories") / task_id
+base_ref, head_ref = "refs/ocr/base", "refs/ocr/head"
+
+def run(command, timeout=60):
+    return subprocess.run(
+        command, cwd=root, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=timeout,
+        env={**os.environ, "OCR_NO_UPDATE": "1"},
+    )
+
+summary = {
+    "task_id": task_id,
+    "workspace": str(root),
+    "workspace_exists": root.is_dir(),
+    "task_base_sha": task.base_sha,
+    "task_head_sha": task.head_sha,
+}
+if not (root / ".git").is_dir():
+    summary["reason"] = "任务 OCR Git 工作区不存在，可能已被删除或尚未创建"
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    raise SystemExit(0)
+
+for label, ref in (("workspace_base_sha", base_ref), ("workspace_head_sha", head_ref)):
+    result = run(["git", "rev-parse", ref], timeout=15)
+    summary[label] = result.stdout.strip() if result.returncode == 0 else None
+    if result.returncode:
+        summary[f"{label}_error"] = result.stderr.strip()[-1000:]
+
+diff = run(["git", "diff", "--numstat", base_ref, head_ref], timeout=30)
+summary["git_diff_returncode"] = diff.returncode
+summary["git_diff_numstat"] = diff.stdout.splitlines()[:200]
+summary["git_diff_error"] = diff.stderr.strip()[-1000:]
+
+preview_command = [
+    "ocr", "delegate", "preview", "--format", "json",
+    "--from", base_ref, "--to", head_ref,
+    "--exclude", ",".join(LOW_VALUE_FILE_PATTERNS),
+]
+try:
+    preview = run(preview_command, timeout=90)
+    summary["preview_returncode"] = preview.returncode
+    summary["preview_stderr"] = preview.stderr.strip()[-2000:]
+    try:
+        payload = json.loads(preview.stdout)
+        summary["preview"] = {
+            "mode": payload.get("mode"),
+            "merge_base": payload.get("merge_base"),
+            "total_files": payload.get("total_files"),
+            "reviewable_count": payload.get("reviewable_count"),
+            "excluded_count": payload.get("excluded_count"),
+            "reviewable_files": payload.get("reviewable_files") or [],
+            "excluded_files": payload.get("excluded_files") or [],
+        }
+    except Exception as exc:
+        summary["preview_parse_error"] = f"{type(exc).__name__}: {exc}"
+        summary["preview_stdout_prefix"] = preview.stdout[:3000]
+except subprocess.TimeoutExpired:
+    summary["preview_timeout"] = True
+
+rule = root / ".opencodereview" / "rule.json"
+summary["repository_rule"] = {
+    "exists": rule.is_file(),
+    "size_bytes": rule.stat().st_size if rule.is_file() else 0,
+}
+print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+PY
+
 section "Celery 任务与 OCR 进程"
 docker exec "$BACKEND_CONTAINER" timeout 25 celery -A wharttest_django inspect active --timeout=15 || true
 docker exec "$BACKEND_CONTAINER" timeout 25 celery -A wharttest_django inspect reserved --timeout=15 || true
