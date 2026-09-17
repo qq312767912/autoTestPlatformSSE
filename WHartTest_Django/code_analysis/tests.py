@@ -4,6 +4,7 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 from django.contrib.auth.models import Permission, User
 from django.test import SimpleTestCase, TestCase, TransactionTestCase
@@ -570,14 +571,64 @@ class AnalysisLifecycleTests(TransactionTestCase):
         change_download = client.get(f"/api/code-analysis/tasks/{task.id}/download-change-report/")
         test_download = client.get(f"/api/code-analysis/tasks/{task.id}/download-test-report/")
         self.assertEqual(change_download.status_code, 200)
+        self.assertEqual(change_download["Content-Type"], "text/markdown; charset=utf-8")
+        self.assertIn(quote("代码审查报告_交易平台.md"), change_download["Content-Disposition"])
         self.assertIn("代码审查报告", change_download.content.decode())
         self.assertEqual(test_download.status_code, 200)
+        self.assertEqual(test_download["Content-Type"], "text/markdown; charset=utf-8")
+        self.assertIn(quote("测试分析报告_交易平台.md"), test_download["Content-Disposition"])
         self.assertIn("测试分析报告", test_download.content.decode())
         draft_id = task.test_requirement_drafts.get().id
         task.delete()
         self.assertFalse(AnalysisTask.objects.filter(pk=task.id).exists())
         from .models import TestRequirementDraft
         self.assertFalse(TestRequirementDraft.objects.filter(pk=draft_id).exists())
+
+    def test_markdown_reports_sort_risks_and_test_points_by_priority(self):
+        task = AnalysisTask.objects.create(
+            project=self.project,
+            repository=self.repository,
+            creator=self.user,
+            source_type="commits",
+            base_sha="a",
+            head_sha="b",
+            status="completed",
+            change_report={
+                "summary": {},
+                "findings": [
+                    {"severity": "low", "change": "低风险项", "file": "low.py"},
+                    {"severity": "high", "change": "高风险项", "file": "high.py"},
+                    {"severity": "medium", "change": "中风险项", "file": "medium.py"},
+                ],
+            },
+            test_report={
+                "summary": {},
+                "test_requirements": [
+                    {"title": "低优先级需求", "priority": "low", "change_group": "迭代验证"},
+                    {"title": "高优先级需求", "priority": "high", "change_group": "迭代验证"},
+                    {"title": "中优先级需求", "priority": "medium", "change_group": "迭代验证"},
+                    {"title": "低优先级风险", "priority": "low", "change_group": "风险排查"},
+                    {"title": "高优先级风险", "priority": "high", "change_group": "风险排查"},
+                    {"title": "中优先级风险", "priority": "medium", "change_group": "风险排查"},
+                ],
+            },
+        )
+        client = APIClient()
+        client.force_authenticate(self.user)
+
+        change_content = client.get(
+            f"/api/code-analysis/tasks/{task.id}/download-change-report/"
+        ).content.decode()
+        self.assertLess(change_content.index("高风险项"), change_content.index("中风险项"))
+        self.assertLess(change_content.index("中风险项"), change_content.index("低风险项"))
+
+        test_content = client.get(
+            f"/api/code-analysis/tasks/{task.id}/download-test-report/"
+        ).content.decode()
+        self.assertLess(test_content.index("高优先级需求"), test_content.index("中优先级需求"))
+        self.assertLess(test_content.index("中优先级需求"), test_content.index("低优先级需求"))
+        self.assertLess(test_content.index("高优先级风险"), test_content.index("中优先级风险"))
+        self.assertLess(test_content.index("中优先级风险"), test_content.index("低优先级风险"))
 
     def test_analysis_modes_use_the_expected_ai_and_ocr_stages(self):
         diff_payload = {"diffs": [{

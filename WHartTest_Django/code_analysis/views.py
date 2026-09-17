@@ -1,3 +1,6 @@
+import re
+from urllib.parse import quote
+
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
@@ -7,7 +10,6 @@ from django.http import HttpResponse
 from celery import current_app
 from django.db import transaction
 from django.db.models import Count
-
 from projects.models import ProjectMember
 from wharttest_django.permissions import HasModelPermission, permission_required
 from .models import AnalysisTask, AnalysisTaskExecutionLog, CodeAnalysisLLMConfig, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
@@ -429,6 +431,7 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
         return Response({**generated, "generation_note": note})
 
     def _markdown_response(self, task, report_type):
+        priority_order = {"high": 0, "medium": 1, "low": 2}
         if report_type == "change":
             report = task.change_report or {}
             summary = report.get("summary", {})
@@ -454,7 +457,11 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
                 f"- Token消耗：{task.token_usage}", "",
                 "## 风险与影响", "",
             ]
-            for index, item in enumerate(report.get("findings", []), 1):
+            findings = sorted(
+                report.get("findings", []),
+                key=lambda item: priority_order.get(item.get("severity"), 9),
+            )
+            for index, item in enumerate(findings, 1):
                 lines.extend([
                     f"### {index}. [{item.get('severity', 'unknown').upper()}] {item.get('change', '')}", "",
                     f"- 文件：`{item.get('file', '')}`",
@@ -483,9 +490,9 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
                 item for item in test_requirements
                 if item.get("change_group") in {"风险排查", "风险点", "风险回归"}
             ]
-            priority_order = {"high": 0, "medium": 1, "low": 2}
             risk_test_requirements.sort(key=lambda item: priority_order.get(item.get("priority"), 9))
             iteration_test_requirements = [item for item in test_requirements if item not in risk_test_requirements]
+            iteration_test_requirements.sort(key=lambda item: priority_order.get(item.get("priority"), 9))
             lines = [
                 f"# {task.title or task.repository.name} - 测试分析报告", "",
                 f"- 代码仓库：{task.repository.path_with_namespace}",
@@ -549,9 +556,14 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
                 ])
             lines.extend(["", "## 覆盖缺口", ""])
             lines.extend(f"- {item}" for item in report.get("coverage_gaps", []))
-        filename = f"{'code-review-report' if report_type == 'change' else 'test-analysis-report'}-{task.id}.txt"
-        response = HttpResponse("\ufeff" + "\n".join(lines), content_type="text/plain; charset=utf-8")
-        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        safe_project_name = re.sub(r'[/\\:*?"<>|\r\n]+', "_", task.project.name).strip(" ._") or "未命名项目"
+        report_name = "代码审查报告" if report_type == "change" else "测试分析报告"
+        filename = f"{report_name}_{safe_project_name}.md"
+        ascii_filename = "code-review-report.md" if report_type == "change" else "test-analysis-report.md"
+        response = HttpResponse("\ufeff" + "\n".join(lines), content_type="text/markdown; charset=utf-8")
+        response["Content-Disposition"] = (
+            f'attachment; filename="{ascii_filename}"; filename*=UTF-8\'\'{quote(filename)}'
+        )
         return response
 
     @action(detail=True, methods=["get"], url_path="download-change-report")

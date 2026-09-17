@@ -63,10 +63,17 @@ export async function downloadReport(id: string, type: 'change'|'test') {
   const url = `${base}/tasks/${id}/download-${type}-report/`;
   const response = await http.get(url, { responseType: 'blob' });
   const source = response.data instanceof Blob ? response.data : new Blob([response.data]);
-  const blob = new Blob([source], { type: 'text/plain;charset=utf-8' });
+  const blob = new Blob([source], { type: 'text/markdown;charset=utf-8' });
+  const disposition = String(response.headers?.['content-disposition'] || '');
+  const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+  let filename = `${type === 'change' ? '代码审查报告' : '测试分析报告'}.md`;
+  if (encodedName) {
+    try { filename = decodeURIComponent(encodedName); } catch { filename = encodedName; }
+  } else if (plainName) filename = plainName;
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
-  link.download = `${type === 'change' ? '代码审查报告' : '测试分析报告'}-${id}.txt`;
+  link.download = filename;
   document.body.appendChild(link);
   link.click();
   link.remove();
