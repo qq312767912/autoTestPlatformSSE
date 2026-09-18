@@ -25,8 +25,14 @@ done
 # 生效代码必须来自镜像本体。d595a628-review-fix-r5 起 Backend 镜像已完整包含此前的全部
 # 代码修复，不再需要 hotfix/ 挂载；若仍检测到代码覆盖层，说明生效的是挂载副本而不是镜像，
 # 上面基于文件内容的断言就失去意义（无论镜像是否更新都可能通过），必须直接失败。
-overlay_mounts="$(docker inspect wharttest-backend --format '{{range .Mounts}}{{println .Destination}}{{end}}' \
-  | grep -E '^/app/(testcases|code_analysis|requirements|orchestrator_integration|bundled_skills)(/|$)' || true)"
+#
+# 判据必须看挂载“源”是否落在 deploy_env/hotfix/ 下，不能只看挂载“目标”目录：
+# 基础 compose 里本来就有一条 ./skills:/app/bundled_skills:ro（平台技能目录外置，用于技能
+# 热插拔），而 hotfix 层里也有一条 hotfix/bundled_skills:/app/bundled_skills:ro —— 两者
+# 目标完全相同、只有源不同。按目标匹配会把基础部署的这条合法挂载误报成覆盖层。
+HOTFIX_MOUNT_PREFIX="/update_platform_version/deploy_env/hotfix/"
+overlay_mounts="$(docker inspect wharttest-backend --format '{{range .Mounts}}{{println .Source " -> " .Destination}}{{end}}' \
+  | grep -F "$HOTFIX_MOUNT_PREFIX" || true)"
 if [ -n "$overlay_mounts" ]; then
   echo "[失败] Backend 仍叠加着 hotfix 代码覆盖层，生效内容不是镜像本体：" >&2
   echo "$overlay_mounts" >&2
@@ -34,6 +40,12 @@ if [ -n "$overlay_mounts" ]; then
   exit 1
 fi
 echo "[通过] Backend 无 hotfix 代码覆盖层，生效代码全部来自镜像"
+
+# /app/bundled_skills 在基础 compose 里就是外置挂载（技能热插拔），正常部署下生效的是宿主机
+# 的 offline-images/skills 目录，既不是镜像本体也不是 hotfix 层。这里显式打印来源，避免把
+# “技能目录外置”误判成“代码覆盖层”，也便于确认技能修复到底有没有同步到宿主机目录。
+skills_source="$(docker inspect wharttest-backend --format '{{range .Mounts}}{{if eq .Destination "/app/bundled_skills"}}{{.Source}}{{end}}{{end}}')"
+echo "[信息] /app/bundled_skills 来源：${skills_source:-（未挂载，使用镜像内副本）}"
 
 curl -fsS http://127.0.0.1:8912/admin/login/ >/dev/null
 curl -fsS http://127.0.0.1:8913/ >/dev/null
@@ -113,7 +125,8 @@ assert "def _is_case_header" in service
 assert "config.request_timeout" in service
 assert "max_retries=0" in service
 assert "if key != \"_checkpoint\"" in serializers
-assert Path("/app/bundled_skills/test-case-clarity-review/references/review-rules.md").is_file()
+rules = Path("/app/bundled_skills/test-case-clarity-review/references/review-rules.md")
+assert rules.is_file(), f"缺少技能文件 {rules}：/app/bundled_skills 由基础 compose 外置挂载到宿主机的 offline-images/skills 目录，请先同步该目录（不是镜像内副本）"
 '
 echo "[通过] 用例审查表头识别、20行/2并发分片、重试退避与熔断、断点续审及完整 Skill 热修复"
 
