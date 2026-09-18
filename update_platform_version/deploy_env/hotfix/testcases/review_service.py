@@ -5,10 +5,12 @@ import hashlib
 import json
 import logging
 import re
+import threading
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from time import sleep
+from time import monotonic, sleep
 
 from django.core.files.base import ContentFile
 from django.utils import timezone
@@ -25,8 +27,34 @@ from .models import TestCaseReview
 logger = logging.getLogger(__name__)
 
 FALLBACK_SKILL = """审查测试用例的可执行性与验收清晰度。不要凭空补造业务规则；未知标准标记为待业务确认。按风险检查前置条件、测试数据、步骤、预期、业务结果、边界异常、数据一致性、证据与可维护性。"""
-TESTCASE_REVIEW_CHUNK_SIZE = 10
-TESTCASE_REVIEW_CHUNK_ATTEMPTS = 2
+TESTCASE_REVIEW_CHUNK_SIZE = 20
+TESTCASE_REVIEW_CHUNK_ATTEMPTS = 3
+TESTCASE_REVIEW_MAX_ATTEMPTS = 5
+TESTCASE_REVIEW_MAX_WORKERS = 2
+TESTCASE_REVIEW_TOTAL_BUDGET_SECONDS = 45 * 60
+TESTCASE_REVIEW_CIRCUIT_BREAKER = 3
+TESTCASE_REVIEW_RETRY_BASE_DELAY = 2
+TESTCASE_REVIEW_RETRY_MAX_DELAY = 30
+
+
+def _chunk_attempt_limit(config):
+    """单批最大尝试次数：尊重 LLMConfig.max_retries，但设有下限与上限。
+
+    内网模型网关会出现瞬时 5xx（如 502 upstream_unavailable）。历史实现每批
+    只尝试 2 次且间隔固定 2 秒，一次上游抖动就让整项任务失败，故这里设下限；
+    同时设上限，避免单批长时间占用模型。
+    """
+    try:
+        configured = int(getattr(config, "max_retries", 0) or 0) + 1
+    except (TypeError, ValueError):
+        configured = TESTCASE_REVIEW_CHUNK_ATTEMPTS
+    return max(TESTCASE_REVIEW_CHUNK_ATTEMPTS, min(configured, TESTCASE_REVIEW_MAX_ATTEMPTS))
+
+
+def _retry_delay(attempt):
+    """指数退避：2、4、8……并封顶，避免在上游故障窗口内高频重试。"""
+    return min(TESTCASE_REVIEW_RETRY_MAX_DELAY, TESTCASE_REVIEW_RETRY_BASE_DELAY * (2 ** (attempt - 1)))
+
 
 HEADER_ALIASES = {
     "identity": ("编号", "用例id", "用例编号", "用例名称", "测试用例", "caseid", "casename"),
@@ -175,8 +203,9 @@ def _review_chunk(llm, skill_prompt, rows, business_context):
         f"输出结构示例：{json.dumps(schema, ensure_ascii=False)}\n"
         f"待审查数据：{json.dumps(rows, ensure_ascii=False)}"
     )
-    # ChatOpenAI 的内部重试在本功能中已关闭。审查请求可能生成较长 JSON，
-    # 单次失败后由用户明确重试整项任务，避免同一分片重复占用模型数十分钟。
+    # 此处只调用一次：重试次数与指数退避统一由 run_testcase_review 的外层循环管理。
+    # 若两层同时重试，单批最坏耗时会放大成 (1 + max_retries) 倍超时时间，
+    # 无法用总时间预算约束，反而更容易撞上 Celery 时限。
     response = safe_llm_invoke(
         llm,
         [SystemMessage(content=skill_prompt), HumanMessage(content=prompt)],
@@ -186,7 +215,9 @@ def _review_chunk(llm, skill_prompt, rows, business_context):
     return _extract_json(response.content)
 
 
-def _write_report(review, rows, issues, pending, governance):
+def _write_report(review, rows, issues, pending, governance, uncovered=None, chunks=None):
+    uncovered = uncovered or {}
+    chunks = chunks or []
     workbook = Workbook()
     info = workbook.active
     info.title = "审查摘要"
@@ -195,6 +226,7 @@ def _write_report(review, rows, issues, pending, governance):
     module_counts = Counter(str(item.get("module") or "未标注模块") for item in issues)
     issue_rows = {(str(item.get("sheet")), int(item.get("row") or 0)) for item in issues}
     estimated_cases = len(rows)
+    uncovered_rows = sum(len(chunks[index - 1]) for index in uncovered if 0 < index <= len(chunks))
     top_issue = type_counts.most_common(1)[0][0] if type_counts else "未发现明确问题"
     summary_rows = [
         ("源文件", review.source_name), ("扫描时间", timezone.localtime().strftime("%Y-%m-%d %H:%M:%S")),
@@ -205,6 +237,8 @@ def _write_report(review, rows, issues, pending, governance):
         ("审查方式", review.get_review_mode_display()), ("使用 Skill", review.skill_name),
         ("业务背景", review.business_context or "未提供"), ("自定义审查规则", review.custom_rules or "未提供"),
         ("审查口径", f"{review.skill_name} + 用户自定义审查规则"),
+        ("未覆盖批次", f"{len(uncovered)}/{len(chunks)}" if chunks else str(len(uncovered))),
+        ("未覆盖用例行数", uncovered_rows),
     ]
     info.merge_cells("A1:B1")
     info["A1"] = "测试用例质量审查报告"
@@ -348,7 +382,13 @@ def _write_report(review, rows, issues, pending, governance):
     stem = Path(review.source_name).stem
     filename = f"{stem}_测试用例质量审查报告.xlsx"
     review.report_file.save(filename, ContentFile(output.read()), save=False)
-    return {"total_rows": estimated_cases, "scanned_rows": len(rows), "problem_cases": len(issue_rows), "issue_count": len(issues), "high": counts.get("高", 0), "medium": counts.get("中", 0), "low": counts.get("低", 0)}
+    return {
+        "total_rows": estimated_cases, "scanned_rows": len(rows), "problem_cases": len(issue_rows),
+        "issue_count": len(issues), "high": counts.get("高", 0), "medium": counts.get("中", 0),
+        "low": counts.get("低", 0),
+        "uncovered_chunks": len(uncovered), "uncovered_rows": uncovered_rows,
+        "total_chunks": len(chunks),
+    }
 
 
 def run_testcase_review(review_id):
@@ -368,13 +408,20 @@ def run_testcase_review(review_id):
     if review.custom_rules.strip():
         skill_prompt += "\n\n# 本次用户指定的审查规则（在不违反质量边界的前提下优先执行）\n" + review.custom_rules.strip()
     issues, pending, governance = [], [], []
-    # 内网模型网关会在长 JSON 生成时触发上游超时。小分片串行调用，
-    # 用更可预期的总耗时换取内网网关的稳定性。
+    # 分片大小与并发度是一对取舍：分片小则单批 JSON 输出短、不易触发网关
+    # 120 秒上游超时，但分片小会成倍增加批次数。历史实现一度改成「10 行 +
+    # 串行」，480 条用例产生 48 批串行调用，总耗时逼近 Celery 软时限。
+    # 这里取 20 行 + 2 路并发，在两者之间取得平衡。
     chunk_size = TESTCASE_REVIEW_CHUNK_SIZE
     chunks = [rows[i:i + chunk_size] for i in range(0, len(rows), chunk_size)]
     review_timeout = max(30, min(int(config.request_timeout or 120), 600))
+    attempts = _chunk_attempt_limit(config)
+    workers = max(1, min(TESTCASE_REVIEW_MAX_WORKERS, len(chunks)))
+    deadline = monotonic() + TESTCASE_REVIEW_TOTAL_BUDGET_SECONDS
 
     def review_one(index, chunk):
+        # 底层 SDK 重试保持关闭：重试与退避统一由本层管理，单批最坏耗时才能
+        # 按 attempts × review_timeout 估算，进而受总时间预算约束。
         llm = create_llm_instance(
             config,
             temperature=0.1,
@@ -382,26 +429,26 @@ def run_testcase_review(review_id):
             max_retries=0,
         )
         last_error = None
-        for attempt in range(1, TESTCASE_REVIEW_CHUNK_ATTEMPTS + 1):
+        for attempt in range(1, attempts + 1):
             try:
                 return _review_chunk(llm, skill_prompt, chunk, review.business_context)
             except Exception as exc:
                 last_error = exc
                 logger.warning(
                     "用例审查分片失败 review=%s chunk=%s/%s attempt=%s/%s error=%s: %s",
-                    review.id, index, len(chunks), attempt, TESTCASE_REVIEW_CHUNK_ATTEMPTS,
+                    review.id, index, len(chunks), attempt, attempts,
                     type(exc).__name__, exc,
                 )
-                if attempt < TESTCASE_REVIEW_CHUNK_ATTEMPTS:
-                    sleep(2)
+                if attempt < attempts:
+                    sleep(_retry_delay(attempt))
         raise RuntimeError(
-            f"第 {index}/{len(chunks)} 批模型调用失败（已尝试 {TESTCASE_REVIEW_CHUNK_ATTEMPTS} 次）："
+            f"第 {index}/{len(chunks)} 批模型调用失败（已尝试 {attempts} 次）："
             f"{type(last_error).__name__}: {last_error}"
         ) from last_error
 
     review.current_step = (
-        f"Skill 审查 0/{len(chunks)}（串行小分片，"
-        f"单次最长 {review_timeout} 秒）"
+        f"Skill 审查 0/{len(chunks)}（并发 {workers}，"
+        f"单批上限 {review_timeout} 秒）"
     )
     review.progress = 10
     review.save(update_fields=["current_step", "progress", "updated_at"])
@@ -417,35 +464,100 @@ def run_testcase_review(review_id):
         int(index): result
         for index, result in (checkpoint.get("results") or {}).items()
     } if checkpoint.get("signature") == signature else {}
+    # 批次失败只记录、不中断整项任务：一次上游抖动不应让已跑完的批次白跑。
+    uncovered = {}
+    state_lock = threading.Lock()
 
-    for index, chunk in enumerate(chunks, 1):
-        if index not in ordered_results:
-            ordered_results[index] = review_one(index, chunk)
-            review.summary = {"_checkpoint": {
-                "signature": signature,
-                "total_chunks": len(chunks),
-                "results": {str(key): value for key, value in ordered_results.items()},
-            }}
-        completed = len(ordered_results)
+    def persist_progress():
+        processed = len(ordered_results) + len(uncovered)
+        review.summary = {"_checkpoint": {
+            "signature": signature,
+            "total_chunks": len(chunks),
+            "results": {str(key): value for key, value in ordered_results.items()},
+            "uncovered": {str(key): value for key, value in uncovered.items()},
+        }}
         review.current_step = (
-            f"Skill 审查 {completed}/{len(chunks)}（串行小分片，"
-            f"单次最长 {review_timeout} 秒）"
+            f"Skill 审查 {processed}/{len(chunks)}（并发 {workers}，"
+            f"单批上限 {review_timeout} 秒）"
         )
-        review.progress = 10 + int(completed / len(chunks) * 75)
+        review.progress = 10 + int(processed / len(chunks) * 75)
         review.save(update_fields=["summary", "current_step", "progress", "updated_at"])
+
+    waiting = [index for index in range(1, len(chunks) + 1) if index not in ordered_results]
+    cursor = 0
+    consecutive_failures = 0
+    circuit_broken = False
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        while cursor < len(waiting):
+            if monotonic() >= deadline:
+                break
+            wave = waiting[cursor:cursor + workers]
+            cursor += len(wave)
+            futures = {
+                executor.submit(review_one, index, chunks[index - 1]): index
+                for index in wave
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    with state_lock:
+                        uncovered[index] = f"{type(exc).__name__}: {exc}"
+                        consecutive_failures += 1
+                        # 连续多批失败且迄今无任何成功批次，说明是网关整体不可用
+                        # （而不是个别分片偶发失败）：提前终止，不必逐批耗尽重试。
+                        if not ordered_results and consecutive_failures >= TESTCASE_REVIEW_CIRCUIT_BREAKER:
+                            circuit_broken = True
+                    logger.error(
+                        "用例审查分片最终失败 review=%s chunk=%s/%s：%s",
+                        review.id, index, len(chunks), exc,
+                    )
+                else:
+                    with state_lock:
+                        ordered_results[index] = result
+                        consecutive_failures = 0
+                with state_lock:
+                    persist_progress()
+            if circuit_broken:
+                logger.error(
+                    "用例审查连续 %s 批失败且无任何成功批次，判定模型网关不可用，提前终止 "
+                    "review=%s（已送审 %s/%s 批）",
+                    consecutive_failures, review.id, cursor, len(waiting),
+                )
+                break
+    for index in waiting[cursor:]:
+        uncovered.setdefault(
+            index,
+            "模型网关连续失败，已提前终止" if circuit_broken
+            else f"总时间预算 {TESTCASE_REVIEW_TOTAL_BUDGET_SECONDS // 60} 分钟耗尽，该批未送审",
+        )
+    with state_lock:
+        persist_progress()
+
+    if not ordered_results:
+        first_error = next(iter(uncovered.values()), "未知原因")
+        raise RuntimeError(
+            f"共 {len(uncovered)}/{len(chunks)} 批模型调用失败，未生成报告。首个错误：{first_error}"
+        )
 
     # 按原始分片顺序汇总，保证报告顺序稳定可追溯。
     for index in range(1, len(chunks) + 1):
-        result = ordered_results[index]
+        result = ordered_results.get(index)
+        if not result:
+            continue
         issues.extend(result.get("issues") or [])
         pending.extend(result.get("pending_confirmations") or [])
         governance.extend(result.get("governance_suggestions") or [])
     review.current_step = "生成 Excel 报告"
     review.progress = 90
-    review.summary = _write_report(review, rows, issues, pending, governance)
+    review.summary = _write_report(review, rows, issues, pending, governance, uncovered, chunks)
     review.status = "completed"
     review.progress = 100
-    review.current_step = "审查完成"
+    review.current_step = (
+        f"审查完成（{len(ordered_results)}/{len(chunks)} 批已覆盖）"
+        if uncovered else "审查完成"
+    )
     review.completed_at = timezone.now()
     review.error_message = ""
     review.save()

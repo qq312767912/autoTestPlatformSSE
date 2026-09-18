@@ -69,16 +69,25 @@ echo "[通过] 代码审查概览长模块名单列布局"
 docker exec wharttest-backend /opt/venv/bin/python -c '
 from pathlib import Path
 service = Path("/app/testcases/review_service.py").read_text(encoding="utf-8")
-assert "TESTCASE_REVIEW_CHUNK_SIZE = 10" in service
-assert "TESTCASE_REVIEW_CHUNK_ATTEMPTS = 2" in service
-assert "串行小分片" in service
+serializers = Path("/app/testcases/serializers.py").read_text(encoding="utf-8")
+assert "TESTCASE_REVIEW_CHUNK_SIZE = 20" in service
+assert "TESTCASE_REVIEW_MAX_WORKERS = 2" in service
+assert "TESTCASE_REVIEW_CHUNK_ATTEMPTS = 3" in service
+assert "def _chunk_attempt_limit" in service
+assert "def _retry_delay" in service
+assert "TESTCASE_REVIEW_CIRCUIT_BREAKER = 3" in service
+assert "TESTCASE_REVIEW_TOTAL_BUDGET_SECONDS = 45 * 60" in service
+assert "uncovered_chunks" in service
+assert "ThreadPoolExecutor" in service
+assert "串行小分片" not in service
 assert "\"_checkpoint\"" in service
 assert "def _is_case_header" in service
 assert "config.request_timeout" in service
 assert "max_retries=0" in service
+assert "if key != \"_checkpoint\"" in serializers
 assert Path("/app/bundled_skills/test-case-clarity-review/references/review-rules.md").is_file()
 '
-echo "[通过] 用例审查表头识别、10行串行分片、断点续审与完整 Skill 热修复"
+echo "[通过] 用例审查表头识别、20行/2并发分片、重试退避与熔断、断点续审及完整 Skill 热修复"
 
 celery_ping="$(docker exec wharttest-backend timeout 20 celery -A wharttest_django inspect ping --timeout=10)"
 echo "$celery_ping" | grep -q 'pong' || { echo "[失败] Celery Worker 未响应 ping" >&2; exit 1; }

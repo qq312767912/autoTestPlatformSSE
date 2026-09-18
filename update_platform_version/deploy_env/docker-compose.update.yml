@@ -49,6 +49,9 @@ services:
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/urls.py:/app/code_analysis/urls.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/migrations/0012_codeanalysisllmconfig.py:/app/code_analysis/migrations/0012_codeanalysisllmconfig.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/review_service.py:/app/testcases/review_service.py:ro
+      # 列表接口不再回传运行中的 _checkpoint（仅回传进度计数），避免 4 秒轮询
+      # 产生 MB 级响应；该文件与镜像内版本仅差这一处，可直接覆盖。
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/serializers.py:/app/testcases/serializers.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/views.py:/app/testcases/views.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/management:/app/testcases/management:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/orchestrator_integration/builtin_tools/skill_tools.py:/app/orchestrator_integration/builtin_tools/skill_tools.py:ro

@@ -13,6 +13,7 @@ fail() { echo "[失败] $*" >&2; exit 1; }
 required=(
   hotfix/requirements/services.py
   hotfix/testcases/review_service.py
+  hotfix/testcases/serializers.py
   hotfix/testcases/views.py
   hotfix/testcases/management/commands/recover_stale_testcase_reviews.py
   hotfix/orchestrator_integration/builtin_tools/skill_tools.py
@@ -55,16 +56,68 @@ echo "[验证] 热修复代码与挂载"
 docker exec wharttest-backend /opt/venv/bin/python -c '
 from pathlib import Path
 service = Path("/app/testcases/review_service.py").read_text(encoding="utf-8")
+serializers = Path("/app/testcases/serializers.py").read_text(encoding="utf-8")
 skill_tool = Path("/app/orchestrator_integration/builtin_tools/skill_tools.py").read_text(encoding="utf-8")
-assert "TESTCASE_REVIEW_CHUNK_SIZE = 10" in service
-assert "TESTCASE_REVIEW_CHUNK_ATTEMPTS = 2" in service
-assert "串行小分片" in service
-assert "\"_checkpoint\"" in service
+
+# 1) 分片与并发：20 行/批 + 2 路并发（旧版为 10 行串行，48 批串行会顶到 Celery 软时限）
+assert "TESTCASE_REVIEW_CHUNK_SIZE = 20" in service
+assert "TESTCASE_REVIEW_MAX_WORKERS = 2" in service
+assert "ThreadPoolExecutor" in service
+assert "串行小分片" not in service, "仍挂载着旧版（10 行串行）review_service.py"
+
+# 2) 重试与退避：次数取自 LLMConfig.max_retries 且带上下限，退避为指数且封顶
+assert "TESTCASE_REVIEW_CHUNK_ATTEMPTS = 3" in service
+assert "TESTCASE_REVIEW_MAX_ATTEMPTS = 5" in service
+assert "TESTCASE_REVIEW_RETRY_BASE_DELAY = 2" in service
+assert "TESTCASE_REVIEW_RETRY_MAX_DELAY = 30" in service
+assert "def _chunk_attempt_limit" in service
+assert "def _retry_delay" in service
+
+# 3) 单批失败降级 + 网关整体故障熔断 + 总时间预算
+assert "TESTCASE_REVIEW_CIRCUIT_BREAKER = 3" in service
+assert "TESTCASE_REVIEW_TOTAL_BUDGET_SECONDS = 45 * 60" in service
+assert "uncovered_chunks" in service
+assert "未生成报告" in service
+
+# 4) 既有能力不得回退：表头识别、断点续审、超时与 SDK 重试关闭
 assert "def _is_case_header" in service
+assert "\"_checkpoint\"" in service
 assert "config.request_timeout" in service
 assert "max_retries=0" in service
+
+# 5) 列表接口不再回传运行中的 _checkpoint（否则 4 秒轮询会拉 MB 级响应）
+assert "if key != \"_checkpoint\"" in serializers
+
 assert "已内联参考文件" in skill_tool
 assert Path("/app/bundled_skills/test-case-clarity-review/references/review-rules.md").is_file()
+
+import re
+
+def constant(name, text=service):
+    # 只解析文本，不在 exec 环境导入 Django 应用（此处未初始化 settings）。
+    match = re.search(rf"^{name}\s*=\s*(.+?)\s*(?:#.*)?$", text, re.MULTILINE)
+    assert match, f"review_service.py 中找不到常量 {name}"
+    return eval(match.group(1), {"__builtins__": {}}, {})   # noqa: S307 仅算术表达式
+
+chunk_size = constant("TESTCASE_REVIEW_CHUNK_SIZE")
+workers = constant("TESTCASE_REVIEW_MAX_WORKERS")
+attempts = constant("TESTCASE_REVIEW_CHUNK_ATTEMPTS")
+max_attempts = constant("TESTCASE_REVIEW_MAX_ATTEMPTS")
+breaker = constant("TESTCASE_REVIEW_CIRCUIT_BREAKER")
+budget_seconds = constant("TESTCASE_REVIEW_TOTAL_BUDGET_SECONDS")
+base_delay = constant("TESTCASE_REVIEW_RETRY_BASE_DELAY")
+max_delay = constant("TESTCASE_REVIEW_RETRY_MAX_DELAY")
+assert chunk_size == 20, chunk_size
+assert workers >= 2, workers
+assert 3 <= attempts <= max_attempts, (attempts, max_attempts)
+assert budget_seconds <= 50 * 60, budget_seconds        # 必须小于 Celery 55 分钟软时限
+print(
+    "review_service 生效参数："
+    f"CHUNK_SIZE={chunk_size} WORKERS={workers} "
+    f"ATTEMPTS={attempts}(上限{max_attempts}) "
+    f"BACKOFF={base_delay}~{max_delay}s "
+    f"BUDGET={budget_seconds // 60}min BREAKER={breaker}"
+)
 print("testcase review hotfix OK")
 '
 

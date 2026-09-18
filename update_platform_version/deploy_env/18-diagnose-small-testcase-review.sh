@@ -20,7 +20,7 @@ section "Backend 状态"
 docker inspect "$BACKEND_CONTAINER" --format \
   'image={{.Config.Image}} status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} restarts={{.RestartCount}}' || true
 
-section "审查记录、源文件实际行数与分片估算"
+section "审查记录、源文件实际行数与分片/耗时估算"
 docker exec -e REVIEW_ID="$REVIEW_ID" "$BACKEND_CONTAINER" \
   /opt/venv/bin/python /app/manage.py shell -c '
 import json
@@ -51,26 +51,62 @@ else:
                 nonempty_rows += count
         finally:
             workbook.close()
-    payload = {
-        "id": review.id,
-        "file": review.source_name,
-        "file_size_bytes": Path(path).stat().st_size if Path(path).exists() else None,
-        "status": review.status,
-        "step": review.current_step,
-        "progress": review.progress,
-        "task_id": review.celery_task_id,
-        "created_at": review.created_at.isoformat() if review.created_at else None,
-        "started_at": review.started_at.isoformat() if review.started_at else None,
-        "updated_at": review.updated_at.isoformat() if review.updated_at else None,
-        "completed_at": review.completed_at.isoformat() if review.completed_at else None,
-        "error": review.error_message[:2000],
-        "nonempty_rows": nonempty_rows,
-        "nonempty_rows_by_sheet": sheet_rows,
-        "recognized_case_rows": len(_read_rows(path)) if Path(path).exists() else 0,
-        "old_backend_chunks_80_rows": (nonempty_rows + 79) // 80 if nonempty_rows else 0,
-        "new_backend_chunks_10_rows_upper_bound": (nonempty_rows + 9) // 10 if nonempty_rows else 0,
-    }
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+        from langgraph_integration.models import LLMConfig
+        from testcases import review_service as rs
+
+        def chunks_for(row_count, chunk_size):
+            return (row_count + chunk_size - 1) // chunk_size if row_count and chunk_size else 0
+
+        recognized = len(_read_rows(path)) if Path(path).exists() else 0
+        config = LLMConfig.objects.filter(is_active=True).first()
+        # 取全部带兜底：诊断脚本要能在「修复前 / 修复后」两种代码上都跑通，
+        # 不能因为新版常量不存在就直接崩，那正好丢失了最重要的现场证据。
+        # 估算参数一律取自当前挂载代码的真实常量，不再写死历史值（80 行 / 10 行串行）。
+        chunk_size = getattr(rs, "TESTCASE_REVIEW_CHUNK_SIZE", 80)
+        max_workers = getattr(rs, "TESTCASE_REVIEW_MAX_WORKERS", 1)
+        attempt_limit = getattr(rs, "TESTCASE_REVIEW_CHUNK_ATTEMPTS", 2)
+        budget = getattr(rs, "TESTCASE_REVIEW_TOTAL_BUDGET_SECONDS", 0)
+        retry_aware = hasattr(rs, "_chunk_attempt_limit")
+        batch_count = chunks_for(recognized, chunk_size)
+        workers = max(1, min(max_workers, batch_count or 1))
+        attempts = rs._chunk_attempt_limit(config) if (retry_aware and config) else attempt_limit
+        timeout = max(30, min(int(getattr(config, "request_timeout", None) or 120), 600)) if config else 120
+        waves = chunks_for(batch_count, workers)
+        worst_case = waves * attempts * timeout
+        payload = {
+            "id": review.id,
+            "file": review.source_name,
+            "file_size_bytes": Path(path).stat().st_size if Path(path).exists() else None,
+            "status": review.status,
+            "step": review.current_step,
+            "progress": review.progress,
+            "task_id": review.celery_task_id,
+            "created_at": review.created_at.isoformat() if review.created_at else None,
+            "started_at": review.started_at.isoformat() if review.started_at else None,
+            "updated_at": review.updated_at.isoformat() if review.updated_at else None,
+            "completed_at": review.completed_at.isoformat() if review.completed_at else None,
+            "error": review.error_message[:2000],
+            "nonempty_rows": nonempty_rows,
+            "nonempty_rows_by_sheet": sheet_rows,
+            "recognized_case_rows": recognized,
+            "code_revision": "可配置重试 + 并发分片（修复后）" if retry_aware else "旧版（小分片串行，无外层重试）",
+            "review_backend_params": {
+                "chunk_size": chunk_size,
+                "batch_count": batch_count,
+                "concurrency": workers,
+                "waves": waves,
+                "attempts_per_batch": attempts,
+                "per_batch_timeout_seconds": timeout,
+                # 无重试顺跑耗时：这就是「480 条用例能否在 Celery 软时限内跑完」的关键值。
+                "estimated_seconds_no_retry": waves * timeout,
+                # 全部批次都失败并耗尽重试的最坏值（修复后会被 45 分钟总预算截断）。
+                "worst_case_seconds_if_all_batches_fail": worst_case,
+                "review_budget_seconds": budget,
+                "celery_soft_limit_seconds": 55 * 60,
+                "happy_path_exceeds_celery_soft_limit": waves * timeout > 55 * 60,
+            },
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
 ' || true
 
 section "当前激活模型（不输出密钥）"

@@ -69,8 +69,14 @@ def safe_llm_invoke(llm, messages, max_retries=3, retry_delay=2):
             if response and hasattr(response, "content") and response.content:
                 return response
 
-            # 响应为空，记录并重试
-            logger.warning(f"LLM 返回空响应，尝试重试 ({attempt + 1}/{max_retries})")
+            # 响应为空：同样记入 last_error，否则重试耗尽后只会抛出
+            # 「LLM 调用失败，所有重试都未成功」这种丢失原因的信息，难以排查。
+            last_error = RuntimeError(
+                f"LLM 返回空响应（第 {attempt + 1}/{max_retries} 次尝试，content 为空）"
+            )
+            logger.warning(
+                "LLM 返回空响应，尝试重试 (%s/%s)", attempt + 1, max_retries
+            )
             if attempt < max_retries - 1:
                 time.sleep(retry_delay * (attempt + 1))  # 递增延迟
             continue

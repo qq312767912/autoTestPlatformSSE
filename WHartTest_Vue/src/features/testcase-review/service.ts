@@ -1,5 +1,11 @@
 import http from '@/utils/request';
 
+export interface ReviewChunkProgress {
+  completed: number;
+  uncovered: number;
+  total: number;
+}
+
 export interface TestCaseReview {
   id: number;
   source_name: string;
@@ -12,7 +18,16 @@ export interface TestCaseReview {
   current_step: string;
   progress: number;
   report_url?: string;
-  summary: Record<string, number>;
+  summary: {
+    total_rows?: number;
+    high?: number;
+    medium?: number;
+    low?: number;
+    uncovered_chunks?: number;
+    uncovered_rows?: number;
+    total_chunks?: number;
+    progress_chunks?: ReviewChunkProgress;
+  };
   error_message: string;
   creator_name?: string;
   created_at: string;
