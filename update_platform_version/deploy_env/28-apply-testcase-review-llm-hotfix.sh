@@ -30,6 +30,15 @@ set -euo pipefail
 #   BASE_COMPOSE    内网基础 compose（默认 /projects/ai-test-platform/offline-images/docker-compose.offline.yml）
 #   BACKEND_CONTAINER  后端容器名（默认 wharttest-backend）
 #   BACKEND_URL      后端地址（默认 http://127.0.0.1:8912）
+#   BACKEND_WAIT_SECONDS  重建后就绪等待上限秒数（默认 420）
+#
+# 就绪判据说明（重要）：
+#   本脚本以「容器内能否真的取到 HTTP 响应」为就绪判据，Docker 健康状态只作参考。
+#   原因是镜像自带的健康探针预算只有约 130s（start_period 40s + 重试 3×30s、单次超时 10s），
+#   而本平台 ASGI 首个请求才 import 整个应用，内网负载高时冷启动偶尔超时，
+#   会出现「接口可用但 docker ps 显示 unhealthy」的误报 —— 旧版本在这里直接判失败，
+#   属于误判。真正失败时脚本会打印健康探针记录、supervisord 状态与 django 日志
+#   （注意 django 日志在 /app/data/logs/，不在 docker logs 里），并提示跑 29 号诊断脚本。
 # ============================================================================
 
 UPDATE_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -44,7 +53,7 @@ REVERT=0
 for arg in "$@"; do
   case "$arg" in
     --revert) REVERT=1 ;;
-    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
     *) echo "[失败] 未知参数：$arg（可用：--revert / --help）" >&2; exit 1 ;;
   esac
 done
@@ -75,21 +84,97 @@ recreate_backend_revert() {
   echo "[回退] 不叠加覆盖层重新创建 Backend：代码回到镜像内版本"
   "${compose[@]}" up -d --no-deps --force-recreate backend
 }
+# ---------------------------------------------------------------------------
+# 就绪判定
+#   ⚠️ 不要用 Docker 的健康状态当唯一判据。镜像自带的探针是
+#      `python -c urlopen('http://127.0.0.1:8000/admin/login/')`，
+#      单次超时 10s、预算约 130s（start_period 40s + 重试 3×30s）。
+#      本平台 Django(ASGI, uvicorn --workers=1) 直到「首个请求」才 import 整个应用
+#      （LangChain/langgraph/qdrant 等重依赖），在负载较高的内网机器上冷启动偶尔超过
+#      该预算 —— 于是出现「进程活着、接口其实也能用，但 docker ps 显示 unhealthy」的误报，
+#      探针下一次成功后会自行回到 healthy。
+#   ⚠️ 也正因为如此，失败时 `docker logs` 往往什么都没用：django 的日志被 supervisord
+#      写到 /app/data/logs/django_{out,err}.log（宿主机 offline-images/data/logs/），
+#      容器 stdout 里只有 supervisord 自己的几行。
+#   所以这里：以「容器内能否真的取到 HTTP 响应」为就绪判据，Docker 健康状态只作参考；
+#   真正失败时把该看的日志全部打印出来，并提示去跑 29 号诊断脚本。
+# ---------------------------------------------------------------------------
+BACKEND_WAIT_SECONDS="${BACKEND_WAIT_SECONDS:-420}"
+
+backend_health() {
+  docker inspect "$BACKEND_CONTAINER" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{if .State.Running}}running{{else}}stopped{{end}}{{end}}' 2>/dev/null || true
+}
+# 容器内 HTTP 探测：能拿到响应（含 4xx）即视为应用已就绪；5xx 视为未就绪。
+# 输出一行说明，退出码 = 判定结果。
+http_probe() {  # $1 = URL
+  docker exec "$BACKEND_CONTAINER" python -c '
+import sys, urllib.request, urllib.error
+url = sys.argv[1]
+try:
+    r = urllib.request.urlopen(url, timeout=15)
+    print("HTTP %s" % r.status)
+except urllib.error.HTTPError as e:
+    print("HTTP %s" % e.code)
+    sys.exit(0 if e.code < 500 else 3)
+except Exception as e:
+    print("未响应：%s: %s" % (type(e).__name__, e))
+    sys.exit(1)
+' "$1" 2>&1
+}
+dump_backend_diagnostics() {
+  echo
+  echo "---- 诊断信息（挂载与迁移都已生效，不受本步失败影响）----"
+  echo "[1] 容器状态"
+  docker inspect "$BACKEND_CONTAINER" --format '    state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}无健康检查{{end}} restarts={{.RestartCount}} oom={{.State.OOMKilled}} started={{.State.StartedAt}}' 2>&1 || true
+  echo "[2] Docker 健康探针最近结果（含探针自身的报错，排查误报最有用）"
+  docker inspect "$BACKEND_CONTAINER" --format '{{if .State.Health}}{{range .State.Health.Log}}    exit={{.ExitCode}} 输出={{printf "%s" .Output}}{{end}}{{else}}    （镜像未定义健康检查）{{end}}' 2>&1 | head -12 || true
+  echo "[3] supervisord 程序状态"
+  docker exec "$BACKEND_CONTAINER" sh -c 'supervisorctl -c /app/supervisord.conf status 2>&1 || ps -ef 2>&1 | head -20' 2>&1 | sed 's/^/    /' || true
+  echo "[4] Django 错误日志（/app/data/logs/django_err.log 末 60 行）"
+  docker exec "$BACKEND_CONTAINER" tail -n 60 /app/data/logs/django_err.log 2>&1 | sed 's/^/    /' || true
+  echo "[5] Django 输出日志（/app/data/logs/django_out.log 末 30 行）"
+  docker exec "$BACKEND_CONTAINER" tail -n 30 /app/data/logs/django_out.log 2>&1 | sed 's/^/    /' || true
+  echo "[6] 容器内 HTTP 探测（127.0.0.1:8000/admin/login/）"
+  http_probe "http://127.0.0.1:8000/admin/login/" 2>&1 | sed 's/^/    /' || true
+  echo "[7] 宿主机 HTTP 探测（$BACKEND_URL/admin/login/）"
+  curl -s -o /dev/null -w '    -> HTTP %{http_code}\n' "$BACKEND_URL/admin/login/" 2>&1 || true
+  echo "[8] 需要完整证据链时跑：bash $UPDATE_DIR/29-diagnose-backend-health.sh"
+}
 wait_backend() {
-  local elapsed=0 health=""
-  while [ "$elapsed" -lt 300 ]; do
-    health="$(docker inspect "$BACKEND_CONTAINER" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{if .State.Running}}running{{else}}stopped{{end}}{{end}}' 2>/dev/null || true)"
-    case "$health" in
-      healthy|running) return 0 ;;
-      unhealthy|stopped)
-        docker logs --tail 150 "$BACKEND_CONTAINER" || true
-        fail "Backend 状态异常：$health"
-        ;;
-    esac
+  local elapsed=0 health="" out="" warned=0
+  while [ "$elapsed" -lt "$BACKEND_WAIT_SECONDS" ]; do
+    # if 形式（不是 var=$(...)），否则 set -e 会在探测失败时直接终止脚本
+    if out="$(http_probe "http://127.0.0.1:8000/admin/login/")"; then
+      health="$(backend_health)"
+      case "$health" in
+        healthy|running) echo "[通过] Backend 已就绪（$out；Docker 状态：$health）" ;;
+        *)
+          echo "[通过] Backend 已就绪（$out）"
+          echo "[提示] Docker 健康状态是 $health，这是镜像内探针的预算问题，不是本次热修复的故障："
+          echo "       探针单次超时 10s、预算约 130s，而本平台 ASGI 首个请求要 import 整个应用，"
+          echo "       冷启动偶尔超时；探针下一次成功会自行回到 healthy。功能不受影响。"
+          ;;
+      esac
+      return 0
+    fi
+    health="$(backend_health)"
+    if [ "$health" = "unhealthy" ] && [ "$warned" = 0 ]; then
+      warned=1
+      echo "[提示] Docker 健康状态已转为 unhealthy（第 ${elapsed}s）：多为探针超时误报，继续等应用就绪…"
+      echo "       当前容器内探测结果：$out"
+    fi
+    if [ "$health" = "stopped" ]; then
+      dump_backend_diagnostics
+      fail "Backend 容器已停止（不是探针超时，请按上面诊断信息排查）"
+    fi
+    if [ $((elapsed % 30)) -eq 0 ]; then
+      echo "[等待] 第 ${elapsed}s：容器内 $out"
+    fi
     sleep 5
     elapsed=$((elapsed + 5))
   done
-  fail "Backend 启动超过 300 秒"
+  dump_backend_diagnostics
+  fail "Backend 在 ${BACKEND_WAIT_SECONDS}s 内未能响应（可用 BACKEND_WAIT_SECONDS 调整等待上限）"
 }
 restore_actuators() {
   local services

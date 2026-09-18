@@ -37,6 +37,23 @@ x-actuator-common: &actuator-common
 services:
   backend:
     image: wharttest-250-backend:update-d595a628-review-fix-r5-arm64
+    # 健康检查预算调宽（只改探针参数，不换镜像）：
+    #   镜像自带的探针为 `python -c urlopen('http://127.0.0.1:8000/admin/login/')`，
+    #   单次超时 10s、总预算约 130s（start_period 40s + 重试 3×30s）。
+    #   本平台 Django(ASGI, uvicorn --workers=1) 直到「首个请求」才 import 整个应用
+    #   （LangChain / langgraph / qdrant 等重依赖），在内网负载较高时冷启动偶发超过
+    #   该预算，于是出现「进程活着、/admin/login/ 也能打开，但 docker ps 显示 unhealthy」
+    #   的误报，并导致 04-deploy.sh 与各 apply 脚本的就绪等待误判失败、
+    #   05-verify.sh 的容器状态断言失败。
+    #   这里把单次超时放宽到 30s、重试 5 次、start_period 放宽到 180s，
+    #   让探针结果如实反映「应用能否响应」，而不是「能否在 130s 内响应」。
+    #   注意：这只放宽「慢」的容忍度，应用在持续 5xx 时依旧会判为 unhealthy，不会掩盖真故障。
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/admin/login/', timeout=25)"]
+      interval: 30s
+      timeout: 30s
+      retries: 5
+      start_period: 180s
     volumes:
       # 唯一保留的挂载：Celery 单 Worker 配置。
       # ⚠️ 自 update-d595a628-review-fix-r5 起，Backend 镜像已完整包含此前的全部代码修复

@@ -21,6 +21,7 @@ Vision MCP 继续复用 `01339484` 版本镜像；Actuator 使用包含动态页
 | 代码审查界面 | 长模块名概览单列布局与安全换行 |
 | 用例审查界面 | 断点续审提示（`已完成 N/M 批，点击「重试」将从断点继续`）与覆盖率告警 |
 | 用例审查 LLM | 新增**用例审查专用 LLM 配置**（仅平台管理员可配置，见下文专节）。审查不再复用平台通用 LLM；未配置时创建/重试直接返回 409，不再静默回退。含新迁移 `testcases/0025`。**当前镜像 `d595a628` 不含此改动** —— 需执行 `28-apply-testcase-review-llm-hotfix.sh`，或重建 Backend 镜像 |
+| 部署健壮性 | ① `28` 的就绪判定改为「容器内真实 HTTP 响应」，不再把 Docker 健康状态的 `unhealthy` 当失败（ASGI 冷启动偶发超过探针 130s 预算的已知误报）；② `docker-compose.update.yml` 覆盖 Backend 健康探针预算（单次 30s / 重试 5 / start_period 180s），只放宽「慢」，持续 5xx 仍判 unhealthy；③ 新增 `29-diagnose-backend-health.sh`（13 段证据链，含 supervisor 状态与 `/app/data/logs/django_*.log`，那才是应用日志所在） |
 
 > ⚠️ 由此带来一处**部署方式变更**：代码挂载层已从 `docker-compose.update.yml` 移出，
 > 见下文「代码覆盖层（hotfix）的启用方式」。正常升级不再挂载任何后端代码文件。
@@ -321,6 +322,51 @@ import LLMConfig` 即失败）；③ 叠加 `docker-compose.hotfix.yml` 重建 B
 >
 > 附带：`28 --revert` 只卸挂载，**不删表**；`testcases_testcasereviewllmconfig` 与 `0025` 的迁移
 > 记录会保留（Django 容忍已应用但代码中不存在的迁移，不影响运行）。
+
+### Backend 报 `unhealthy` 时怎么判读（已知误报，2026-09-18 实测）
+
+`28` 若以 `[失败] Backend 状态异常：unhealthy` 结束，**挂载与迁移其实已经生效**——失败发生在
+最后的「等就绪」一步。先看一眼当前状态：
+
+```bash
+docker inspect wharttest-backend --format '{{.State.Health.Status}}'
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8912/admin/login/
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8912/api/testcases/review-llm-config/   # 期望 401/403
+```
+
+**根因**：镜像自带的健康探针是
+
+```
+python -c "urllib.request.urlopen('http://127.0.0.1:8000/admin/login/')"
+interval 30s / timeout 10s / retries 3 / start_period 40s   ← 总预算约 130s
+```
+
+而本平台 Django 是 **ASGI（uvicorn --workers=1）**，直到**首个请求**才 import 整个应用
+（LangChain / langgraph / qdrant 等重依赖）。内网机器负载高时冷启动偶尔超过这个预算，于是出现
+「进程活着、`/admin/login/` 也能打开，但 `docker ps` 显示 `unhealthy`」的误报。探针下一个周期
+（30s）成功后会自行回到 `healthy`——所以第一件事永远是「再看一眼」，而不是立刻回滚。
+
+**本次做了三处修正：**
+
+| 位置 | 修正 |
+| --- | --- |
+| `28` 的就绪判定 | 改用「容器内能否真的取到 HTTP 响应」为判据（4xx 也算已响应，5xx 不算），Docker 健康状态只作参考；等待上限 `BACKEND_WAIT_SECONDS`（默认 420s）内持续探测，超时才失败 |
+| `28` 的失败输出 | 不再只打 `docker logs`——那个几乎没有应用日志。改为打印：健康探针记录（含探针自身报错）、`supervisorctl status`、`/app/data/logs/django_{out,err}.log`、容器内与宿主机双向探活 |
+| `docker-compose.update.yml` | 为 backend 覆盖健康探针参数：单次 `timeout 30s`、`retries 5`、`start_period 180s`。只放宽「慢」的容忍度，持续 5xx 依旧判 unhealthy，不会掩盖真故障；`19/22/23/04` 等脚本同步受益 |
+
+> ⚠️ 排查时的一个坑：**django / celery 的日志不在 `docker logs` 里**。supervisord 把它们写到
+> 容器内 `/app/data/logs/*.log`（即宿主机 `offline-images/data/logs/`），`docker logs` 里只有
+> supervisord 自己的几行。所以「看不到报错」不等于「没有报错」。
+
+需要完整证据链时跑（会落一份日志，便于回传）：
+
+```bash
+bash 29-diagnose-backend-health.sh     # 13 段：健康状态/探针记录/supervisord/django 日志/代码导入/路由反解/双向探活/磁盘
+```
+
+判读口径：第 5、6 节能通且宿主机 `/admin/login/` 是 200 → 应用正常，unhealthy 只是探针超时；
+第 6 节报导入或路由失败 → 挂载层代码有问题，看第 7 节 traceback；第 5 节 `Connection refused`
+→ uvicorn 未监听 8000，看第 4/7/8 节。
 
 ### 上游网关 502 / 无输出时的诊断（`26-diagnose-llm-upstream-capacity.sh`）
 
