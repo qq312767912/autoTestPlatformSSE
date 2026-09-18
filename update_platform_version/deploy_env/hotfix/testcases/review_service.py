@@ -19,9 +19,10 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from langgraph_integration.models import LLMConfig
 from requirements.services import create_llm_instance, safe_llm_invoke
 
-from .models import TestCaseReview, TestCaseReviewLLMConfig
+from .models import TestCaseReview
 
 logger = logging.getLogger(__name__)
 
@@ -36,23 +37,8 @@ TESTCASE_REVIEW_RETRY_BASE_DELAY = 2
 TESTCASE_REVIEW_RETRY_MAX_DELAY = 30
 
 
-def _get_testcase_review_llm_config():
-    """只解析用例审查专属配置，禁止隐式回退到平台通用 LLM。
-
-    用例审查要求模型按提示词稳定输出 JSON，与对话/编排对模型的偏好不同。
-    若这里回退到通用配置，改通用配置会悄悄改变审查行为，且管理员无法为审查
-    单独选一个"吐 JSON 更稳"的模型，因此宁可显式失败。
-    """
-    config = TestCaseReviewLLMConfig.objects.filter(is_active=True).first()
-    if not config:
-        raise ValueError("尚未配置并启用用例审查专用 LLM，请联系平台管理员配置")
-    if not config.api_key:
-        raise ValueError("用例审查专用 LLM 缺少 API Key，请联系平台管理员补全")
-    return config
-
-
 def _chunk_attempt_limit(config):
-    """单批最大尝试次数：尊重专用配置的 max_retries，但设有下限与上限。
+    """单批最大尝试次数：尊重 LLMConfig.max_retries，但设有下限与上限。
 
     内网模型网关会出现瞬时 5xx（如 502 upstream_unavailable）。历史实现每批
     只尝试 2 次且间隔固定 2 秒，一次上游抖动就让整项任务失败，故这里设下限；
@@ -415,7 +401,9 @@ def run_testcase_review(review_id):
     rows = _read_rows(review.source_file.path)
     if not rows:
         raise ValueError("文件中没有可审查的非空内容")
-    config = _get_testcase_review_llm_config()
+    config = LLMConfig.objects.filter(is_active=True).first()
+    if not config:
+        raise ValueError("没有已启用的 LLM 配置")
     skill_prompt = _skill_prompt(review)
     if review.custom_rules.strip():
         skill_prompt += "\n\n# 本次用户指定的审查规则（在不违反质量边界的前提下优先执行）\n" + review.custom_rules.strip()

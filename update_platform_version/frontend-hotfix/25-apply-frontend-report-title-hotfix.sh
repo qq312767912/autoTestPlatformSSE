@@ -2,8 +2,7 @@
 set -euo pipefail
 
 # ============================================================================
-# 前端热修复（累计产物）：① 报告导出标题 / 文件名改用代码仓库名
-#                          ② 用例审查「审查模型配置」入口（仅平台管理员可见）
+# 前端热修复：代码审查 / 测试分析报告「导出标题与文件名改用代码仓库名」
 # ============================================================================
 # 为什么需要单独一条通道：
 #   报告导出有两处产物 ——
@@ -14,12 +13,6 @@ set -euo pipefail
 #   Backend 容器内的文件，对前端无效；而 05-verify.sh 的前端断言检查的是容器内
 #   /usr/share/nginx/html 的实际产物（nginx.conf 的 root）。
 #   所以本脚本用「只读挂载已构建产物」让修复立即生效：不重建镜像、不联网、不改数据库。
-#
-# 关于产物是「累计」的：
-#   每次重新构建 dist 都会把当时源码里的全部前端改动一起打进去。所以本包同时携带
-#   ① 报告命名（3feae08a）与 ② 用例审查专用 LLM 入口（92cbc741）两项改动，
-#   包名 frontend-report-title-dist.tar.gz 是历史命名，不代表只含报告命名。
-#   判据也随之扩展：解包后会同时校验报告命名口径与用例审查配置入口，任一缺失即中止。
 #
 # 用法：
 #   bash 25-apply-frontend-report-title-hotfix.sh            # 应用
@@ -53,7 +46,7 @@ REVERT=0
 for arg in "$@"; do
   case "$arg" in
     --revert) REVERT=1 ;;
-    -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
     *) echo "[失败] 未知参数：$arg（可用：--revert / --help）" >&2; exit 1 ;;
   esac
 done
@@ -71,18 +64,6 @@ check_report_naming() {  # $1 = 主包文件路径，- 表示标准输入
         if (at > 0 && index(substr($0, at, 200), field) > 0) found[kind] = 1
       } }
     END { exit (found[1] && found[2]) ? 0 : 1 }' "$1"
-}
-
-# 用例审查专用 LLM 入口判据：主包必须同时含接口基址与两个专用文案。
-# 区分度说明：仅报告命名的旧产物里，review-llm-config 与「用例审查专用 LLM」都不存在
-# （只有「审查模型配置」——那是代码审查页原有的按钮文案），因此本判据能识别出旧产物。
-# 判据与 05-verify.sh 的前端层断言逐字一致，避免两处口径漂移。
-check_review_llm_entry() {  # $1 = 主包文件路径，- 表示标准输入
-  awk -v a='review-llm-config' -v b='审查模型配置' -v c='用例审查专用 LLM' '
-    { if (index($0, a) > 0) hitA = 1
-      if (index($0, b) > 0) hitB = 1
-      if (index($0, c) > 0) hitC = 1 }
-    END { exit (hitA && hitB && hitC) ? 0 : 1 }' "$1"
 }
 
 main_bundle() {  # $1 = 目录；输出该目录下最大的 assets/*.js（即主包）
@@ -129,7 +110,7 @@ recreate_frontend() {  # $1 = 1 表示叠加本覆盖层，0 表示不叠加
 compose=(docker compose -p offline-images -f "$BASE_COMPOSE" -f "$UPDATE_COMPOSE")
 
 echo "=========================================="
-echo " 前端热修复（累计产物）：① 报告命名 ② 用例审查专用 LLM 入口"
+echo " 前端热修复：报告标题与文件名改用代码仓库名"
 echo " 模式：$([ "$REVERT" = 1 ] && echo '回退' || echo '应用')"
 echo " 前端容器：$FRONTEND_CONTAINER"
 echo " 覆盖层：$HOTFIX_COMPOSE"
@@ -156,11 +137,9 @@ if [ "$REVERT" = 1 ]; then
 
   echo
   echo "[完成] 已回退到镜像内前端产物。"
-  echo "       注意：若镜像尚未包含这两项改动，站点会退回 ——"
-  echo "         ① 报告标题/文件名回到「<报告名>_<平台项目名>」的旧口径；"
-  echo "         ② 用例审查页不再出现「审查模型配置」入口。"
+  echo "       注意：若镜像尚未包含本次修复，站点会回到「<报告名>_<平台项目名>」的旧口径。"
   echo "       解包产物保留在 $DIST_DIR（可安全删除）。"
-  echo "       复核：bash $UPDATE_DIR/../deploy_env/05-verify.sh（其中报告命名与用例审查入口断言此时应失败，属预期）"
+  echo "       复核：bash $UPDATE_DIR/../deploy_env/05-verify.sh（其中报告命名断言此时应失败，属预期）"
   exit 0
 fi
 
@@ -200,13 +179,6 @@ check_report_naming "$bundle" || fail \
 echo "[通过] 产物为「<报告名>_<代码仓库名>」口径"
 
 echo
-echo "[预检] 产物里的用例审查专用 LLM 入口（仅平台管理员可见）"
-check_review_llm_entry "$bundle" || fail \
-  "产物不含用例审查专用 LLM 入口：$(basename "$bundle") 缺少 review-llm-config / 审查模型配置 / 用例审查专用 LLM。\
-若产物是仅含报告命名的旧包，需重新构建 dist 并重打包（pack-frontend-hotfix.sh --build）"
-echo "[通过] 产物含用例审查「审查模型配置」入口"
-
-echo
 recreate_frontend 1
 
 echo
@@ -228,22 +200,13 @@ docker exec "$FRONTEND_CONTAINER" cat "/usr/share/nginx/html/assets/$bundle_name
   || fail "容器内产物未按「报告名_代码仓库名」命名，或站点根目录不是热修复产物（assets/$bundle_name）"
 echo "[通过] assets/$bundle_name"
 
-echo
-echo "[验证] 容器内实际产物含用例审查专用 LLM 入口（与 05-verify.sh 同判据）"
-docker exec "$FRONTEND_CONTAINER" cat "/usr/share/nginx/html/assets/$bundle_name" | check_review_llm_entry - \
-  || fail "容器内产物不含用例审查专用 LLM 入口（assets/$bundle_name），站点根目录可能不是热修复产物"
-echo "[通过] assets/$bundle_name 含 review-llm-config / 审查模型配置 / 用例审查专用 LLM"
-
 curl -fsS "$FRONTEND_URL" >/dev/null || fail "前端不可访问：$FRONTEND_URL"
 echo "[通过] 前端 HTTP 可访问：$FRONTEND_URL"
 
 echo
 echo "=========================================="
-echo "[完成] 前端两项改动已生效："
-echo "       ① 报告导出标题与下载文件名 = 「代码审查报告_<仓库名>」「测试分析报告_<仓库名>」"
-echo "       ② 用例审查页出现「审查模型配置」按钮（仅 is_staff 可见，用于配置专用 LLM）"
-echo "       验证方式：① 对任一分析任务点「导出报告 → HTML」，看报告标题与下载文件名；"
-echo "                 ② 以管理员登录「用例审查」页，点右上「审查模型配置」填写并启用模型。"
+echo "[完成] 报告导出标题与下载文件名已为「代码审查报告_<仓库名>」「测试分析报告_<仓库名>」。"
+echo "       验证方式：在平台上对任一分析任务点「导出报告 → HTML」，查看报告顶部标题与下载文件名。"
 echo "       手工复核：bash $UPDATE_DIR/../deploy_env/05-verify.sh"
 echo "       回退方式：bash $UPDATE_DIR/25-apply-frontend-report-title-hotfix.sh --revert"
 echo

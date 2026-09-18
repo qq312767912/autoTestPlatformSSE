@@ -1,36 +1,19 @@
-# 前端热修复通道（累计产物）：① 报告命名 ② 用例审查专用 LLM 入口
+# 前端热修复通道：报告导出标题与文件名改用代码仓库名
 
 ## 这个包解决什么
 
-本包携带**两项**前端改动，一次挂载同时生效：
-
-**① 报告导出标题与文件名改用代码仓库名**
 代码审查 / 测试分析报告**导出 HTML** 时，报告顶部标题与下载文件名原本是
 「`代码审查报告_<平台项目名>`」。同一平台项目下可以有多个代码仓库，用项目名会让不同仓库的
 报告同名、无法区分。本次改为「`代码审查报告_<代码仓库名>`」（测试分析报告同理）。
-改动落点在 `WHartTest_Vue/src/features/code-analysis/reportExport.ts`。
 
-**② 用例审查「审查模型配置」入口（仅平台管理员可见）**
-用例审查改为使用**专用 LLM 配置**，不再复用平台通用模型；配置入口在用例审查页右上，
-只对 `is_staff` 账号显示。改动落点在
-`WHartTest_Vue/src/features/testcase-review/{TestCaseReviewView.vue,service.ts}`。
-注意：该入口只是前端按钮，**后端能力由 `deploy_env/28-apply-testcase-review-llm-hotfix.sh` 提供**，
-两者要一起上，否则前端按钮点了会 404。
-
-改动都落在前端 —— 报告是**前端在浏览器里**拼 HTML 再 Blob 下载，后端只提供 Markdown；配置入口
-是前端按钮。因此：
+改动落点在 `WHartTest_Vue/src/features/code-analysis/reportExport.ts` —— 报告是**前端在浏览器里**
+拼 HTML 再 Blob 下载的，后端只提供 Markdown。因此：
 
 | 通道 | 能覆盖到吗 | 说明 |
 | --- | --- | --- |
 | `deploy_env/hotfix/`（Python 代码覆盖层） | ❌ | 只能覆盖 Backend 容器内的文件 |
 | `deploy_env/04-deploy.sh` 换镜像 | ✅ 但要重建镜像 | 需要 ARM64 构建机 `docker save`，不是热修复 |
 | **本包（挂载已构建产物）** | ✅ | 不重建镜像、不联网，重建一次 Frontend 容器即生效 |
-
-## 关于「累计」
-
-每次 `pack-frontend-hotfix.sh --build` 都会把**当时源码里的全部前端改动**打进同一个 dist，
-所以本包是累计的：包名 `frontend-report-title-dist.tar.gz` 是历史命名，不代表只含报告命名。
-判据也相应扩展：解包后同时校验报告命名口径**与**用例审查配置入口，任一缺失即在动容器之前中止。
 
 ## 内网怎么用
 
@@ -50,26 +33,9 @@ bash ../deploy_env/05-verify.sh
 bash 25-apply-frontend-report-title-hotfix.sh --revert
 ```
 
-执行时脚本会依次：校验产物包 SHA256 → 解包 → **在动容器之前**先断言产物确含两项改动 →
+执行时脚本会依次：校验产物包 SHA256 → 解包 → **在动容器之前**先断言产物确是新口径 →
 只读挂载到 `/usr/share/nginx/html` 并重建 Frontend → 事后核对挂载来源与容器内实际产物。
 任一步失败都会在碰容器之前中止，不会留下半成品。
-
-## 顺序：后端先行，前端随后
-
-两项改动是「后端提供能力 + 前端提供入口」的关系。建议内网按此顺序：
-
-```bash
-# 1) 后端：专用 LLM 配置模型 / 迁移 / 路由（含自动 apply 0025 迁移）
-cd /projects/ai-test-platform/update_platform_version/deploy_env
-bash 28-apply-testcase-review-llm-hotfix.sh
-
-# 2) 前端：挂载新产物，前端页面上才会出现配置入口
-cd ../frontend-hotfix
-bash 25-apply-frontend-report-title-hotfix.sh
-
-# 3) 管理员在页面上配置并启用模型，否则用例审查会返回 409
-#    「用例审查」→ 右上「审查模型配置」→ 复制或填写 → 测试连接 → 保存并启用
-```
 
 ## 目录构成
 
@@ -77,7 +43,7 @@ bash 25-apply-frontend-report-title-hotfix.sh
 | --- | --- |
 | `25-apply-frontend-report-title-hotfix.sh` | 应用 / 回退（`--revert`） |
 | `docker-compose.frontend-hotfix.yml` | 覆盖层：把 dist 只读挂到 `/usr/share/nginx/html`；挂载源必须由 `FRONTEND_DIST_DIR` 显式给出，未设置时 compose 直接报错，避免把站点根目录挂成空目录 |
-| `frontend-report-title-dist.tar.gz` | 已构建的前端产物（累计，137 个文件，约 4.4 MB） |
+| `frontend-report-title-dist.tar.gz` | 已构建的前端产物（137 个文件，约 4.4 MB） |
 | `SHA256SUMS` | 产物包校验和 |
 | `pack-frontend-hotfix.sh` | 【联网构建机专用】重新构建并打包产物，内网不执行 |
 
@@ -87,22 +53,17 @@ bash 25-apply-frontend-report-title-hotfix.sh
    请重建 `wharttest-250-frontend` 镜像（`wharttest-image-release` 流程）并走 03/04 正常升级。
 2. **下一次 `04-deploy.sh` 会把它卸掉。** `04-deploy.sh` 用
    `base + docker-compose.update.yml` 重建 Frontend，不带本覆盖层，挂载随之消失、站点回到
-   镜像内产物（报告回到旧口径、用例审查页的配置入口消失）。这不是故障，是这条通道的固有代价
-   ——届时如果镜像还没重建，重新执行一次本脚本即可。
-3. **`05-verify.sh` 的前端断言此时校验的就是挂载产物。** 它证明的是「站点当前产物含这两项改动」，
+   镜像内产物（即旧口径）。这不是故障，是这条通道的固有代价——届时如果镜像还没重建，
+   重新执行一次本脚本即可。
+3. **`05-verify.sh` 的报告命名断言此时校验的就是挂载产物。** 它证明的是「站点当前产物是新口径」，
    不代表镜像已经更新。镜像更新与否由 `03-import-images.sh` 的镜像 revision 校验负责。
 
 ## 判据说明（避免两处口径漂移）
 
-`05-verify.sh` 与 `25-apply-*.sh` 用的是**逐字相同的两条判据**：
+`05-verify.sh` 与 `25-apply-*.sh` 用的是**同一条判据**：在产物里找到 `代码审查报告_` /
+`测试分析报告_` 前缀字面量后，检查其后 200 字符窗口内是否出现 `repository_name`。
 
-1. **报告命名口径**：在产物里找到 `代码审查报告_` / `测试分析报告_` 前缀字面量后，检查其后
-   200 字符窗口内是否出现 `repository_name`。
-   只断言「含 `代码审查报告_`」是不够的——旧版同样含这个字符串（旧写法是
-   `` `代码审查报告_${task.project_name || ...}` ``），两种产物都能过。
-2. **用例审查专用 LLM 入口**：主包内必须同时出现 `review-llm-config`、`审查模型配置`、
-   `用例审查专用 LLM`。
-   其中 `审查模型配置` 单独不具区分度（代码审查页早就用了这个按钮文案），真正起作用的是
-   前两个串——仅含报告命名的旧产物两者都没有。
-
-两条判据在交付前都用**改动前后的两份产物**做过对照：旧产物被拦下、新产物通过。
+只断言「产物里含 `代码审查报告_`」是不够的——旧版同样含这个字符串（旧写法是
+`` `代码审查报告_${task.project_name || ...}` ``），两种产物都能过。加上邻近窗口判据后：
+旧产物用的是 `project_name`，直接过不了；这一点在交付前用改动前后的两份产物做过对照验证
+（旧产物被拦下、新产物通过）。
