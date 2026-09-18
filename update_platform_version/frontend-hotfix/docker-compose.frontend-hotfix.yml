@@ -1,0 +1,35 @@
+# ============================================================================
+# 前端产物热修复覆盖层（仅用于「必须改前端、又来不及重建镜像」的应急场景）
+# ============================================================================
+# 背景：代码审查 / 测试分析报告的「导出 HTML」是前端在浏览器里拼 HTML 再 Blob 下载的
+# （WHartTest_Vue/src/features/code-analysis/reportExport.ts），后端只提供 Markdown。
+# 因此标准热修复通道（deploy_env/hotfix/ 下的 Python 代码覆盖层）覆盖不到它，
+# 而 05-verify.sh 的前端断言检查的是容器内 /usr/share/nginx/html 的实际产物。
+#
+# 本覆盖层把已构建好的 dist 只读挂到 Nginx 的站点根目录（nginx.conf: root /usr/share/nginx/html），
+# 从而在不重建镜像的前提下让新产物立即生效。
+#
+# 叠加方式（25-apply-frontend-report-title-hotfix.sh 会自动做，无需手工敲）：
+#
+#   FRONTEND_DIST_DIR=/projects/ai-test-platform/update_platform_version/frontend-hotfix/dist \
+#   docker compose -p offline-images \
+#     -f /projects/ai-test-platform/offline-images/docker-compose.offline.yml \
+#     -f /projects/ai-test-platform/update_platform_version/deploy_env/docker-compose.update.yml \
+#     -f /projects/ai-test-platform/update_platform_version/frontend-hotfix/docker-compose.frontend-hotfix.yml \
+#     up -d --no-deps --force-recreate frontend
+#
+# ⚠️ 三点切记：
+#   1. 本覆盖层是**临时通道**。它挂在 Frontend 上而不是 Backend，所以 05-verify.sh 的
+#      “Backend 不得有 hotfix 代码覆盖层”检查不会因此失败；但 05-verify.sh 的前端断言此时
+#      校验的就是这里挂上去的产物，不再代表镜像本体。要让修复永久生效，请重建
+#      wharttest-250-frontend 镜像并走 03/04 正常升级。
+#   2. 下一次不带本文件的 04-deploy.sh 重建 Frontend 时，挂载会自动消失，站点回到镜像内产物
+#      （即旧口径）。这不是故障，是这条通道的固有代价。
+#   3. 挂载源目录必须由环境变量 FRONTEND_DIST_DIR 显式给出。未设置时 compose 会直接报错，
+#      避免把站点根目录挂成空目录导致前端整体 404。
+#
+# 回退：bash 25-apply-frontend-report-title-hotfix.sh --revert
+services:
+  frontend:
+    volumes:
+      - ${FRONTEND_DIST_DIR:?未设置 FRONTEND_DIST_DIR（应指向解包后的 dist 绝对路径），请用 25-apply-frontend-report-title-hotfix.sh 执行}:/usr/share/nginx/html:ro

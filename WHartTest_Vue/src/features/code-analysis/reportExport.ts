@@ -33,6 +33,18 @@ function safeFilename(value: string): string {
   return value.replace(/[/\\:*?"<>|\r\n]+/g, '_').replace(/^[ ._]+|[ ._]+$/g, '') || '未命名项目';
 }
 
+// 报告标题前缀本身带下划线，保证「代码审查报告_」在产物里是完整字符串，
+// 内网 05-verify.sh 用它做前端产物级断言。
+const reportTitlePrefixes: Record<ReportType, string> = { change: '代码审查报告_', test: '测试分析报告_' };
+
+// 报告标题与下载文件名共用同一口径：`<报告名>_<代码仓库名>`。
+// 同一平台项目下可以有多个代码仓库，按仓库名命名才能区分不同仓库的报告；
+// 标题与文件名同源，避免两处写法各自漂移。
+function reportName(task: AnalysisTask, type: ReportType): string {
+  const repository = task.repository_name || task.project_name || `项目${task.project}`;
+  return safeFilename(`${reportTitlePrefixes[type]}${repository}`);
+}
+
 function formatTime(value?: string): string {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-';
 }
@@ -135,7 +147,7 @@ function buildChangeReport(task: AnalysisTask): string {
       ${cards || '<div class="empty">未发现确定性风险</div>'}
     </section>
     <section class="section"><div class="section-head"><div><h2>变更文件</h2><p>本次分析范围内的文件</p></div></div><div class="file-list">${files || '<div class="empty">未记录变更文件</div>'}</div></section>`;
-  return reportDocument(task, `代码审查报告_${task.project_name || `项目${task.project}`}`, body);
+  return reportDocument(task, reportName(task, 'change'), body);
 }
 
 function buildTestReport(task: AnalysisTask): string {
@@ -182,7 +194,7 @@ function buildTestReport(task: AnalysisTask): string {
     <section class="section"><div class="section-head"><div><h2>需求测试点</h2><p>依据本次迭代变更生成</p></div><span class="count">按优先级排序 · ${iterationPoints.length} 项</span></div>${pointCards(iterationPoints, '迭代验证') || '<div class="empty">暂无需求测试点</div>'}</section>
     <section class="section"><div class="section-head"><div><h2>风险测试点</h2><p>依据代码审查风险生成</p></div><span class="count">按优先级排序 · ${riskPoints.length} 项</span></div>${pointCards(riskPoints, '风险排查') || '<div class="empty">暂无风险测试点</div>'}</section>
     <section class="section"><div class="section-head"><div><h2>覆盖缺口</h2><p>建议进一步确认的测试范围</p></div></div>${gaps ? `<ul>${gaps}</ul>` : '<div class="empty">未记录覆盖缺口</div>'}</section>`;
-  return reportDocument(task, `测试分析报告_${task.project_name || `项目${task.project}`}`, body);
+  return reportDocument(task, reportName(task, 'test'), body);
 }
 
 export function buildHtmlReport(task: AnalysisTask, type: ReportType): string {
@@ -190,12 +202,10 @@ export function buildHtmlReport(task: AnalysisTask, type: ReportType): string {
 }
 
 export function downloadHtmlReport(task: AnalysisTask, type: ReportType): void {
-  const reportName = type === 'change' ? '代码审查报告' : '测试分析报告';
-  const projectName = safeFilename(task.project_name || `项目${task.project}`);
   const blob = new Blob([buildHtmlReport(task, type)], { type: 'text/html;charset=utf-8' });
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
-  link.download = `${reportName}_${projectName}.html`;
+  link.download = `${reportName(task, type)}.html`;
   document.body.appendChild(link);
   link.click();
   link.remove();
