@@ -211,7 +211,29 @@ class ProjectRepositoryViewSet(viewsets.ModelViewSet):
             return Response(
                 {"detail": "基准 Commit 和目标 Commit 不能相同"}, status=status.HTTP_400_BAD_REQUEST,
             )
-        return Response({"valid": True, "base_sha": base_sha, "head_sha": head_sha})
+        # 差异统一按共同祖先比较：基准不是目标的祖先时必须取 merge base，否则两点比较
+        # 会把基准分支上已修复的改动呈现成目标分支的删除，报出并不存在的问题。
+        try:
+            if repo.source_type == "local_git":
+                merge_base = LocalGitClient(repo.local_path).merge_base(base_sha, head_sha)
+            else:
+                merge_base = client.merge_base(repo.gitlab_project_id, base_sha, head_sha)
+            if not isinstance(merge_base, str) or not re.fullmatch(r"[0-9a-f]{40,64}", merge_base):
+                merge_base = ""
+        except Exception:
+            merge_base = ""
+        if merge_base and merge_base == head_sha:
+            return Response(
+                {"detail": "目标 Commit 是基准 Commit 的祖先，基准与目标疑似颠倒，请交换后重试"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        notice = ""
+        if merge_base and merge_base != base_sha:
+            notice = f"基准 Commit 不是目标 Commit 的祖先，将按共同祖先 {merge_base[:8]} 比较"
+        return Response({
+            "valid": True, "base_sha": base_sha, "head_sha": head_sha,
+            "compare_base_sha": merge_base or base_sha, "notice": notice,
+        })
 
     @action(detail=True, methods=["get"], url_path="merge-requests")
     def merge_requests(self, request, pk=None):

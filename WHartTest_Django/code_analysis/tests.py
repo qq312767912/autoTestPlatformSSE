@@ -263,6 +263,90 @@ class LocalGitClientTests(SimpleTestCase):
             self.assertEqual(len(result["diffs"]), 1)
 
 
+class LocalGitMergeBaseTests(SimpleTestCase):
+    """回归：基准分支独有的改动（如主干已修好的鉴权）不得渲染成目标分支的删除。"""
+
+    def _diverged_repository(self, directory, git):
+        """构造真正的分叉历史：基准分支补了鉴权，目标分支自分叉点拉出后只新增自己的文件。
+
+        必须真分叉（基准提交不是目标的祖先）：否则共同祖先即基准自身，两点比较与
+        共同祖先比较结果相同，用例会退化为恒过，守不住本缺陷。
+        """
+        git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test")
+        file_path = os.path.join(directory, "Demo.java")
+        with open(file_path, "w", encoding="utf-8") as handle: handle.write("private String name;\n")
+        git("add", "."); git("commit", "-m", "base")
+        git("branch", "-M", "trunk")
+        # 目标分支从分叉点拉出，稍后只新增自己的文件
+        git("checkout", "-q", "-b", "feature")
+        # 基准分支继续前进：补上鉴权注解，该提交不在目标分支上
+        git("checkout", "-q", "trunk")
+        with open(file_path, "w", encoding="utf-8") as handle: handle.write("@PreAuthorize\nprivate String name;\n")
+        git("commit", "-am", "trunk adds annotation")
+        git("checkout", "-q", "feature")
+        with open(os.path.join(directory, "Added.java"), "w", encoding="utf-8") as handle: handle.write("class Added {}\n")
+        git("add", "."); git("commit", "-m", "feature adds file")
+        return file_path
+
+    def test_local_git_compares_from_common_ancestor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def git(*args):
+                return subprocess.run(["git", "-C", directory, *args], check=True, capture_output=True, text=True)
+            self._diverged_repository(directory, git)
+            expected_base = git("merge-base", "trunk", "feature").stdout.strip()
+            # 前提自检：两条分支必须真的分叉，否则本用例无法区分两种比较语义
+            self.assertNotEqual(expected_base, git("rev-parse", "trunk").stdout.strip())
+            original_root = LocalGitClient.ROOT
+            try:
+                LocalGitClient.ROOT = Path(directory).resolve()
+                result = LocalGitClient(".").compare("trunk", "feature")
+            finally:
+                LocalGitClient.ROOT = original_root
+            self.assertEqual([item["new_path"] for item in result["diffs"]], ["Added.java"])
+            self.assertNotIn("@PreAuthorize", "".join(item["diff"] for item in result["diffs"]))
+            self.assertEqual(result["base_sha"], expected_base)
+
+    def test_local_git_keeps_ancestor_range_unchanged(self):
+        """基准是目标祖先（常见相邻 Commit 对比）时，比较范围与原先一致。"""
+        with tempfile.TemporaryDirectory() as directory:
+            def git(*args):
+                return subprocess.run(["git", "-C", directory, *args], check=True, capture_output=True, text=True)
+            git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test")
+            file_path = os.path.join(directory, "Demo.java")
+            with open(file_path, "w", encoding="utf-8") as handle: handle.write("@Excel\nprivate String name;\n")
+            git("add", "."); git("commit", "-m", "base"); git("branch", "base")
+            with open(file_path, "w", encoding="utf-8") as handle: handle.write("private String name;\n")
+            git("commit", "-am", "remove annotation"); git("branch", "head")
+            original_root = LocalGitClient.ROOT
+            try:
+                LocalGitClient.ROOT = Path(directory).resolve()
+                result = LocalGitClient(".").compare("base", "head")
+            finally:
+                LocalGitClient.ROOT = original_root
+            self.assertEqual(len(result["diffs"]), 1)
+            self.assertIn("@Excel", result["diffs"][0]["diff"])
+            self.assertEqual(result["base_sha"], git("rev-parse", "base").strip())
+
+    def test_local_git_rejects_reversed_commit_range(self):
+        """目标提交是基准提交的祖先时，说明选反了，必须拦下而不是反向报风险。"""
+        with tempfile.TemporaryDirectory() as directory:
+            def git(*args):
+                return subprocess.run(["git", "-C", directory, *args], check=True, capture_output=True, text=True)
+            git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test")
+            file_path = os.path.join(directory, "Demo.java")
+            with open(file_path, "w", encoding="utf-8") as handle: handle.write("private String name;\n")
+            git("add", "."); git("commit", "-m", "old"); git("branch", "old")
+            with open(file_path, "w", encoding="utf-8") as handle: handle.write("@PreAuthorize\nprivate String name;\n")
+            git("commit", "-am", "fix"); git("branch", "new")
+            original_root = LocalGitClient.ROOT
+            try:
+                LocalGitClient.ROOT = Path(directory).resolve()
+                with self.assertRaisesMessage(ValueError, "颠倒"):
+                    LocalGitClient(".").compare("new", "old")
+            finally:
+                LocalGitClient.ROOT = original_root
+
+
 class AnalysisLifecycleTests(TransactionTestCase):
     @staticmethod
     def grant_code_analysis_permissions(user, *codenames):
@@ -409,17 +493,39 @@ class AnalysisLifecycleTests(TransactionTestCase):
         self.repository.refresh_from_db()
         self.assertEqual(self.repository.default_branch, "develop")
 
+    @patch("code_analysis.services.GitLabClient.merge_base")
     @patch("code_analysis.services.GitLabClient.commit")
-    def test_repository_validates_and_resolves_both_commit_refs(self, commit):
+    def test_repository_validates_and_resolves_both_commit_refs(self, commit, merge_base):
         commit.side_effect = [{"id": "a" * 40}, {"id": "b" * 40}]
+        merge_base.return_value = "c" * 40
         client = APIClient(); client.force_authenticate(self.user)
         response = client.post(
             f"/api/code-analysis/repositories/{self.repository.id}/validate-refs/",
             {"base_sha": "feature~1", "head_sha": "feature"}, format="json",
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data, {"valid": True, "base_sha": "a" * 40, "head_sha": "b" * 40})
+        self.assertEqual(response.data["valid"], True)
+        self.assertEqual(response.data["base_sha"], "a" * 40)
+        self.assertEqual(response.data["head_sha"], "b" * 40)
+        # 基准不是目标的祖先时必须提示按共同祖先比较，避免两点比较报出已修复的问题。
+        self.assertEqual(response.data["compare_base_sha"], "c" * 40)
+        self.assertIn("共同祖先", response.data["notice"])
         self.assertEqual(commit.call_count, 2)
+        merge_base.assert_called_once_with(self.repository.gitlab_project_id, "a" * 40, "b" * 40)
+
+    @patch("code_analysis.services.GitLabClient.merge_base")
+    @patch("code_analysis.services.GitLabClient.commit")
+    def test_repository_rejects_reversed_commit_refs(self, commit, merge_base):
+        # 目标提交是基准提交的祖先，说明基准/目标选反：必须拦下，否则会把刚修好的改动报成删除。
+        commit.side_effect = [{"id": "b" * 40}, {"id": "a" * 40}]
+        merge_base.return_value = "a" * 40
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.post(
+            f"/api/code-analysis/repositories/{self.repository.id}/validate-refs/",
+            {"base_sha": "a" * 40, "head_sha": "b" * 40}, format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("颠倒", response.data["detail"])
 
     def test_repository_rejects_empty_commit_refs_before_task_creation(self):
         client = APIClient(); client.force_authenticate(self.user)
@@ -645,6 +751,7 @@ class AnalysisLifecycleTests(TransactionTestCase):
         }]
         with (
             patch("code_analysis.services.GitLabClient.compare", return_value=diff_payload),
+            patch("code_analysis.services.GitLabClient.merge_base", return_value=""),
             patch("code_analysis.review_mcp.CodeReviewMCP.run_static_checks", return_value=([], [])),
             patch("code_analysis.services._analysis_stage", side_effect=lambda _task_id, _name, function, *args: function(*args)),
             patch("code_analysis.services._run_ai_batches", return_value=([], [], [], 5, 100, "AI分析完成")) as ai_batches,
@@ -813,7 +920,10 @@ class AnalysisLifecycleTests(TransactionTestCase):
             ):
                 with _managed_gitlab_repository(task) as (root, base_ref, head_ref):
                     self.assertTrue((root / ".git").exists())
-                    self.assertEqual({base_ref, head_ref}, {"refs/ocr/base", "refs/ocr/head"})
+                    # OCR 必须与平台机器规则看到同一段差异：从共同祖先开始比较。
+                    # 线性历史下共同祖先即基准提交本身。
+                    self.assertEqual(base_ref, base_sha)
+                    self.assertEqual(head_ref, "refs/ocr/head")
                 self.assertTrue(root.exists())
                 remove_ocr_repository(task.id)
                 self.assertFalse(root.exists())

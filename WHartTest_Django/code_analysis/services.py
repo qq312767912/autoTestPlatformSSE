@@ -175,8 +175,22 @@ class GitLabClient:
     def merge_request_changes(self, project_id, iid):
         return self.get(f"/projects/{quote(str(project_id), safe='')}/merge_requests/{iid}/changes")
 
+    def merge_base(self, project_id, base_ref, head_ref):
+        """取两个 ref 的共同祖先，用于把差异范围对齐到 merge base 语义。"""
+        payload = self.get(
+            f"/projects/{quote(str(project_id), safe='')}/repository/merge_base",
+            {"refs[]": [base_ref, head_ref]},
+        )
+        return payload.get("id") or ""
+
     def compare(self, project_id, base_sha, head_sha):
-        return self.get(f"/projects/{quote(str(project_id), safe='')}/repository/compare", {"from": base_sha, "to": head_sha, "straight": True})
+        # 必须按 merge base 比较（straight=false，也是 GitLab 默认行为）。
+        # straight=true 等价于 from..to 直接比较，会把“基准分支独有、目标分支尚未合并”
+        # 的改动渲染成目标分支的删除，从而把基准分支上已经修好的问题重复报成新增风险。
+        return self.get(
+            f"/projects/{quote(str(project_id), safe='')}/repository/compare",
+            {"from": base_sha, "to": head_sha, "straight": False},
+        )
 
     def raw_file(self, project_id, path, ref):
         encoded = quote(path, safe="")
@@ -224,9 +238,25 @@ class LocalGitClient:
                 })
         return commits
 
+    def merge_base(self, base_ref, head_ref):
+        """返回两个 ref 的共同祖先 SHA；两者无共同祖先时返回空字符串。"""
+        try:
+            return self._git("merge-base", base_ref, head_ref).strip()
+        except ValueError:
+            return ""
+
     def compare(self, base_ref, head_ref):
         base_sha, head_sha = self.resolve(base_ref), self.resolve(head_ref)
-        name_status = self._git("diff", "--name-status", "--find-renames", base_sha, head_sha)
+        if base_sha == head_sha:
+            raise ValueError("基准与目标指向同一个 Commit，没有可审查的差异")
+        # 统一以共同祖先作为比较起点（与 GitLab 侧 merge base 语义一致）：只审查目标
+        # 相对共同祖先引入的改动。两点比较会把基准独有的改动呈现为“删除”，是已修复
+        # 问题被重复报出的根因。
+        merge_base = self.merge_base(base_sha, head_sha)
+        if merge_base == head_sha:
+            raise ValueError("目标 Commit 是基准 Commit 的祖先，基准与目标疑似颠倒，请交换后重试")
+        compare_base = merge_base or base_sha
+        name_status = self._git("diff", "--name-status", "--find-renames", compare_base, head_sha)
         diffs = []
         for row in name_status.splitlines():
             parts = row.split("\t")
@@ -234,9 +264,9 @@ class LocalGitClient:
                 continue
             status, old_path, new_path = parts[0], parts[-2] if len(parts) > 2 else parts[1], parts[-1]
             target = new_path if not status.startswith("D") else old_path
-            diff = self._git("diff", "--no-ext-diff", "--find-renames", base_sha, head_sha, "--", target)
+            diff = self._git("diff", "--no-ext-diff", "--find-renames", compare_base, head_sha, "--", target)
             diffs.append({"old_path": old_path, "new_path": new_path, "new_file": status.startswith("A"), "deleted_file": status.startswith("D"), "diff": diff})
-        return {"base_sha": base_sha, "head_sha": head_sha, "diffs": diffs}
+        return {"base_sha": compare_base, "head_sha": head_sha, "diffs": diffs}
 
 
 def _gitlab_clone_url(repository):
@@ -354,8 +384,15 @@ def _managed_gitlab_repository(task):
     )
     if merge_base.returncode != 0:
         raise ValueError("浅仓库在最大历史深度内找不到两个 Commit 的共同祖先")
+    diff_base = merge_base.stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", diff_base or ""):
+        raise ValueError("浅仓库未能解析两个 Commit 的共同祖先")
+    if diff_base == task.head_sha:
+        raise ValueError("目标提交已是基准提交的祖先，两者之间没有可审查的差异，请确认基准/目标是否选反")
     _run_git(["git", "checkout", "--quiet", "--force", "--detach", "refs/ocr/head"], cwd=root, env=env)
-    yield root, "refs/ocr/base", "refs/ocr/head"
+    # OCR 与平台机器规则必须看到同一段差异：统一从共同祖先比较，否则两点比较会把
+    # 基准分支上已修复的改动当成目标分支的删除，OCR 会把已修复问题再次报出。
+    yield root, diff_base, "refs/ocr/head"
 
 
 @contextmanager
@@ -1483,8 +1520,20 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
                 task.title = task.title or payload.get("title", "")
                 diffs = payload.get("changes", [])
             else:
+                # 先取共同祖先：既拦下基准/目标颠倒，也让任务记录的“提交范围”与实际
+                # 比较范围一致（与 MR 模式写入 diff_refs.base_sha 的做法对齐）。
+                try:
+                    compare_base = client.merge_base(task.repository.gitlab_project_id, task.base_sha, task.head_sha)
+                    if not isinstance(compare_base, str) or not re.fullmatch(r"[0-9a-f]{40,64}", compare_base):
+                        compare_base = ""
+                except Exception:
+                    compare_base = ""
+                if compare_base and compare_base == task.head_sha:
+                    raise ValueError("目标 Commit 是基准 Commit 的祖先，基准与目标疑似颠倒，请交换后重试")
                 payload = client.compare(task.repository.gitlab_project_id, task.base_sha, task.head_sha)
                 diffs = payload.get("diffs", [])
+                if compare_base:
+                    task.base_sha = compare_base
 
         if not force_refresh and _reuse_cached_result(task, original_base_sha, original_head_sha):
             return task
