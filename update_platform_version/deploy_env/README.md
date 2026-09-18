@@ -248,6 +248,50 @@ bash 18-diagnose-small-testcase-review.sh
 > 注意：`review_service.py` 里的 `TESTCASE_REVIEW_*` 常量一旦调整，断点续审的签名
 > （`signature`）会变化，历史 `_checkpoint` 将不再复用，任务会从头跑。
 
+### 上游网关 502 / 无输出时的诊断（`26-diagnose-llm-upstream-capacity.sh`）
+
+失败形态长这样：
+
+```
+共 9/9 批模型调用失败，未生成报告。首个错误：RuntimeError: 第 1/9 批模型调用失败（已尝试 4 次）：
+InternalServerError: Error code: 502 - {"error": {"message": "Did not observe any item or terminal
+signal within 1200000ms in 'flatMap' (and no fallback has been configured)",
+"type": "upstream_error", "code": "upstream_unavailable"}}
+```
+
+两个要点：
+
+1. 这条 502 由**上游网关**产生，含义是「网关在自己的等待窗口内没有从模型拿到任何输出」。
+   它不代表平台代码或 Skill 内容有问题，也不代表请求被平台提前掐断。
+2. 界面上的 `N/M 批模型调用失败` **不等于「N 批都真的打了模型 4 次」**。连续 3 批失败且全程
+   无任何成功批次时熔断器会提前终止，其余批次直接标记为「模型网关连续失败，已提前终止」。
+   所以 `9/9` 的现场往往只有 2–3 批真实调用过，`首个错误` 才是要看的那一条。
+
+排查只跑一条命令（默认用量级递增的 prompt 逐档真实调用，并打印每批实际 prompt 体量）：
+
+```bash
+cd /projects/ai-test-platform/update_platform_version/deploy_env
+bash 26-diagnose-llm-upstream-capacity.sh
+```
+
+| 探测结果 | 结论 | 处置 |
+| --- | --- | --- |
+| 所有台阶都失败 | 上游网关整体不可用 | 找模型/网关侧，平台侧怎么调都没用 |
+| 小台阶过、大台阶挂 | 上游对单请求体量敏感 | 减小分片或并发，需改 `review_service.py` 常量后重建 Backend 镜像 |
+| 全部台阶通过 | 上游当前健康 | 属瞬时故障或并发压力，可观察 `max_retries` 的重试是否够用 |
+
+要复现现场那一次的请求形态（真实 Skill 快照 + 前 20 行，走平台同一条 `_review_chunk` 调用路径）：
+
+```bash
+REVIEW_ID=<审查记录ID> REAL_PROBE=1 bash 26-diagnose-llm-upstream-capacity.sh
+```
+
+可调项：`LADDER_SIZES`（默认 `2000,8000,20000,40000`）、`PROBE_TIMEOUT`（默认 180 秒）、
+`REAL_PROBE_ROWS`（默认 20）。日志落在 `deploy_env/logs/llm-upstream-capacity-*.log`。
+
+> 注意：阶梯探测与真实复现都会**真实消耗模型调用**（每档一次，零重试）；`REAL_PROBE=1` 时
+> 会按 `min(request_timeout, 600)` 秒等待，请避开业务高峰执行。
+
 ## 代码覆盖层（hotfix）的启用方式
 
 从本版本起，`docker-compose.update.yml` **不再挂载任何后端代码文件**，唯一保留的挂载是
