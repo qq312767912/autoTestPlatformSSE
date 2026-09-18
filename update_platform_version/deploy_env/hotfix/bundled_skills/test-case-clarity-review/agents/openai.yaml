@@ -1,0 +1,4 @@
+interface:
+  display_name: "测试用例清晰度审查"
+  short_description: "扫描业务测试用例质量问题并生成可归档的独立审查报告"
+  default_prompt: "使用 $test-case-clarity-review 审查这些测试用例，生成包含问题明细和整改建议的交付报告。"

@@ -20,6 +20,7 @@ Vision MCP 继续复用 `01339484` 版本镜像；Actuator 使用包含动态页
 | 代码审查报告 | 前端新增**导出 HTML 报告**与测试分析报告（上一版前端镜像构建于该功能提交之前，内网此前没有此入口） |
 | 代码审查界面 | 长模块名概览单列布局与安全换行 |
 | 用例审查界面 | 断点续审提示（`已完成 N/M 批，点击「重试」将从断点继续`）与覆盖率告警 |
+| 用例审查技能 | `test-case-clarity-review` 统一为**全量版**（`SKILL.md` 5815 B + `review-rules.md` 4247 B），补齐商店 zip 与 manifest 条目；内网用 `24-sync-bundled-skills.sh` 落地并刷新 DB，见下文 |
 
 > ⚠️ 由此带来一处**部署方式变更**：代码挂载层已从 `docker-compose.update.yml` 移出，
 > 见下文「代码覆盖层（hotfix）的启用方式」。正常升级不再挂载任何后端代码文件。
@@ -330,6 +331,62 @@ bash 15-fix-artifact-download-volume.sh
 ```
 
 该脚本只重建 Frontend，不会重启 Backend、数据库或执行器；`05-verify.sh` 会自动检查此挂载。
+
+## 内置技能统一为全量版（用例审查质量）
+
+`test-case-clarity-review` 此前在仓库里有**三处不一致副本**：`WHartTest_Skills/`（技能商店源）
+与镜像内的 `bundled_skills/` 是早期**精简兜底版**（`SKILL.md` 1127 B、`references/review-rules.md`
+986 B，规则只是若干条一句话），而技能库交付的全量版是 `SKILL.md` 5815 B + `review-rules.md`
+4247 B（9 类规则的判定要点与改写示例、输入处理、交付物、完成条件、质量边界）。本次已把各处
+副本统一为全量版，并补齐商店分发件。
+
+| 位置 | 角色 | 本次变化 |
+| --- | --- | --- |
+| `WHartTest_Skills/` | 技能商店源 | 目录改为全量版；新增 `test-case-clarity-review.zip` 与 `manifest.json` 条目 |
+| `WHartTest_Django/bundled_skills/` | Backend 镜像构建源 | 改为全量版（下次重建镜像即带上） |
+| `update_platform_version/deploy_env/hotfix/bundled_skills/` | 应急覆盖层 + 本同步脚本的源 | 改为全量版 |
+| `<内网>/offline-images/skills/` | 容器内 `/app/bundled_skills` 的真实来源 | 由 `24-sync-bundled-skills.sh` 写入全量版 |
+
+> ⚠️ 容器里的 `/app/bundled_skills` 来自宿主机 `offline-images/skills`（基础 compose 的外置挂载，
+> 用于技能热插拔），**不是镜像内副本**——所以「把技能烤进镜像」对内网正常部署不生效。
+
+### 改了目录还要刷新数据库
+
+审查时真正送进模型的是**数据库里 Skill 的 `skill_content`**：
+`review_service.build_skill_snapshot()` 优先使用 DB 内容，并把 media 目录下的
+`references/*.md` 内联进去；只有在未选择 Skill 时才回退读 `/app/bundled_skills`。
+宿主机目录只是「技能来源」，DB 内容由容器启动时 entrypoint 的 `init_skills` 从该目录同步。
+**只改目录不刷 DB，界面与审查用到的仍是旧的精简版。**
+
+`24-sync-bundled-skills.sh --apply` 会在容器内执行一次 `init_skills` 完成这一步，
+等价于重启 Backend 所做的事，但不中断服务。
+
+### 内网执行
+
+```bash
+cd /projects/ai-test-platform/update_platform_version/deploy_env
+
+bash 24-sync-bundled-skills.sh            # 只诊断：分别列出缺失 / 内容不同 / 完全一致
+bash 24-sync-bundled-skills.sh --apply    # 补齐技能文件 + 商店 zip + manifest 条目，并刷新 DB
+bash 05-verify.sh
+```
+
+若诊断显示目标是「精简兜底版」，说明内网已有旧内容（默认不覆盖，避免顶掉手工调整过的技能），
+升级时加 `--force`：
+
+```bash
+bash 24-sync-bundled-skills.sh --apply --force
+```
+
+写入前会把目标技能目录整体备份到 `deploy_env/backups/`，并单独备份 `manifest.json`；
+写入后逐文件复查，同时校验容器内已可见且**确实是全量版**。
+
+`05-verify.sh` 的技能断言也从「文件是否存在」升级为「是否为全量版」（校验
+`## 9. 严重程度参考`、`## 1. 模糊和不可判定表述`、`## 完成条件`、`## 质量边界`、`## 交付物`
+等章节及规则字符数），避免内网留着精简版也能通过。
+
+商店安装（可选，与上面两条互不影响）：全量版同时以 `test-case-clarity-review.zip` 形式放在
+`offline-images/skills/`，可在平台「Skill 商店 / 上传 Skill」中直接选择该 zip 安装。
 
 只停止执行器而不影响平台其他服务：
 

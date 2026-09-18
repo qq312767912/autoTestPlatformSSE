@@ -126,9 +126,23 @@ assert "config.request_timeout" in service
 assert "max_retries=0" in service
 assert "if key != \"_checkpoint\"" in serializers
 rules = Path("/app/bundled_skills/test-case-clarity-review/references/review-rules.md")
-assert rules.is_file(), f"缺少技能文件 {rules}：/app/bundled_skills 由基础 compose 外置挂载到宿主机的 offline-images/skills 目录，请先同步该目录（不是镜像内副本）"
+assert rules.is_file(), f"缺少技能文件 {rules}：/app/bundled_skills 由基础 compose 外置挂载到宿主机的 offline-images/skills 目录，请先同步该目录（不是镜像内副本）：bash 24-sync-bundled-skills.sh --apply"
+skill_md = Path("/app/bundled_skills/test-case-clarity-review/SKILL.md")
+assert skill_md.is_file(), f"缺少技能文件 {skill_md}：同上，请先执行 bash 24-sync-bundled-skills.sh --apply"
+rules_text = rules.read_text(encoding="utf-8")
+skill_text = skill_md.read_text(encoding="utf-8")
+# 必须是「全量版」。早期镜像用的是精简兜底版（SKILL.md 约 1127 字节、
+# review-rules.md 约 986 字节，只有若干条一句话规则），若只断言文件存在，
+# 旧版同样能通过，断言就失去判别力。
+assert "## 9. 严重程度参考" in rules_text, "技能规则是精简兜底版（缺「## 9. 严重程度参考」）：请执行 bash 24-sync-bundled-skills.sh --apply --force 升级为全量版"
+assert "## 1. 模糊和不可判定表述" in rules_text, "技能规则缺少分类规则章节（## 1. 模糊和不可判定表述），疑似旧版"
+assert len(rules_text) > 1000, f"技能规则仅 {len(rules_text)} 字符（全量版约 1537 字符，精简版约 350 字符），判定为精简版：请用 24-sync-bundled-skills.sh --apply --force 同步全量版"
+assert "## 完成条件" in skill_text, "技能 SKILL.md 是精简兜底版（缺「## 完成条件」）：请执行 bash 24-sync-bundled-skills.sh --apply --force"
+assert "## 质量边界" in skill_text, "技能 SKILL.md 缺「## 质量边界」章节，疑似旧版"
+assert "## 交付物" in skill_text, "技能 SKILL.md 缺「## 交付物」章节，疑似旧版"
+assert (Path("/app/bundled_skills/test-case-clarity-review/agents/openai.yaml")).is_file(), "缺少 agents/openai.yaml：请执行 bash 24-sync-bundled-skills.sh --apply"
 '
-echo "[通过] 用例审查表头识别、20行/2并发分片、重试退避与熔断、断点续审及完整 Skill 热修复"
+echo "[通过] 用例审查表头识别、20行/2并发分片、重试退避与熔断、断点续审及技能全量版（SKILL.md + references/review-rules.md + agents/openai.yaml）"
 
 celery_ping="$(docker exec wharttest-backend timeout 20 celery -A wharttest_django inspect ping --timeout=10)"
 echo "$celery_ping" | grep -q 'pong' || { echo "[失败] Celery Worker 未响应 ping" >&2; exit 1; }

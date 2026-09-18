@@ -11,6 +11,7 @@ wharttest-250-backend:update-d595a628-review-fix-r5-arm64
   runtime: Alpine Linux / musl / Python 3.11.16 / @alibaba-group/open-code-review v1.12.5 / ocr CLI (/usr/local/bin/ocr) / agent-browser 0.38.1 / Celery concurrency 8 / 代码审查专用 LLM
   features: 用例审查 20行2并发分片+可配置重试退避+单批降级+熔断+45分钟预算 / 列表接口不再回传 _checkpoint / 代码审查差异按共同祖先比较 / 快速·标准·深度分析模式 / 审查模型复用 / GitLab 连接安全删除 / master 默认分支
   note: 本版起镜像内置全部代码修复，docker-compose.update.yml 不再挂载 hotfix/ 代码覆盖层
+  skill: bundled_skills 构建源已统一为 test-case-clarity-review 全量版（SKILL.md 5815B + references/review-rules.md 4247B + agents/openai.yaml）；但正常部署下 /app/bundled_skills 被宿主机 offline-images/skills 覆盖，技能内容以宿主机目录为准 → 用 24-sync-bundled-skills.sh --apply 落地并刷新 DB（仅改目录不刷 DB 不生效）
 
 wharttest-250-frontend:update-d595a628-review-fix-r5-arm64
   platform: linux/arm64
