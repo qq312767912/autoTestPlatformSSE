@@ -30,10 +30,44 @@ wait_healthy() {
   return 1
 }
 
+# ------------------------------------------------------------------ 内置技能
+# 容器内 /app/bundled_skills 由基础 compose 的 `./skills:/app/bundled_skills:ro`
+# 挂载自宿主机外置目录——不在镜像内，也不随升级包自动落地，必须在这里补齐，
+# 否则 05-verify.sh 的技能断言必然失败。
+# 放在 up 之前：Backend 启动时 entrypoint 会自动执行 init_skills，
+# 先刷好宿主机目录，容器第一次起来读到的就是包内版本。
+SKILLS_SYNC="$UPDATE_DIR/24-sync-bundled-skills.sh"
+
+if [ -f "$SKILLS_SYNC" ]; then
+  echo "[技能] 同步内置技能到宿主机外置目录（写前自动整目录备份，可回退）"
+  # 这里【故意不传 SKILLS_DIR】：目标目录由 24 自己从 BASE_COMPOSE 推导。
+  # 24 用「SKILLS_DIR 是否由外部给定」来区分“自动推导”和“用户手动指定”，
+  # 自动推导时才会把「推导结果 vs 容器实际挂载源」当硬校验（不一致即中止）。
+  # 若由本脚本代传，24 会误判成用户手动指定，从而绕过该校验。
+  # 用户 export SKILLS_DIR 时仍会被 24 继承，并正确进入“手动指定”语义。
+  SKILLS_SYNC_BY_DEPLOY=1 BASE_COMPOSE="$BASE_COMPOSE" UPDATE_DIR="$UPDATE_DIR" \
+    bash "$SKILLS_SYNC" --apply --force
+else
+  echo "[警告] 未找到 $SKILLS_SYNC，跳过内置技能同步；05-verify.sh 的技能断言可能失败" >&2
+fi
+
 echo "[升级] 替换 Backend 和 Frontend（Backend 入口脚本会执行数据库迁移）"
 "${compose[@]}" up -d --no-deps backend frontend
 wait_healthy wharttest-backend 300
 wait_healthy wharttest-frontend 180
+
+# 刷新数据库中的技能快照。
+# Backend 的 entrypoint 只在容器「被重建」时才跑 init_skills；只换技能文件、不换镜像时
+# 容器不会重建，数据库里仍是旧内容——而审查送进模型的正是 Skill.skill_content。
+# init_skills 对已存在技能是「覆盖更新」且保留 is_active，故这里无条件补一次，幂等安全。
+echo "[技能] 刷新数据库中的技能快照"
+if docker exec wharttest-backend /opt/venv/bin/python /app/manage.py init_skills; then
+  echo "[通过] 技能快照已刷新"
+else
+  echo "[失败] init_skills 执行失败，请排查后单独重跑：" >&2
+  echo "       docker exec wharttest-backend /opt/venv/bin/python /app/manage.py init_skills" >&2
+  exit 1
+fi
 
 echo "[恢复] Backend 网络恢复后重新拉起三个执行器"
 "${compose[@]}" up -d --no-deps actuator-01 actuator-02 actuator-03

@@ -12,6 +12,10 @@
 #   bash 24-sync-bundled-skills.sh --apply    # 只补缺失文件，已存在的不同内容不动
 #   bash 24-sync-bundled-skills.sh --apply --force   # 内容不同的也覆盖（先自动备份）
 #
+# 正常升级【不需要手工执行本脚本】：04-deploy.sh 会在替换容器之前自动调用它
+# （--apply --force），并在 Backend 健康后自动执行 init_skills 刷新数据库快照。
+# 保留本脚本作为：① 只读诊断当前差异；② 04 之外单独补技能/回滚后的补救手段。
+#
 # 安全约定：
 #   * 默认只读；任何写动作都要显式 --apply。
 #   * 写入前先把目标技能目录整体打包备份到 deploy_env/backups/。
@@ -31,11 +35,26 @@ for arg in "$@"; do
 done
 
 BASE_DIR="${BASE_DIR:-/projects/ai-test-platform}"
-SKILLS_DIR="${SKILLS_DIR:-$BASE_DIR/offline-images/skills}"
 UPDATE_DIR="${UPDATE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 HOTFIX_SKILLS="$UPDATE_DIR/hotfix/bundled_skills"
 BACKEND_CONTAINER="${BACKEND_CONTAINER:-wharttest-backend}"
 BACKUP_DIR="$UPDATE_DIR/backups"
+
+# ------------------------------------------------------------ 目标目录推导
+# 基础 compose 里是相对路径挂载 `./skills:/app/bundled_skills:ro`，
+# 相对的是 **compose 文件所在目录**。所以从本次实际使用的 BASE_COMPOSE 推导，
+# 比硬编码 /projects/ai-test-platform 更可靠（改过安装根目录也不会错）。
+BASE_COMPOSE="${BASE_COMPOSE:-$BASE_DIR/offline-images/docker-compose.offline.yml}"
+SKILLS_DIR_EXPLICIT=0
+if [ -n "${SKILLS_DIR:-}" ]; then
+  SKILLS_DIR_EXPLICIT=1
+elif [ -f "$BASE_COMPOSE" ]; then
+  SKILLS_DIR="$(cd "$(dirname "$BASE_COMPOSE")" && pwd)/skills"
+else
+  SKILLS_DIR="$BASE_DIR/offline-images/skills"
+  echo "[警告] 找不到基础 compose：$BASE_COMPOSE" >&2
+  echo "       已回退到默认路径推导：$SKILLS_DIR；如与实际部署不符请用 SKILLS_DIR=... 显式指定。" >&2
+fi
 
 # ---------------------------------------------------------------- 选源
 # 优先用 deploy_env 自带的 hotfix/bundled_skills（与镜像内容一致，内网本地就有），
@@ -60,6 +79,37 @@ echo "目标目录：$SKILLS_DIR"
 echo "模式    ：$([ "$APPLY" = 1 ] && echo "同步（$([ "$FORCE" = 1 ] && echo '含覆盖' || echo '仅补缺失')）" || echo '只诊断，不写入')"
 echo "=========================================="
 echo
+
+# ------------------------------------------------- 与运行中容器交叉校验（只读）
+# 以容器「实际挂载源」为准做一次比对：路径推断一旦与实际部署不符，
+# 最坏情况是把技能写到另一个自建目录、而容器根本看不到，故这里必须提示。
+_norm_dir() { # 归一化目录（解析软链、去掉尾斜杠）；不是目录时原样返回
+  if [ -d "$1" ]; then (cd "$1" && pwd -P); else printf '%s' "$1"; fi
+}
+
+if docker inspect "$BACKEND_CONTAINER" >/dev/null 2>&1; then
+  live_src="$(docker inspect "$BACKEND_CONTAINER" \
+    --format '{{range .Mounts}}{{if eq .Destination "/app/bundled_skills"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)"
+  if [ -z "$live_src" ]; then
+    echo "[警告] 容器 $BACKEND_CONTAINER 上未见 /app/bundled_skills 挂载。"
+    echo "       此时容器内技能来自镜像内副本，同步宿主机目录不会生效。" >&2
+  elif [ "$(_norm_dir "$live_src")" != "$(_norm_dir "$SKILLS_DIR")" ]; then
+    echo "[错误] 实际挂载源与推算的目标目录不一致，写下去容器看不到任何改动：" >&2
+    echo "       容器实际挂载源：$live_src" >&2
+    echo "       本脚本将写入  ：$SKILLS_DIR" >&2
+    if [ "$SKILLS_DIR_EXPLICIT" = 1 ]; then
+      echo "       （SKILLS_DIR 由你显式指定，故仅告警不中断；确认无误可忽略本提示）" >&2
+    else
+      echo "       处理：确认 BASE_COMPOSE 指向的是本次实际使用的 compose 文件（当前：$BASE_COMPOSE），" >&2
+      echo "             或显式指定：SKILLS_DIR=$live_src bash $(basename "${BASH_SOURCE[0]}") ..." >&2
+      echo "       已中止，未写入任何文件。" >&2
+      exit 1
+    fi
+  else
+    echo "[校验] 目标目录与 $BACKEND_CONTAINER 的实际挂载源一致（$live_src）。"
+  fi
+  echo
+fi
 
 if [ ! -d "$SKILLS_DIR" ]; then
   echo "[提示] 目标目录尚不存在，将由本脚本创建：$SKILLS_DIR"
@@ -97,7 +147,11 @@ echo
 
 if [ "$APPLY" != 1 ]; then
   echo "[只诊断] 未改动任何文件。确认上面清单后再执行：bash $(basename "${BASH_SOURCE[0]}") --apply"
-  [ "$differ" -gt 0 ] && echo "         注意有 $differ 个文件内容不同，默认不会被覆盖；确需覆盖请加 --force。"
+  # 用 if 而不是 `[ ... ] && echo`：后者在条件为假时让整个列表返回 1，
+  # 配合 set -e 会让「纯诊断且一切一致」这种最正常的情况以退出码 1 结束。
+  if [ "$differ" -gt 0 ]; then
+    echo "         注意有 $differ 个文件内容不同，默认不会被覆盖；确需覆盖请加 --force。"
+  fi
   exit 0
 fi
 
@@ -107,6 +161,12 @@ to_copy="$missing"
 
 if [ "$to_copy" -eq 0 ]; then
   echo "[完成] 无需写入：技能目录已是最新（缺失 0，且$([ "$FORCE" = 1 ] && echo '内容全部一致' || echo '未启用覆盖')）。"
+  if [ "${SKILLS_SYNC_BY_DEPLOY:-0}" = 1 ]; then
+    echo "[提醒] 数据库技能快照由 04-deploy.sh 在 Backend 健康后自动刷新，此处无需手工操作。"
+  else
+    echo "[提醒] 目录已到位，但数据库里的技能快照未必是最新的；如刚补过文件，请刷新："
+    echo "       docker exec $BACKEND_CONTAINER /opt/venv/bin/python /app/manage.py init_skills"
+  fi
   exit 0
 fi
 
@@ -159,4 +219,17 @@ else
   echo "  [跳过] 容器 $BACKEND_CONTAINER 不在运行，容器内可见性未校验"
 fi
 echo
-echo "[下一步] 重跑校验：bash $UPDATE_DIR/05-verify.sh"
+echo "=========================================="
+if [ "${SKILLS_SYNC_BY_DEPLOY:-0}" = 1 ]; then
+  # 由 04-deploy.sh 自动调用：刷库与后续校验由它接管，避免提示里出现"多余的第二步"。
+  echo "[下一步] 本脚本由 04-deploy.sh 自动调用：Backend 健康后它会执行 init_skills 刷新数据库快照，"
+  echo "         并在最后提示你运行 05-verify.sh，此处无需手工操作。"
+else
+  echo "[下一步] 文件层面已同步，但审查真正读到的技能内容来自数据库："
+  echo "         docker exec $BACKEND_CONTAINER /opt/venv/bin/python /app/manage.py init_skills"
+  echo "         只补宿主机目录不刷数据库，界面与审查结果仍是旧版。"
+  echo "[下一步] 然后重跑校验：bash $UPDATE_DIR/05-verify.sh"
+  echo "         （05-verify.sh 的技能断言为三层校验：文件是否存在、review-rules.md 是否含第 9 条"
+  echo "           「严重程度参考」、SKILL.md 是否含「完成条件」章节；跑绿即代表宿主机目录里是完整版）"
+fi
+echo "=========================================="

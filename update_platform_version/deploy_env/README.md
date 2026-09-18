@@ -24,6 +24,11 @@ Vision MCP 继续复用 `01339484` 版本镜像；Actuator 使用包含动态页
 > ⚠️ 由此带来一处**部署方式变更**：代码挂载层已从 `docker-compose.update.yml` 移出，
 > 见下文「代码覆盖层（hotfix）的启用方式」。正常升级不再挂载任何后端代码文件。
 
+> ⚠️ **本包不含「报告导出改用代码仓库名」这个改动**（它属于前端产物，需要重建 Frontend
+> 镜像才能随本包交付）。但 `05-verify.sh` 已经带上对应的产物断言，所以**只升级本包而不处理
+> 前端，校验会在该断言处失败**。处理方式见下文「前端热修复通道（`../frontend-hotfix/`）」。
+> 另外本包的 `04-deploy.sh` 已内置技能同步与数据库快照刷新，「内置技能」一节随之改写。
+
 代码审查现使用独立 LLM 配置。系统管理员进入“代码审查”页面，点击右上角
 “审查模型配置”，填写 OpenAI 兼容 API 地址、模型名称和 API Key。密钥在数据库中
 加密保存且接口永不回显；该配置仅供 OpenCodeReview、AI 风险分析和测试影响分析使用，
@@ -72,13 +77,102 @@ cd /projects/ai-test-platform/update_platform_version/deploy_env
 bash 01-precheck.sh
 bash 02-backup.sh
 bash 03-import-images.sh
-bash 04-deploy.sh
+bash 04-deploy.sh      # 内置技能同步 + 数据库快照刷新已自动完成，无需额外步骤
 bash 05-verify.sh
 ```
+
+> ✅ **内置技能已内置在 `04-deploy.sh` 中，不再需要手工执行同步命令。**
+> 04 会在替换容器**之前**把包内技能（`hotfix/bundled_skills/`）同步到宿主机外置技能目录
+> （`<安装根目录>/offline-images/skills`，即基础 compose 挂载给容器的 `/app/bundled_skills`），
+> 并在 Backend 健康后自动执行 `init_skills` 刷新数据库快照。顺序是刻意安排的：先刷好宿主机目录，
+> 容器启动时读到的就是包内版本。只有在需要单独诊断、或 04 之外补救时才手工跑 24 脚本。
+> 详见下文「内置技能（已内置，24 为可选）」。
 
 本次 `04-deploy.sh` 同时替换 Backend 和 Frontend，不重启 Vision MCP。Backend 网络恢复后，
 脚本会自动重新拉起并检查三个执行器，避免执行器在 Backend 短暂不可达期间退出后无法恢复。
 如需单独恢复执行器，也可以执行 `07-start-actuators.sh`。
+
+## 内置技能（已内置，24 为可选）
+
+### 为什么必须落到宿主机目录
+
+| 事实 | 说明 |
+| --- | --- |
+| 技能目录是外置的 | 基础 compose 有 `./skills:/app/bundled_skills:ro`，容器内看到的就是宿主机 `<安装根目录>/offline-images/skills` |
+| 不随镜像走 | 把技能烤进 Backend 镜像对正常部署**不生效**，会被上面这条挂载盖住 |
+| 不随升级包自动落地 | `deploy_env.zip` 只含 `deploy_env/`，不含 `offline-images/`，解压升级包不会更新宿主机技能目录 |
+| 05-verify 校验的就是它 | 技能断言先查该宿主机目录经挂载后在容器内的可见性；但审查实际读的是 DB 快照 + 媒体目录副本，故 05 同时校验这两处（见下文） |
+
+所以升级包必须自己把技能「送进去」。这件事现在由 `04-deploy.sh` 自动完成，**不需要人工干预**。
+
+### 04-deploy.sh 自动做了什么
+
+1. **替换容器之前**：以 `24-sync-bundled-skills.sh --apply --force` 把 `hotfix/bundled_skills/`
+   同步到宿主机技能目录（写前自动整目录备份到 `deploy_env/backups/skills-backup-<时间戳>.tar.gz`）。
+   放在容器创建之前是刻意的：Backend 启动时 `entrypoint.sh` 会跑 `init_skills`，先刷好目录，
+   容器第一次起来读到的就是包内版本。
+2. **Backend 健康之后**：执行 `init_skills` 刷新数据库里的技能快照。这一步不能省——Backend 只在
+   容器**被重建**时才自动跑 `init_skills`，而只更新技能文件、不换镜像时容器不会重建，数据库会停在旧内容。
+3. **目标目录的确定方式**：从 `BASE_COMPOSE` 推导（基础 compose 里是相对挂载 `./skills`，基准是
+   compose 文件所在目录），不硬编码安装根目录。若推导结果与运行中容器的**实际挂载源**不一致，
+   脚本**直接中止**，而不是把技能写进一个容器根本看不到的目录——这正是本次内网踩坑的同类隐患。
+
+### 24-sync-bundled-skills.sh（可选：诊断 / 补救）
+
+```bash
+cd /projects/ai-test-platform/update_platform_version/deploy_env
+
+bash 24-sync-bundled-skills.sh                    # 只诊断，列出「缺失 / 内容不同 / 一致」三类文件
+bash 24-sync-bundled-skills.sh --apply            # 只补缺失文件，已存在的不同内容不动
+bash 24-sync-bundled-skills.sh --apply --force    # 内容不同的也覆盖（写前自动备份整个技能目录）
+```
+
+技能源取自包内的 `hotfix/bundled_skills`（无容器依赖）。补文件后**无需重启容器**，只读挂载即时
+生效。但独立运行时它**不会**替你刷数据库（04 调用时会，且会跳过这段提示），需要自己补一条：
+
+```bash
+docker exec wharttest-backend /opt/venv/bin/python /app/manage.py init_skills
+```
+
+然后重跑 `bash 05-verify.sh` 复核。本版本的技能断言分两段、共四层：
+
+- **宿主机技能目录**（`/app/bundled_skills`，即 `offline-images/skills`）：三个文件**是否存在**、
+  `references/review-rules.md` 是否含第 9 条「严重程度参考」、`SKILL.md` 是否含「完成条件」章节。
+  因此「精简兜底版」和「精简 SKILL.md + 完整规则明细」的混搭都会被明确拦下。
+- **审查实际读取的路径**：`testcases/review_service.py` 的 `build_skill_snapshot()` 在**选中 Skill** 时
+  读的是 DB 的 `Skill.skill_content`（=SKILL.md）+ MEDIA_ROOT 下该副本的 `references/*.md`
+  （`init_skills` 用 `_sync_files` 复制过去的那份）；**只有未选中 Skill** 时才回退读 `/app/bundled_skills`。
+  所以还要校验数据库快照与媒体目录副本，否则「文件到位但没跑 `init_skills`」这种状态会跑绿、
+  而审查仍在用旧规则（DB 里尚无该技能记录时本段会自动跳过并说明）。
+
+媒体目录那份副本可以直接在宿主机上核对（基础 compose 是 `./data:/app/data`，所以 `MEDIA_ROOT` 就是
+`<安装根目录>/offline-images/data/media`）：
+
+```bash
+ls -l /projects/ai-test-platform/offline-images/data/media/skills/*/*/references/review-rules.md
+# 期望 4247 字节；若只有 986 字节说明这份副本还是精简版，即 init_skills 没跑到
+```
+
+手工用 `SKILLS_DIR=...` 指定目标目录时，脚本会跳过「与实际挂载源比对」的硬校验，只告警。
+
+### 版本口径
+
+包内 `hotfix/bundled_skills/test-case-clarity-review` 是**完整版**，与用户交付的技能包
+`test-case-clarity-review.zip` 逐字节一致，共 3 个文件：
+
+| 文件 | 字节数 | 作用 |
+| --- | --- | --- |
+| `SKILL.md` | 5815 | 审查流程主体（输入处理 / 审查方法 / 交付物 / 报告内容要求 / 完成条件 / 质量边界） |
+| `references/review-rules.md` | 4247 | 9 条审查规则明细（模糊表述、前置条件与数据、步骤可执行性、预期完整性、正/异常与边界覆盖、数据一致性、证据与可追溯性、可维护性、严重程度参考） |
+| `agents/openai.yaml` | 294 | 界面元数据（显示名、简介、默认提示词），无执行逻辑 |
+
+这就是 04 自动同步时固定加 `--force` 的原因：
+
+- `--apply` 单独使用**不覆盖**内容不同的既有文件——这是有意的保护，但会带来一个坑：如果宿主机
+  目录里已经存在**精简兜底版**的 `SKILL.md`（1127 字节），脚本会把它报成「内容不同」并跳过，却
+  仍然补上完整的 `references/review-rules.md`，最终出现「精简 SKILL.md + 完整规则明细」的**混搭**。
+- 04 固定用 `--force`，保证三文件一次性统一为完整版。写前会把宿主机技能目录整体备份到
+  `deploy_env/backups/skills-backup-<时间戳>.tar.gz`，需要回退时解开该包覆盖回去即可。
 
 如果用例审查长时间停在某个分片，执行：
 
@@ -182,6 +276,40 @@ bash 05-verify.sh      # 应全部通过
 > 两个模式的语义要分清 ——
 > **镜像模式**（默认）：生效代码来自镜像，`05-verify.sh` 的代码断言真正验证了镜像内容。
 > **挂载模式**（紧急）：生效代码来自 `hotfix/`，镜像更新尚未得到验证。
+
+## 前端热修复通道（`../frontend-hotfix/`）
+
+`deploy_env/hotfix/` 那套 Python 代码覆盖层**只能覆盖 Backend 容器内的文件**。报告导出这类
+纯前端能力（在浏览器里拼 HTML 再 Blob 下载）传不过去，需要另一条通道：把已构建的前端产物
+只读挂到 Nginx 站点根目录 `/usr/share/nginx/html`，再重建一次 Frontend 容器。
+
+当前该通道承载的修复是：**报告导出标题与下载文件名改用代码仓库名**
+（`代码审查报告_<仓库名>` / `测试分析报告_<仓库名>`，原为平台项目名）。
+
+```bash
+cd /projects/ai-test-platform/update_platform_version/frontend-hotfix
+bash 25-apply-frontend-report-title-hotfix.sh          # 应用
+bash 25-apply-frontend-report-title-hotfix.sh --revert # 回退
+```
+
+### 与本包校验脚本的交互（重要）
+
+`05-verify.sh` 从本版本起新增一条**报告命名口径断言**：在前端产物里定位
+`代码审查报告_` / `测试分析报告_` 前缀后，检查其后 200 字符窗口内是否出现 `repository_name`。
+这只是「字符串存在」不够——旧版同样含 `代码审查报告_`（旧写法紧跟的是 `project_name`），
+两种情况都能过；加上邻近窗口判据后，旧产物会被明确拦下。
+
+推论：**如果内网 Frontend 镜像尚未包含本次修复，新 `05-verify.sh` 会在该断言处失败**，
+并提示产物不是「报告名_代码仓库名」口径。两条出路：
+
+| 出路 | 做法 | 代价 |
+| --- | --- | --- |
+| 临时（推荐先做） | 执行 `../frontend-hotfix/25-apply-frontend-report-title-hotfix.sh` | 生效的是挂载产物而非镜像本体 |
+| 永久 | 重建 `wharttest-250-frontend` 镜像，走 `03-import-images.sh` + `04-deploy.sh` | 需要 ARM64 构建机 |
+
+注意 `04-deploy.sh` 用 `base + docker-compose.update.yml` 重建 Frontend，**不带**该覆盖层，
+所以下一次正常升级会自动卸下挂载、站点回到镜像内产物 —— 镜像还没重建的话即旧口径，
+此时重跑一次 25 号脚本即可。
 
 ## 代码审查诊断与单并发（21/22）
 

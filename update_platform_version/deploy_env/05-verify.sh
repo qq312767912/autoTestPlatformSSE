@@ -106,6 +106,24 @@ docker exec wharttest-frontend sh -c \
   'cd /usr/share/nginx/html && grep -R -q "代码审查报告_" assets/ && grep -R -q "测试分析报告_" assets/ && grep -R -q "导出报告" assets/ && grep -R -q "将从断点继续" assets/ && grep -R -q "coverage-warning" assets/'
 echo "[通过] 代码审查 HTML/测试分析报告导出入口、用例审查断点续审提示与覆盖率告警"
 
+# 报告命名口径必须是「<报告名>_<代码仓库名>」，而不是平台项目名：同一平台项目下可以有多个
+# 代码仓库，用项目名会让不同仓库的报告同名。只断言字符串存在证明不了口径（旧版同样含
+# 「代码审查报告_」），所以在前缀字面量之后的窗口里找 repository_name —— 旧版内联写法
+# 紧跟的是 project_name，过不了这条断言。
+frontend_bundle="$(docker exec wharttest-frontend sh -c 'ls -S /usr/share/nginx/html/assets/*.js | head -1')"
+docker exec wharttest-frontend cat "$frontend_bundle" | awk -v n1='代码审查报告_' -v n2='测试分析报告_' -v field='repository_name' '
+  { for (kind = 1; kind <= 2; kind++) {
+      needle = (kind == 1 ? n1 : n2)
+      at = index($0, needle)
+      if (at > 0 && index(substr($0, at, 200), field) > 0) found[kind] = 1
+    } }
+  END { exit (found[1] && found[2]) ? 0 : 1 }' || {
+  echo "[失败] 前端报告命名口径不是「报告名_代码仓库名」：$frontend_bundle" >&2
+  echo "       前端产物缺少「报告名前缀 + repository_name」的组合，可能仍是按平台项目名命名的旧产物。" >&2
+  exit 1
+}
+echo "[通过] 报告标题与下载文件名均为「报告名_代码仓库名」口径"
+
 docker exec wharttest-backend /opt/venv/bin/python -c '
 from pathlib import Path
 service = Path("/app/testcases/review_service.py").read_text(encoding="utf-8")
@@ -126,9 +144,66 @@ assert "config.request_timeout" in service
 assert "max_retries=0" in service
 assert "if key != \"_checkpoint\"" in serializers
 rules = Path("/app/bundled_skills/test-case-clarity-review/references/review-rules.md")
-assert rules.is_file(), f"缺少技能文件 {rules}：/app/bundled_skills 由基础 compose 外置挂载到宿主机的 offline-images/skills 目录，请先同步该目录（不是镜像内副本）"
+skill_md = Path("/app/bundled_skills/test-case-clarity-review/SKILL.md")
+# /app/bundled_skills 是基础 compose 的外置挂载，内容来自宿主机 offline-images/skills，
+# 升级包不含该目录，所以缺文件时不能靠重装镜像解决，只能同步宿主机目录。
+_hint = ("（修复：重跑 bash 04-deploy.sh 即会自动同步技能并刷新数据库；也可手工执行 "
+         "bash 24-sync-bundled-skills.sh --apply --force，再执行 "
+         "docker exec wharttest-backend /opt/venv/bin/python /app/manage.py init_skills）")
+assert rules.is_file() and skill_md.is_file(), (
+    f"缺少技能文件 {skill_md} 或 {rules}：/app/bundled_skills 由基础 compose 外置挂载到宿主机的 "
+    "offline-images/skills 目录，不是镜像内副本。" + _hint)
+# 只查文件存在不够：宿主机目录里可能残留精简兜底版（有文件但没规则明细），
+# 那种情况下界面和审查行为都还是旧的。这里校验完整版独有的章节，保证装的确实是完整版。
+rules_text = rules.read_text(encoding="utf-8")
+skill_text = skill_md.read_text(encoding="utf-8")
+assert "## 9. 严重程度参考" in rules_text, (
+    "references/review-rules.md 不是完整版（缺第 9 条「严重程度参考」），"
+    "宿主机技能目录里可能是精简兜底版。" + _hint)
+assert "## 完成条件" in skill_text, (
+    "SKILL.md 不是完整版（缺「完成条件」章节）。" + _hint)
 '
-echo "[通过] 用例审查表头识别、20行/2并发分片、重试退避与熔断、断点续审及完整 Skill 热修复"
+echo "[通过] 用例审查表头识别、20行/2并发分片、重试退避与熔断、断点续审及完整版 Skill 内容校验"
+
+# 宿主机目录到位 ≠ 审查读到新内容。审查送进模型的内容由 testcases/review_service.py 的
+# build_skill_snapshot() 组装，两条路径都不是宿主机那个目录：
+#   ① 选中了 Skill：DB 的 Skill.skill_content（=SKILL.md）+ MEDIA_ROOT 下该 Skill 的
+#      references/*.md（init_skills 用 _sync_files 复制过去的那份副本）；
+#   ② 未选中 Skill：才回退读 /app/bundled_skills（上面已校验）。
+# 所以只补宿主机目录、不跑 init_skills，界面和审查结果仍是旧版。这一段校验的正是 ①。
+docker exec -i wharttest-backend /opt/venv/bin/python - <<'PY'
+import os
+from pathlib import Path
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "wharttest_django.settings")
+import django
+
+django.setup()
+from skills.models import Skill
+
+HINT = ("（修复：docker exec wharttest-backend /opt/venv/bin/python /app/manage.py init_skills；"
+        "或直接重跑 bash 04-deploy.sh，它会在 Backend 健康后自动刷新）")
+
+rows = list(Skill.objects.filter(name="test-case-clarity-review"))
+if not rows:
+    print("  [跳过] 数据库暂无 test-case-clarity-review 记录，审查将走 /app/bundled_skills 回退读取（已单独校验）")
+for skill in rows:
+    full_path = skill.get_full_path()
+    rules = Path(full_path) / "references" / "review-rules.md" if full_path else None
+    assert "## 完成条件" in skill.skill_content, (
+        f"Skill[{skill.id}] 数据库里的 SKILL.md 不是完整版（缺「完成条件」章节），"
+        "说明文件同步后没跑 init_skills。" + HINT)
+    assert rules is not None and rules.is_file(), (
+        f"Skill[{skill.id}] 媒体目录缺少 references/review-rules.md（{rules}），"
+        "审查实际读的是这份副本，不是宿主机 offline-images/skills。" + HINT)
+    rules_text = rules.read_text(encoding="utf-8")
+    assert "## 9. 严重程度参考" in rules_text, (
+        f"Skill[{skill.id}] 媒体目录里的 review-rules.md 不是完整版（缺第 9 条「严重程度参考」）。" + HINT)
+    db_bytes = len(skill.skill_content.encode("utf-8"))
+    print(f"  [通过] Skill[{skill.id}] project={skill.project_id}："
+          f"DB SKILL.md {db_bytes} 字节，媒体目录 review-rules.md {rules.stat().st_size} 字节")
+PY
+echo "[通过] 数据库技能快照与媒体目录规则副本均为完整版（审查实际读取的路径）"
 
 celery_ping="$(docker exec wharttest-backend timeout 20 celery -A wharttest_django inspect ping --timeout=10)"
 echo "$celery_ping" | grep -q 'pong' || { echo "[失败] Celery Worker 未响应 ping" >&2; exit 1; }
