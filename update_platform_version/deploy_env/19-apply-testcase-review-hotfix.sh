@@ -4,11 +4,15 @@ set -euo pipefail
 BASE_COMPOSE="${BASE_COMPOSE:-/projects/ai-test-platform/offline-images/docker-compose.offline.yml}"
 UPDATE_DIR="$(cd "$(dirname "$0")" && pwd)"
 UPDATE_COMPOSE="$UPDATE_DIR/docker-compose.update.yml"
+# 新版 Backend 镜像（update-d595a628-review-fix-r5 起）已内置全部代码修复，代码挂载已从
+# docker-compose.update.yml 移出到本覆盖层；跑本脚本即等同“临时启用挂载层”。
+HOTFIX_COMPOSE="$UPDATE_DIR/docker-compose.hotfix.yml"
 
 fail() { echo "[失败] $*" >&2; exit 1; }
 
 [ -f "$BASE_COMPOSE" ] || fail "找不到当前内网 YAML：$BASE_COMPOSE"
 [ -f "$UPDATE_COMPOSE" ] || fail "找不到升级覆盖 YAML：$UPDATE_COMPOSE"
+[ -f "$HOTFIX_COMPOSE" ] || fail "找不到热修复覆盖 YAML：$HOTFIX_COMPOSE"
 
 required=(
   hotfix/requirements/services.py
@@ -24,7 +28,7 @@ for relative_path in "${required[@]}"; do
   [ -f "$UPDATE_DIR/$relative_path" ] || fail "热修复文件缺失：$relative_path"
 done
 
-compose=(docker compose -p offline-images -f "$BASE_COMPOSE" -f "$UPDATE_COMPOSE")
+compose=(docker compose -p offline-images -f "$BASE_COMPOSE" -f "$UPDATE_COMPOSE" -f "$HOTFIX_COMPOSE")
 "${compose[@]}" config --quiet
 
 echo "[应用] 仅重新创建 Backend，数据库、Frontend、Vision MCP、执行器均不重启"

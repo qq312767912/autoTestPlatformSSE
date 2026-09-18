@@ -1,8 +1,28 @@
 # WHartTest 内网 ARM64 增量升级包
 
-应用版本：Backend `dev@1ed4e374-code-review-layout-r4`，Frontend `dev@1ed4e374-code-review-layout-r4`
+应用版本：Backend `dev@d595a628-review-fix-r5`，Frontend `dev@d595a628-review-fix-r5`
+
+源码基线：`dev@d595a628`（相对上一版 `1ed4e374` 共 3 个提交）
 
 Vision MCP 继续复用 `01339484` 版本镜像；Actuator 使用包含动态页面导航修复的 R4 镜像。
+
+## 本版本相对上一版 `1ed4e374` 的变化
+
+本次是**前端、后端镜像的完整重建**（不是只改几个文件的挂载层），把此前只能靠
+`hotfix/` 只读挂载临时交付的后端修复全部烤进镜像；前端则补上了上一版镜像构建之后
+才提交的代码审查 HTML 报告导出功能。
+
+| 类别 | 内容 |
+| --- | --- |
+| 用例审查稳定性 | 分片 10 → 20 行/批并恢复 2 路并发；重试次数取 `LLMConfig.max_retries` 且带上下限、退避改指数封顶 30 秒；单批失败只降级不中断整项；连续失败熔断；45 分钟总时间预算；报告新增「未覆盖用例行」 |
+| 用例审查接口 | 列表接口不再回传运行中的 `_checkpoint`，改回传进度计数，避免前端 4 秒轮询产生 MB 级响应 |
+| 代码审查正确性 | 差异范围改用**共同祖先**比较（本地 `git diff merge_base..head`、GitLab `straight=false`），不再把基准分支上已修好的改动误报成新增风险 |
+| 代码审查报告 | 前端新增**导出 HTML 报告**与测试分析报告（上一版前端镜像构建于该功能提交之前，内网此前没有此入口） |
+| 代码审查界面 | 长模块名概览单列布局与安全换行 |
+| 用例审查界面 | 断点续审提示（`已完成 N/M 批，点击「重试」将从断点继续`）与覆盖率告警 |
+
+> ⚠️ 由此带来一处**部署方式变更**：代码挂载层已从 `docker-compose.update.yml` 移出，
+> 见下文「代码覆盖层（hotfix）的启用方式」。正常升级不再挂载任何后端代码文件。
 
 代码审查现使用独立 LLM 配置。系统管理员进入“代码审查”页面，点击右上角
 “审查模型配置”，填写 OpenAI 兼容 API 地址、模型名称和 API Key。密钥在数据库中
@@ -80,41 +100,22 @@ bash 18-diagnose-small-testcase-review.sh
 「修复前（小分片串行）」还是「修复后（可配置重试 + 并发分片）」。脚本还会对当前激活模型发起
 一次60秒、最多256输出 Token、零重试的最小 `OK` 调用，并报告推理内容长度。脚本不会输出 API Key。
 
-## 用例审查免构建热修复
+## 用例审查重试与并发修复（本版本已内置镜像）
 
-当前 Backend 镜像不变时，可直接应用 `hotfix/` 中的只读代码覆盖层：
+原先这套修复通过 `hotfix/` 只读代码覆盖层交付，**从本版本起已完整编译进 Backend 镜像**，
+正常升级（`04-deploy.sh`）后即生效，不需要再执行任何 `*-apply-*-hotfix.sh`。
 
-```bash
-bash 19-apply-testcase-review-hotfix.sh
-bash 05-verify.sh
-```
+涉及的后端文件与作用：
 
-脚本只重新创建 Backend，并在其恢复后重新拉起三个执行器；不会重启数据库、Frontend 或
-Vision MCP，不会修改数据卷。热修复已写入 `docker-compose.update.yml`，后续使用这组 Compose
-文件重建 Backend 时仍会生效。
-
-针对大 Excel 在内网模型网关超时的增量修复（本文简称「用例审查重试与并发修复」），
-也可使用语义更明确的入口：
-
-```bash
-bash 20-apply-large-testcase-review-hotfix.sh
-bash 05-verify.sh
-```
-
-该脚本会调用 `19-apply-testcase-review-hotfix.sh`。`hotfix/` 覆盖层包含以下四个文件，
-全部只读挂载，覆盖后仅重建 Backend：
-
-| 覆盖文件 | 作用 |
+| 文件 | 作用 |
 | --- | --- |
 | `testcases/review_service.py` | 分片调度、重试退避、失败降级、熔断、预算、断点续审 |
 | `requirements/services.py` | 空响应不再丢失真实错误原因 |
 | `testcases/serializers.py` | 列表接口不再回传运行中的 `_checkpoint`，只回传进度计数 |
 | `testcases/views.py`、`management/commands/recover_stale_testcase_reviews.py` | 既有能力，保持不变 |
 
-> 本次修复还改动了前端两个文件（`TestCaseReviewView.vue` 的断点续审提示与覆盖率告警、
-> `service.ts` 的 `summary` 类型），它们属于**纯展示增强**，不影响后端行为，因此不在这套
-> 热修复里。前端需要在下一次 Frontend 镜像重建时一并带上；在此之前页面照旧可用，
-> 只是看不到「已完成 N/M 批」提示与覆盖率告警。
+前端两个文件（`TestCaseReviewView.vue` 的断点续审提示与覆盖率告警、`service.ts` 的
+`summary` 类型）随本次 Frontend 镜像一并上线。
 
 #### 分片与并发（修复 480 条用例跑不完的问题）
 
@@ -137,66 +138,52 @@ bash 05-verify.sh
 - 只有**所有**批次都失败时才整项失败，错误信息为
   `共 N/M 批模型调用失败，未生成报告。首个错误：…`。
 
-#### 内网操作步骤
+#### 升级后的预期行为
 
-```bash
-cd /projects/ai-test-platform/update_platform_version/deploy_env
-
-# 0) 先取现场证据（可选，但建议保留）：确认是不是「顺跑即超时」，并记录当前代码版本
-bash 18-diagnose-small-testcase-review.sh
-
-# 1) 备份回滚点：覆盖层目录 + 叠加用的 Compose（两者必须一起备份）
-tar czf /tmp/testcase-review-hotfix-backup-$(date +%Y%m%d-%H%M%S).tgz hotfix docker-compose.update.yml
-
-# 2) 用升级包替换 deploy_env（含新的 hotfix/ 与 docker-compose.update.yml）
-
-# 3) 应用（会重建 Backend，并在其恢复后拉起三个执行器）
-bash 20-apply-large-testcase-review-hotfix.sh
-
-# 4) 校验：常量、挂载、Skill、Celery 任务注册
-bash 05-verify.sh
-```
-
-脚本最后的 `[验证]` 会打印实际生效参数，形如：
-
-```
-review_service 生效参数：CHUNK_SIZE=20 WORKERS=2 ATTEMPTS=3(上限5) BACKOFF=2~30s BUDGET=45min BREAKER=3
-testcase review hotfix OK
-```
-
-#### 生效后的预期行为
-
+- 450 条以上的用例审查按 20 行/批、2 路并发送审，480 条用例约 24 批 12 波，不会再顶到
+  Celery 55 分钟软时限。
+- 上游网关偶发 502 时，单批会自动重试（2/4/8/16… 秒退避，封顶 30 秒）而不是立刻整项失败。
+- 少数批次最终仍失败时任务显示为「已完成」，页面出现覆盖率告警，报告首页给出
+  `uncovered_chunks` / `uncovered_rows`，并可查看「未覆盖用例行」工作表。
 - 对历史失败记录点击「重试」会从断点继续：已完成批次不再重跑，页面提示
   `已完成 N/M 批，点击「重试」将从断点继续`。
-- 少数批次仍失败时任务显示为「已完成」，但列表会出现覆盖率告警，报告里能查到未覆盖的行。
-- 需要放宽或收紧重试时，在「模型配置」里改 `max_retries` 即可，无需改代码；分片大小与并发度
-  是代码常量，如需调整要改 `hotfix/testcases/review_service.py` 后重跑 19/20 脚本。
+- 需要放宽或收紧重试时，在「模型配置」里改 `max_retries` 即可，无需改代码。
+  分片大小与并发度是代码常量（`TESTCASE_REVIEW_CHUNK_SIZE` / `TESTCASE_REVIEW_MAX_WORKERS`），
+  如需调整要改源码后重建 Backend 镜像。
 
 > 注意：`review_service.py` 里的 `TESTCASE_REVIEW_*` 常量一旦调整，断点续审的签名
 > （`signature`）会变化，历史 `_checkpoint` 将不再复用，任务会从头跑。
 
-#### 回滚
+## 代码覆盖层（hotfix）的启用方式
 
-热修复是只读挂载，回滚只需还原「覆盖层目录 + Compose」并重建 Backend：
+从本版本起，`docker-compose.update.yml` **不再挂载任何后端代码文件**，唯一保留的挂载是
+`supervisord.single-worker.conf`。原因：Backend 镜像已内置全部代码修复，再叠加旧副本会
+盖掉镜像内容，并且让 `05-verify.sh` 失去“镜像是否真的更新”的判别力。
+
+代码挂载层被移到了独立文件 `docker-compose.hotfix.yml`，**默认不叠加**。只有在“必须改后端
+代码、又来不及重建镜像”时才启用，`19/20/22/23-apply-*-hotfix.sh` 会自动叠加它：
 
 ```bash
-cd /projects/ai-test-platform/update_platform_version/deploy_env
-tar xzf /tmp/testcase-review-hotfix-backup-<时间戳>.tgz
+# 紧急热修复（临时启用挂载层）
+bash 22-apply-code-analysis-ocr-hotfix.sh
+bash 05-verify.sh      # 此时会失败：提示正处于挂载层模式
 
-compose=(docker compose -p offline-images \
+# 回到镜像模式（卸下挂载层）
+docker compose -p offline-images \
   -f /projects/ai-test-platform/offline-images/docker-compose.offline.yml \
-  -f docker-compose.update.yml)
-"${compose[@]}" config --quiet
-"${compose[@]}" up -d --no-deps --force-recreate backend
-"${compose[@]}" up -d --no-deps actuator-01 actuator-02 actuator-03
+  -f docker-compose.update.yml \
+  up -d --no-deps --force-recreate backend
+bash 05-verify.sh      # 应全部通过
 ```
 
-> 回滚必须**同时**还原 `docker-compose.update.yml`。新版 Compose 里多了一条
-> `hotfix/testcases/serializers.py` 的挂载；若只还原 `hotfix/` 而不还原 Compose，
-> 该文件不存在，Docker 会把挂载点创建成目录，Backend 会启动失败。
->
-> 回滚后 `bash 05-verify.sh` 中的用例审查断言会失败（断言已按修复后的常量与函数更新），
-> 这是**预期结果**，不代表回滚失败。
+`05-verify.sh` 会检查 Backend 上是否存在 `/app/{testcases,code_analysis,requirements,orchestrator_integration,bundled_skills}`
+的挂载点；存在即直接失败，提醒你当前生效的是挂载副本而非镜像。这是有意设计：
+
+> 两个模式的语义要分清 ——
+> **镜像模式**（默认）：生效代码来自镜像，`05-verify.sh` 的代码断言真正验证了镜像内容。
+> **挂载模式**（紧急）：生效代码来自 `hotfix/`，镜像更新尚未得到验证。
+
+## 代码审查诊断与单并发（21/22）
 
 若多个代码审查任务连续显示“OpenCodeReview 平台调用失败”，执行：
 
@@ -209,27 +196,62 @@ TASK_ID=<代码审查任务UUID> bash 21-diagnose-code-analysis-ocr.sh
 脚本会采集任务保存的 OCR 失败原因、执行记录、结果文件结构、Celery/OCR 进程、
 相关 Worker 日志和一次 60 秒最小模型调用，不输出 GitLab Token 或模型密钥。
 
-确认内网低算力导致 OpenCodeReview 多并发超时后，执行单并发热修复：
+OpenCodeReview 单并发、超时诊断、全平台代码审查串行、OCR 单独重试等能力，
+**本版本已全部内置在 Backend 镜像**，无需再执行 22 号脚本。相关内容如下（备查）：
+
+- OpenCodeReview 首轮与续审均为单并发。
+- 若达到动态时间上限仍未生成 JSON，任务会保存超时分钟数、退出码、结果文件状态和最后错误，
+  不再只记录“返回状态 empty”。
+- 取消/删除流程先停止指定任务的 OCR 进程组，再终止 Celery 运行任务；即使任务记录已删除，
+  后台也会按取消处理，不再遗留孤儿 OCR 进程。
+- 代码审查在全平台严格串行：前一个任务未结束时，后续任务显示“排队中”；OCR 失败但平台 AI
+  降级分析完成时显示“降级完成”，并允许只重试 OCR，不重跑机器规则和已完成的降级分析。
+
+## 代码审查差异范围修复（本版本已内置镜像）
+
+代码审查此前把差异范围算成**两点比较**（本地 `git diff A B`、GitLab `straight=true`）。
+两点比较会把「基准分支独有、目标分支尚未合并」的改动渲染成目标分支的**删除**，
+而机器规则只扫删除行，于是基准分支上**已经修好的问题会被当成新增风险重复报出**
+（典型误报：“删除 `@PreAuthorize` 注解”“删除关键配置：`enabled`”）。
+
+正确语义是按**共同祖先**比较，即 `merge_base(A,B)..B`。修复落在两个后端文件上，
+**本版本已编译进 Backend 镜像**，正常升级即生效，无需任何挂载操作：
+
+| 文件 | 变化 |
+| --- | --- |
+| `code_analysis/services.py` | GitLab `compare` 的 `straight` 由 `True` 改为 `False`；新增 `GitLabClient.merge_base` / `LocalGitClient.merge_base`；`LocalGitClient.compare` 以共同祖先为起点，并拦下同 Commit 与基准/目标颠倒；`_managed_gitlab_repository` 把共同祖先交给 OCR 作 `--from`，机器规则与 OCR 看到同一段差异；`run_analysis` 把实际比较基准写回 `task.base_sha` |
+| `code_analysis/views.py` | `validate-refs` 增加方向校验（目标是基准的祖先时返回 400 并提示“基准与目标疑似颠倒”），新增 `compare_base_sha` 与 `notice` 字段 |
+
+如需临时热修复（不重建镜像），执行 `23-apply-code-analysis-mergebase-hotfix.sh`：它不换镜像、
+**不改数据库、不需要 migrate**，只叠加 `docker-compose.hotfix.yml` 里的两个只读挂载文件并重建
+Backend，随后拉起三个执行器。脚本内置守门断言：若覆盖层还是 `straight=true` 的两点比较旧版，
+或者同步过程中挤掉了既有的 OCR 单并发、超时诊断、OCR 单独重试、LLM 配置复制等能力，
+脚本会在重建之前直接失败，不会把旧版或残缺版推上内网。
+
+#### 使用注意
+
+- 修复只影响**新发起**的分析任务。**历史已有结论的任务不会自动重算**；需要刷新结论时请重新执行任务。
+- Merge Request 模式行为不变（`diff_refs.base_sha` 本身即共同祖先）。
+- “基准是目标的祖先”的相邻 Commit 对比行为不变（此时 `merge_base == base`）。
+- GitLab 侧依赖 `/repository/merge_base` 接口。该接口不可用时校验接口按降级处理
+  （仍返回 `compare_base_sha = base_sha`），不会阻断提交任务。
+
+#### 回滚
+
+本版本可回滚到上一版镜像 `update-1ed4e374-code-review-layout-r4-arm64`：
 
 ```bash
-bash 22-apply-code-analysis-ocr-hotfix.sh
-bash 05-verify.sh
+bash 06-rollback-app.sh
 ```
 
-该脚本不更换镜像和数据卷，只重新创建 Backend。OpenCodeReview 首轮与续审均改为
-单并发；若达到动态时间上限仍未生成 JSON，任务会保存超时分钟数、退出码、结果文件
-状态和最后错误，不再只记录“返回状态 empty”。热修复同时改造取消/删除流程：
-先停止指定任务的 OCR 进程组，再终止 Celery 运行任务；即使任务记录已删除，
-后台也会按取消处理，不再遗留孤儿 OCR 进程。代码审查在全平台严格串行：
-前一个任务未结束时，后续任务显示“排队中”；OCR 失败但平台 AI 降级分析完成时
-显示“降级完成”，并允许只重试 OCR，不重跑机器规则和已完成的降级分析。
+若之前叠加过 `docker-compose.hotfix.yml`，重建时不再传该 `-f` 即可卸下挂载层。
 
-`05-verify.sh` 会验证容器和 HTTP 状态、数据库迁移、Celery Worker 及代码审查/用例审查
-任务注册、OpenCodeReview、共享媒体文件实际下载、Vision OCR、三个执行器的测试域名解析与
-HTTP 访问，以及 Backend WebSocket 注册表中的在线执行器数量。默认还会执行一次最小真实
-OpenCodeReview 模型调用：临时构造 Java 导出 DTO 新增字段却遗漏 Excel 注解的变更，并验证
-审查结果确实识别该问题（不强制风险等级）。该检查会消耗少量 Token，最长 4 分钟；
-仅在排查其他基础设施时可跳过：
+`05-verify.sh` 会验证容器和 HTTP 状态、**Backend 无代码覆盖层**、数据库迁移、Celery Worker
+及代码审查/用例审查任务注册、OpenCodeReview、前端 HTML 报告导出、共享媒体文件实际下载、
+Vision OCR、三个执行器的测试域名解析与 HTTP 访问，以及 Backend WebSocket 注册表中的
+在线执行器数量。默认还会执行一次最小真实 OpenCodeReview 模型调用：临时构造 Java 导出 DTO
+新增字段却遗漏 Excel 注解的变更，并验证审查结果确实识别该问题（不强制风险等级）。
+该检查会消耗少量 Token，最长 4 分钟；仅在排查其他基础设施时可跳过：
 
 ```bash
 VERIFY_OCR_LIVE=0 bash 05-verify.sh
@@ -252,17 +274,21 @@ VERIFY_OCR_LIVE=0 bash 05-verify.sh
 300 MB 的传输限制，大镜像使用 `.part000` 起的分卷。
 
 ```text
-../images/backend-1ed4e374-code-review-layout-r4-arm64.tar.gz.part000 ...（以实际分卷数为准）
-../images/frontend-1ed4e374-code-review-layout-r4-arm64.tar.gz.part000
+../images/backend-d595a628-review-fix-r5-arm64.tar.gz.part000 ...（以实际分卷数为准）
+../images/frontend-d595a628-review-fix-r5-arm64.tar.gz.part000
 ../images/actuator-update-178fb3ed-arm64-r4.tar.gz.partaa ... partab
 ```
 
-`03-import-images.sh` 可以自动按顺序合并并导入，无需手工生成 520 MB 的完整文件。
-新版 Backend 为完整 Alpine/musl ARM64 构建，适配麒麟 ARM64 64KB 页环境，已包含
-OpenCodeReview，并将 Celery 并发调整为 8。Supervisor 的日志和 PID 分别写入
-`/app/data/logs` 与 `/app/data/run`，通过已有数据卷落在
-`/projects/ai-test-platform/offline-images/data`，不再写入 `/var`。
+`SHA256SUMS` 覆盖本次需传输的全部分卷，`03-import-images.sh` 会先校验再导入。
 本次需传输 Backend 分卷和 Frontend 镜像；Vision MCP、Actuator 继续复用内网已导入镜像。
+
+新版 Backend 为完整 Alpine/musl ARM64 构建，适配麒麟 ARM64 64KB 页环境：基于
+`WHartTest_Django/Dockerfile.alpine` 两阶段构建，构建阶段自带 `build-base`/`musl-dev`/`cargo`，
+运行阶段全局安装 `@alibaba-group/open-code-review` 并保留 `ocr` CLI（`ocr --version`
+在镜像内可直接执行），Celery 并发为 8。Supervisor 的日志和 PID 分别写入 `/app/data/logs`
+与 `/app/data/run`，通过已有数据卷落在 `/projects/ai-test-platform/offline-images/data`，
+不再写入 `/var`。
+
 如果只补充执行器镜像，可直接执行：
 
 ```bash

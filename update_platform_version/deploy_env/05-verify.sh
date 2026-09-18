@@ -5,8 +5,8 @@ VERIFY_OCR_LIVE="${VERIFY_OCR_LIVE:-1}"
 TEST_HOSTNAME="${TEST_HOSTNAME:-www.test.sse.com.cn}"
 
 expected=(
-  'wharttest-backend|wharttest-250-backend:update-1ed4e374-code-review-layout-r4-arm64'
-  'wharttest-frontend|wharttest-250-frontend:update-1ed4e374-code-review-layout-r4-arm64'
+  'wharttest-backend|wharttest-250-backend:update-d595a628-review-fix-r5-arm64'
+  'wharttest-frontend|wharttest-250-frontend:update-d595a628-review-fix-r5-arm64'
   'wharttest-vision-mcp|wharttest-250-vision-mcp:update-01339484-arm64-r2'
   'wharttest-mcp|wharttest-250-mcp-alpine:latest'
   'wharttest-qdrant|qdrant-kylin-arm64:v1.16.0-page64k'
@@ -22,6 +22,19 @@ for entry in "${expected[@]}"; do
   echo "[通过] $container -> $actual"
 done
 
+# 生效代码必须来自镜像本体。d595a628-review-fix-r5 起 Backend 镜像已完整包含此前的全部
+# 代码修复，不再需要 hotfix/ 挂载；若仍检测到代码覆盖层，说明生效的是挂载副本而不是镜像，
+# 上面基于文件内容的断言就失去意义（无论镜像是否更新都可能通过），必须直接失败。
+overlay_mounts="$(docker inspect wharttest-backend --format '{{range .Mounts}}{{println .Destination}}{{end}}' \
+  | grep -E '^/app/(testcases|code_analysis|requirements|orchestrator_integration|bundled_skills)(/|$)' || true)"
+if [ -n "$overlay_mounts" ]; then
+  echo "[失败] Backend 仍叠加着 hotfix 代码覆盖层，生效内容不是镜像本体：" >&2
+  echo "$overlay_mounts" >&2
+  echo "       紧急热修复请显式叠加 docker-compose.hotfix.yml；正常升级应卸下覆盖层后重跑本脚本。" >&2
+  exit 1
+fi
+echo "[通过] Backend 无 hotfix 代码覆盖层，生效代码全部来自镜像"
+
 curl -fsS http://127.0.0.1:8912/admin/login/ >/dev/null
 curl -fsS http://127.0.0.1:8913/ >/dev/null
 echo "[通过] Backend 和 Frontend HTTP 检查"
@@ -30,8 +43,8 @@ docker exec wharttest-backend /opt/venv/bin/python /app/manage.py migrate --chec
 echo "[通过] 数据库迁移状态"
 
 docker exec wharttest-backend sh -c \
-  'grep -q "Alpine Linux" /etc/os-release && command -v ocr >/dev/null && ocr --version && grep -q -- "--concurrency=8" /app/supervisord.conf && grep -q "/app/data/logs" /app/supervisord.conf && ! grep -q "/var/log" /app/supervisord.conf'
-echo "[通过] Backend Alpine、OpenCodeReview、Celery 并发 8，运行日志不写 /var"
+  'grep -q "Alpine Linux" /etc/os-release && ldd --version 2>&1 | grep -qi musl && command -v ocr >/dev/null && ocr --version && npm list -g --depth=0 @alibaba-group/open-code-review >/dev/null && grep -q -- "--concurrency=8" /app/supervisord.conf && grep -q "/app/data/logs" /app/supervisord.conf && ! grep -q "/var/log" /app/supervisord.conf'
+echo "[通过] Backend Alpine/musl、OpenCodeReview（ocr CLI 可用）、Celery 并发 8，运行日志不写 /var"
 
 docker exec wharttest-backend /opt/venv/bin/python -c '
 from pathlib import Path
@@ -59,12 +72,27 @@ assert "def _get_code_analysis_llm_config" in service
 assert "if task.mode != \"deep\"" in service
 assert "if task.mode != \"deep\"" in view
 assert "default_branch = models.CharField(max_length=255, default=\"master\")" in models
+# 差异范围按共同祖先比较：缺了这些断言就说明挂载的还是两点比较的旧版，
+# 基准分支上已修好的改动会被当成目标分支的删除，重复报出并不存在的问题。
+assert "def merge_base" in service
+assert "\"straight\": False" in service
+assert "\"straight\": True" not in service
+assert "compare_base" in service
+assert ".merge_base(" in view
+assert "compare_base_sha" in view
+assert "基准与目标疑似颠倒" in view
 '
-echo "[通过] OpenCodeReview 单并发、超时诊断、分析模式、master 默认分支、专用 LLM、已有配置复制及 GitLab 连接删除保护"
+echo "[通过] OpenCodeReview 单并发、超时诊断、分析模式、master 默认分支、专用 LLM、已有配置复制、GitLab 连接删除保护、差异按共同祖先比较"
 
 docker exec wharttest-frontend sh -c \
   'grep -R -q "impact-module-grid.*grid-template-columns:minmax(0,1fr)" /usr/share/nginx/html/assets/*.css'
 echo "[通过] 代码审查概览长模块名单列布局"
+
+# 前端产物里必须带上报告导出与断点续审提示。这些字符串只出现在对应功能源码中，
+# 命中即证明镜像里的是一版包含这些能力的前端产物，而不是旧镜像。
+docker exec wharttest-frontend sh -c \
+  'cd /usr/share/nginx/html && grep -R -q "代码审查报告_" assets/ && grep -R -q "测试分析报告_" assets/ && grep -R -q "导出报告" assets/ && grep -R -q "将从断点继续" assets/ && grep -R -q "coverage-warning" assets/'
+echo "[通过] 代码审查 HTML/测试分析报告导出入口、用例审查断点续审提示与覆盖率告警"
 
 docker exec wharttest-backend /opt/venv/bin/python -c '
 from pathlib import Path

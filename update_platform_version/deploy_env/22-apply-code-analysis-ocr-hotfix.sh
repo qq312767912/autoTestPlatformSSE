@@ -4,6 +4,7 @@ set -euo pipefail
 BASE_COMPOSE="${BASE_COMPOSE:-/projects/ai-test-platform/offline-images/docker-compose.offline.yml}"
 UPDATE_DIR="$(cd "$(dirname "$0")" && pwd)"
 UPDATE_COMPOSE="$UPDATE_DIR/docker-compose.update.yml"
+HOTFIX_COMPOSE="$UPDATE_DIR/docker-compose.hotfix.yml"
 HOTFIX_FILE="$UPDATE_DIR/hotfix/code_analysis/services.py"
 HOTFIX_VIEW="$UPDATE_DIR/hotfix/code_analysis/views.py"
 HOTFIX_TASKS="$UPDATE_DIR/hotfix/code_analysis/tasks.py"
@@ -16,6 +17,7 @@ fail() { echo "[失败] $*" >&2; exit 1; }
 
 [ -f "$BASE_COMPOSE" ] || fail "找不到当前内网 YAML：$BASE_COMPOSE"
 [ -f "$UPDATE_COMPOSE" ] || fail "找不到升级覆盖 YAML：$UPDATE_COMPOSE"
+[ -f "$HOTFIX_COMPOSE" ] || fail "找不到热修复覆盖 YAML：$HOTFIX_COMPOSE"
 [ -f "$HOTFIX_FILE" ] || fail "缺少代码审查热修复文件：$HOTFIX_FILE"
 [ -f "$HOTFIX_VIEW" ] || fail "缺少代码审查取消接口热修复文件：$HOTFIX_VIEW"
 [ -f "$HOTFIX_TASKS" ] || fail "缺少代码审查队列热修复文件：$HOTFIX_TASKS"
@@ -36,7 +38,7 @@ grep -q 'class CodeAnalysisLLMConfig' "$HOTFIX_MODELS" || fail "热修复文件�
 grep -q 'class CodeAnalysisLLMConfigSerializer' "$HOTFIX_SERIALIZERS" || fail "热修复文件缺少代码审查专用 LLM API"
 grep -q 'router.register("llm-config"' "$HOTFIX_URLS" || fail "热修复文件缺少代码审查专用 LLM 路由"
 
-compose=(docker compose -p offline-images -f "$BASE_COMPOSE" -f "$UPDATE_COMPOSE")
+compose=(docker compose -p offline-images -f "$BASE_COMPOSE" -f "$UPDATE_COMPOSE" -f "$HOTFIX_COMPOSE")
 "${compose[@]}" config --quiet
 
 echo "[提醒] 重新创建 Backend 会中断当前正在运行的后台任务，请确认当前无必须保留的运行中任务。"

@@ -36,26 +36,15 @@ x-actuator-common: &actuator-common
 # 与内网当前 docker-compose.offline.yml 叠加使用，覆盖升级服务并新增三个执行器。
 services:
   backend:
-    image: wharttest-250-backend:update-1ed4e374-code-review-layout-r4-arm64
+    image: wharttest-250-backend:update-d595a628-review-fix-r5-arm64
     volumes:
+      # 唯一保留的挂载：Celery 单 Worker 配置。
+      # ⚠️ 自 update-d595a628-review-fix-r5 起，Backend 镜像已完整包含此前的全部代码修复
+      #    （用例审查并发与重试、代码审查共同祖先比较等），因此不再挂载 hotfix/ 代码覆盖层。
+      #    挂载旧副本会盖掉新镜像的改动，并让 05-verify.sh 失去“镜像是否真的更新”的判别力。
+      #    确需在不重建镜像的前提下临时改后端代码时，叠加 docker-compose.hotfix.yml
+      #    （19/22/23-apply-*-hotfix.sh 会自动叠加）。
       - /projects/ai-test-platform/update_platform_version/deploy_env/supervisord.single-worker.conf:/app/supervisord.conf:ro
-      # 用例审查热修复覆盖层：无需重建 Backend 镜像，可随 Compose 重建持续生效。
-      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/requirements/services.py:/app/requirements/services.py:ro
-      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/services.py:/app/code_analysis/services.py:ro
-      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/views.py:/app/code_analysis/views.py:ro
-      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/tasks.py:/app/code_analysis/tasks.py:ro
-      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/models.py:/app/code_analysis/models.py:ro
-      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/serializers.py:/app/code_analysis/serializers.py:ro
-      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/urls.py:/app/code_analysis/urls.py:ro
-      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/migrations/0012_codeanalysisllmconfig.py:/app/code_analysis/migrations/0012_codeanalysisllmconfig.py:ro
-      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/review_service.py:/app/testcases/review_service.py:ro
-      # 列表接口不再回传运行中的 _checkpoint（仅回传进度计数），避免 4 秒轮询
-      # 产生 MB 级响应；该文件与镜像内版本仅差这一处，可直接覆盖。
-      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/serializers.py:/app/testcases/serializers.py:ro
-      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/views.py:/app/testcases/views.py:ro
-      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/management:/app/testcases/management:ro
-      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/orchestrator_integration/builtin_tools/skill_tools.py:/app/orchestrator_integration/builtin_tools/skill_tools.py:ro
-      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/bundled_skills:/app/bundled_skills:ro
     environment:
       VISION_MCP_URL: http://vision-mcp:8010/mcp
       VISION_API_BASE_URL: ${VISION_API_BASE_URL:-}
@@ -70,7 +59,7 @@ services:
       VISION_MCP_TIMEOUT_SECONDS: ${VISION_MCP_TIMEOUT_SECONDS:-120}
 
   frontend:
-    image: wharttest-250-frontend:update-1ed4e374-code-review-layout-r4-arm64
+    image: wharttest-250-frontend:update-d595a628-review-fix-r5-arm64
     # 与后端共享持久化媒体目录，确保 Skill 生成的交付物可由 Nginx 下载。
     volumes:
       - /projects/ai-test-platform/offline-images/data/media:/app/data/media:ro

@@ -1,0 +1,41 @@
+# ============================================================================
+# 紧急热修复覆盖层（默认不启用）
+# ============================================================================
+# 正常升级只叠加 docker-compose.update.yml：Backend 镜像（update-d595a628-review-fix-r5
+# 及以后）已完整包含此前用挂载方式交付的全部代码修复，因此不需要任何代码只读挂载。
+#
+# 只有在“必须改后端代码、又来不及重建镜像”时，才额外叠加本文件：
+#
+#   docker compose -p offline-images \
+#     -f /projects/ai-test-platform/offline-images/docker-compose.offline.yml \
+#     -f /projects/ai-test-platform/update_platform_version/deploy_env/docker-compose.update.yml \
+#     -f /projects/ai-test-platform/update_platform_version/deploy_env/docker-compose.hotfix.yml \
+#     up -d --no-deps --force-recreate backend
+#
+# 19/22/23-apply-*-hotfix.sh 会自动叠加本文件，无需手工敲上面这行。
+#
+# ⚠️ 两点切记：
+#   1. 叠加本文件后，生效的是 hotfix/ 里的副本而不是镜像内容。若 hotfix/ 落后于镜像，
+#      新镜像的修复会被静默盖掉。改完请尽快重建镜像并撤下本覆盖层。
+#   2. 叠加期间 05-verify.sh 的“生效内容来自镜像”校验会失败，这是有意设计：
+#      它提醒当前生效的是挂载层，镜像更新尚未得到验证。
+#
+# 回滚本覆盖层：不再传 -f docker-compose.hotfix.yml 重建 Backend 即可，
+# 容器上的挂载会随重建一并消失。
+services:
+  backend:
+    volumes:
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/requirements/services.py:/app/requirements/services.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/services.py:/app/code_analysis/services.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/views.py:/app/code_analysis/views.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/tasks.py:/app/code_analysis/tasks.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/models.py:/app/code_analysis/models.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/serializers.py:/app/code_analysis/serializers.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/urls.py:/app/code_analysis/urls.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/migrations/0012_codeanalysisllmconfig.py:/app/code_analysis/migrations/0012_codeanalysisllmconfig.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/review_service.py:/app/testcases/review_service.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/serializers.py:/app/testcases/serializers.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/views.py:/app/testcases/views.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/management:/app/testcases/management:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/orchestrator_integration/builtin_tools/skill_tools.py:/app/orchestrator_integration/builtin_tools/skill_tools.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/bundled_skills:/app/bundled_skills:ro
