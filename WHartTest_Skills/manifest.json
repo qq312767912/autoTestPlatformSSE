@@ -83,15 +83,6 @@
       "author": "mgdaas-lab",
       "tags": ["wharttest", "test-management"],
       "zip_path": "wharttest_skills.zip"
-    },
-    {
-      "id": "test-case-clarity-review",
-      "name": "test-case-clarity-review",
-      "description": "审查通用业务测试用例的可执行性与验收清晰度，发现“正常、正确、成功、无异常”等模糊表述，以及步骤、数据、预期、证据和覆盖范围的缺口，并生成可交付的独立审查报告。适用于评审手工测试用例、外包交付用例、存量用例治理和提测前质量检查；不用于代替需求方定义未知业务规则。",
-      "version": "1.0.0",
-      "author": "mgdaas-lab",
-      "tags": ["testcase", "review", "quality"],
-      "zip_path": "test-case-clarity-review.zip"
     }
   ]
 }
