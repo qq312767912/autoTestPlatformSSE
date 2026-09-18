@@ -1,10 +1,16 @@
-from django.db import models
-from django.contrib.auth.models import User
-from django.utils.translation import gettext_lazy as _
-from django.core.exceptions import ValidationError
-from projects.models import Project # 确保从正确的应用导入Project模型
+import base64
+import hashlib
 import os
 import uuid
+
+from cryptography.fernet import Fernet, InvalidToken
+from django.conf import settings
+from django.contrib.auth.models import User
+from django.core.exceptions import ValidationError
+from django.db import models
+from django.utils.translation import gettext_lazy as _
+
+from projects.models import Project # 确保从正确的应用导入Project模型
 
 
 def testcase_review_source_path(instance, filename):
@@ -529,3 +535,68 @@ class TestCaseReview(models.Model):
             source.delete(save=False)
         if report:
             report.delete(save=False)
+
+
+def _testcase_review_cipher():
+    """用例审查专用配置的对称加密器。
+
+    与代码审查专用配置同源（均由 SECRET_KEY 派生），但各自独立加解密，
+    互不读取对方的密文。
+    """
+    digest = hashlib.sha256(settings.SECRET_KEY.encode("utf-8")).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+class TestCaseReviewLLMConfig(models.Model):
+    """用例审查专用的全局 OpenAI 兼容模型配置（单例）。
+
+    与平台通用 LLM 配置（``langgraph_integration.LLMConfig``）刻意分离：用例
+    审查按提示词要求模型稳定输出 JSON，对模型的偏好与对话/编排不同，混用会让
+    两边调参互相干扰。审查只读本表，未配置时直接失败，不做隐式回退。
+    """
+
+    config_name = models.CharField(max_length=255, default="用例审查 LLM", verbose_name=_("配置名称"))
+    name = models.CharField(max_length=255, verbose_name=_("模型名称"))
+    api_url = models.URLField(max_length=2048, verbose_name=_("API 地址"))
+    encrypted_api_key = models.TextField(blank=True, default="", verbose_name=_("加密 API Key"))
+    request_timeout = models.PositiveIntegerField(default=600, verbose_name=_("请求超时秒数"))
+    max_retries = models.PositiveSmallIntegerField(default=2, verbose_name=_("最大重试次数"))
+    is_active = models.BooleanField(default=True, verbose_name=_("是否启用"))
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = _("用例审查 LLM 配置")
+        verbose_name_plural = _("用例审查 LLM 配置")
+
+    def save(self, *args, **kwargs):
+        # 单例：始终复用首条记录的 pk，避免在 Admin 里误点出多条配置。
+        if not self.pk:
+            existing = type(self).objects.order_by("pk").first()
+            if existing:
+                self.pk = existing.pk
+        super().save(*args, **kwargs)
+
+    def set_api_key(self, value):
+        self.encrypted_api_key = _testcase_review_cipher().encrypt(value.encode()).decode() if value else ""
+
+    def get_api_key(self):
+        if not self.encrypted_api_key:
+            return ""
+        try:
+            return _testcase_review_cipher().decrypt(self.encrypted_api_key.encode()).decode()
+        except (InvalidToken, ValueError) as exc:
+            raise ValidationError("用例审查 LLM API Key 无法解密，请重新配置") from exc
+
+    @property
+    def api_key(self):
+        return self.get_api_key()
+
+    @property
+    def provider(self):
+        # create_llm_instance 统一按 OpenAI 兼容协议实例化，无需再读 provider 字段。
+        return "openai_compatible"
+
+    @property
+    def has_api_key(self):
+        return bool(self.encrypted_api_key)

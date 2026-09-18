@@ -20,6 +20,7 @@ Vision MCP 继续复用 `01339484` 版本镜像；Actuator 使用包含动态页
 | 代码审查报告 | 前端新增**导出 HTML 报告**与测试分析报告（上一版前端镜像构建于该功能提交之前，内网此前没有此入口） |
 | 代码审查界面 | 长模块名概览单列布局与安全换行 |
 | 用例审查界面 | 断点续审提示（`已完成 N/M 批，点击「重试」将从断点继续`）与覆盖率告警 |
+| 用例审查 LLM | 新增**用例审查专用 LLM 配置**（仅平台管理员可配置，见下文专节）。审查不再复用平台通用 LLM；未配置时创建/重试直接返回 409，不再静默回退。含新迁移 `testcases/0025` |
 
 > ⚠️ 由此带来一处**部署方式变更**：代码挂载层已从 `docker-compose.update.yml` 移出，
 > 见下文「代码覆盖层（hotfix）的启用方式」。正常升级不再挂载任何后端代码文件。
@@ -241,12 +242,42 @@ bash 18-diagnose-small-testcase-review.sh
   `uncovered_chunks` / `uncovered_rows`，并可查看「未覆盖用例行」工作表。
 - 对历史失败记录点击「重试」会从断点继续：已完成批次不再重跑，页面提示
   `已完成 N/M 批，点击「重试」将从断点继续`。
-- 需要放宽或收紧重试时，在「模型配置」里改 `max_retries` 即可，无需改代码。
+- 需要放宽或收紧重试时，改**用例审查专用 LLM 配置**里的 `max_retries` 即可，无需改代码
+  （见下节；注意不是平台通用「模型配置」—— 审查已不再读它）。
   分片大小与并发度是代码常量（`TESTCASE_REVIEW_CHUNK_SIZE` / `TESTCASE_REVIEW_MAX_WORKERS`），
   如需调整要改源码后重建 Backend 镜像。
 
 > 注意：`review_service.py` 里的 `TESTCASE_REVIEW_*` 常量一旦调整，断点续审的签名
 > （`signature`）会变化，历史 `_checkpoint` 将不再复用，任务会从头跑。
+
+## 用例审查专用 LLM（本版本新增，仅管理员可配置）
+
+代码审查早有独立的「审查模型配置」（`CodeAnalysisLLMConfig`）；用例审查此前一直复用平台通用
+LLM（`langgraph_integration.LLMConfig`），结果是改通用配置会连带改变审查行为，也无法为审查
+单独挑一个"吐 JSON 更稳"的模型。本版本对齐代码审查的做法：
+
+| 项 | 说明 |
+| --- | --- |
+| 数据表 | `testcases_testcasereviewllmconfig`（单例），迁移 `testcases/0025_testcasereviewllmconfig.py` |
+| 接口 | `/api/testcases/review-llm-config/`，另有 `platform-configs` / `copy-from-platform` / `test-connection` |
+| 权限 | 仅平台管理员（`is_staff` / `is_superuser`）可读写；普通项目成员**连读都不允许**（403） |
+| 密钥 | 与代码审查同源（`SECRET_KEY` 派生 Fernet），加密落库、只回显 `has_api_key` |
+| 回退 | **不做**隐式回退：未配置、未启用或缺密钥时，创建/重试审查直接返回 409 |
+
+**升级后只有两件事**：
+
+1. Backend 启动时 `entrypoint.sh` 会自动 `migrate`，`0025` 建表并**把当前启用中的通用配置复制
+   一份**作为初始专用配置（密钥在服务端重新加密，不经过浏览器）。两套配置此后彼此独立：再改
+   通用配置不会影响用例审查。
+2. 管理员登录后进「用例审查 → 审查模型配置」核对模型，或用「从已有 LLM 配置复制」重选一个。
+
+**注意**：如果管理员把专用配置停用或把 API Key 留空，审查会按"未配置"处理并返回 409
+（提示「请先由管理员配置并启用用例审查专用 LLM」），**不会**退回平台通用配置 —— 这是刻意的，
+避免审查静默换模型。
+
+`05-verify.sh` 已补四层断言：代码层（专用模型/序列化器/管理员权限/路由/前置校验齐备，且审查
+服务里已不存在通用配置入口）、迁移层（表已建立且保持单例）、路由层（未认证应 401/403，返回 404
+即路由未随镜像生效）、前端层（产物含配置入口）。
 
 ### 上游网关 502 / 无输出时的诊断（`26-diagnose-llm-upstream-capacity.sh`）
 
@@ -291,6 +322,52 @@ REVIEW_ID=<审查记录ID> REAL_PROBE=1 bash 26-diagnose-llm-upstream-capacity.s
 
 > 注意：阶梯探测与真实复现都会**真实消耗模型调用**（每档一次，零重试）；`REAL_PROBE=1` 时
 > 会按 `min(request_timeout, 600)` 秒等待，请避开业务高峰执行。
+
+### 模型能力矩阵：用例审查依赖哪些模型能力（`27-probe-llm-capabilities.sh`）
+
+排查时经常出现「是不是模型不支持 tool 调用」这个猜测。**对用例审查而言，这个说法不成立。**
+
+代码事实（可直接核对）：
+
+- `testcases/review_service.py::_review_chunk` 只组装两条消息
+  （`SystemMessage(skill_prompt)` + `HumanMessage(prompt)`），经 `safe_llm_invoke` 发起
+  **一次纯文本调用**，再用 `_extract_json` 正则提取 JSON。全程不传 `tools`、不传 `response_format`。
+- 全项目扫描：`bind_tools` **0 处**、`with_structured_output` **0 处**；`tools=` 只出现在
+  智能体编排（`orchestrator_integration` 的 `create_agent`）。
+
+各功能对模型能力的真实依赖：
+
+| 功能 | 代码位置 | 依赖的模型能力 |
+| --- | --- | --- |
+| 用例审查 | `testcases/review_service.py::_review_chunk` | 纯文本对话 + **按提示词稳定输出 JSON**（无 tool 依赖） |
+| 代码审查迭代修复 | `code_analysis/services.py:1055` | `response_format={"type":"json_object"}`（JSON mode） |
+| 智能体编排 | `orchestrator_integration` `create_agent(llm, tools)` | **function calling**（平台唯一依赖 tool 调用处） |
+
+即：模型不支持 function calling，**只会影响智能体，不会影响用例审查**。用例审查真正的软肋是
+「模型能不能听话地只吐 JSON」——吐不出来就是 `模型未返回可解析的 JSON`。
+
+一条命令把当前激活模型的能力测出来：
+
+```bash
+cd /projects/ai-test-platform/update_platform_version/deploy_env
+bash 27-probe-llm-capabilities.sh
+```
+
+逐项探测五项能力，并把失败项直接映射到受影响的功能：
+
+| 探测项 | 不通时会打断 |
+| --- | --- |
+| `basic_chat` | 全平台 AI 功能 |
+| `json_text` | 用例审查（`_review_chunk`） |
+| `json_mode` | 代码审查迭代修复 |
+| `tool_calling` | 智能体编排（**不影响用例审查**） |
+| `streaming` | 网关流式转发路径（与 502 `flatMap` 无输出相关） |
+
+脚本末尾打印 `failed` 列表与 `impact_of_failed` 映射，一眼能看出该找谁。日志落在
+`deploy_env/logs/llm-capabilities-*.log`。
+
+可调项：`PROBE_TIMEOUT`（默认 60 秒/项）、`PROBE_SKIP`（逗号分隔跳过，例如
+`PROBE_SKIP=tool_calling,streaming`）。
 
 ## 代码覆盖层（hotfix）的启用方式
 

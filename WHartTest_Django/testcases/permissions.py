@@ -6,7 +6,7 @@ class IsProjectMemberForTestCase(permissions.BasePermission):
     """
     自定义权限，用于检查用户是否是与 TestCase 关联的项目的成员。
     允许项目所有者、管理员和普通成员访问。
-    echo "我就是在项目1创建的项目，然后项目的模块管理不显示模块树，这应该是前端的问题"    超级管理员(is_superuser=True)可以访问所有项目。
+    超级管理员(is_superuser=True)可以访问所有项目。
     """
 
     def has_permission(self, request, view):
@@ -216,3 +216,24 @@ class IsProjectMemberForTestExecution(permissions.BasePermission):
             user=request.user,
             role__in=["owner", "admin", "member"],
         ).exists()
+
+
+class IsPlatformAdmin(permissions.BasePermission):
+    """仅平台管理员（is_staff 或 is_superuser）可访问。
+
+    用例审查的专用 LLM 配置属于平台级凭据：普通项目成员即使拥有 testcases
+    应用的模型权限，也不应看到 API 地址与密钥是否已配置，更不能改动它。
+    因此该视图集不使用 ``HasModelPermission``（它按模型权限放行），而是整体
+    收紧到管理员。
+    """
+
+    message = "仅平台管理员可维护用例审查专用 LLM 配置"
+
+    def has_permission(self, request, view):
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return False
+        return bool(user.is_superuser or user.is_staff)
+
+    def has_object_permission(self, request, view, obj):
+        return self.has_permission(request, view)

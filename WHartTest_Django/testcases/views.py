@@ -4,6 +4,7 @@ from django_filters.rest_framework import (
 )  # 导入 DjangoFilterBackend
 from rest_framework.response import Response
 from rest_framework.decorators import action
+from rest_framework.exceptions import APIException
 from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.http import HttpResponse
@@ -24,6 +25,7 @@ from .models import (
     TestExecution,
     TestCaseResult,
     TestCaseReview,
+    TestCaseReviewLLMConfig,
 )
 from .serializers import (
     TestCaseSerializer,
@@ -31,12 +33,38 @@ from .serializers import (
     TestCaseModuleSerializer,
     TestCaseScreenshotSerializer,
     TestCaseReviewSerializer,
+    TestCaseReviewLLMConfigSerializer,
 )
-from .permissions import IsProjectMemberForTestCase, IsProjectMemberForTestCaseModule
+from .permissions import (
+    IsPlatformAdmin,
+    IsProjectMemberForTestCase,
+    IsProjectMemberForTestCaseModule,
+)
 from .filters import TestCaseFilter  # 导入自定义过滤器
 from wharttest_django.pagination import StandardPagination
 
 from .review_tasks import execute_testcase_review
+
+
+class ReviewLLMNotConfigured(APIException):
+    """用例审查专用 LLM 尚未配置。
+
+    用 409 而非 400：这不是请求参数错误，而是平台前置条件缺失，前端据此提示
+    「请联系管理员」而不是「请检查填写内容」。
+    """
+
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = "请先由管理员配置并启用用例审查专用 LLM"
+    default_code = "review_llm_not_configured"
+
+
+def _testcase_review_llm_ready():
+    """是否已存在启用且带密钥的用例审查专用配置。"""
+    return (
+        TestCaseReviewLLMConfig.objects.filter(is_active=True)
+        .exclude(encrypted_api_key="")
+        .exists()
+    )
 
 
 class TestCaseReviewViewSet(viewsets.ModelViewSet):
@@ -52,6 +80,9 @@ class TestCaseReviewViewSet(viewsets.ModelViewSet):
         return TestCaseReview.objects.filter(project_id=self.kwargs.get("project_pk")).select_related("creator")
 
     def perform_create(self, serializer):
+        # 先卡前置条件再落库：否则会留下一条永远跑不起来的审查记录。
+        if not _testcase_review_llm_ready():
+            raise ReviewLLMNotConfigured()
         project = get_object_or_404(Project, pk=self.kwargs.get("project_pk"))
         review = serializer.save(project=project, creator=self.request.user)
         async_result = execute_testcase_review.delay(review.id)
@@ -61,6 +92,8 @@ class TestCaseReviewViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="retry")
     def retry(self, request, *args, **kwargs):
         review = self.get_object()
+        if not _testcase_review_llm_ready():
+            raise ReviewLLMNotConfigured()
         stale_before = timezone.now() - timedelta(minutes=15)
         is_stale = review.status == "running" and review.updated_at < stale_before
         if review.status in {"pending", "running"} and not is_stale:
@@ -77,6 +110,80 @@ class TestCaseReviewViewSet(viewsets.ModelViewSet):
         review.celery_task_id = async_result.id or ""
         review.save()
         return Response(self.get_serializer(review).data)
+
+
+class TestCaseReviewLLMConfigViewSet(viewsets.ModelViewSet):
+    """用例审查专用 LLM 配置（平台级单例）。
+
+    与代码审查的 ``CodeAnalysisLLMConfigViewSet`` 同构，但权限整体收紧到平台
+    管理员：这里保存的是平台级凭据，普通项目成员既不该看到 API 地址与密钥
+    状态，也不该改动它，因此不使用按模型权限放行的 ``HasModelPermission``。
+    """
+
+    queryset = TestCaseReviewLLMConfig.objects.order_by("pk")
+    serializer_class = TestCaseReviewLLMConfigSerializer
+    permission_classes = [permissions.IsAuthenticated, IsPlatformAdmin]
+
+    @action(detail=False, methods=["get"], url_path="platform-configs")
+    def platform_configs(self, request):
+        """列出可复用的平台通用 LLM 配置，不向浏览器返回 API Key。"""
+        from langgraph_integration.models import LLMConfig
+
+        configs = LLMConfig.objects.order_by("-is_active", "config_name")
+        return Response([
+            {
+                "id": item.pk,
+                "config_name": item.config_name,
+                "name": item.name,
+                "api_url": item.api_url,
+                "request_timeout": item.request_timeout,
+                "max_retries": item.max_retries,
+                "is_active": item.is_active,
+                "has_api_key": bool(item.api_key),
+            }
+            for item in configs
+        ])
+
+    @action(detail=False, methods=["post"], url_path="copy-from-platform")
+    def copy_from_platform(self, request):
+        """在服务端复制通用配置，密钥全程不经过前端。"""
+        from langgraph_integration.models import LLMConfig
+
+        source_id = request.data.get("source_config_id")
+        try:
+            source = LLMConfig.objects.get(pk=source_id)
+        except (LLMConfig.DoesNotExist, TypeError, ValueError):
+            return Response({"detail": "所选 LLM 配置不存在"}, status=status.HTTP_400_BAD_REQUEST)
+        if not source.api_key:
+            return Response(
+                {"detail": "所选 LLM 配置没有 API Key，请改为手工配置"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        config = TestCaseReviewLLMConfig.objects.order_by("pk").first() or TestCaseReviewLLMConfig()
+        config.config_name = f"用例审查 - {source.config_name}"[:255]
+        config.name = source.name
+        config.api_url = source.api_url
+        config.request_timeout = max(30, min(source.request_timeout or 600, 7200))
+        config.max_retries = max(0, min(source.max_retries or 0, 10))
+        config.is_active = True
+        config.set_api_key(source.api_key)
+        config.save()
+        return Response(self.get_serializer(config).data)
+
+    @action(detail=True, methods=["post"], url_path="test-connection")
+    def test_connection(self, request, pk=None):
+        from langgraph_integration.views import create_llm_instance
+
+        config = self.get_object()
+        try:
+            response = create_llm_instance(config, temperature=0.1).invoke("只回复 OK")
+            if getattr(response, "content", None):
+                return Response({"message": "用例审查 LLM 连接测试成功"})
+            return Response({"detail": "模型没有返回有效内容"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            return Response({"detail": f"连接测试失败：{exc}"}, status=status.HTTP_400_BAD_REQUEST)
+
 
 # 确保导入项目自定义的权限类
 from wharttest_django.permissions import HasModelPermission, permission_required

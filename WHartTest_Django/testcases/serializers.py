@@ -9,6 +9,7 @@ from .models import (
     TestExecution,
     TestCaseResult,
     TestCaseReview,
+    TestCaseReviewLLMConfig,
 )
 from projects.models import Project  # 确保导入Project模型以便进行校验
 from accounts.serializers import UserDetailSerializer  # 用于显示创建者信息
@@ -753,3 +754,49 @@ class TestCaseReviewSerializer(serializers.ModelSerializer):
 
     def get_report_url(self, obj):
         return self._url(self.context.get("request"), obj.report_file)
+
+
+class TestCaseReviewLLMConfigSerializer(serializers.ModelSerializer):
+    """用例审查专用 LLM 配置（单例）。
+
+    ``api_key`` 只写不读：已配置时前端只会看到 ``has_api_key``，避免密钥回显。
+    """
+
+    api_key = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    has_api_key = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = TestCaseReviewLLMConfig
+        fields = [
+            "id", "config_name", "name", "api_url", "api_key", "has_api_key",
+            "request_timeout", "max_retries", "is_active", "created_at", "updated_at",
+        ]
+        read_only_fields = ["id", "has_api_key", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        timeout = attrs.get("request_timeout", getattr(self.instance, "request_timeout", 600))
+        retries = attrs.get("max_retries", getattr(self.instance, "max_retries", 2))
+        if not 30 <= timeout <= 7200:
+            raise serializers.ValidationError({"request_timeout": "超时时间必须在 30~7200 秒之间"})
+        if retries > 10:
+            raise serializers.ValidationError({"max_retries": "最大重试次数不能超过 10"})
+        if not self.instance and not attrs.get("api_key"):
+            raise serializers.ValidationError({"api_key": "首次配置必须填写 API Key"})
+        return attrs
+
+    def create(self, validated_data):
+        api_key = validated_data.pop("api_key", "")
+        instance = TestCaseReviewLLMConfig(**validated_data)
+        instance.set_api_key(api_key)
+        instance.save()
+        return instance
+
+    def update(self, instance, validated_data):
+        api_key = validated_data.pop("api_key", None)
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        # 留空表示「保持原密钥」，只有显式传入新值才覆盖。
+        if api_key:
+            instance.set_api_key(api_key)
+        instance.save()
+        return instance

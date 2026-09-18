@@ -342,5 +342,80 @@ else
   echo "[跳过] OpenCodeReview 真实模型调用（VERIFY_OCR_LIVE=$VERIFY_OCR_LIVE）"
 fi
 
+# 用例审查专用 LLM（testcases.TestCaseReviewLLMConfig）：
+#   ① 代码层：专用配置模型 / 序列化器 / 管理员权限 / 路由 / 前置校验齐全，
+#      且审查服务**不再回退**平台通用配置（回退会让专用配置形同虚设）；
+#   ② 迁移层：0025 已应用（专用配置表已建立），且保持单例；
+#   ③ 路由层：新接口已挂载 —— 未认证应返回 401/403，返回 404 说明路由没进镜像；
+#   ④ 前端层：用例审查页的配置入口已进产物。
+docker exec wharttest-backend /opt/venv/bin/python - <<'PY'
+import re
+from pathlib import Path
+
+
+def read(path):
+    return Path(path).read_text(encoding="utf-8")
+
+
+models = read("/app/testcases/models.py")
+serializers = read("/app/testcases/serializers.py")
+views = read("/app/testcases/views.py")
+permissions = read("/app/testcases/permissions.py")
+service = read("/app/testcases/review_service.py")
+urls = read("/app/testcases/urls.py")
+root_urls = read("/app/wharttest_django/urls.py")
+
+assert "class TestCaseReviewLLMConfig" in models, "缺少用例审查专用 LLM 配置模型"
+assert "encrypted_api_key" in models and "def set_api_key" in models, "专用配置缺少加密密钥实现"
+assert "class TestCaseReviewLLMConfigSerializer" in serializers, "缺少专用配置序列化器"
+assert "class IsPlatformAdmin" in permissions, "缺少管理员专用权限类"
+assert "class TestCaseReviewLLMConfigViewSet" in views and "IsPlatformAdmin" in views, (
+    "专用配置视图未收紧到平台管理员")
+assert "def _get_testcase_review_llm_config" in service, "审查服务未切换到专用配置"
+# 判据必须排除 TestCaseReviewLLMConfig 这个前缀，否则专用配置自己的 ORM 调用
+# 也会命中「LLMConfig.objects...」子串，把正常实现误报成回退。
+assert "langgraph_integration.models import LLMConfig" not in service, (
+    "审查服务仍导入平台通用 LLM 配置：专用配置形同虚设")
+assert not re.search(r"(?<!TestCaseReview)LLMConfig\.objects", service), (
+    "审查服务仍会回退平台通用配置：专用配置形同虚设")
+assert "def _testcase_review_llm_ready" in views, "缺少审查创建/重试的前置条件校验"
+assert "review-llm-config" in urls and 'include("testcases.urls")' in root_urls, "专用配置路由未挂载"
+print("  [通过] 专用配置模型 / 序列化器 / 管理员权限 / 路由 / 前置校验齐全")
+PY
+
+docker exec -i wharttest-backend /opt/venv/bin/python - <<'PY'
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "wharttest_django.settings")
+import django
+
+django.setup()
+from django.db import connection
+from testcases.models import TestCaseReviewLLMConfig
+
+assert "testcases_testcasereviewllmconfig" in connection.introspection.table_names(), (
+    "0025 迁移未应用：专用配置表不存在（修复：docker exec wharttest-backend "
+    "/opt/venv/bin/python /app/manage.py migrate）")
+rows = list(TestCaseReviewLLMConfig.objects.all())
+assert len(rows) <= 1, f"专用配置应为单例，实际有 {len(rows)} 条"
+if rows:
+    row = rows[0]
+    print(f"  [通过] 专用配置表已建立；config_name={row.config_name!r} "
+          f"is_active={row.is_active} has_api_key={row.has_api_key}")
+else:
+    print("  [提示] 专用配置表已建立但暂无记录：需管理员在「用例审查 → 审查模型配置」中填写")
+PY
+
+llm_config_code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8912/api/testcases/review-llm-config/)"
+case "$llm_config_code" in
+  401|403) echo "[通过] 用例审查专用 LLM 接口已挂载且要求认证（HTTP $llm_config_code）" ;;
+  404) echo "[失败] /api/testcases/review-llm-config/ 返回 404：路由未随镜像生效" >&2; exit 1 ;;
+  *)   echo "[失败] 用例审查专用 LLM 接口返回 HTTP $llm_config_code（期望 401/403）" >&2; exit 1 ;;
+esac
+
+docker exec wharttest-frontend sh -c \
+  'cd /usr/share/nginx/html && grep -R -q "review-llm-config" assets/ && grep -R -q "审查模型配置" assets/ && grep -R -q "用例审查专用 LLM" assets/'
+echo "[通过] 前端产物已包含用例审查的模型配置入口"
+
 echo "[全部通过] 容器、HTTP、迁移、Celery、OpenCodeReview、文件下载、Vision OCR、执行器注册与域名访问"
 docker ps --filter 'name=wharttest' --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'

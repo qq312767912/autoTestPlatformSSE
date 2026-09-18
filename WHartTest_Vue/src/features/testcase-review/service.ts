@@ -1,4 +1,4 @@
-import http from '@/utils/request';
+import http, { request } from '@/utils/request';
 
 export interface ReviewChunkProgress {
   completed: number;
@@ -64,4 +64,73 @@ export async function retryReview(projectId: number, id: number) {
 
 export async function deleteReview(projectId: number, id: number) {
   await http.delete(`/projects/${projectId}/testcase-reviews/${id}/`);
+}
+
+// ---------------------------------------------------------------------------
+// 用例审查专用 LLM 配置（平台级单例，仅平台管理员可读写）
+// ---------------------------------------------------------------------------
+
+export interface TestCaseReviewLlmConfig {
+  id?: number;
+  config_name: string;
+  name: string;
+  api_url: string;
+  api_key?: string;
+  has_api_key?: boolean;
+  request_timeout: number;
+  max_retries: number;
+  is_active: boolean;
+}
+
+export interface PlatformLlmConfigOption {
+  id: number;
+  config_name: string;
+  name: string;
+  api_url: string;
+  request_timeout: number;
+  max_retries: number;
+  is_active: boolean;
+  has_api_key: boolean;
+}
+
+const llmConfigBase = '/testcases/review-llm-config';
+const asList = <T>(value: any): T[] => (Array.isArray(value) ? value : value?.results || []);
+
+export async function getReviewLlmConfig() {
+  const r = await request<any>({ url: `${llmConfigBase}/`, method: 'GET' });
+  if (!r.success) throw new Error(r.error);
+  // 单例：列表接口只会返回 0 或 1 条。
+  return asList<TestCaseReviewLlmConfig>(r.data)[0] || null;
+}
+
+export async function saveReviewLlmConfig(data: TestCaseReviewLlmConfig) {
+  const r = await request<TestCaseReviewLlmConfig>({
+    url: data.id ? `${llmConfigBase}/${data.id}/` : `${llmConfigBase}/`,
+    method: data.id ? 'PATCH' : 'POST',
+    data,
+  });
+  if (!r.success) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function testReviewLlmConfig(id: number) {
+  const r = await request<any>({ url: `${llmConfigBase}/${id}/test-connection/`, method: 'POST' });
+  if (!r.success) throw new Error(r.error);
+  return r.data;
+}
+
+export async function getPlatformLlmConfigs() {
+  const r = await request<any>({ url: `${llmConfigBase}/platform-configs/`, method: 'GET' });
+  if (!r.success) throw new Error(r.error);
+  return asList<PlatformLlmConfigOption>(r.data);
+}
+
+export async function copyPlatformLlmConfig(sourceConfigId: number) {
+  const r = await request<TestCaseReviewLlmConfig>({
+    url: `${llmConfigBase}/copy-from-platform/`,
+    method: 'POST',
+    data: { source_config_id: sourceConfigId },
+  });
+  if (!r.success) throw new Error(r.error);
+  return r.data!;
 }

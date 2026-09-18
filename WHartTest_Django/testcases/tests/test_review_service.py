@@ -63,6 +63,34 @@ class ReviewRetryPolicyTests(SimpleTestCase):
                          [2, 4, 8, 16, 30, 30])
 
 
+class TestCaseReviewLLMConfigResolutionTests(SimpleTestCase):
+    """审查只认专用配置：缺失或没密钥必须失败，不得回退平台通用 LLM。"""
+
+    def _resolve(self, config):
+        with patch.object(review_service, "TestCaseReviewLLMConfig", SimpleNamespace(
+                objects=SimpleNamespace(filter=lambda **kwargs: SimpleNamespace(first=lambda: config)))):
+            return review_service._get_testcase_review_llm_config()
+
+    def test_module_has_no_platform_llm_entry_point(self):
+        # 前提自检：模块里若还留着平台通用 LLMConfig，实现就可能悄悄回退，
+        # 下面两条断言也就失去了意义。
+        self.assertFalse(hasattr(review_service, "LLMConfig"))
+
+    def test_missing_config_raises_instead_of_falling_back(self):
+        with self.assertRaises(ValueError) as raised:
+            self._resolve(None)
+        self.assertIn("用例审查专用 LLM", str(raised.exception))
+
+    def test_config_without_api_key_raises(self):
+        with self.assertRaises(ValueError) as raised:
+            self._resolve(SimpleNamespace(api_key=""))
+        self.assertIn("API Key", str(raised.exception))
+
+    def test_active_config_is_returned(self):
+        config = SimpleNamespace(api_key="k", request_timeout=100, max_retries=1)
+        self.assertIs(self._resolve(config), config)
+
+
 class ReviewChunkFallbackTests(SimpleTestCase):
     """分片失败只降级、不中断整项；网关整体故障时提前熔断。"""
 
@@ -84,7 +112,7 @@ class ReviewChunkFallbackTests(SimpleTestCase):
             save=lambda **kwargs: None,
             get_review_mode_display=lambda: "通用审查",
         )
-        config = SimpleNamespace(request_timeout=120, max_retries=max_retries)
+        config = SimpleNamespace(request_timeout=120, max_retries=max_retries, api_key="test-key")
 
         def fake_review_chunk(llm, skill_prompt, chunk_rows, business_context):
             calls.append(chunk_rows[0]["row"])
@@ -96,7 +124,7 @@ class ReviewChunkFallbackTests(SimpleTestCase):
             patch.object(review_service, "_read_rows", return_value=rows),
             patch.object(review_service, "TestCaseReview", SimpleNamespace(
                 objects=SimpleNamespace(get=lambda **kwargs: review))),
-            patch.object(review_service, "LLMConfig", SimpleNamespace(
+            patch.object(review_service, "TestCaseReviewLLMConfig", SimpleNamespace(
                 objects=SimpleNamespace(filter=lambda **kwargs: SimpleNamespace(first=lambda: config)))),
             patch.object(review_service, "create_llm_instance", return_value=object()),
             patch.object(review_service, "_review_chunk", side_effect=fake_review_chunk),

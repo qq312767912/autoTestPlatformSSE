@@ -6,7 +6,12 @@
         <h1>用例审查</h1>
         <p>上传测试用例，由 test-case-clarity-review Skill 检查可执行性、验收标准和覆盖缺口，并生成 Excel 报告。</p>
       </div>
-      <a-button type="primary" size="large" @click="openCreate">发起审查</a-button>
+      <div class="hero-actions">
+        <a-button v-if="isPlatformAdmin" @click="openLlmConfig">
+          <template #icon><icon-settings /></template>审查模型配置
+        </a-button>
+        <a-button type="primary" size="large" @click="openCreate">发起审查</a-button>
+      </div>
     </section>
 
     <a-alert v-if="!projectId" type="warning">请先在顶部选择项目。</a-alert>
@@ -120,14 +125,58 @@
         </section>
       </a-form>
     </a-modal>
+
+    <a-modal v-model:visible="llmConfigVisible" title="用例审查专用 LLM" :ok-loading="llmConfigSaving" width="680px" @ok="saveLlmConfig">
+      <a-alert type="info" style="margin-bottom:16px">
+        此配置只用于测试用例审查，不影响平台对话、代码审查与其他 AI 功能；仅平台管理员可维护。API Key 加密保存且不会回显。
+      </a-alert>
+      <a-form :model="llmConfigForm" layout="vertical">
+        <a-form-item label="从已有 LLM 配置复制">
+          <div style="display:flex;gap:12px;width:100%">
+            <a-select v-model="selectedPlatformLlmId" :loading="platformLlmLoading" allow-clear placeholder="请选择已有配置" style="flex:1">
+              <a-option v-for="item in platformLlmConfigs" :key="item.id" :value="item.id">
+                {{ item.config_name }}（{{ item.name }}）{{ item.is_active ? ' · 当前启用' : '' }}
+              </a-option>
+            </a-select>
+            <a-button type="primary" :disabled="!selectedPlatformLlmId" :loading="platformLlmCopying" @click="usePlatformLlmConfig">复制并使用</a-button>
+          </div>
+          <template #extra>密钥由后端直接复制，不会发送到浏览器；复制后可在下方独立调整。</template>
+        </a-form-item>
+        <a-divider>或手工填写</a-divider>
+        <a-form-item label="配置名称" required><a-input v-model="llmConfigForm.config_name" placeholder="例如：内网用例审查模型" /></a-form-item>
+        <a-form-item label="API URL" required><a-input v-model="llmConfigForm.api_url" placeholder="例如：http://模型服务/v1" /></a-form-item>
+        <a-form-item label="模型名称" required><a-input v-model="llmConfigForm.name" placeholder="填写模型服务中的真实模型 ID" /></a-form-item>
+        <a-form-item label="API Key" :required="!llmConfigForm.has_api_key"><a-input-password v-model="llmConfigForm.api_key" :placeholder="llmConfigForm.has_api_key ? '已配置，留空保持原密钥' : '请输入 API Key'" /></a-form-item>
+        <a-row :gutter="16">
+          <a-col :span="10"><a-form-item label="单次请求超时（秒）"><a-input-number v-model="llmConfigForm.request_timeout" :min="30" :max="7200" /></a-form-item></a-col>
+          <a-col :span="8"><a-form-item label="最大重试次数"><a-input-number v-model="llmConfigForm.max_retries" :min="0" :max="10" /></a-form-item></a-col>
+          <a-col :span="6"><a-form-item label="启用"><a-switch v-model="llmConfigForm.is_active" /></a-form-item></a-col>
+        </a-row>
+        <a-space><a-button :disabled="!llmConfigForm.id" :loading="llmConfigTesting" @click="testLlmConfig">测试连接</a-button><a-tag v-if="llmConfigForm.has_api_key" color="green">密钥已配置</a-tag></a-space>
+      </a-form>
+    </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { useProjectStore } from '@/store/projectStore';
-import { createReview, deleteReview, listReviews, retryReview, type TestCaseReview } from './service';
+import { useAuthStore } from '@/store/authStore';
+import {
+  copyPlatformLlmConfig,
+  createReview,
+  deleteReview,
+  getPlatformLlmConfigs,
+  getReviewLlmConfig,
+  listReviews,
+  retryReview,
+  saveReviewLlmConfig,
+  testReviewLlmConfig,
+  type PlatformLlmConfigOption,
+  type TestCaseReview,
+  type TestCaseReviewLlmConfig,
+} from './service';
 import { SkillService } from '@/features/skills/services/skillService';
 
 const projectStore = useProjectStore();
@@ -144,6 +193,21 @@ const selectedSkillId = ref<number>();
 const customRules = ref('');
 const availableSkills = ref<any[]>([]);
 let timer: number | undefined;
+
+const authStore = useAuthStore();
+// 专用 LLM 配置属于平台级凭据：只有平台管理员显示入口，后端同样强制校验。
+const isPlatformAdmin = computed(() => !!(authStore.currentUser as any)?.is_staff);
+const llmConfigVisible = ref(false);
+const llmConfigSaving = ref(false);
+const llmConfigTesting = ref(false);
+const platformLlmConfigs = ref<PlatformLlmConfigOption[]>([]);
+const platformLlmLoading = ref(false);
+const platformLlmCopying = ref(false);
+const selectedPlatformLlmId = ref<number>();
+const llmConfigForm = reactive<TestCaseReviewLlmConfig>({
+  config_name: '用例审查 LLM', name: '', api_url: '', api_key: '',
+  has_api_key: false, request_timeout: 600, max_retries: 2, is_active: true,
+});
 
 const statusMeta = (status: TestCaseReview['status']) => ({
   pending: { label: '等待中', color: 'gray' }, running: { label: '审查中', color: 'blue' },
@@ -168,6 +232,72 @@ async function load(silent = false) {
   finally { loading.value = false; }
 }
 function openCreate() { if (!projectId.value) return Message.warning('请先选择项目'); createVisible.value = true; }
+
+async function openLlmConfig() {
+  llmConfigVisible.value = true;
+  selectedPlatformLlmId.value = undefined;
+  platformLlmLoading.value = true;
+  try {
+    const [config, options] = await Promise.all([getReviewLlmConfig(), getPlatformLlmConfigs()]);
+    platformLlmConfigs.value = options;
+    // 先回到默认值再叠加服务端配置，避免上一次编辑残留。
+    Object.assign(llmConfigForm, {
+      id: undefined, config_name: '用例审查 LLM', name: '', api_url: '',
+      api_key: '', has_api_key: false, request_timeout: 600, max_retries: 2, is_active: true,
+    }, config || {}, { api_key: '' });
+  } catch (error: any) {
+    Message.error(error?.message || '读取用例审查模型配置失败');
+  } finally {
+    platformLlmLoading.value = false;
+  }
+}
+
+async function usePlatformLlmConfig() {
+  if (!selectedPlatformLlmId.value) return;
+  platformLlmCopying.value = true;
+  try {
+    const saved = await copyPlatformLlmConfig(selectedPlatformLlmId.value);
+    Object.assign(llmConfigForm, saved, { api_key: '' });
+    selectedPlatformLlmId.value = undefined;
+    Message.success('已复制为用例审查专用配置，可继续调整或测试连接');
+  } catch (error: any) {
+    Message.error(error?.message || '复制 LLM 配置失败');
+  } finally {
+    platformLlmCopying.value = false;
+  }
+}
+
+async function saveLlmConfig() {
+  if (!llmConfigForm.config_name || !llmConfigForm.api_url || !llmConfigForm.name
+    || (!llmConfigForm.api_key && !llmConfigForm.has_api_key)) {
+    Message.warning('请完整填写用例审查模型配置');
+    return;
+  }
+  llmConfigSaving.value = true;
+  try {
+    const saved = await saveReviewLlmConfig({ ...llmConfigForm });
+    Object.assign(llmConfigForm, saved, { api_key: '' });
+    llmConfigVisible.value = false;
+    Message.success('用例审查专用 LLM 已保存');
+  } catch (error: any) {
+    Message.error(error?.message || '保存用例审查模型配置失败');
+  } finally {
+    llmConfigSaving.value = false;
+  }
+}
+
+async function testLlmConfig() {
+  if (!llmConfigForm.id) return;
+  llmConfigTesting.value = true;
+  try {
+    const result = await testReviewLlmConfig(llmConfigForm.id);
+    Message.success(result?.message || '连接测试成功');
+  } catch (error: any) {
+    Message.error(error?.message || '连接测试失败');
+  } finally {
+    llmConfigTesting.value = false;
+  }
+}
 function onFileChange(files: any[]) {
   fileList.value = files;
   selectedFile.value = files?.[0]?.file || null;
@@ -185,7 +315,13 @@ async function submit() {
     });
     Message.success('审查任务已创建'); createVisible.value = false; selectedFile.value = null; fileList.value = [];
     businessContext.value = ''; customRules.value = ''; reviewMode.value = 'general'; selectedSkillId.value = undefined; await load();
-  } catch (error: any) { Message.error(error?.response?.data?.source_file?.[0] || error?.message || '创建失败'); }
+  } catch (error: any) {
+    // 未配置专用 LLM 时后端返回 409：提示应指向管理员，而不是让用户改表单。
+    const detail = error?.response?.data?.detail;
+    Message.error(error?.response?.data?.source_file?.[0]
+      || (typeof detail === 'string' ? detail : '')
+      || error?.message || '创建失败');
+  }
   finally { submitting.value = false; }
 }
 async function retry(item: TestCaseReview) { if (!projectId.value) return; await retryReview(projectId.value, item.id); Message.success('已重新提交'); await load(); }
@@ -198,7 +334,7 @@ onBeforeUnmount(() => { if (timer) window.clearInterval(timer); });
 </script>
 
 <style scoped>
-.review-page{padding:24px;min-height:100%;background:#f5f7fa;color:#1d2939}.hero{display:flex;justify-content:space-between;align-items:flex-end;padding:34px 38px;margin-bottom:20px;border-radius:16px;color:white;background:linear-gradient(120deg,#15395b,#0f766e);box-shadow:0 12px 30px rgba(21,57,91,.16)}.eyebrow{font-size:12px;letter-spacing:2px;color:#99f6e4}.hero h1{font-size:30px;margin:8px 0}.hero p{margin:0;max-width:760px;color:#d8edf0;line-height:1.7}.content-card{background:#fff;border:1px solid #e5e9f0;border-radius:14px;padding:24px}.section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}.section-head h2{margin:0 0 5px;font-size:20px}.section-head span,.meta,.step,.hint{font-size:13px;color:#8492a6}.review-list{display:grid;gap:12px}.review-item{display:flex;gap:16px;align-items:flex-start;padding:20px;border:1px solid #e8edf3;border-radius:12px;transition:.2s}.review-item:hover{border-color:#9dd8d2;box-shadow:0 5px 18px rgba(15,118,110,.08)}.file-mark{flex:none;width:48px;height:48px;border-radius:10px;display:grid;place-items:center;background:#e8f7f4;color:#0f766e;font-weight:700}.review-main{min-width:0;flex:1}.review-title-row{display:flex;gap:10px;align-items:center}.review-title-row strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta{margin:6px 0}.skill-line{display:flex;gap:8px;align-items:center;margin:7px 0;font-size:12px}.skill-line span{padding:2px 8px;border-radius:99px;background:#edf7f5;color:#0f766e}.skill-line b{font-weight:500;color:#526173}.step{margin-top:5px}.summary{display:flex;gap:16px;margin-top:10px;font-size:13px}.danger{color:#d4380d}.warning{color:#d46b08}.actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.coverage-warning{margin-top:9px;padding:8px 12px;border:1px solid #ffe0a3;border-radius:8px;background:#fff8e8;color:#b54708;font-size:13px;line-height:1.6}
+.review-page{padding:24px;min-height:100%;background:#f5f7fa;color:#1d2939}.hero{display:flex;justify-content:space-between;align-items:flex-end;padding:34px 38px;margin-bottom:20px;border-radius:16px;color:white;background:linear-gradient(120deg,#15395b,#0f766e);box-shadow:0 12px 30px rgba(21,57,91,.16)}.eyebrow{font-size:12px;letter-spacing:2px;color:#99f6e4}.hero h1{font-size:30px;margin:8px 0}.hero p{margin:0;max-width:760px;color:#d8edf0;line-height:1.7}.hero-actions{display:flex;gap:10px;align-items:center;flex:none}.content-card{background:#fff;border:1px solid #e5e9f0;border-radius:14px;padding:24px}.section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}.section-head h2{margin:0 0 5px;font-size:20px}.section-head span,.meta,.step,.hint{font-size:13px;color:#8492a6}.review-list{display:grid;gap:12px}.review-item{display:flex;gap:16px;align-items:flex-start;padding:20px;border:1px solid #e8edf3;border-radius:12px;transition:.2s}.review-item:hover{border-color:#9dd8d2;box-shadow:0 5px 18px rgba(15,118,110,.08)}.file-mark{flex:none;width:48px;height:48px;border-radius:10px;display:grid;place-items:center;background:#e8f7f4;color:#0f766e;font-weight:700}.review-main{min-width:0;flex:1}.review-title-row{display:flex;gap:10px;align-items:center}.review-title-row strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta{margin:6px 0}.skill-line{display:flex;gap:8px;align-items:center;margin:7px 0;font-size:12px}.skill-line span{padding:2px 8px;border-radius:99px;background:#edf7f5;color:#0f766e}.skill-line b{font-weight:500;color:#526173}.step{margin-top:5px}.summary{display:flex;gap:16px;margin-top:10px;font-size:13px}.danger{color:#d4380d}.warning{color:#d46b08}.actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.coverage-warning{margin-top:9px;padding:8px 12px;border:1px solid #ffe0a3;border-radius:8px;background:#fff8e8;color:#b54708;font-size:13px;line-height:1.6}
 .modal-title{display:flex;align-items:center;justify-content:center;gap:9px;font-size:17px}.modal-title-mark{display:grid;place-items:center;width:24px;height:24px;border-radius:8px;background:#e8f7f4;color:#0f766e;font-size:14px;font-weight:800}.review-form-intro{display:flex;flex-direction:column;gap:5px;margin:-4px 0 18px;padding:15px 17px;border:1px solid #dcece8;border-radius:10px;background:linear-gradient(120deg,#f3faf8,#f8fbff)}.review-form-intro strong{font-size:15px;color:#234657}.review-form-intro span{font-size:13px;color:#718096}.review-form{display:grid;gap:14px}.form-section{padding:18px 20px 5px;border:1px solid #e5eaf0;border-radius:12px;background:#fff}.form-section-title{display:flex;align-items:center;gap:11px;margin-bottom:16px}.form-section-title>span{display:grid;place-items:center;width:32px;height:32px;border-radius:9px;background:#15395b;color:#fff;font-size:11px;font-weight:700;letter-spacing:.5px}.form-section-title>div{display:flex;flex-direction:column;gap:2px}.form-section-title strong{font-size:15px;color:#253748}.form-section-title small{font-size:12px;color:#96a2b2}.field-stack{display:flex;flex-direction:column;width:100%;gap:8px}.review-mode-group{display:grid!important;grid-template-columns:1fr 1fr;width:100%}.review-mode-group :deep(.arco-radio-button){display:flex;justify-content:center}.review-upload{display:block;width:100%}.review-upload :deep(.arco-upload){width:100%}.review-upload :deep(.arco-upload-drag){width:100%;min-height:112px;border-radius:10px;background:#f8fafc;border-color:#cad6e2;transition:.2s}.review-upload :deep(.arco-upload-drag:hover){border-color:#0f8f82;background:#f3faf8}.review-form :deep(.arco-form-item){margin-bottom:16px}.review-form :deep(.arco-form-item-content){width:100%}.review-form :deep(.arco-textarea-wrapper){border-radius:8px;background:#f8fafc}.review-form :deep(.arco-select-view){border-radius:8px;background:#f8fafc}
 @media(max-width:760px){.hero,.review-item{align-items:stretch;flex-direction:column}.actions{justify-content:flex-end}.form-section{padding:15px 14px 2px}.review-mode-group{grid-template-columns:1fr}.review-form-intro{margin-top:0}}
 </style>

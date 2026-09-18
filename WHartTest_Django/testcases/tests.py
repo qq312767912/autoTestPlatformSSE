@@ -9,7 +9,7 @@ from openpyxl import Workbook, load_workbook
 from rest_framework.test import APIClient
 
 from projects.models import Project, ProjectMember
-from testcases.models import TestCaseReview
+from testcases.models import TestCaseReview, TestCaseReviewLLMConfig
 from testcases.review_service import _read_rows, _write_report
 from skills.models import Skill
 
@@ -19,6 +19,12 @@ class TestCaseReviewApiTests(TestCase):
         self.user = get_user_model().objects.create_user(username="reviewer", password="pass")
         self.project = Project.objects.create(name="Review Project", creator=self.user)
         ProjectMember.objects.create(project=self.project, user=self.user, role="member")
+        # 审查任务的前置条件是「已配置专用 LLM」，否则创建会被 409 拦下。
+        config = TestCaseReviewLLMConfig.objects.create(
+            config_name="用例审查 LLM", name="review-model", api_url="http://model-service/v1",
+        )
+        config.set_api_key("secret")
+        config.save()
         self.client = APIClient()
         self.client.force_authenticate(self.user)
 
@@ -83,6 +89,134 @@ class TestCaseReviewApiTests(TestCase):
         )
         self.assertEqual(response.status_code, 400)
         delay.assert_not_called()
+
+
+class TestCaseReviewLLMGateTests(TestCase):
+    """审查的前置条件：必须先由管理员配置并启用专用 LLM。"""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="gate-user", password="pass")
+        self.project = Project.objects.create(name="Gate Project", creator=self.user)
+        ProjectMember.objects.create(project=self.project, user=self.user, role="member")
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def _configure(self, api_key="secret"):
+        config = TestCaseReviewLLMConfig.objects.create(
+            config_name="用例审查 LLM", name="review-model", api_url="http://model-service/v1",
+        )
+        config.set_api_key(api_key)
+        config.save()
+        return config
+
+    def _upload(self):
+        with override_settings(MEDIA_ROOT=tempfile.gettempdir()):
+            return self.client.post(
+                f"/api/projects/{self.project.id}/testcase-reviews/",
+                {"source_file": SimpleUploadedFile("cases.xlsx", b"fake")},
+                format="multipart",
+            )
+
+    @patch("testcases.views.execute_testcase_review.delay")
+    def test_upload_is_blocked_and_not_persisted_without_config(self, delay):
+        # 前提自检：此刻确实没有任何可用配置，否则这条断言恒过。
+        self.assertFalse(TestCaseReviewLLMConfig.objects.exists())
+        response = self._upload()
+        self.assertEqual(response.status_code, 409)
+        # 关键：不能留下一条永远跑不起来的审查记录。
+        self.assertFalse(TestCaseReview.objects.exists())
+        delay.assert_not_called()
+
+    @patch("testcases.views.execute_testcase_review.delay")
+    def test_upload_allowed_once_config_exists(self, delay):
+        delay.return_value.id = "task-gate"
+        self._configure()
+        response = self._upload()
+        self.assertEqual(response.status_code, 201)
+        delay.assert_called_once()
+        TestCaseReview.objects.all().delete()
+
+    @patch("testcases.views.execute_testcase_review.delay")
+    def test_config_without_api_key_does_not_count_as_configured(self, delay):
+        # 有配置但没密钥时依然按「未配置」处理，否则审查会在运行时才失败。
+        self._configure(api_key="")
+        response = self._upload()
+        self.assertEqual(response.status_code, 409)
+        delay.assert_not_called()
+
+
+class TestCaseReviewLLMConfigPermissionTests(TestCase):
+    """专用 LLM 配置只对平台管理员开放，普通成员连读都不允许。"""
+
+    URL = "/api/testcases/review-llm-config/"
+
+    def setUp(self):
+        self.member = get_user_model().objects.create_user(username="plain-member", password="pass")
+        self.admin = get_user_model().objects.create_user(
+            username="platform-admin", password="pass", is_staff=True,
+        )
+        self.client = APIClient()
+
+    def _list_as(self, user):
+        self.client.force_authenticate(user)
+        return self.client.get(self.URL)
+
+    def test_regular_member_is_denied(self):
+        self.assertEqual(self._list_as(self.member).status_code, 403)
+
+    def test_admin_can_list(self):
+        # 前提自检：管理员必须能读到，否则「拒绝普通成员」可能只是接口整体不通。
+        self.assertEqual(self._list_as(self.admin).status_code, 200)
+
+    def test_anonymous_is_rejected(self):
+        self.client.force_authenticate(None)
+        self.assertIn(self.client.get(self.URL).status_code, (401, 403))
+
+    def test_admin_can_create_then_update_without_resending_key(self):
+        self.client.force_authenticate(self.admin)
+        created = self.client.post(self.URL, {
+            "config_name": "用例审查 LLM", "name": "review-model",
+            "api_url": "http://model-service/v1", "api_key": "secret",
+            "request_timeout": 600, "max_retries": 2, "is_active": True,
+        }, format="json")
+        self.assertEqual(created.status_code, 201)
+        self.assertTrue(created.data["has_api_key"])
+        self.assertNotIn("api_key", created.data)
+
+        config_id = created.data["id"]
+        updated = self.client.patch(f"{self.URL}{config_id}/", {"name": "review-model-v2"}, format="json")
+        self.assertEqual(updated.status_code, 200)
+        # 留空表示保持原密钥，不得把已配置的密钥清掉。
+        self.assertTrue(updated.data["has_api_key"])
+        self.assertEqual(TestCaseReviewLLMConfig.objects.get(pk=config_id).name, "review-model-v2")
+
+    def test_first_configuration_requires_api_key(self):
+        self.client.force_authenticate(self.admin)
+        response = self.client.post(self.URL, {
+            "config_name": "用例审查 LLM", "name": "review-model",
+            "api_url": "http://model-service/v1", "request_timeout": 600, "max_retries": 2,
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("api_key", response.data)
+
+    def test_out_of_range_timeout_is_rejected(self):
+        self.client.force_authenticate(self.admin)
+        response = self.client.post(self.URL, {
+            "config_name": "用例审查 LLM", "name": "review-model",
+            "api_url": "http://model-service/v1", "api_key": "secret", "request_timeout": 5,
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("request_timeout", response.data)
+
+    def test_configuration_stays_singleton(self):
+        self.client.force_authenticate(self.admin)
+        for name in ("first", "second"):
+            response = self.client.post(self.URL, {
+                "config_name": f"用例审查 LLM {name}", "name": "review-model",
+                "api_url": "http://model-service/v1", "api_key": "secret",
+            }, format="json")
+            self.assertEqual(response.status_code, 201)
+        self.assertEqual(TestCaseReviewLLMConfig.objects.count(), 1)
 
 
 class TestCaseReviewReportTests(TestCase):
