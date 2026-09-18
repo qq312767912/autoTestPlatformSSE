@@ -19,6 +19,10 @@
 #      新镜像的修复会被静默盖掉。改完请尽快重建镜像并撤下本覆盖层。
 #   2. 叠加期间 05-verify.sh 的“生效内容来自镜像”校验会失败，这是有意设计：
 #      它提醒当前生效的是挂载层，镜像更新尚未得到验证。
+#   3. 挂载层若新增迁移文件（如 testcases/migrations/0025_*.py），无需手工执行 migrate：
+#      backend 容器 entrypoint.sh 的第一步就是 `manage.py migrate --noinput`，
+#      因此 `up -d --no-deps --force-recreate backend` 会自动补跑迁移。镜像内必须已存在
+#      被依赖的前序迁移（如 0024），否则迁移链会断。
 #
 # 回滚本覆盖层：不再传 -f docker-compose.hotfix.yml 重建 Backend 即可，
 # 容器上的挂载会随重建一并消失。
@@ -33,9 +37,14 @@ services:
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/serializers.py:/app/code_analysis/serializers.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/urls.py:/app/code_analysis/urls.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/code_analysis/migrations/0012_codeanalysisllmconfig.py:/app/code_analysis/migrations/0012_codeanalysisllmconfig.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/models.py:/app/testcases/models.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/permissions.py:/app/testcases/permissions.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/urls.py:/app/testcases/urls.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/review_service.py:/app/testcases/review_service.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/serializers.py:/app/testcases/serializers.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/views.py:/app/testcases/views.py:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/migrations/0025_testcasereviewllmconfig.py:/app/testcases/migrations/0025_testcasereviewllmconfig.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/testcases/management:/app/testcases/management:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/wharttest_django/urls.py:/app/wharttest_django/urls.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/orchestrator_integration/builtin_tools/skill_tools.py:/app/orchestrator_integration/builtin_tools/skill_tools.py:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/hotfix/bundled_skills:/app/bundled_skills:ro

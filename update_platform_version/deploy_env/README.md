@@ -20,7 +20,7 @@ Vision MCP 继续复用 `01339484` 版本镜像；Actuator 使用包含动态页
 | 代码审查报告 | 前端新增**导出 HTML 报告**与测试分析报告（上一版前端镜像构建于该功能提交之前，内网此前没有此入口） |
 | 代码审查界面 | 长模块名概览单列布局与安全换行 |
 | 用例审查界面 | 断点续审提示（`已完成 N/M 批，点击「重试」将从断点继续`）与覆盖率告警 |
-| 用例审查 LLM | 新增**用例审查专用 LLM 配置**（仅平台管理员可配置，见下文专节）。审查不再复用平台通用 LLM；未配置时创建/重试直接返回 409，不再静默回退。含新迁移 `testcases/0025` |
+| 用例审查 LLM | 新增**用例审查专用 LLM 配置**（仅平台管理员可配置，见下文专节）。审查不再复用平台通用 LLM；未配置时创建/重试直接返回 409，不再静默回退。含新迁移 `testcases/0025`。**当前镜像 `d595a628` 不含此改动** —— 需执行 `28-apply-testcase-review-llm-hotfix.sh`，或重建 Backend 镜像 |
 
 > ⚠️ 由此带来一处**部署方式变更**：代码挂载层已从 `docker-compose.update.yml` 移出，
 > 见下文「代码覆盖层（hotfix）的启用方式」。正常升级不再挂载任何后端代码文件。
@@ -28,7 +28,13 @@ Vision MCP 继续复用 `01339484` 版本镜像；Actuator 使用包含动态页
 > ⚠️ **本包不含「报告导出改用代码仓库名」这个改动**（它属于前端产物，需要重建 Frontend
 > 镜像才能随本包交付）。但 `05-verify.sh` 已经带上对应的产物断言，所以**只升级本包而不处理
 > 前端，校验会在该断言处失败**。处理方式见下文「前端热修复通道（`../frontend-hotfix/`）」。
+> `../frontend-hotfix/` 的产物包已重建为**累计版**，同时携带报告命名与用例审查配置入口两项改动。
 > 另外本包的 `04-deploy.sh` 已内置技能同步与数据库快照刷新，「内置技能」一节随之改写。
+
+> ⚠️ **若 Backend/前端镜像仍是 `d595a628`（即未重建镜像）**，用例审查专用 LLM 与报告命名都不能
+> 靠升级本包交付，必须走两条热修复通道：后端 `28-apply-testcase-review-llm-hotfix.sh`，
+> 前端 `../frontend-hotfix/25-apply-frontend-report-title-hotfix.sh`。此时 `05-verify.sh` 会因
+> 检测到后端挂载层而按设计失败 —— 以 `28` 脚本自身的四层断言为准。
 
 代码审查现使用独立 LLM 配置。系统管理员进入“代码审查”页面，点击右上角
 “审查模型配置”，填写 OpenAI 兼容 API 地址、模型名称和 API Key。密钥在数据库中
@@ -279,6 +285,43 @@ LLM（`langgraph_integration.LLMConfig`），结果是改通用配置会连带�
 服务里已不存在通用配置入口）、迁移层（表已建立且保持单例）、路由层（未认证应 401/403，返回 404
 即路由未随镜像生效）、前端层（产物含配置入口）。
 
+### 免构建上线：`28-apply-testcase-review-llm-hotfix.sh`
+
+如果当前内网 Backend 镜像（如 `update-d595a628-review-fix-r5-arm64`）**尚未包含**上述改动，
+又不想等重建镜像，可以走覆盖层通道：
+
+```bash
+cd /projects/ai-test-platform/update_platform_version/deploy_env
+bash 28-apply-testcase-review-llm-hotfix.sh            # 应用
+bash 28-apply-testcase-review-llm-hotfix.sh --revert   # 回退
+```
+
+脚本做四件事：① 校验 `docker-compose.hotfix.yml` 引用的**全部 19 个挂载源**在本目录都存在
+（防打包遗漏，判据按 `hotfix/` 之后的相对路径，与安装根目录解耦）；② 对 8 个本次相关文件做
+ASCII 特征守门（含反向守门：`review_service.py` 若又出现 `from langgraph_integration.models
+import LLMConfig` 即失败）；③ 叠加 `docker-compose.hotfix.yml` 重建 Backend —— 容器
+`entrypoint.sh` 第一步就是 `migrate --noinput`，`0025` 会自动应用，**无需手工 migrate**；
+④ 容器内四层断言（模型/权限语义/迁移记录/URL 反解）+ 接口探活（404 即失败）。
+
+本次新增的 5 个挂载（原先只有 14 个挂载，本次扩到 19 个）：
+
+| 挂载 | 目标 | 为什么必须 |
+| --- | --- | --- |
+| `hotfix/testcases/models.py` | `/app/testcases/models.py` | `TestCaseReviewLLMConfig` 与密钥加解密 |
+| `hotfix/testcases/permissions.py` | `/app/testcases/permissions.py` | `IsPlatformAdmin` |
+| `hotfix/testcases/urls.py` | `/app/testcases/urls.py` | `review-llm-config` 路由注册 |
+| `hotfix/testcases/migrations/0025_testcasereviewllmconfig.py` | 同名迁移路径 | 建表 + 初值复制（镜像内已有前序 `0024`，迁移链不断） |
+| `hotfix/wharttest_django/urls.py` | `/app/wharttest_django/urls.py` | 根路由挂载 `api/testcases/` |
+
+> ⚠️ 两个后果要提前知道：
+> 1. 跑完 `28` 后 `05-verify.sh` 的「生效内容来自镜像」硬检查会**按设计故意失败** —— 它提醒你
+>    当前生效的是挂载层、镜像还没更新。这不是脚本出错。把 `28` 的校验输出当作这次的成功判据。
+> 2. 前端入口不在这条通道里，必须另外执行 `../frontend-hotfix/25-apply-frontend-report-title-hotfix.sh`，
+>    否则按钮不出现（接口本身可用）。
+>
+> 附带：`28 --revert` 只卸挂载，**不删表**；`testcases_testcasereviewllmconfig` 与 `0025` 的迁移
+> 记录会保留（Django 容忍已应用但代码中不存在的迁移，不影响运行）。
+
 ### 上游网关 502 / 无输出时的诊断（`26-diagnose-llm-upstream-capacity.sh`）
 
 失败形态长这样：
@@ -376,7 +419,7 @@ bash 27-probe-llm-capabilities.sh
 盖掉镜像内容，并且让 `05-verify.sh` 失去“镜像是否真的更新”的判别力。
 
 代码挂载层被移到了独立文件 `docker-compose.hotfix.yml`，**默认不叠加**。只有在“必须改后端
-代码、又来不及重建镜像”时才启用，`19/20/22/23-apply-*-hotfix.sh` 会自动叠加它：
+代码、又来不及重建镜像”时才启用，`19/20/22/23/28-apply-*-hotfix.sh` 会自动叠加它：
 
 ```bash
 # 紧急热修复（临时启用挂载层）
@@ -404,8 +447,12 @@ bash 05-verify.sh      # 应全部通过
 纯前端能力（在浏览器里拼 HTML 再 Blob 下载）传不过去，需要另一条通道：把已构建的前端产物
 只读挂到 Nginx 站点根目录 `/usr/share/nginx/html`，再重建一次 Frontend 容器。
 
-当前该通道承载的修复是：**报告导出标题与下载文件名改用代码仓库名**
-（`代码审查报告_<仓库名>` / `测试分析报告_<仓库名>`，原为平台项目名）。
+当前该通道承载的修复是（**累计产物，一次挂载两项都生效**）：
+
+1. **报告导出标题与下载文件名改用代码仓库名**
+   （`代码审查报告_<仓库名>` / `测试分析报告_<仓库名>`，原为平台项目名）；
+2. **用例审查「审查模型配置」入口**（仅 `is_staff` 可见）—— 与后端
+   `28-apply-testcase-review-llm-hotfix.sh` 是一对，前端只负责按钮，后端负责能力，**两个都要上**。
 
 ```bash
 cd /projects/ai-test-platform/update_platform_version/frontend-hotfix
