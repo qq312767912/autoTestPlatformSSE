@@ -1,0 +1,4 @@
+release=update-ecff56e4-r2-arm64
+git_commit=e22e1f22
+image_commit=ecff56e40673d502bd85e702dbf4e11ef969f2af
+platform=linux/arm64

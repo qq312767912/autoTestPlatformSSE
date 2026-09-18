@@ -1,0 +1,18 @@
+WHartTest 内网 ARM64 正式增量升级镜像
+代码基线: dev@ecff56e40673d502bd85e702dbf4e11ef969f2af
+交付版本: update-ecff56e4-r1-arm64
+
+本包新增镜像:
+
+wharttest-250-backend:update-ecff56e4-r1-arm64
+  platform: linux/arm64
+  image ID: sha256:a59ee48b5f8629e99aba032b18b906dbe0a1fa01fb538b3b0e01dc16bf16834f
+  source: 复用 5c204861 依赖层，增量加入 code_analysis
+
+wharttest-250-frontend:update-ecff56e4-r1-arm64
+  platform: linux/arm64
+  image ID: sha256:8aaa12f3ea873710ba9e1f80af14811f7130f250ada682b867faac4586b5e9ee
+
+内网继续复用（本包不携带、不重建）:
+  PostgreSQL、Redis、Qdrant、MCP、Playwright MCP、Vision MCP、
+  微信插件宿主、Actuator-01/02/03 及所有现有数据卷。

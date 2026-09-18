@@ -92,3 +92,12 @@ AGENTS.md
 WHartTest_IDEA_Plugin/
 WHartTest_VSCode_Extension/
 docx-editor/
+
+# 解压后的 OCI 镜像层（含 246MB 级 blob，超 GitHub 100MB 硬限制，禁止入库）
+update_platform_version/images/
+
+# 本地备份与发布物（数据库 dump 等，不入库）
+backups/
+
+# 演示仓库（内含独立 .git，按子仓库单独管理）
+demo_repositories/

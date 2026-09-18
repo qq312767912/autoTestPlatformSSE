@@ -1,0 +1,8 @@
+FROM wharttest-250-backend:update-5c204861-r1-arm64
+
+ARG OCI_REVISION=unknown
+
+# 5c204861 基础镜像已包含同一代码与全部依赖，只缺少代码审查应用目录。
+COPY code_analysis/ /app/code_analysis/
+
+LABEL org.opencontainers.image.revision="${OCI_REVISION}"
