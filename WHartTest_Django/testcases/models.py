@@ -575,6 +575,9 @@ class TestCaseReviewLLMConfig(models.Model):
             existing = type(self).objects.order_by("pk").first()
             if existing:
                 self.pk = existing.pk
+                # 将新实例转为对已有单例的 UPDATE 时，auto_now_add 不会
+                # 再填充。保留原创建时间，避免重复 POST 配置触发 NOT NULL。
+                self.created_at = existing.created_at
         super().save(*args, **kwargs)
 
     def set_api_key(self, value):

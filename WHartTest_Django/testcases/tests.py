@@ -21,7 +21,7 @@ class TestCaseReviewApiTests(TestCase):
         ProjectMember.objects.create(project=self.project, user=self.user, role="member")
         # 审查任务的前置条件是「已配置专用 LLM」，否则创建会被 409 拦下。
         config = TestCaseReviewLLMConfig.objects.create(
-            config_name="用例审查 LLM", name="review-model", api_url="http://model-service/v1",
+            config_name="用例审查 LLM", name="review-model", api_url="http://model-service.local/v1",
         )
         config.set_api_key("secret")
         config.save()
@@ -103,7 +103,7 @@ class TestCaseReviewLLMGateTests(TestCase):
 
     def _configure(self, api_key="secret"):
         config = TestCaseReviewLLMConfig.objects.create(
-            config_name="用例审查 LLM", name="review-model", api_url="http://model-service/v1",
+            config_name="用例审查 LLM", name="review-model", api_url="http://model-service.local/v1",
         )
         config.set_api_key(api_key)
         config.save()
@@ -176,7 +176,7 @@ class TestCaseReviewLLMConfigPermissionTests(TestCase):
         self.client.force_authenticate(self.admin)
         created = self.client.post(self.URL, {
             "config_name": "用例审查 LLM", "name": "review-model",
-            "api_url": "http://model-service/v1", "api_key": "secret",
+            "api_url": "http://model-service.local/v1", "api_key": "secret",
             "request_timeout": 600, "max_retries": 2, "is_active": True,
         }, format="json")
         self.assertEqual(created.status_code, 201)
@@ -194,7 +194,7 @@ class TestCaseReviewLLMConfigPermissionTests(TestCase):
         self.client.force_authenticate(self.admin)
         response = self.client.post(self.URL, {
             "config_name": "用例审查 LLM", "name": "review-model",
-            "api_url": "http://model-service/v1", "request_timeout": 600, "max_retries": 2,
+            "api_url": "http://model-service.local/v1", "request_timeout": 600, "max_retries": 2,
         }, format="json")
         self.assertEqual(response.status_code, 400)
         self.assertIn("api_key", response.data)
@@ -203,7 +203,7 @@ class TestCaseReviewLLMConfigPermissionTests(TestCase):
         self.client.force_authenticate(self.admin)
         response = self.client.post(self.URL, {
             "config_name": "用例审查 LLM", "name": "review-model",
-            "api_url": "http://model-service/v1", "api_key": "secret", "request_timeout": 5,
+            "api_url": "http://model-service.local/v1", "api_key": "secret", "request_timeout": 5,
         }, format="json")
         self.assertEqual(response.status_code, 400)
         self.assertIn("request_timeout", response.data)
@@ -213,7 +213,7 @@ class TestCaseReviewLLMConfigPermissionTests(TestCase):
         for name in ("first", "second"):
             response = self.client.post(self.URL, {
                 "config_name": f"用例审查 LLM {name}", "name": "review-model",
-                "api_url": "http://model-service/v1", "api_key": "secret",
+                "api_url": "http://model-service.local/v1", "api_key": "secret",
             }, format="json")
             self.assertEqual(response.status_code, 201)
         self.assertEqual(TestCaseReviewLLMConfig.objects.count(), 1)

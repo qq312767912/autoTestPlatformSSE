@@ -196,7 +196,10 @@ let timer: number | undefined;
 
 const authStore = useAuthStore();
 // 专用 LLM 配置属于平台级凭据：只有平台管理员显示入口，后端同样强制校验。
-const isPlatformAdmin = computed(() => !!(authStore.currentUser as any)?.is_staff);
+const isPlatformAdmin = computed(() => {
+  const user = authStore.currentUser as any;
+  return !!(user?.is_staff || user?.is_superuser);
+});
 const llmConfigVisible = ref(false);
 const llmConfigSaving = ref(false);
 const llmConfigTesting = ref(false);
