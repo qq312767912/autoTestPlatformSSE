@@ -39,6 +39,8 @@ _ARTIFACT_EXTENSIONS = {
     ".pdf",
     ".html",
     ".htm",
+    ".md",
+    ".markdown",
     ".txt",
     ".json",
     ".csv",
@@ -53,11 +55,11 @@ _ARTIFACT_EXTENSIONS = {
 }
 _MAX_ARTIFACT_SIZE_BYTES = 50 * 1024 * 1024
 _ARTIFACT_TOKEN_RE = re.compile(
-    r"(?P<path>(?:[A-Za-z]:)?[^\s<>\"'`|]+?\.(?:drawio|png|jpe?g|gif|svg|pdf|html?|txt|json|csv|xml|zip|docx?|xlsx?|pptx?))",
+    r"(?P<path>(?:[A-Za-z]:)?[^\s<>\"'`|]+?\.(?:drawio|png|jpe?g|gif|svg|pdf|html?|md|markdown|txt|json|csv|xml|zip|docx?|xlsx?|pptx?))",
     re.IGNORECASE,
 )
 _QUOTED_ARTIFACT_TOKEN_RE = re.compile(
-    r"[`'\"](?P<path>[^`'\"]+?\.(?:drawio|png|jpe?g|gif|svg|pdf|html?|txt|json|csv|xml|zip|docx?|xlsx?|pptx?))[`'\"]",
+    r"[`'\"](?P<path>[^`'\"]+?\.(?:drawio|png|jpe?g|gif|svg|pdf|html?|md|markdown|txt|json|csv|xml|zip|docx?|xlsx?|pptx?))[`'\"]",
     re.IGNORECASE,
 )
 

@@ -358,6 +358,36 @@ class SkillScreenshotDirectoryTests(SimpleTestCase):
                 )
                 self.assertTrue(os.path.exists(os.path.join(artifacts_dir, "order-payment-flow.drawio")))
 
+    def test_collect_skill_artifacts_detects_markdown_report(self):
+        with tempfile.TemporaryDirectory() as temp_media_root:
+            with override_settings(MEDIA_ROOT=temp_media_root, MEDIA_URL="/media/"):
+                skill_dir = os.path.join(temp_media_root, "skills", "1", "11")
+                os.makedirs(skill_dir, exist_ok=True)
+                generated_file = os.path.join(skill_dir, "review-report.md")
+                with open(generated_file, "w", encoding="utf-8") as handle:
+                    handle.write("# Review report\n")
+
+                artifacts_dir = os.path.join(
+                    temp_media_root, "skill_runtime", "artifacts", "1", "s1"
+                )
+                artifacts = _collect_skill_artifacts(
+                    "已生成报告 `review-report.md`",
+                    skill_dir=skill_dir,
+                    artifacts_dir=artifacts_dir,
+                    artifacts_before={},
+                )
+
+                self.assertEqual(len(artifacts), 1)
+                self.assertEqual(artifacts[0]["name"], "review-report.md")
+                self.assertEqual(artifacts[0]["mime_type"], "text/markdown")
+                self.assertEqual(
+                    artifacts[0]["url"],
+                    "/media/skill_runtime/artifacts/1/s1/review-report.md",
+                )
+                self.assertTrue(
+                    os.path.exists(os.path.join(artifacts_dir, "review-report.md"))
+                )
+
     def test_prepare_skill_artifacts_dir_never_deletes_historical_files(self):
         with tempfile.TemporaryDirectory() as temp_media_root:
             with override_settings(MEDIA_ROOT=temp_media_root):
