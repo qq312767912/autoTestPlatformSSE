@@ -1,3 +1,6 @@
+import os
+import tempfile
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from django.contrib.auth.models import User
@@ -7,7 +10,34 @@ from rest_framework.test import APIClient
 
 from .models import KnowledgeGlobalConfig
 from .langgraph_integration import create_knowledge_tool
+from .services import DocumentProcessor
 from .views import _mask_secret
+
+
+class DocumentProcessorOfflineTests(SimpleTestCase):
+    def test_markdown_loads_as_utf8_text_without_nltk_data(self):
+        content = "# 离线知识库\n\n支持 **Markdown** 内容。"
+        with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as temp_file:
+            temp_file.write(content.encode("utf-8"))
+            file_path = temp_file.name
+
+        document = SimpleNamespace(
+            id="offline-md",
+            title="离线 Markdown",
+            document_type="md",
+            content="",
+            file=SimpleNamespace(path=file_path),
+        )
+
+        try:
+            with patch("nltk.data.find", side_effect=LookupError("offline")):
+                docs = DocumentProcessor().load_document(document)
+        finally:
+            os.unlink(file_path)
+
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(docs[0].page_content, content)
+        self.assertEqual(docs[0].metadata["document_type"], "md")
 
 
 class MultiKnowledgeBaseToolTests(SimpleTestCase):
