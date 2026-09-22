@@ -314,8 +314,8 @@ class TestCaseReviewReportTests(TestCase):
 
             self.assertIn("测试确认处理结果", generated.sheetnames)
             confirmation = generated["测试确认处理结果"]
-            self.assertEqual(confirmation.sheet_properties.tabColor.rgb, "00A64B4B")
-            self.assertEqual(confirmation["A1"].fill.fgColor.rgb, "008B3F3F")
+            self.assertEqual(confirmation.sheet_properties.tabColor.rgb, "004F7F78")
+            self.assertEqual(confirmation["A1"].fill.fgColor.rgb, "002F5F5B")
             self.assertEqual(confirmation["B5"].value, 1)
             self.assertEqual(confirmation["B6"].value, "=COUNTA('问题明细'!$A$2:$A$2)")
             self.assertEqual(confirmation["B7"].value, '=COUNTIF(\'问题明细\'!$K$2:$K$2,"是")')
