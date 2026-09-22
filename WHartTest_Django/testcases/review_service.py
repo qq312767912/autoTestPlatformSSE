@@ -430,7 +430,7 @@ def _write_report(review, rows, issues, pending, governance, uncovered=None, chu
             cell.font = Font(name="Arial", size=10, bold=True, color=font_color)
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    confirmation_sheet.sheet_properties.tabColor = "FF0000"
+    confirmation_sheet.sheet_properties.tabColor = "A64B4B"
     confirmation_sheet.freeze_panes = "A4"
     confirmation_sheet.auto_filter.ref = (
         f"A12:F{confirmation_sheet.max_row}" if confirmation_sheet.max_row > 12 else None
@@ -439,18 +439,18 @@ def _write_report(review, rows, issues, pending, governance, uncovered=None, chu
     for column in "BCDE":
         confirmation_sheet.column_dimensions[column].width = 16
     confirmation_sheet.column_dimensions["F"].width = 16
-    confirmation_sheet["A1"].fill = PatternFill("solid", fgColor="C00000")
+    confirmation_sheet["A1"].fill = PatternFill("solid", fgColor="8B3F3F")
     confirmation_sheet["A1"].font = Font(name="Arial", size=18, bold=True, color="FFFFFF")
     confirmation_sheet["A1"].alignment = Alignment(vertical="center")
     confirmation_sheet.row_dimensions[1].height = 40
-    confirmation_sheet["A2"].fill = PatternFill("solid", fgColor="FCE8E6")
-    confirmation_sheet["A2"].font = Font(name="Arial", size=10, italic=True, color="7A271A")
+    confirmation_sheet["A2"].fill = PatternFill("solid", fgColor="F4E9E7")
+    confirmation_sheet["A2"].font = Font(name="Arial", size=10, italic=True, color="6B3530")
     confirmation_sheet["A2"].alignment = Alignment(vertical="center", wrap_text=True)
     confirmation_sheet.row_dimensions[2].height = 32
     for header_row in (4, 12):
         for cell in confirmation_sheet[header_row]:
             cell.font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
-            cell.fill = PatternFill("solid", fgColor="C00000")
+            cell.fill = PatternFill("solid", fgColor="8B3F3F")
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell.border = thin_border
     for row_index in range(5, confirmation_sheet.max_row + 1):
