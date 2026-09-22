@@ -29,6 +29,12 @@ API_ANNOTATIONS = {"RequestMapping", "GetMapping", "PostMapping", "PutMapping", 
 PYTHON_DECORATORS = {"login_required", "permission_required", "require_http_methods", "api_view", "transaction.atomic"}
 CRITICAL_MODIFIERS = {"public", "protected", "private", "static", "final", "synchronized", "volatile", "abstract"}
 SENSITIVE_CONFIG_KEYS = {"enabled", "enable", "auth", "authentication", "authorization", "permission", "security", "ssl", "verify", "timeout", "retry", "url", "endpoint"}
+AI_REVIEW_LANGUAGE_RULE = (
+    "所有面向用户展示的自然语言内容必须使用简体中文，包括 impact_modules 中的 module、change_type、impact、"
+    "regression_scope，以及 risks 中的 change、evidence、impact、test_title、test_objective、test_expected_result，"
+    "还有 test_requirements 的全部描述字段。代码标识符、文件路径、接口名、字段名和必要的原始代码片段保持原文，"
+    "但解释这些证据的句子必须使用中文；即使 Diff、源码注释或业务上下文是英文，也不得输出英文审查结论。"
+)
 
 # OpenCodeReview 参数统一维护。内网自建模型不限制 token；OCR 需要保留原生上下文，
 # 否则多轮工具调用可能在上下文压缩阶段提前结束。
@@ -569,6 +575,21 @@ def _json_from_response(content):
     if start < 0 or end < start:
         raise ValueError("LLM未返回JSON对象")
     return json.loads(text[start:end + 1])
+
+
+def _review_payload_needs_chinese_retry(payload):
+    """检测模型是否把面向用户的审查结论输出成了纯英文。"""
+    values = []
+    for item in payload.get("impact_modules") or []:
+        values.extend(item.get(key) for key in ("impact", "regression_scope"))
+    for item in payload.get("risks") or []:
+        values.extend(item.get(key) for key in ("change", "impact", "test_title", "test_objective", "test_expected_result"))
+    for item in payload.get("test_requirements") or []:
+        values.extend(item.get(key) for key in ("title", "objective", "expected_result"))
+    return any(
+        isinstance(value, str) and value.strip() and not re.search(r"[\u4e00-\u9fff]", value)
+        for value in values
+    )
 
 
 def _sanitize_json_value(value):
@@ -1258,6 +1279,7 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
         repository_context = []
     prompt_head = (
         "你是测试代码审查助手。机器规则结论不可删除。只分析给出的局部 Diff，不推测未提供源码。"
+        f"{AI_REVIEW_LANGUAGE_RULE}"
         "按三步完成：先说明变更文件/模块；再识别类型（接口、SQL、配置、数据模型、权限、前端UI、任务/脚本等）；"
         "最后只基于明确证据评估影响范围并生成回归点。不得把单独出现的闭合标签、截断代码或未提供的上下文判断为模板语法/编译错误；"
         "模板、XML、Vue 等语法问题只有在同一 Diff 中存在明确不匹配证据时才可报告。"
@@ -1270,10 +1292,19 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
         # 各线程使用独立模型客户端，避免共享 HTTP 会话和回调状态。
         llm = create_llm_instance(config, temperature=0.1)
         known = [x for x in machine_findings if x.get("file") in batch]
-        response = llm.invoke(f"{prompt_head}\n业务上下文：\n{business_context}\n已读取的目标版本源码上下文（只读MCP）：\n{json.dumps(repository_context, ensure_ascii=False)[:18000]}\n机器已确认风险：{json.dumps(known, ensure_ascii=False)}\nDIFF:\n{batch}")
+        prompt = f"{prompt_head}\n业务上下文：\n{business_context}\n已读取的目标版本源码上下文（只读MCP）：\n{json.dumps(repository_context, ensure_ascii=False)[:18000]}\n机器已确认风险：{json.dumps(known, ensure_ascii=False)}\nDIFF:\n{batch}"
+        response = llm.invoke(prompt)
         payload = _json_from_response(getattr(response, "content", response))
         usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
         tokens = int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0)
+        if _review_payload_needs_chinese_retry(payload):
+            response = llm.invoke(
+                f"{prompt}\n\n上一次回答包含英文审查结论，不符合要求。请重新生成，所有说明性内容必须为简体中文，"
+                "仅代码标识符、路径和原始代码片段保留原文。"
+            )
+            payload = _json_from_response(getattr(response, "content", response))
+            retry_usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
+            tokens += int(retry_usage.get("total_tokens", retry_usage.get("input_tokens", 0) + retry_usage.get("output_tokens", 0)) or 0)
         return index, payload, tokens
 
     successful_batches, batch_errors = 0, []

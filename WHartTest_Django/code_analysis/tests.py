@@ -14,7 +14,25 @@ from projects.models import Project, ProjectMember
 from langgraph_integration.models import LLMConfig
 from .models import AnalysisTask, AnalysisTaskExecutionLog, CodeAnalysisLLMConfig, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
 from .serializers import GitLabConnectionSerializer, ProjectRepositorySerializer
-from .services import AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _diff_line_stats, _ensure_not_cancelled, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _reuse_cached_result, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, retry_ocr_analysis, run_analysis
+from .services import AI_REVIEW_LANGUAGE_RULE, AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _diff_line_stats, _ensure_not_cancelled, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _reuse_cached_result, _review_payload_needs_chinese_retry, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, retry_ocr_analysis, run_analysis
+
+
+class CodeReviewPromptLanguageTests(SimpleTestCase):
+    def test_ai_review_prompt_requires_chinese_for_report_fields(self):
+        self.assertIn("所有面向用户展示的自然语言内容必须使用简体中文", AI_REVIEW_LANGUAGE_RULE)
+        self.assertIn("即使 Diff、源码注释或业务上下文是英文，也不得输出英文审查结论", AI_REVIEW_LANGUAGE_RULE)
+        for field in ("change", "evidence", "impact", "regression_scope"):
+            self.assertIn(field, AI_REVIEW_LANGUAGE_RULE)
+
+    def test_english_review_payload_requires_retry(self):
+        self.assertTrue(_review_payload_needs_chinese_retry({
+            "risks": [{"change": "Added a new API field", "impact": "May break clients"}],
+        }))
+
+    def test_chinese_review_payload_does_not_require_retry(self):
+        self.assertFalse(_review_payload_needs_chinese_retry({
+            "risks": [{"change": "新增 usci 字段", "impact": "可能影响现有客户端兼容性"}],
+        }))
 
 
 class DiffRuleTests(TestCase):
