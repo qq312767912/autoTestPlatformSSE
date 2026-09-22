@@ -15,6 +15,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
 from rest_framework.parsers import MultiPartParser, FormParser
 import io
+import os
+import tempfile
 
 from .models import (
     TestCase,
@@ -88,6 +90,47 @@ class TestCaseReviewViewSet(viewsets.ModelViewSet):
         async_result = execute_testcase_review.delay(review.id)
         review.celery_task_id = async_result.id or ""
         review.save(update_fields=["celery_task_id", "updated_at"])
+
+    @action(detail=False, methods=["post"], url_path="diagnose-file")
+    def diagnose_file(self, request, *args, **kwargs):
+        """只诊断上传文件能否被用例审查读取，不创建审查任务。"""
+        source = request.FILES.get("source_file")
+        if not source:
+            return Response({"usable": False, "detail": "请选择需要诊断的 XLSX 或 CSV 文件"}, status=status.HTTP_400_BAD_REQUEST)
+        extension = os.path.splitext(source.name)[1].lower()
+        if extension not in {".xlsx", ".csv"}:
+            return Response({"usable": False, "detail": "不是平台可用的测试用例文件：仅支持 XLSX、CSV"}, status=status.HTTP_400_BAD_REQUEST)
+        if source.size > 50 * 1024 * 1024:
+            return Response({"usable": False, "detail": "不是平台可用的测试用例文件：文件不能超过 50MB"}, status=status.HTTP_400_BAD_REQUEST)
+
+        from .review_service import _read_rows
+
+        temp_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as temp_file:
+                for chunk in source.chunks():
+                    temp_file.write(chunk)
+                temp_path = temp_file.name
+            rows = _read_rows(temp_path)
+        except Exception as exc:
+            return Response({
+                "usable": False,
+                "detail": f"不是平台可用的 {extension.lstrip('.').upper()} 格式：文件无法解析或内容已损坏（{type(exc).__name__}）",
+            }, status=status.HTTP_400_BAD_REQUEST)
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+        if not rows:
+            return Response({
+                "usable": False,
+                "detail": "文件可以打开，但不是平台可用的测试用例格式：未识别到包含“测试步骤”和“预期结果”的用例表头，或表头下没有有效用例行",
+            }, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            "usable": True,
+            "detail": f"格式诊断通过，识别到 {len(rows)} 条可审查用例",
+            "case_rows": len(rows),
+        })
 
     @action(detail=True, methods=["post"], url_path="retry")
     def retry(self, request, *args, **kwargs):

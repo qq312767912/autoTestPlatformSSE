@@ -18,6 +18,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
 from requirements.services import create_llm_instance, safe_llm_invoke
 
@@ -271,10 +272,28 @@ def _write_report(review, rows, issues, pending, governance, uncovered=None, chu
             distribution.append([label, name, count])
 
     detail = workbook.create_sheet("问题明细")
-    headers = ["Sheet", "行号", "用例编号/名称", "模块", "原文", "严重程度", "问题类型", "问题说明", "修改建议", "判定"]
+    headers = [
+        "Sheet", "行号", "用例编号/名称", "模块", "原文", "严重程度", "问题类型", "问题说明",
+        "修改建议", "判定", "问题确认", "修改点", "不采纳原因",
+    ]
     detail.append(headers)
     for item in issues:
-        detail.append([item.get(k, "") for k in ["sheet", "row", "case_id", "module", "original", "severity", "issue_type", "description", "suggestion", "judgement"]])
+        detail.append(
+            [item.get(k, "") for k in [
+                "sheet", "row", "case_id", "module", "original", "severity", "issue_type",
+                "description", "suggestion", "judgement",
+            ]] + ["", "", ""]
+        )
+    confirmation_validation = DataValidation(
+        type="list", formula1='"是,否"', allow_blank=True,
+        errorTitle="无效的问题确认值", error='请从下拉列表中选择“是”或“否”。',
+        promptTitle="问题确认", prompt='确认采纳请选“是”，不采纳请选“否”。',
+    )
+    confirmation_validation.showErrorMessage = True
+    confirmation_validation.showInputMessage = True
+    if issues:
+        detail.add_data_validation(confirmation_validation)
+        confirmation_validation.add(f"K2:K{len(issues) + 1}")
 
     examples = workbook.create_sheet("改写示例")
     examples.append(["用例编号/名称", "原文", "改写示例"])
@@ -290,6 +309,33 @@ def _write_report(review, rows, issues, pending, governance, uncovered=None, chu
     governance_sheet.append(["序号", "建议"])
     for index, value in enumerate(dict.fromkeys(governance), 1):
         governance_sheet.append([index, value])
+
+    confirmation_sheet = workbook.create_sheet("测试确认处理结果")
+    confirmation_sheet.merge_cells("A1:F1")
+    confirmation_sheet["A1"] = "测试确认处理结果"
+    confirmation_sheet.merge_cells("A2:F2")
+    confirmation_sheet["A2"] = "本页数据根据“问题明细”中的“问题确认”自动统计：“是”为采纳，“否”为不采纳。"
+    confirmation_sheet.append([])
+    confirmation_sheet.append(["总体统计", "数值"])
+    issue_end_row = max(2, len(issues) + 1)
+    confirmation_sheet.append(["共审查用例数", estimated_cases])
+    confirmation_sheet.append(["审查提供意见", f"=COUNTA('问题明细'!$A$2:$A${issue_end_row})"])
+    confirmation_sheet.append(["采纳", f'=COUNTIF(\'问题明细\'!$K$2:$K${issue_end_row},"是")'])
+    confirmation_sheet.append(["不采纳", f'=COUNTIF(\'问题明细\'!$K$2:$K${issue_end_row},"否")'])
+    confirmation_sheet.append(["待确认", "=B6-B7-B8"])
+    confirmation_sheet.append(["采纳率", "=IF(B6=0,0,B7/B6)"])
+    confirmation_sheet.append([])
+    confirmation_sheet.append(["问题类型", "审查意见数", "采纳", "不采纳", "待确认", "采纳率"])
+    for issue_type in type_counts:
+        row_number = confirmation_sheet.max_row + 1
+        confirmation_sheet.append([
+            issue_type,
+            f'=COUNTIF(\'问题明细\'!$G$2:$G${issue_end_row},A{row_number})',
+            f'=COUNTIFS(\'问题明细\'!$G$2:$G${issue_end_row},A{row_number},\'问题明细\'!$K$2:$K${issue_end_row},"是")',
+            f'=COUNTIFS(\'问题明细\'!$G$2:$G${issue_end_row},A{row_number},\'问题明细\'!$K$2:$K${issue_end_row},"否")',
+            f"=B{row_number}-C{row_number}-D{row_number}",
+            f"=IF(B{row_number}=0,0,C{row_number}/B{row_number})",
+        ])
 
     navy = "1D3F66"
     blue = "2F75B5"
@@ -363,6 +409,9 @@ def _write_report(review, rows, issues, pending, governance, uncovered=None, chu
     detail.column_dimensions["H"].width = 48
     detail.column_dimensions["I"].width = 48
     detail.column_dimensions["J"].width = 16
+    detail.column_dimensions["K"].width = 14
+    detail.column_dimensions["L"].width = 36
+    detail.column_dimensions["M"].width = 36
     for row_index in range(2, detail.max_row + 1):
         severity = str(detail.cell(row_index, 6).value or "")
         if severity in risk_styles:
@@ -379,6 +428,43 @@ def _write_report(review, rows, issues, pending, governance, uncovered=None, chu
             cell.fill = PatternFill("solid", fgColor=fill_color)
             cell.font = Font(name="Arial", size=10, bold=True, color=font_color)
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    confirmation_sheet.sheet_properties.tabColor = "FF0000"
+    confirmation_sheet.freeze_panes = "A4"
+    confirmation_sheet.auto_filter.ref = (
+        f"A12:F{confirmation_sheet.max_row}" if confirmation_sheet.max_row > 12 else None
+    )
+    confirmation_sheet.column_dimensions["A"].width = 28
+    for column in "BCDE":
+        confirmation_sheet.column_dimensions[column].width = 16
+    confirmation_sheet.column_dimensions["F"].width = 16
+    confirmation_sheet["A1"].fill = PatternFill("solid", fgColor="C00000")
+    confirmation_sheet["A1"].font = Font(name="Arial", size=18, bold=True, color="FFFFFF")
+    confirmation_sheet["A1"].alignment = Alignment(vertical="center")
+    confirmation_sheet.row_dimensions[1].height = 40
+    confirmation_sheet["A2"].fill = PatternFill("solid", fgColor="FCE8E6")
+    confirmation_sheet["A2"].font = Font(name="Arial", size=10, italic=True, color="7A271A")
+    confirmation_sheet["A2"].alignment = Alignment(vertical="center", wrap_text=True)
+    confirmation_sheet.row_dimensions[2].height = 32
+    for header_row in (4, 12):
+        for cell in confirmation_sheet[header_row]:
+            cell.font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="C00000")
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = thin_border
+    for row_index in range(5, confirmation_sheet.max_row + 1):
+        if row_index in {11, 12}:
+            continue
+        for cell in confirmation_sheet[row_index]:
+            cell.border = thin_border
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+    confirmation_sheet["B10"].number_format = "0.00%"
+    for row_index in range(13, confirmation_sheet.max_row + 1):
+        confirmation_sheet.cell(row_index, 6).number_format = "0.00%"
+
+    workbook.calculation.fullCalcOnLoad = True
+    workbook.calculation.forceFullCalc = True
+    workbook.calculation.calcMode = "auto"
 
     for row_index in range(2, distribution.max_row + 1):
         if distribution.cell(row_index, 1).value == "严重程度":

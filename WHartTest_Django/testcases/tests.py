@@ -1,3 +1,4 @@
+import io
 import os
 import tempfile
 from unittest.mock import patch
@@ -55,6 +56,52 @@ class TestCaseReviewApiTests(TestCase):
         )
         self.assertEqual(response.status_code, 400)
         delay.assert_not_called()
+
+    def _xlsx_file(self, rows, name="cases.xlsx"):
+        workbook = Workbook()
+        sheet = workbook.active
+        for row in rows:
+            sheet.append(row)
+        stream = io.BytesIO()
+        workbook.save(stream)
+        return SimpleUploadedFile(
+            name,
+            stream.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    def test_diagnose_file_accepts_recognizable_xlsx(self):
+        response = self.client.post(
+            f"/api/projects/{self.project.id}/testcase-reviews/diagnose-file/",
+            {"source_file": self._xlsx_file([
+                ["用例编号", "测试步骤", "预期结果"],
+                ["CASE-001", "点击提交", "显示提交成功"],
+            ])},
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["usable"])
+        self.assertEqual(response.data["case_rows"], 1)
+
+    def test_diagnose_file_rejects_broken_xlsx(self):
+        response = self.client.post(
+            f"/api/projects/{self.project.id}/testcase-reviews/diagnose-file/",
+            {"source_file": SimpleUploadedFile("broken.xlsx", b"not-an-xlsx")},
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.data["usable"])
+        self.assertIn("文件无法解析或内容已损坏", response.data["detail"])
+
+    def test_diagnose_file_rejects_xlsx_without_case_headers(self):
+        response = self.client.post(
+            f"/api/projects/{self.project.id}/testcase-reviews/diagnose-file/",
+            {"source_file": self._xlsx_file([["姓名", "部门"], ["张三", "测试部"]])},
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.data["usable"])
+        self.assertIn("未识别到", response.data["detail"])
 
     @override_settings(MEDIA_ROOT=tempfile.gettempdir())
     @patch("testcases.views.execute_testcase_review.delay")
@@ -252,5 +299,30 @@ class TestCaseReviewReportTests(TestCase):
             self.assertEqual(generated["问题明细"]["F2"].fill.fgColor.rgb, "00FFF2D6")
             self.assertFalse(generated["问题明细"].sheet_view.showGridLines)
             self.assertEqual(generated["问题明细"].freeze_panes, "A2")
+            self.assertEqual(
+                [generated["问题明细"].cell(1, column).value for column in range(11, 14)],
+                ["问题确认", "修改点", "不采纳原因"],
+            )
+            self.assertEqual(
+                [generated["问题明细"].cell(2, column).value for column in range(11, 14)],
+                [None, None, None],
+            )
+            validations = list(generated["问题明细"].data_validations.dataValidation)
+            self.assertEqual(len(validations), 1)
+            self.assertEqual(validations[0].formula1, '"是,否"')
+            self.assertIn("K2", str(validations[0].sqref))
+
+            self.assertIn("测试确认处理结果", generated.sheetnames)
+            confirmation = generated["测试确认处理结果"]
+            self.assertEqual(confirmation.sheet_properties.tabColor.rgb, "00FF0000")
+            self.assertEqual(confirmation["B5"].value, 1)
+            self.assertEqual(confirmation["B6"].value, "=COUNTA('问题明细'!$A$2:$A$2)")
+            self.assertEqual(confirmation["B7"].value, '=COUNTIF(\'问题明细\'!$K$2:$K$2,"是")')
+            self.assertEqual(confirmation["B10"].value, "=IF(B6=0,0,B7/B6)")
+            self.assertEqual(confirmation["A13"].value, "判定标准模糊")
+            self.assertIn("COUNTIFS", confirmation["C13"].value)
+            self.assertEqual(confirmation["F13"].number_format, "0.00%")
+            self.assertEqual(generated.calculation.calcMode, "auto")
+            self.assertTrue(generated.calculation.fullCalcOnLoad)
             generated.close()
             review.delete()

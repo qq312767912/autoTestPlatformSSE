@@ -57,6 +57,13 @@ export async function createReview(projectId: number, file: File, options: {
   return response.data as TestCaseReview;
 }
 
+export async function diagnoseReviewFile(projectId: number, file: File) {
+  const form = new FormData();
+  form.append('source_file', file);
+  const response = await http.post(`/projects/${projectId}/testcase-reviews/diagnose-file/`, form);
+  return response.data as { usable: boolean; detail: string; case_rows?: number };
+}
+
 export async function retryReview(projectId: number, id: number) {
   const response = await http.post(`/projects/${projectId}/testcase-reviews/${id}/retry/`);
   return response.data as TestCaseReview;

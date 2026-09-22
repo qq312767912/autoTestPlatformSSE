@@ -98,13 +98,14 @@
                 class="review-upload"
                 :file-list="fileList"
                 :auto-upload="false"
+                :custom-request="diagnoseUpload"
                 :show-retry-button="false"
                 :limit="1"
                 accept=".xlsx,.csv"
                 draggable
                 @change="onFileChange"
               />
-              <div class="hint">支持 XLSX、CSV，单个文件最大 50MB。</div>
+              <div class="hint">支持 XLSX、CSV，单个文件最大 50MB。点击文件右侧三角形可诊断是否为平台可用格式。</div>
             </div>
           </a-form-item>
         </section>
@@ -167,6 +168,7 @@ import {
   copyPlatformLlmConfig,
   createReview,
   deleteReview,
+  diagnoseReviewFile,
   getPlatformLlmConfigs,
   getReviewLlmConfig,
   listReviews,
@@ -304,6 +306,25 @@ async function testLlmConfig() {
 function onFileChange(files: any[]) {
   fileList.value = files;
   selectedFile.value = files?.[0]?.file || null;
+}
+function diagnoseUpload(option: any) {
+  const file = option?.fileItem?.file as File | undefined;
+  if (!projectId.value || !file) {
+    const error = new Error('请选择需要诊断的测试用例文件');
+    option?.onError?.(error);
+    Message.error(error.message);
+    return { abort() {} };
+  }
+  diagnoseReviewFile(projectId.value, file)
+    .then((result) => {
+      option.onSuccess(result);
+      Message.success(result.detail || '格式诊断通过');
+    })
+    .catch((error: any) => {
+      option.onError(error);
+      Message.error(error?.response?.data?.detail || error?.message || '不是平台可用的 XLSX/CSV 格式');
+    });
+  return { abort() {} };
 }
 async function submit() {
   if (!projectId.value || !selectedFile.value) return Message.warning('请选择测试用例文件');
