@@ -2,9 +2,9 @@
   <div class="chat-messages" ref="messagesContainer">
     <!-- 顶部加载更多历史记录按钮 -->
     <div v-if="hasMore && messages.length > 0" class="load-more-container">
-      <button 
-        class="load-more-btn" 
-        :disabled="isLoadingMore" 
+      <button
+        class="load-more-btn"
+        :disabled="isLoadingMore"
         @click="emit('load-more')"
       >
         <span v-if="isLoadingMore" class="loading-spinner"></span>
@@ -42,7 +42,7 @@
 import { ref, watch, nextTick, onMounted, onUnmounted, computed } from 'vue';
 import MessageItem from './MessageItem.vue';
 import { brandLogoUrl } from '@/utils/assetUrl';
-import type { TodoDisplayPayload, ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
+import type { ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
 import type { FileAsset } from '@/features/file-management/types';
 import { useAppI18n } from '@/composables/useAppI18n';
 
@@ -53,7 +53,6 @@ interface ChatMessage {
   isLoading?: boolean;
   messageType?: 'human' | 'ai' | 'tool' | 'system' | 'agent_step' | 'step_separator';
   toolName?: string;
-  todoPayload?: TodoDisplayPayload;
   isExpanded?: boolean;
   isStreaming?: boolean;
   imageBase64?: string;
@@ -88,12 +87,12 @@ const props = withDefaults(defineProps<Props>(), {
 const { isEnglish } = useAppI18n();
 const text = computed(() => (
   isEnglish.value
-    ? { 
+    ? {
         emptyChat: 'Start chatting with WHartTest',
         loadMore: 'Load older messages',
         loadingMore: 'Loading...'
       }
-    : { 
+    : {
         emptyChat: '开始与 WHartTest 的对话吧',
         loadMore: '查看更早的历史记录',
         loadingMore: '正在加载历史记录...'
@@ -137,12 +136,12 @@ const handleScroll = () => {
   // 检测用户是否在底部
   const nearBottom = isNearBottom();
   userIsScrolling.value = !nearBottom;
-  
+
   // 清除之前的定时器
   if (scrollTimeout !== null) {
     clearTimeout(scrollTimeout);
   }
-  
+
   // 如果用户滚动到底部附近，恢复自动滚动
   if (nearBottom) {
     scrollTimeout = window.setTimeout(() => {

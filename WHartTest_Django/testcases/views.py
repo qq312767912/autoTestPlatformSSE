@@ -14,6 +14,7 @@ from datetime import timedelta
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
 from rest_framework.parsers import MultiPartParser, FormParser
+from wharttest_django.pagination import StandardPagination
 import io
 import os
 import tempfile
@@ -43,7 +44,6 @@ from .permissions import (
     IsProjectMemberForTestCaseModule,
 )
 from .filters import TestCaseFilter  # 导入自定义过滤器
-from wharttest_django.pagination import StandardPagination
 
 from .review_tasks import execute_testcase_review
 
@@ -230,7 +230,6 @@ class TestCaseReviewLLMConfigViewSet(viewsets.ModelViewSet):
 
 # 确保导入项目自定义的权限类
 from wharttest_django.permissions import HasModelPermission, permission_required
-from wharttest_django.pagination import StandardPagination
 
 
 def _normalize_media_url(url: str) -> str:
@@ -279,13 +278,10 @@ class TestCaseViewSet(viewsets.ModelViewSet):
     ordering_fields = ["id", "created_at", "updated_at"]
     ordering = ["-created_at"]
 
-    def _should_include_steps(self):
-        value = self.request.query_params.get("include_steps")
-        return str(value).lower() in {"1", "true", "yes"}
-
     def get_serializer_class(self):
-        """列表接口默认使用精简序列化器，详情/写入接口保留完整步骤数据。"""
-        if self.action == "list" and not self._should_include_steps():
+        """列表接口使用精简序列化器，详情/写入接口保留完整步骤数据。"""
+        include_steps = self.request.query_params.get("include_steps") == "true"
+        if self.action == "list" and not include_steps:
             return TestCaseListSerializer
         return TestCaseSerializer
 
@@ -309,15 +305,17 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         project_pk = self.kwargs.get("project_pk")
         if project_pk:
             project = get_object_or_404(Project, pk=project_pk)
-            # 权限类 IsProjectMemberForTestCase 已经检查了用户是否是此项目的成员，
-            # 所以这里可以直接返回项目下的用例。列表接口默认不预取 steps，减少传输和查询开销；
-            # 思维导图等场景可通过 include_steps=true/1/yes 显式获取步骤详情。
-            qs = TestCase.objects.filter(project=project).select_related(
-                "creator", "module"
+            # 权限类 IsProjectMemberForTestCase 已经检查了用户是否是此项目的成员
+            # 所以这里可以直接返回项目下的用例
+            queryset = (
+                TestCase.objects.filter(project=project)
+                .select_related("creator", "module", "ui_test_case__module")
+                .prefetch_related("ui_test_case__case_steps")
             )
-            if self.action != "list" or self._should_include_steps():
-                qs = qs.prefetch_related("steps")
-            return qs
+            include_steps = self.request.query_params.get("include_steps") == "true"
+            if self.action != "list" or include_steps:
+                queryset = queryset.prefetch_related("steps")
+            return queryset
         # 如果没有 project_pk (理论上不应该发生，因为路由是嵌套的)
         # 返回空 queryset 或根据需求抛出错误
         return TestCase.objects.none()
@@ -384,6 +382,8 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                 try:
                     testcase_ids = [int(id) for id in ids_data]
                 except (ValueError, TypeError):
+                    from rest_framework.response import Response
+
                     return Response(
                         {"error": "ids参数格式错误，应为数字列表"}, status=400
                     )
@@ -405,6 +405,8 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                         int(id.strip()) for id in ids_param.split(",") if id.strip()
                     ]
                 except ValueError:
+                    from rest_framework.response import Response
+
                     return Response(
                         {"error": "ids参数格式错误，应为逗号分隔的数字列表"}, status=400
                     )
@@ -936,6 +938,94 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             return Response(
                 {"error": f"删除过程中发生错误: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(detail=True, methods=["post"], url_path="bind-ui-testcase")
+    def bind_ui_testcase(self, request, project_pk=None, pk=None):
+        """
+        绑定或解绑 UI 自动化用例
+        POST /api/projects/{project_pk}/testcases/{pk}/bind-ui-testcase/
+        请求体: {"ui_test_case_id": 123, "execution_mode": "hybrid"}
+        """
+        from ui_automation.models import UiTestCase
+        testcase = self.get_object()
+        ui_test_case_id = request.data.get("ui_test_case_id")
+
+        if ui_test_case_id:
+            try:
+                ui_tc = UiTestCase.objects.get(id=ui_test_case_id, project_id=testcase.project_id)
+                testcase.ui_test_case = ui_tc
+            except UiTestCase.DoesNotExist:
+                return Response(
+                    {"error": "指定的 UI 自动化用例不存在或不属于当前项目"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            testcase.ui_test_case = None
+
+        if "execution_mode" in request.data:
+            testcase.execution_mode = request.data["execution_mode"]
+
+        testcase.save(update_fields=["ui_test_case", "execution_mode", "updated_at"])
+        serializer = self.get_serializer(testcase)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="diagnose-failure")
+    def diagnose_failure(self, request, project_pk=None, pk=None):
+        """
+        AI 失败归因诊断接口
+        POST /api/projects/{project_pk}/testcases/{pk}/diagnose-failure/
+        请求体: {"ui_execution_record_id": 123} (可选)
+        """
+        from .ai_diagnosis_service import diagnose_execution_failure
+        testcase = self.get_object()
+        ui_record_id = request.data.get("ui_execution_record_id")
+
+        try:
+            diagnosis = diagnose_execution_failure(
+                testcase=testcase,
+                ui_record_id=ui_record_id,
+                user=request.user,
+            )
+            return Response(diagnosis, status=status.HTTP_200_OK)
+        except ValueError as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"AI 诊断失败: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(detail=True, methods=["post"], url_path="apply-healing")
+    def apply_healing(self, request, project_pk=None, pk=None):
+        """
+        一键应用 AI 自愈建议，回写 UI 元素定位配置
+        POST /api/projects/{project_pk}/testcases/{pk}/apply-healing/
+        请求体: {
+            "element_id": 123,
+            "element_name": "...",
+            "suggested_locator_type": "xpath",
+            "suggested_locator_value": "..."
+        }
+        """
+        from .ai_diagnosis_service import apply_healing_to_element
+        testcase = self.get_object()
+        healing_data = request.data
+
+        try:
+            result = apply_healing_to_element(
+                testcase=testcase,
+                healing_data=healing_data,
+                user=request.user,
+            )
+            return Response(result, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response(
+                {"error": f"应用自愈建议失败: {str(e)}"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
 

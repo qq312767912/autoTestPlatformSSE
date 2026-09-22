@@ -9,8 +9,18 @@
             <a-tag v-if="env.is_default" size="small" color="arcoblue" style="margin-left: 4px">{{ stepText.default }}</a-tag>
           </a-option>
         </a-select>
+        <a-select
+          v-model="selectedAuthState"
+          :placeholder="stepText.authStatePlaceholder"
+          size="small"
+          style="width: 160px"
+          allow-clear
+          @change="onAuthStateChange"
+        >
+          <a-option v-for="a in envAuthStates" :key="a.id" :value="a.id">{{ a.name }}</a-option>
+        </a-select>
         <a-select v-model="selectedActuator" :placeholder="stepText.selectActuator" size="small" style="width: 150px" allow-clear>
-          <a-option v-for="act in actuators" :key="act.id" :value="act.id" :disabled="!act.is_open">
+          <a-option v-for="act in allActuators" :key="act.id" :value="act.id" :disabled="!act.is_open">
             {{ act.name || act.id }}
             <a-tag v-if="!act.is_open" size="small" color="gray" style="margin-left: 4px">{{ stepText.offline }}</a-tag>
           </a-option>
@@ -19,6 +29,25 @@
           <template #icon><icon-play-arrow /></template>
           {{ stepText.debugRun }}
         </a-button>
+        <a-checkbox
+          :model-value="allStepSelected"
+          :indeterminate="partialStepSelected"
+          :disabled="!stepData.length"
+          class="step-select-all"
+          @change="toggleSelectAllSteps"
+        >
+          {{ stepText.selectAll }}
+        </a-checkbox>
+        <a-popconfirm
+          :content="stepText.batchDeleteConfirm"
+          :disabled="!selectedStepIds.length"
+          @ok="handleBatchDeleteSteps"
+        >
+          <a-button status="danger" size="small" :disabled="!selectedStepIds.length">
+            <template #icon><icon-delete /></template>
+            {{ stepText.batchDelete }}{{ selectedStepIds.length ? `（${selectedStepIds.length}）` : '' }}
+          </a-button>
+        </a-popconfirm>
         <a-button type="primary" size="small" @click="showAddModal">
           <template #icon><icon-plus /></template>
           {{ stepText.addAction }}
@@ -38,8 +67,13 @@
         @end="onDragEnd"
       >
         <template #item="{ element, index }">
-          <div class="step-card">
+          <div class="step-card" :class="{ 'step-card--selected': selectedStepIds.includes(element.id) }">
             <div class="step-left">
+              <a-checkbox
+                v-model="selectedStepIds"
+                :value="element.id"
+                class="step-batch-checkbox"
+              />
               <div class="drag-handle">
                 <icon-drag-dot-vertical />
               </div>
@@ -168,6 +202,7 @@
                 <a-option value="type">{{ stepText.typeOption }}</a-option>
                 <a-option value="clear">{{ stepText.clearOption }}</a-option>
                 <a-option value="press">{{ stepText.pressOption }}</a-option>
+                <a-option value="captcha_recognize">{{ stepText.captchaRecognizeOption }}</a-option>
               </a-optgroup>
               <a-optgroup :label="stepText.groupSelect">
                 <a-option value="select_option">{{ stepText.selectOption }}</a-option>
@@ -190,12 +225,39 @@
               </a-optgroup>
             </a-select>
           </a-form-item>
+          <!-- 智能识别验证码参数表单 -->
+          <template v-if="formData.ope_key === 'captcha_recognize'">
+            <a-form-item :label="stepText.selectTargetElement" required>
+              <a-select
+                v-model="opeParams.target_element_id"
+                :placeholder="stepText.pleaseSelectTargetElement"
+                allow-search
+                allow-clear
+                :disabled="!selectedElementPage"
+                @change="onTargetElementChange"
+              >
+                <a-option v-for="el in elementOptions" :key="el.id" :value="el.id">
+                  {{ el.name }}
+                </a-option>
+              </a-select>
+            </a-form-item>
+            <a-form-item :label="stepText.retryCount">
+              <a-input-number
+                v-model="opeParams.retry_count"
+                :min="1"
+                :max="10"
+                :placeholder="stepText.retryCountPlaceholder"
+              />
+            </a-form-item>
+            <a-form-item :label="stepText.clickToRefresh">
+              <a-switch v-model="opeParams.click_to_refresh" />
+            </a-form-item>
+          </template>
           <!-- 根据操作类型动态渲染参数表单 -->
           <template v-if="currentOpeParams.length > 0">
             <a-form-item
               v-for="param in currentOpeParams"
               :key="param.field"
-              :field="'opeParams.' + param.field"
               :label="getParamLabel(param)"
               :required="param.required"
             >
@@ -380,6 +442,13 @@
       </a-table>
     </a-modal>
 
+    <!-- 页面步骤执行画面（直播帧） -->
+    <ExecutionScreenModal
+      v-model:visible="execScreenVisible"
+      mode="page-steps"
+      :task-id="execScreenTaskId"
+    />
+
   </div>
 </template>
 
@@ -389,10 +458,12 @@ import { Message } from '@arco-design/web-vue'
 import { IconPlus, IconEdit, IconDelete, IconDragDotVertical, IconPlayArrow, IconUpload } from '@arco-design/web-vue/es/icon'
 import draggable from 'vuedraggable'
 import { useAppI18n } from '@/composables/useAppI18n'
-import { pageStepsDetailedApi, elementApi, actuatorApi, envConfigApi, moduleApi, pageApi, type ActuatorInfo } from '../api'
+import { pageStepsApi, pageStepsDetailedApi, elementApi, actuatorApi, envConfigApi, moduleApi, pageApi, authStateApi, type ActuatorInfo } from '../api'
 import type { UiPageStepsDetailed, UiPageSteps, UiElement, UiModule, UiPage, StepType, UiEnvironmentConfig } from '../types'
+import type { UiAuthState } from '../types'
 import { STEP_TYPE_LABELS, extractListData, extractResponseData } from '../types'
 import { uiWebSocket, UiSocketEnum } from '../services/websocket'
+import ExecutionScreenModal from '../components/ExecutionScreenModal.vue'
 import { fileService } from '@/features/file-management/services/fileService'
 
 /** 操作参数定义 */
@@ -437,6 +508,7 @@ const OPE_KEY_LABELS: Record<string, string> = {
   type: '输入',
   clear: '清空',
   press: '按键模拟',
+  captcha_recognize: '智能识别验证码',
   select_option: '选择下拉',
   check: '勾选',
   uncheck: '取消勾选',
@@ -466,7 +538,12 @@ const OPE_KEY_LABELS: Record<string, string> = {
 /** 格式化操作值显示 */
 const formatOpeValue = (opeValue: Record<string, any>) => {
   if (opeValue.file_name) return `file: ${opeValue.file_name}`
-  const entries = Object.entries(opeValue).filter(([k, v]) => !['file_id', 'mime_type'].includes(k) && v !== null && v !== undefined && v !== '')
+  if (opeValue.target_element_name || opeValue.target_element_id) {
+    const targetName = opeValue.target_element_name || `ID:${opeValue.target_element_id}`
+    const retry = opeValue.retry_count ?? 3
+    return `${stepText.value.targetElementLabel}: ${targetName} | ${stepText.value.retryCountLabel}: ${retry}`
+  }
+  const entries = Object.entries(opeValue).filter(([k, v]) => !['file_id', 'mime_type', 'target_locator'].includes(k) && v !== null && v !== undefined && v !== '')
   if (entries.length === 0) return ''
   return entries.map(([k, v]) => `${k}: ${typeof v === 'string' && v.length > 30 ? v.slice(0, 30) + '...' : v}`).join(', ')
 }
@@ -480,6 +557,8 @@ const stepText = computed(() => isEnglish.value
       executionEnv: 'Environment',
       default: 'Default',
       selectActuator: 'Select actuator',
+      authStatePlaceholder: 'Select login state',
+      authStateSaved: 'Step login-state binding updated',
       offline: 'Offline',
       debugRun: 'Debug Run',
       addAction: 'Add action',
@@ -518,6 +597,14 @@ const stepText = computed(() => isEnglish.value
       typeOption: 'Type (type)',
       clearOption: 'Clear (clear)',
       pressOption: 'Press key (press)',
+      captchaRecognizeOption: 'Captcha recognize (captcha_recognize)',
+      selectTargetElement: 'Captcha input element',
+      pleaseSelectTargetElement: 'Please select captcha input element',
+      retryCount: 'Max retries',
+      retryCountPlaceholder: 'Default 3',
+      clickToRefresh: 'Click captcha to refresh on retry',
+      targetElementLabel: 'Target input',
+      retryCountLabel: 'Retries',
       selectOption: 'Select option (select_option)',
       checkOption: 'Check (check)',
       uncheckOption: 'Uncheck (uncheck)',
@@ -587,7 +674,11 @@ const stepText = computed(() => isEnglish.value
       addFailed: 'Add failed',
       deleteSuccess: 'Deleted successfully',
       deleteFailed: 'Delete failed',
+      batchDelete: 'Batch delete',
+      batchDeleteConfirm: 'Delete the selected steps?',
+      selectAll: 'Select all',
       sortSaved: 'Order saved',
+      saveFailed: 'Save failed',
       saveSortFailed: 'Failed to save order',
     }
   : {
@@ -595,6 +686,8 @@ const stepText = computed(() => isEnglish.value
       executionEnv: '执行环境',
       default: '默认',
       selectActuator: '选择执行器',
+      authStatePlaceholder: '请选择登录态',
+      authStateSaved: '步骤登录态绑定已更新',
       offline: '离线',
       debugRun: '调试执行',
       addAction: '添加操作',
@@ -633,6 +726,14 @@ const stepText = computed(() => isEnglish.value
       typeOption: '输入 (type)',
       clearOption: '清空 (clear)',
       pressOption: '按键模拟 (press)',
+      captchaRecognizeOption: '智能识别验证码 (captcha_recognize)',
+      selectTargetElement: '验证码输入框元素',
+      pleaseSelectTargetElement: '请选择验证码输入框元素',
+      retryCount: '最大重试次数',
+      retryCountPlaceholder: '默认 3 次',
+      clickToRefresh: '重试时点击验证码刷新',
+      targetElementLabel: '目标输入框',
+      retryCountLabel: '重试',
       selectOption: '选择下拉 (select_option)',
       checkOption: '勾选 (check)',
       uncheckOption: '取消勾选 (uncheck)',
@@ -702,7 +803,11 @@ const stepText = computed(() => isEnglish.value
       addFailed: '添加失败',
       deleteSuccess: '删除成功',
       deleteFailed: '删除失败',
+      batchDelete: '批量删除',
+      batchDeleteConfirm: '确定删除选中的步骤？',
+      selectAll: '全选',
       sortSaved: '排序已保存',
+      saveFailed: '保存失败',
       saveSortFailed: '保存排序失败',
     }
 )
@@ -727,6 +832,7 @@ const opeKeyLabelsEn: Record<string, string> = {
   type: 'Type',
   clear: 'Clear',
   press: 'Press key',
+  captcha_recognize: 'Captcha recognize',
   select_option: 'Select option',
   check: 'Check',
   uncheck: 'Uncheck',
@@ -804,6 +910,18 @@ const translateServerMessage = (message: unknown) => (
 const loading = ref(false)
 const submitting = ref(false)
 const stepData = ref<UiPageStepsDetailed[]>([])
+const selectedStepIds = ref<number[]>([])
+
+// 一键全选（含半选态）
+const allStepSelected = computed(
+  () => stepData.value.length > 0 && selectedStepIds.value.length === stepData.value.length,
+)
+const partialStepSelected = computed(
+  () => selectedStepIds.value.length > 0 && selectedStepIds.value.length < stepData.value.length,
+)
+const toggleSelectAllSteps = (checked: boolean) => {
+  selectedStepIds.value = checked ? stepData.value.map((s) => s.id) : []
+}
 const moduleOptions = ref<UiModule[]>([])
 const modulesLoading = ref(false)
 const flatModuleOptions = computed(() => flattenModules(moduleOptions.value))
@@ -819,7 +937,19 @@ const formRef = ref()
 // 执行器相关
 const actuators = ref<ActuatorInfo[]>([])
 const selectedActuator = ref<string>('')
+// 录制器浏览器（本地）：无执行器时的步骤调试兜底
+const RECORDER_BROWSER_ID = 'recorder-browser'
+const recorderBrowserName = computed(() => (isEnglish.value ? 'Recorder Browser (Local)' : '录制器浏览器（本地）'))
+const allActuators = computed(() => [
+  { id: RECORDER_BROWSER_ID, name: recorderBrowserName.value, is_open: true, max_slots: 1, busy_slots: 0 } as ActuatorInfo,
+  ...actuators.value,
+])
 const executing = ref(false)
+// 页面步骤执行画面（直播帧弹窗）：是否弹出由执行器无头开关决定——
+// 后端回执 effective_runtime.headless === false（观看模式）时才弹
+const execScreenVisible = ref(false)
+const execScreenTaskId = ref<number | null>(null)
+const pendingScreenPageStepId = ref<number | null>(null)
 
 // 执行环境相关
 const envConfigs = ref<UiEnvironmentConfig[]>([])
@@ -856,6 +986,20 @@ const currentOpeParams = computed(() => {
 const onOpeKeyChange = () => {
   Object.keys(opeParams).forEach(k => delete opeParams[k])
   uploadingFile.value = false
+  if (formData.ope_key === 'captcha_recognize') {
+    opeParams.retry_count = 3
+    opeParams.click_to_refresh = true
+  }
+}
+
+/** 验证码目标输入框选择变更 */
+const onTargetElementChange = (val: any) => {
+  const matched = elementOptions.value.find(e => e.id === val)
+  if (matched) {
+    opeParams.target_element_name = matched.name
+  } else {
+    delete opeParams.target_element_name
+  }
 }
 
 const rules = {
@@ -984,13 +1128,73 @@ const fetchSteps = async () => {
   }
 }
 
+// 步骤绑定的登录态（执行时优先注入该登录态；留空随环境生效登录态）
+const envAuthStates = ref<Array<{ id: number; name: string }>>([])
+const selectedAuthState = ref<number | undefined>(undefined)
+
+const fetchEnvAuthStates = async () => {
+  envAuthStates.value = []
+  if (!props.pageStep?.id) return
+  const boundId = props.pageStep.auth_state_id ?? undefined
+  if (!selectedEnvConfig.value) {
+    selectedAuthState.value = boundId
+    return
+  }
+  try {
+    const res = await authStateApi.list({ env_config: selectedEnvConfig.value })
+    const items = extractListData<UiAuthState>(res)
+    // 与执行环境下拉同源：按当前所选环境展示其登录态（名称+绑定回显）
+    envAuthStates.value = items.map((i) => ({ id: i.id, name: i.name }))
+    selectedAuthState.value = boundId
+    // 绑定的登录态不属于当前所选环境（如录制时绑定了其他环境的登录态）：
+    // 兜底拉取其名称补进下拉，避免选择框显示为空/裸 id
+    if (boundId && !envAuthStates.value.some((i) => i.id === boundId)) {
+      try {
+        const boundRes = await authStateApi.get(boundId)
+        const bound = extractResponseData<UiAuthState>(boundRes)
+        if (bound?.id) {
+          envAuthStates.value = [...envAuthStates.value, { id: bound.id, name: bound.name }]
+        }
+      } catch {
+        // 登录态可能已被删除：清空回显，避免残留失效绑定
+        selectedAuthState.value = undefined
+      }
+    }
+  } catch {
+    // 加载失败时回显当前绑定，避免误清空
+    selectedAuthState.value = boundId
+  }
+}
+
+// 环境选择变化即刷新（含默认环境自动选中后触发）
+watch(selectedEnvConfig, () => { fetchEnvAuthStates() }, { immediate: true })
+
+const onAuthStateChange = async (val: unknown) => {
+  try {
+    await pageStepsApi.update(props.pageStep.id, { auth_state_id: val ? Number(val) : null })
+    Message.success(stepText.value.authStateSaved)
+  } catch {
+    Message.error(stepText.value.saveFailed || '保存失败')
+    fetchEnvAuthStates()
+  }
+}
+
 const fetchActuators = async () => {
   try {
     const res = await actuatorApi.list()
     const data = extractResponseData<{ count: number; items: ActuatorInfo[] }>(res)
     actuators.value = data?.items ?? []
+    // 未选择时默认录制器浏览器（本地）（自动打开执行画布）；需真实执行器时下拉选
+    if (!selectedActuator.value) {
+      selectedActuator.value = RECORDER_BROWSER_ID
+      return
+    }
+    // 录制器浏览器不在执行器列表中，始终有效
+    if (selectedActuator.value === RECORDER_BROWSER_ID) {
+      return
+    }
     // 自动选择第一个在线的执行器
-    if (!selectedActuator.value && actuators.value.length > 0) {
+    if (actuators.value.length > 0) {
       const available = actuators.value.find((a: ActuatorInfo) => a.is_open)
       if (available) selectedActuator.value = available.id
     }
@@ -1034,9 +1238,9 @@ const executePageStep = async () => {
     Message.warning(stepText.value.noActionSteps)
     return
   }
-  
+
   executing.value = true
-  
+
   // 确保 WebSocket 已连接
   if (!uiWebSocket.connected.value) {
     try {
@@ -1047,16 +1251,25 @@ const executePageStep = async () => {
       return
     }
   }
-  
+
+    // 后端下发任务后会回 effective_runtime（含 headless）：
+  // 无头开关关闭（观看模式）时才弹执行画面画布
+  pendingScreenPageStepId.value = props.pageStep.id
   const sent = uiWebSocket.send(UiSocketEnum.PAGE_STEPS, {
     page_step_id: props.pageStep.id,
     env_config_id: selectedEnvConfig.value,
     actuator_id: selectedActuator.value,
+    auth_state_id: selectedAuthState.value,
   })
-  
+
   if (!sent) {
     Message.error(stepText.value.sendExecutionFailed)
     executing.value = false
+    pendingScreenPageStepId.value = null
+  } else if (selectedActuator.value === RECORDER_BROWSER_ID) {
+    // 录制器浏览器执行：发送即打开执行画布（不依赖回执），失败也有无帧提示可见
+    execScreenTaskId.value = props.pageStep.id
+    execScreenVisible.value = true
   }
 }
 
@@ -1065,7 +1278,7 @@ const handleStepResult = (data: any) => {
   executing.value = false
   const result = data.data?.func_args
   if (!result) return
-  
+
   if (result.status === 'success') {
     Message.success(stepText.value.executionSuccess(result.passed_steps || 0, result.total_steps || 0))
   } else {
@@ -1137,7 +1350,7 @@ const editStep = async (step: UiPageStepsDetailed) => {
   Object.keys(opeParams).forEach(k => delete opeParams[k])
   if (step.ope_value && typeof step.ope_value === 'object') {
     Object.assign(opeParams, step.ope_value)
-    
+
     // 兼容性处理：如果 ope_value 使用 'value' 字段而不是 'text' 字段，进行转换
     if (step.ope_key === 'fill' && step.ope_value.value !== undefined && step.ope_value.text === undefined) {
       // 将 value 字段的内容复制到 text 字段，以兼容前端表单
@@ -1284,13 +1497,13 @@ const buildOpeValue = () => {
       result[k] = v
     }
   }
-  
+
   // 兼容性处理：对于 fill 操作，如果存在 text 字段，也同步到 value 字段
   // 这样后端执行器可以正确识别两种格式
   if (formData.ope_key === 'fill' && result.text !== undefined) {
     result.value = result.text
   }
-  
+
   return Object.keys(result).length > 0 ? result : undefined
 }
 
@@ -1302,7 +1515,7 @@ const handleSubmit = async (done: (closed: boolean) => void) => {
     done(false)
     return
   }
-  
+
   // 额外的业务逻辑校验：对于 fill 操作，必须填写输入内容
   if (formData.ope_key === 'fill') {
     const textValue = opeParams.text
@@ -1316,6 +1529,25 @@ const handleSubmit = async (done: (closed: boolean) => void) => {
     Message.warning(stepText.value.chooseUploadFile)
     done(false)
     return
+  }
+  if (formData.ope_key === 'captcha_recognize') {
+    if (!opeParams.target_element_id) {
+      Message.warning(stepText.value.pleaseSelectTargetElement)
+      done(false)
+      return
+    }
+    if (opeParams.retry_count === undefined || opeParams.retry_count === null) {
+      opeParams.retry_count = 3
+    }
+    if (opeParams.click_to_refresh === undefined) {
+      opeParams.click_to_refresh = true
+    }
+    if (!opeParams.target_element_name && opeParams.target_element_id) {
+      const matched = elementOptions.value.find(e => e.id === opeParams.target_element_id)
+      if (matched) {
+        opeParams.target_element_name = matched.name
+      }
+    }
   }
 
   // 预解析 JSON 配置字段：custom / condition_value 必须是合法 JSON，
@@ -1392,6 +1624,19 @@ const handleCancel = () => {
   modalVisible.value = false
 }
 
+const handleBatchDeleteSteps = async () => {
+  if (!selectedStepIds.value.length) return
+  try {
+    await pageStepsDetailedApi.batchDelete(selectedStepIds.value)
+    Message.success(stepText.value.deleteSuccess)
+    selectedStepIds.value = []
+    await fetchSteps()
+  } catch (error: unknown) {
+    const err = error as { error?: string }
+    Message.error(translateServerMessage(err?.error) || stepText.value.deleteFailed)
+  }
+}
+
 const deleteStep = async (step: UiPageStepsDetailed) => {
   if (!step.id) return
   try {
@@ -1430,10 +1675,25 @@ const onDragEnd = async () => {
 
 // WebSocket 事件监听
 let offStepResult: (() => void) | null = null
+let offEffectiveRuntime: (() => void) | null = null
+
+/** 后端回执生效运行时：无头开关关闭（观看模式）时弹出执行画面画布 */
+const handleEffectiveRuntime = (data: any) => {
+  const args = data?.data?.func_args || {}
+  if (args.headless === false && pendingScreenPageStepId.value != null) {
+    execScreenTaskId.value = pendingScreenPageStepId.value
+    execScreenVisible.value = true
+  }
+  pendingScreenPageStepId.value = null
+}
 
 watch(() => props.pageStep, async () => {
   fetchSteps()
   moduleOptions.value = []
+  // 组件被抽屉复用（v-if 只看 currentPageStep 非空，切换步骤不重建），
+  // 先清掉上一个步骤的登录态回显，防止串显（前一步绑 B、本步绑 A 时误显 B）
+  selectedAuthState.value = undefined
+  envAuthStates.value = []
   // 页面和元素按当前页面步骤默认值初始化；同时加载模块树确保初次渲染不会回显ID，支持跨模块/页面
   await Promise.all([
     fetchModules(true),
@@ -1441,17 +1701,23 @@ watch(() => props.pageStep, async () => {
     fetchActuators(),
     fetchEnvConfigs()
   ])
+  // 按当前步骤的绑定重拉登录态回显（fetchEnvAuthStates 读取最新的 props.pageStep.auth_state_id）
+  await fetchEnvAuthStates()
 }, { immediate: true })
 
 onMounted(() => {
   fetchActuators()
   fetchEnvConfigs()
+  fetchEnvAuthStates()
   // 监听页面步骤执行结果
   offStepResult = uiWebSocket.on(UiSocketEnum.PAGE_STEP_RESULT, handleStepResult)
+  // 监听生效运行时回执（决定是否弹执行画面）
+  offEffectiveRuntime = uiWebSocket.on(UiSocketEnum.EFFECTIVE_RUNTIME, handleEffectiveRuntime)
 })
 
 onUnmounted(() => {
   offStepResult?.()
+  offEffectiveRuntime?.()
 })
 </script>
 
@@ -1475,6 +1741,14 @@ onUnmounted(() => {
 .empty-tips {
   padding: 40px 0;
 }
+.step-card--selected {
+  border-color: var(--color-primary-4) !important;
+}
+
+.step-batch-checkbox {
+  margin-right: 6px;
+}
+
 .step-card {
   display: flex;
   align-items: center;

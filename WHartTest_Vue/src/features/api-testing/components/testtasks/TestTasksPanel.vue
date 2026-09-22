@@ -6,11 +6,11 @@ import { useEnvironmentStore } from '../../stores/environmentStore'
 import { Message, Modal, Select, Option } from '@arco-design/web-vue'
 import { useRouter } from 'vue-router'
 import { IconEdit, IconDelete, IconPlayArrow, IconPlus, IconSearch, IconHistory } from '@arco-design/web-vue/es/icon'
-import { 
-  getTestTaskSuites, 
-  deleteTestTaskSuite, 
+import {
+  getTestTaskSuites,
+  deleteTestTaskSuite,
   createTestTaskExecution,
-  type TestTaskSuite 
+  type TestTaskSuite
 } from '../../services/testTaskService'
 import { toArray } from '../../services/responseHelpers'
 
@@ -120,10 +120,10 @@ const handleRun = async (taskSuite: TestTaskSuite) => {
 
   try {
     loading.value = true
-    
+
     // 确保环境列表已加载
     await environmentStore.fetchEnvironments(projectStore.currentProjectId)
-    
+
     if (environmentStore.environments.length === 0) {
       Message.warning('当前项目没有可用的环境，请先创建环境')
       return
@@ -211,7 +211,7 @@ const modalContent = (taskSuite: TestTaskSuite) => {
         ])
       ])
     ]),
-    
+
     // 环境选择
     h('div', { class: 'space-y-2' }, [
       h('div', { class: 'testtask-modal-section-title' }, '执行环境'),
@@ -225,7 +225,7 @@ const modalContent = (taskSuite: TestTaskSuite) => {
         allowClear: false,
         class: 'w-full'
       }, {
-        default: () => environmentStore.environments.map(env => 
+        default: () => environmentStore.environments.map(env =>
           h(Option, {
             key: env.id,
             value: env.id,
@@ -318,9 +318,14 @@ onMounted(async () => {
   }
 })
 
-// 监听项目变化时重新加载环境列表
-watch(() => projectStore.currentProjectId, async (newProjectId) => {
+// 监听项目变化时重新加载环境列表与任务集列表
+watch(() => projectStore.currentProjectId, async (newProjectId, oldProjectId) => {
+  if (newProjectId === oldProjectId) return
+  pagination.value.current = 1
+  testTaskSuites.value = []
+  pagination.value.total = 0
   if (newProjectId) {
+    fetchTestTaskSuites()
     try {
       await environmentStore.fetchEnvironments(newProjectId)
     } catch (error) {
@@ -347,7 +352,7 @@ watch(() => projectStore.currentProjectId, async (newProjectId) => {
               <icon-search />
             </template>
           </a-input>
-          
+
           <a-select
             v-model="searchParams.priority"
             placeholder="优先级"
@@ -360,7 +365,7 @@ watch(() => projectStore.currentProjectId, async (newProjectId) => {
             <a-option :value="2">高</a-option>
             <a-option :value="3">紧急</a-option>
           </a-select>
-          
+
           <a-button type="outline" class="custom-reset-button" @click="() => {
             searchParams.search = '';
             searchParams.priority = undefined;
@@ -368,7 +373,7 @@ watch(() => projectStore.currentProjectId, async (newProjectId) => {
           }">
             重置
           </a-button>
-          
+
           <a-button type="primary" class="custom-search-button" @click="fetchTestTaskSuites">
             搜索
           </a-button>
@@ -399,8 +404,8 @@ watch(() => projectStore.currentProjectId, async (newProjectId) => {
             <a-table-column title="ID" data-index="id" :width="80" align="center" />
             <a-table-column title="名称" data-index="name" :width="200" align="center">
               <template #cell="{ record }">
-                <span 
-                  class="name-link cursor-pointer hover:underline" 
+                <span
+                  class="name-link cursor-pointer hover:underline"
                   @click="viewTestTaskSuite(record.id)"
                 >
                   {{ record.name }}
@@ -448,7 +453,7 @@ watch(() => projectStore.currentProjectId, async (newProjectId) => {
                     </template>
                     执行
                   </a-button>
-                  <a-button 
+                  <a-button
                     type="primary"
                     size="mini"
                     class="btn-history"
@@ -459,7 +464,7 @@ watch(() => projectStore.currentProjectId, async (newProjectId) => {
                     </template>
                     历史
                   </a-button>
-                  <a-button 
+                  <a-button
                     type="primary"
                     size="mini"
                     class="btn-edit"
@@ -582,13 +587,13 @@ watch(() => projectStore.currentProjectId, async (newProjectId) => {
     color: var(--tt-text-subtle) !important;
     background-color: transparent !important;
     border: 1px solid transparent !important;
-    
+
     &:hover {
       color: var(--tt-link-hover) !important;
       background-color: rgba(var(--theme-accent-rgb), 0.1) !important;
       border-color: rgba(var(--theme-accent-rgb), 0.22) !important;
     }
-    
+
     &.arco-pagination-item-active {
       background-color: rgba(var(--theme-accent-rgb), 0.14) !important;
       color: var(--tt-link-hover) !important;
@@ -748,7 +753,7 @@ watch(() => projectStore.currentProjectId, async (newProjectId) => {
   @apply !bg-blue-500/20 hover:!bg-blue-500/30 !border-blue-500/30 !text-blue-400 !px-1.5;
   box-shadow: 0 1px 3px rgba(37, 99, 235, 0.1) !important;
   backdrop-filter: blur(4px) !important;
-  
+
   &:hover {
     @apply !shadow-md !transform !scale-105 !text-blue-300;
     box-shadow: 0 2px 4px rgba(37, 99, 235, 0.2) !important;
@@ -759,7 +764,7 @@ watch(() => projectStore.currentProjectId, async (newProjectId) => {
   @apply !bg-emerald-500/20 hover:!bg-emerald-500/30 !border-emerald-500/30 !text-emerald-400 !px-1.5;
   box-shadow: 0 1px 3px rgba(5, 150, 105, 0.1) !important;
   backdrop-filter: blur(4px) !important;
-  
+
   &:hover {
     @apply !shadow-md !transform !scale-105 !text-emerald-300;
     box-shadow: 0 2px 4px rgba(5, 150, 105, 0.2) !important;
@@ -770,7 +775,7 @@ watch(() => projectStore.currentProjectId, async (newProjectId) => {
   @apply !bg-purple-500/20 hover:!bg-purple-500/30 !border-purple-500/30 !text-purple-400 !px-1.5;
   box-shadow: 0 1px 3px rgba(147, 51, 234, 0.1) !important;
   backdrop-filter: blur(4px) !important;
-  
+
   &:hover {
     @apply !shadow-md !transform !scale-105 !text-purple-300;
     box-shadow: 0 2px 4px rgba(147, 51, 234, 0.2) !important;
@@ -781,7 +786,7 @@ watch(() => projectStore.currentProjectId, async (newProjectId) => {
   @apply !bg-rose-500/20 hover:!bg-rose-500/30 !border-rose-500/30 !text-rose-400 !px-1.5;
   box-shadow: 0 1px 3px rgba(225, 29, 72, 0.1) !important;
   backdrop-filter: blur(4px) !important;
-  
+
   &:hover {
     @apply !shadow-md !transform !scale-105 !text-rose-300;
     box-shadow: 0 2px 4px rgba(225, 29, 72, 0.2) !important;
@@ -801,11 +806,11 @@ watch(() => projectStore.currentProjectId, async (newProjectId) => {
   .arco-popconfirm {
     @apply !p-2;
   }
-  
+
   .arco-popconfirm-title {
     @apply !text-sm !mb-2;
   }
-  
+
   .arco-btn {
     @apply !text-xs !h-6 !px-2;
   }
@@ -839,7 +844,7 @@ watch(() => projectStore.currentProjectId, async (newProjectId) => {
   color: var(--tt-text) !important;
   width: 100%;
   backdrop-filter: blur(4px) !important;
-  
+
   &:hover, &:focus {
     border-color: rgba(var(--theme-accent-rgb), 0.42) !important;
     background-color: var(--tt-input-bg-hover) !important;
@@ -915,4 +920,4 @@ watch(() => projectStore.currentProjectId, async (newProjectId) => {
 :global(.testtask-modal-value) {
   color: var(--theme-text);
 }
-</style> 
+</style>

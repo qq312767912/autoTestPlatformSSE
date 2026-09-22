@@ -62,6 +62,7 @@ PandaWiki-skill/
 # Build artifacts
 build/
 dist/
+*.egg-info/
 out/
 PandaWiki-skill/
 # Dependencies (handled by subdirectories, but backup)
@@ -78,6 +79,8 @@ __pycache__/
 *.sqlite
 *.sqlite3
 *.db
+
+
 
 # Documentation build
 # Playwright截图目录
@@ -101,3 +104,20 @@ backups/
 
 # 演示仓库（内含独立 .git，按子仓库单独管理）
 demo_repositories/
+architecture/
+.roo/mcp.json
+docs/superpowers/
+docs/competitive-analysis/
+.freebuff
+
+# Actuator
+WHartTest_Actuator/config.toml
+
+# zcode
+.zcode
+~/.dsh
+.freebuff/project-id
+
+# 独立仓库（各自有 .git 和远程），不随父仓库提交
+WHartTest_Desktop/
+WHartTest_Website/

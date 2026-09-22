@@ -249,10 +249,10 @@ class UiModuleSortingTests(TestCase):
         self.user = User.objects.create_superuser(username='testuser', password='password', email='test@example.com')
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
-        
+
         self.project = Project.objects.create(name='Test Project', description='Test Description', creator=self.user)
         ProjectMember.objects.create(project=self.project, user=self.user, role='admin')
-        
+
         # Create hierarchy:
         # root1
         #   - child1_1 (order=1)
@@ -278,13 +278,13 @@ class UiModuleSortingTests(TestCase):
             'target_id': self.child1_1.id,
             'drop_position': -1 # before child1_1
         }
-        
+
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        
+
         self.child1_1.refresh_from_db()
         self.child1_2.refresh_from_db()
-        
+
         self.assertEqual(self.child1_2.order, 1)
         self.assertEqual(self.child1_1.order, 2)
         self.assertEqual(self.child1_2.parent, self.root1)
@@ -297,10 +297,10 @@ class UiModuleSortingTests(TestCase):
             'target_id': self.root2.id,
             'drop_position': 0 # inside root2
         }
-        
+
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        
+
         self.child1_2.refresh_from_db()
         self.assertEqual(self.child1_2.parent, self.root2)
         self.assertEqual(self.child1_2.level, 2)
@@ -312,7 +312,7 @@ class UiModuleSortingTests(TestCase):
             'target_id': self.child1_1_1.id,
             'drop_position': 0
         }
-        
+
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("无法移动模块到自身或其子模块下", response.data['error'])
@@ -321,13 +321,13 @@ class UiModuleSortingTests(TestCase):
         """测试5级深度保护"""
         child4 = UiModule.objects.create(project=self.project, name='Child 4', parent=self.child1_1_1, creator=self.user) # level 4
         child5 = UiModule.objects.create(project=self.project, name='Child 5', parent=child4, creator=self.user) # level 5
-        
+
         url = f'/api/ui-automation/modules/{self.root1.id}/move/'
         data = {
             'target_id': self.root2.id,
             'drop_position': 0
         }
-        
+
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("超过5级限制", response.data['error'])
@@ -626,3 +626,91 @@ class UiDeletionRestrictionTests(TestCase):
         response = self.client.delete(f'/api/ui-automation/pages/{self.page_b.id}/')
         self.assertIn(response.status_code, (status.HTTP_200_OK, status.HTTP_204_NO_CONTENT))
         self.assertFalse(UiPage.objects.filter(id__in=[self.page_a.id, self.page_b.id]).exists())
+
+
+class UiCaptchaRecognizeTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_superuser(username='captcha_tester', password='secret')
+        self.project = Project.objects.create(name='Captcha Project')
+        ProjectMember.objects.create(project=self.project, user=self.user, role='admin')
+        self.module = UiModule.objects.create(project=self.project, name='Auth Module', creator=self.user)
+        self.page = UiPage.objects.create(project=self.project, module=self.module, name='Login', creator=self.user)
+        self.img_element = UiElement.objects.create(
+            page=self.page,
+            name='Captcha Image',
+            locator_type='xpath',
+            locator_value='//img[@id="captcha_img"]',
+            creator=self.user,
+        )
+        self.input_element = UiElement.objects.create(
+            page=self.page,
+            name='Captcha Input',
+            locator_type='xpath',
+            locator_value='//input[@id="captcha_code"]',
+            locator_index=0,
+            creator=self.user,
+        )
+        self.page_step = UiPageSteps.objects.create(
+            project=self.project,
+            page=self.page,
+            module=self.module,
+            name='Login Step',
+            creator=self.user,
+        )
+
+    def test_execute_data_resolves_captcha_target_locator(self):
+        detail = UiPageStepsDetailed.objects.create(
+            page_step=self.page_step,
+            element=self.img_element,
+            ope_key='captcha_recognize',
+            ope_value={
+                'target_element_id': self.input_element.id,
+                'retry_count': 3,
+                'click_to_refresh': True,
+            },
+            step_sort=0,
+        )
+        response = UiPageStepsExecuteSerializer(self.page_step).data
+        self.assertEqual(len(response['step_details']), 1)
+        step_detail = response['step_details'][0]
+        self.assertEqual(step_detail['ope_key'], 'captcha_recognize')
+        self.assertEqual(step_detail['locator_value'], '//img[@id="captcha_img"]')
+
+        target_locator = step_detail['ope_value']['target_locator']
+        self.assertEqual(target_locator['element_id'], self.input_element.id)
+        self.assertEqual(target_locator['locator_value'], '//input[@id="captcha_code"]')
+        self.assertEqual(target_locator['locator_type'], 'xpath')
+        self.assertEqual(target_locator['locator_index'], 0)
+
+    def test_captcha_recognize_validation_requires_target_element(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+
+        # 缺少 target_element_id
+        res = client.post(
+            '/api/ui-automation/page-steps-detailed/',
+            {
+                'page_step': self.page_step.id,
+                'element': self.img_element.id,
+                'ope_key': 'captcha_recognize',
+                'ope_value': {'retry_count': 3},
+                'step_sort': 0,
+            },
+            format='json'
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('必须选择目标输入框元素', str(res.data))
+
+        # 提供 target_element_id 成功
+        res_ok = client.post(
+            '/api/ui-automation/page-steps-detailed/',
+            {
+                'page_step': self.page_step.id,
+                'element': self.img_element.id,
+                'ope_key': 'captcha_recognize',
+                'ope_value': {'target_element_id': self.input_element.id, 'retry_count': 3},
+                'step_sort': 0,
+            },
+            format='json'
+        )
+        self.assertEqual(res_ok.status_code, status.HTTP_201_CREATED)

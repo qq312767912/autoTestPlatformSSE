@@ -46,7 +46,7 @@
               {{ pageText.noOnlineActuators }}
             </div>
           </template>
-          <a-option v-for="act in actuators" :key="act.id" :value="act.id" :disabled="!act.is_open">
+          <a-option v-for="act in allActuators" :key="act.id" :value="act.id" :disabled="!act.is_open">
             {{ act.name || act.id }}
             <a-tag v-if="act.is_open" color="green" size="small" style="margin-left: 4px">{{ pageText.online }}</a-tag>
             <a-tag v-else color="gray" size="small" style="margin-left: 4px">{{ pageText.offline }}</a-tag>
@@ -190,7 +190,7 @@
         <a-form-item field="description" :label="pageText.caseDescription">
           <a-textarea v-model="formData.description" :placeholder="pageText.enterCaseDescription" :auto-size="{ minRows: 2, maxRows: 4 }" />
         </a-form-item>
-      
+
           <a-form-item label="附件">
             <FileAttachmentPicker
               v-model="formData.file_ids"
@@ -210,11 +210,19 @@
     >
       <CaseStepList v-if="currentTestCase" :test-case="currentTestCase" />
     </a-drawer>
+
+    <!-- 单用例执行画面（直播帧） -->
+    <ExecutionScreenModal
+      v-model:visible="execScreenVisible"
+      mode="case"
+      :task-id="execScreenTaskId"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import FileAttachmentPicker from '@/features/file-management/components/FileAttachmentPicker.vue'
+import ExecutionScreenModal from '../components/ExecutionScreenModal.vue'
 import { ref, reactive, computed, onMounted, watch, onUnmounted } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { IconPlus, IconEdit, IconDelete, IconOrderedList, IconPlayArrow, IconThunderbolt, IconCopy } from '@arco-design/web-vue/es/icon'
@@ -288,6 +296,7 @@ const pageText = computed(() => (
         copySuccess: 'Copied successfully',
         copyFailed: 'Copy failed',
         noActuatorAvailable: 'No actuator is available. Start the actuator service first.',
+        batchNeedsActuator: 'Batch execution requires an online actuator. Please start the actuator service.',
         selectOnlineActuator: 'Select an online actuator',
         websocketConnectFailed: 'WebSocket connection failed',
         runCommandFailed: 'Failed to send execution command',
@@ -357,6 +366,7 @@ const pageText = computed(() => (
         copySuccess: '复制成功',
         copyFailed: '复制失败',
         noActuatorAvailable: '没有可用的执行器，请先启动执行器服务',
+        batchNeedsActuator: '批量执行需要在线执行器，请先启动执行器服务',
         selectOnlineActuator: '请选择一个在线的执行器',
         websocketConnectFailed: 'WebSocket 连接失败',
         runCommandFailed: '发送执行命令失败',
@@ -388,8 +398,20 @@ const envConfigs = ref<UiEnvironmentConfig[]>([]) // 环境配置列表
 const actuators = ref<ActuatorInfo[]>([]) // 执行器列表
 const selectedEnvConfig = ref<number | undefined>() // 选中的环境配置
 const selectedActuator = ref<string | undefined>()
+// 录制器浏览器（本地）：无执行器时的步骤调试/用例执行兜底
+const RECORDER_BROWSER_ID = 'recorder-browser'
+const recorderBrowserName = computed(() => (isEnglish.value ? 'Recorder Browser (Local)' : '录制器浏览器（本地）'))
+const allActuators = computed(() => [
+  { id: RECORDER_BROWSER_ID, name: recorderBrowserName.value, is_open: true, max_slots: 1, busy_slots: 0 } as ActuatorInfo,
+  ...actuators.value,
+])
 const selectedRowKeys = ref<number[]>([]) // 批量选中的用例ID
 const modalVisible = ref(false)
+// 单用例执行画面（直播帧弹窗）：是否弹出由执行器无头开关决定——
+// 后端回执 effective_runtime.headless === false（观看模式）时才弹；批量执行不弹
+const execScreenVisible = ref(false)
+const execScreenTaskId = ref<number | null>(null)
+const pendingScreenCaseId = ref<number | null>(null)
 const stepsDrawerVisible = ref(false)
 const isEdit = ref(false)
 const currentTestCase = ref<UiTestCase | null>(null)
@@ -696,7 +718,7 @@ const runTestCase = async (record: UiTestCase) => {
   await fetchActuators()
 
   // 检查是否有可用执行器
-  if (actuators.value.length === 0 || !actuators.value.some(a => a.is_open)) {
+  if (!allActuators.value.some(a => a.is_open)) {
     Message.warning(pageText.value.noActuatorAvailable)
     return
   }
@@ -705,13 +727,9 @@ const runTestCase = async (record: UiTestCase) => {
   ensureDefaultEnvSelected()
 
   if (!selectedActuator.value) {
-    const availableId = selectAvailableActuator(1)
-    if (availableId) {
-      selectedActuator.value = availableId
-    } else {
-      Message.warning(pageText.value.noCompatibleActuator || pageText.value.selectOnlineActuator)
-      return
-    }
+    // 默认使用录制器浏览器（本地）执行（自动打开执行画布）；
+    // 需要真实执行器时在下拉中自行选择
+    selectedActuator.value = RECORDER_BROWSER_ID
   }
 
   // 连接 WebSocket
@@ -724,9 +742,17 @@ const runTestCase = async (record: UiTestCase) => {
 
   // 发送执行命令（包含执行器ID）
   executingIds.value.push(record.id)
+  // 后端下发任务后会回 effective_runtime（含 headless）：
+  // 无头开关关闭（观看模式）时才弹执行画面画布
+  pendingScreenCaseId.value = record.id
   const success = uiWebSocket.runTestCase(record.id, selectedEnvConfig.value, selectedActuator.value)
   if (success) {
     Message.info(pageText.value.startedCase(record.name))
+    // 录制器浏览器执行：发送即打开执行画布（不依赖 effective_runtime 回执）
+    if (selectedActuator.value === RECORDER_BROWSER_ID) {
+      execScreenTaskId.value = record.id
+      execScreenVisible.value = true
+    }
     // 立即更新本地状态为"执行中"
     const idx = testcaseData.value.findIndex(tc => tc.id === record.id)
     if (idx !== -1) {
@@ -744,12 +770,14 @@ const runBatchTestCases = async () => {
     Message.warning(pageText.value.selectCasesToRun)
     return
   }
+  // 批量执行一律后台执行，不弹执行画面
+  pendingScreenCaseId.value = null
 
   // 先获取执行器列表
   await fetchActuators()
 
   // 检查是否有可用执行器
-  if (actuators.value.length === 0 || !actuators.value.some(a => a.is_open)) {
+  if (!allActuators.value.some(a => a.is_open)) {
     Message.warning(pageText.value.noActuatorAvailable)
     return
   }
@@ -766,6 +794,12 @@ const runBatchTestCases = async () => {
       Message.warning(pageText.value.noCompatibleActuator || pageText.value.selectOnlineActuator)
       return
     }
+  }
+
+  // 批量执行需要真实执行器（并发多浏览器），录制器浏览器不支持
+  if (selectedActuator.value === RECORDER_BROWSER_ID) {
+    Message.warning(pageText.value.batchNeedsActuator)
+    return
   }
 
   // 连接 WebSocket
@@ -806,7 +840,7 @@ const batchDeleteTestCases = async () => {
   try {
     const res = await testCaseApi.batchDelete(selectedRowKeys.value)
     const result = extractResponseData<{ message?: string }>(res)
-    
+
     if (result) {
       Message.success(result.message || pageText.value.batchDeleteSuccess(selectedRowKeys.value.length))
       // 清空选择
@@ -877,7 +911,10 @@ const fetchActuators = async (options: { resetSelected?: boolean } = {}) => {
     const data = extractResponseData<{ count: number; items: ActuatorInfo[] }>(res)
     actuators.value = data?.items ?? []
     // Do not auto-fallback to an arbitrary online actuator; capability match happens at run time.
-    const selectedStillAvailable = actuators.value.some(act => act.id === selectedActuator.value && act.is_open)
+    // 录制器浏览器（本地）为固定选项，不随执行器列表刷新被清空
+    const selectedStillAvailable =
+      selectedActuator.value === RECORDER_BROWSER_ID
+      || actuators.value.some(act => act.id === selectedActuator.value && act.is_open)
     if (!selectedStillAvailable) {
       selectedActuator.value = undefined
     }
@@ -888,6 +925,17 @@ const fetchActuators = async (options: { resetSelected?: boolean } = {}) => {
 
 /** WebSocket 事件监听 */
 let offCaseResult: (() => void) | null = null
+let offEffectiveRuntime: (() => void) | null = null
+
+/** 后端回执生效运行时：无头开关关闭（观看模式）时弹出执行画面画布 */
+const handleEffectiveRuntime = (data: any) => {
+  const args = data?.data?.func_args || {}
+  if (args.headless === false && pendingScreenCaseId.value != null) {
+    execScreenTaskId.value = pendingScreenCaseId.value
+    execScreenVisible.value = true
+  }
+  pendingScreenCaseId.value = null
+}
 
 watch(() => props.selectedModuleId, (newVal) => {
   filters.module = newVal
@@ -931,11 +979,14 @@ defineExpose({ refresh })
 onMounted(() => {
   // 监听用例执行结果
   offCaseResult = uiWebSocket.on(UiSocketEnum.CASE_RESULT, handleCaseResult)
+  // 监听生效运行时回执（决定是否弹执行画面）
+  offEffectiveRuntime = uiWebSocket.on(UiSocketEnum.EFFECTIVE_RUNTIME, handleEffectiveRuntime)
 })
 
 onUnmounted(() => {
   // 清理事件监听
   offCaseResult?.()
+  offEffectiveRuntime?.()
 })
 </script>
 

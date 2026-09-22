@@ -129,14 +129,14 @@ const handleInterfaceSelect = async (api: ApiInterface) => {
     emit('select-interface', api)
     return
   }
-  
+
   // 如果已经加载过详情，直接使用
   if (api.id && loadedInterfaceIds.value.has(api.id)) {
     console.log('接口已加载过详情，直接使用')
     emit('select-interface', api)
     return
   }
-  
+
   console.log('接口未加载过详情，开始获取')
   // 否则请求详情
   await fetchInterfaceDetail(api)
@@ -251,7 +251,7 @@ const handleDrop = async (e: DragEvent) => {
     <!-- 当前模块 -->
     <div
       class="module-tree__item px-6 py-2 cursor-pointer transition-colors rounded-lg"
-      :class="{ 
+      :class="{
         'module-tree__item--selected': isSelected,
         'module-tree__item--dragging': isDragging,
         'module-tree__item--drag-over-before': currentDragOverPos === -1,
@@ -274,8 +274,6 @@ const handleDrop = async (e: DragEvent) => {
               type="text"
               size="mini"
               class="module-tree__toggle-btn !w-4 !h-4 !p-0 !min-w-0"
-              :disabled="displayMode === 'detail' ? !module.children?.length && !interfaces.length : !module.children?.length"
-              :class="{ 'module-tree__toggle-btn--disabled': displayMode === 'detail' ? !module.children?.length && !interfaces.length : !module.children?.length }"
               @click.stop="emit('toggle-expand', module.id)"
             >
               <template #icon>
@@ -429,11 +427,6 @@ const handleDrop = async (e: DragEvent) => {
 .module-tree__toggle-btn:hover,
 .module-tree__action-btn:hover {
   color: var(--module-action-hover) !important;
-}
-
-.module-tree__toggle-btn--disabled {
-  opacity: 0.3;
-  cursor: not-allowed !important;
 }
 
 .module-tree__interface-item {

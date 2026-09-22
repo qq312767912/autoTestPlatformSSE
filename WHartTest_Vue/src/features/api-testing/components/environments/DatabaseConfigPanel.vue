@@ -191,7 +191,7 @@ const getElementsSizes = (index: number) => {
   const iconEl = iconContainerRef.value[index]
   const valueEl = valueContainerRef.value[index]
   const buttonEl = buttonGroupRef.value[index]
-  
+
   if (!containerEl || !cardEl || !iconEl || !valueEl || !buttonEl) {
     console.error('获取元素失败:', { containerEl, cardEl, iconEl, valueEl, buttonEl })
     return {
@@ -208,33 +208,33 @@ const getElementsSizes = (index: number) => {
       difference: 0
     }
   }
-  
+
   // 容器宽度计算
   const containerWidth = containerEl.clientWidth
   // 卡片的内边距 (p-3 = 3*4 = 12px 每边)
   const cardPadding = 24
   // 列表的右边距 (pr-1 = 1*4 = 4px)
   const listRightPadding = 4
-  
+
   // 可用内容宽度 = 容器宽度 - 滚动条宽度和内边距
   const availableContainerWidth = containerWidth - listRightPadding
-  
+
   // 元素宽度
   const iconWidth = iconEl.offsetWidth
   const buttonWidth = buttonEl.offsetWidth
   const valueWidth = valueEl.offsetWidth
-  
+
   // 间距 (gap-3 = 3*4 = 12px)
   const gap = 12
   // 总间距 = 图标和键值对之间的间距 + 键值对和按钮组之间的间距
   const totalGap = gap * 2
-  
+
   // 期望的键值对宽度 = 可用容器宽度 - 内边距 - 图标宽度 - 按钮组宽度 - 间距
   const expectedValueWidth = availableContainerWidth - cardPadding - iconWidth - buttonWidth - totalGap
-  
+
   // 实际与期望的差异
   const difference = valueWidth - expectedValueWidth
-  
+
   // 打印计算信息
   console.log(`==== 宽度计算 [${index}] ====`)
   console.log('容器宽度:', containerWidth)
@@ -244,7 +244,7 @@ const getElementsSizes = (index: number) => {
   console.log('按钮组宽度:', buttonWidth)
   console.log('期望键值对宽度:', expectedValueWidth)
   console.log('差异:', difference)
-  
+
   return {
     containerWidth,
     listRightPadding,
@@ -270,13 +270,13 @@ const applyCalculatedWidths = () => {
     })
     return
   }
-  
+
   // 使用requestAnimationFrame保证在下一帧渲染前更新
   requestAnimationFrame(() => {
     configCardRef.value.forEach((_, index) => {
       const sizes = getElementsSizes(index)
       const valueEl = valueContainerRef.value[index]
-      
+
       if (valueEl && sizes.expectedValueWidth > 0) {
         console.log(`应用宽度 [${index}]: ${sizes.expectedValueWidth}px`)
         // 直接设置宽度，确保撑满空间
@@ -284,11 +284,11 @@ const applyCalculatedWidths = () => {
         valueEl.style.maxWidth = `${sizes.expectedValueWidth}px`
         valueEl.style.minWidth = `0px`
       }
-      
+
       // 类型标签自适应：按标签内容实际宽度撑开类型列，保证完整包裹数据库类型文字
       const card = configCardRef.value[index]
-      const tag = card?.querySelector<HTMLElement>('.type-tag')
-      const typeCol = card?.querySelector<HTMLElement>('.col-type')
+      const tag = card?.querySelector('.type-tag') as HTMLElement | null
+      const typeCol = card?.querySelector('.col-type') as HTMLElement | null
       if (tag && typeCol) {
         // offsetWidth 含 padding；scrollWidth 为内容宽度，取较大者保证完整包裹类型文字
         const tagWidth = Math.max(tag.offsetWidth, tag.scrollWidth + 12) // 12px = 标签左右 padding
@@ -304,7 +304,7 @@ const debouncedRecalculateWidths = () => {
   if (recalculateDebounceTimer) {
     clearTimeout(recalculateDebounceTimer)
   }
-  
+
   recalculateDebounceTimer = window.setTimeout(() => {
     console.log('触发宽度重新计算')
     applyCalculatedWidths()
@@ -317,15 +317,15 @@ const observeContainerWidth = () => {
     console.warn('容器未找到，无法监听宽度变化')
     return
   }
-  
+
   const resizeObserver = new ResizeObserver(() => {
     // 当容器宽度变化时，重新应用计算宽度
     console.log('容器宽度变化，重新计算')
     debouncedRecalculateWidths()
   })
-  
+
   resizeObserver.observe(containerRef.value)
-  
+
   return resizeObserver
 }
 
@@ -340,7 +340,7 @@ const fetchDatabaseConfigs = async () => {
     loading.value = true
     const response = await getDatabaseConfigs(Number(projectStore.currentProjectId))
     console.log('数据库配置返回数据:', response)
-    
+
     // 修复：正确处理分页格式的返回数据
     if (response.data && Array.isArray(response.data.results)) {
       // 常见的分页格式 { count, next, previous, results: [] }
@@ -356,7 +356,7 @@ const fetchDatabaseConfigs = async () => {
       console.warn('获取数据库配置返回格式异常:', response)
       databaseConfigs.value = []
     }
-    
+
     console.log('处理后的数据库配置列表:', databaseConfigs.value)
   } catch (error) {
     console.error('获取数据库配置列表失败:', error)
@@ -466,12 +466,12 @@ const submitEdit = async () => {
       description: formData.value.description,
       is_active: formData.value.is_active
     }
-    
+
     // 只有当用户输入了密码时才更新密码
     if (formData.value.password) {
       updateData.password = formData.value.password
     }
-    
+
     const response = await updateDatabaseConfig(currentConfig.value.id, updateData)
     console.log('更新数据库配置返回:', response)
     Message.success(panelText.value.updateDatabaseConfigSuccess)
@@ -559,7 +559,7 @@ const handleTestFormConnection = async () => {
     username: formData.value.username,
     password: formData.value.password
   }
-  
+
   try {
     testingConnection.value = true
     const response = await testConnection(testConnectionForm.value)
@@ -596,7 +596,7 @@ const updateDefaultPort = () => {
     postgresql: 5432,
     oracle: 1521,
   }
-  
+
   if (formData.value.type && portMap[formData.value.type]) {
     formData.value.port = portMap[formData.value.type]
   }
@@ -615,10 +615,10 @@ onMounted(() => {
         // 首次应用宽度
         console.log('初始化宽度计算')
         applyCalculatedWidths()
-        
+
         // 设置监听
         observeContainerWidth()
-        
+
         // 监听窗口大小变化
         window.addEventListener('resize', () => {
           console.log('窗口大小变化')
@@ -678,10 +678,10 @@ defineExpose({
     <div class="flex items-center gap-2 mb-4 flex-shrink-0">
       <icon-storage class="panel-title-icon" />
       <span class="panel-title-text font-medium">{{ panelText.databaseConfigs }}</span>
-      
-      <a-button 
-        size="mini" 
-        type="text" 
+
+      <a-button
+        size="mini"
+        type="text"
         class="ml-auto panel-action-btn"
         @click="handleCreate"
       >
@@ -698,7 +698,7 @@ defineExpose({
         <div class="space-y-2 pb-4 h-full flex flex-col" :class="{ 'justify-center': !databaseConfigs?.length && !loading }">
           <!-- 数据库配置卡片 -->
           <div
-            v-for="(config, index) in databaseConfigs || []" 
+            v-for="(config, index) in databaseConfigs || []"
             :key="config.id"
             class="config-card p-3 rounded-lg border transition-all duration-300"
             :class="{ 'opacity-60': !config.is_active }"
@@ -708,16 +708,16 @@ defineExpose({
             <!-- 单行显示：图标 + 配置信息 + 按钮组 -->
             <div class="flex items-center gap-3 w-full">
               <!-- 图标 -->
-              <div 
+              <div
                 class="config-icon-shell w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
                 :data-index="index"
                 ref="iconContainerRef"
               >
                 <icon-storage class="text-purple-500" />
               </div>
-              
+
               <!-- 配置信息 -->
-              <div 
+              <div
                 class="config-value-shell flex-1 min-w-0 px-4 py-2 rounded text-sm overflow-visible"
                 :data-index="index"
                 ref="valueContainerRef"
@@ -728,24 +728,24 @@ defineExpose({
                   <div class="overflow-visible whitespace-nowrap col-name">
                     <span class="config-name font-semibold inline-block">{{ config.name }}</span>
                   </div>
-                  
+
                   <!-- 第二列：类型 (减小宽度) -->
                   <div class="overflow-visible whitespace-nowrap col-type">
                     <span class="type-tag">{{ config.type }}</span>
                   </div>
-                  
+
                   <!-- 第三列：主机 (增加宽度) -->
                   <div class="overflow-hidden whitespace-nowrap text-ellipsis col-host justify-center">
                     <span class="config-meta-label text-xs font-medium mr-1">{{ panelText.host }}: </span>
                     <span class="config-meta-value whitespace-nowrap font-medium">{{ config.host }}:{{ config.port }}</span>
                   </div>
-                  
+
                   <!-- 第四列：数据库 -->
                   <div class="overflow-hidden whitespace-nowrap text-ellipsis justify-center">
                     <span class="config-meta-label text-xs font-medium mr-1">{{ panelText.database }}: </span>
                     <span class="config-meta-value whitespace-nowrap font-medium">{{ config.database }}</span>
                   </div>
-                  
+
                   <!-- 第五列：用户名 + 状态 -->
                   <div class="flex items-center overflow-visible whitespace-nowrap justify-between">
                     <div class="overflow-visible">
@@ -756,15 +756,15 @@ defineExpose({
                   </div>
                 </div>
               </div>
-              
+
               <!-- 操作按钮组 -->
-              <div 
+              <div
                 class="flex flex-shrink-0 flex-nowrap ml-auto gap-2 button-group"
                 :data-index="index"
-                ref="buttonGroupRef"  
+                ref="buttonGroupRef"
               >
-                <a-button 
-                  type="text" 
+                <a-button
+                  type="text"
                   size="mini"
                   @click.stop="handleTestConnection(config)"
                   :loading="testingConnection"
@@ -772,8 +772,8 @@ defineExpose({
                 >
                   {{ panelText.testConnection }}
                 </a-button>
-                <a-button 
-                  type="text" 
+                <a-button
+                  type="text"
                   size="mini"
                   @click.stop="handleEdit(config)"
                   :class="{ 'active-button': activeButtonType === 'edit' && activeConfigId === config.id, 'edit-button': true }"
@@ -783,9 +783,9 @@ defineExpose({
                   </template>
                   {{ panelText.edit }}
                 </a-button>
-                <a-button 
-                  type="text" 
-                  size="mini" 
+                <a-button
+                  type="text"
+                  size="mini"
                   status="danger"
                   @click.stop="handleDelete(config)"
                   :class="{ 'active-button': activeButtonType === 'delete' && activeConfigId === config.id, 'delete-button': true }"
@@ -797,14 +797,14 @@ defineExpose({
                 </a-button>
               </div>
             </div>
-            
+
             <!-- 详细信息 -->
             <div v-if="config.description" class="config-description mt-2 text-xs px-2 py-1 pl-3">
               <span class="config-meta-label">{{ panelText.description }}:</span>
               <span class="config-meta-value ml-2">{{ config.description }}</span>
             </div>
           </div>
-          
+
           <!-- 无数据时的提示 -->
           <div
             v-if="!databaseConfigs?.length && !loading"
@@ -846,7 +846,7 @@ defineExpose({
         <a-form-item field="name" :label="panelText.configNameLabel" required>
           <a-input v-model="formData.name" :placeholder="panelText.configNamePlaceholder" allow-clear />
         </a-form-item>
-        
+
         <a-form-item field="type" :label="panelText.databaseTypeLabel" required>
           <a-select v-model="formData.type" :placeholder="panelText.selectDatabaseType" @change="handleTypeChange">
             <a-option value="mysql">MySQL</a-option>
@@ -854,26 +854,26 @@ defineExpose({
             <a-option value="oracle">Oracle</a-option>
           </a-select>
         </a-form-item>
-        
+
         <div class="grid grid-cols-2 gap-4">
           <a-form-item field="host" :label="panelText.hostLabel" required>
             <a-input v-model="formData.host" :placeholder="panelText.hostPlaceholder" allow-clear />
           </a-form-item>
-          
+
           <a-form-item field="port" :label="panelText.portLabel">
             <a-input-number v-model="formData.port" :placeholder="panelText.portLabel" :min="1" :max="65535" />
           </a-form-item>
         </div>
-        
+
         <a-form-item field="database" :label="panelText.databaseNameLabel" required>
           <a-input v-model="formData.database" :placeholder="panelText.databaseNamePlaceholder" allow-clear />
         </a-form-item>
-        
+
         <div class="grid grid-cols-2 gap-4">
           <a-form-item field="username" :label="panelText.usernameLabel" required>
             <a-input v-model="formData.username" :placeholder="panelText.usernamePlaceholder" allow-clear />
           </a-form-item>
-          
+
           <a-form-item field="password" :label="panelText.passwordLabel" required>
             <a-input-password
               v-model="formData.password"
@@ -883,17 +883,17 @@ defineExpose({
             />
           </a-form-item>
         </div>
-        
+
         <a-form-item field="description" :label="panelText.description">
           <a-textarea v-model="formData.description" :placeholder="panelText.descriptionPlaceholder" />
         </a-form-item>
-        
+
         <a-form-item field="is_active">
           <a-space>
             <a-checkbox v-model="formData.is_active">{{ panelText.enableConfig }}</a-checkbox>
           </a-space>
         </a-form-item>
-        
+
         <div class="text-right">
           <a-button type="text" @click="handleTestFormConnection" :loading="testingConnection">
             {{ panelText.testConnection }}
@@ -901,7 +901,7 @@ defineExpose({
         </div>
       </a-form>
     </a-modal>
-    
+
     <!-- 编辑数据库配置弹窗 -->
     <a-modal
       v-model:visible="showEditModal"
@@ -920,7 +920,7 @@ defineExpose({
         <a-form-item field="name" :label="panelText.configNameLabel" required>
           <a-input v-model="formData.name" :placeholder="panelText.configNamePlaceholder" allow-clear />
         </a-form-item>
-        
+
         <a-form-item field="type" :label="panelText.databaseTypeLabel" required>
           <a-select v-model="formData.type" :placeholder="panelText.selectDatabaseType" @change="handleTypeChange">
             <a-option value="mysql">MySQL</a-option>
@@ -928,26 +928,26 @@ defineExpose({
             <a-option value="oracle">Oracle</a-option>
           </a-select>
         </a-form-item>
-        
+
         <div class="grid grid-cols-2 gap-4">
           <a-form-item field="host" :label="panelText.hostLabel" required>
             <a-input v-model="formData.host" :placeholder="panelText.hostPlaceholder" allow-clear />
           </a-form-item>
-          
+
           <a-form-item field="port" :label="panelText.portLabel">
             <a-input-number v-model="formData.port" :placeholder="panelText.portLabel" :min="1" :max="65535" />
           </a-form-item>
         </div>
-        
+
         <a-form-item field="database" :label="panelText.databaseNameLabel" required>
           <a-input v-model="formData.database" :placeholder="panelText.databaseNamePlaceholder" allow-clear />
         </a-form-item>
-        
+
         <div class="grid grid-cols-2 gap-4">
           <a-form-item field="username" :label="panelText.usernameLabel" required>
             <a-input v-model="formData.username" :placeholder="panelText.usernamePlaceholder" allow-clear />
           </a-form-item>
-          
+
           <a-form-item field="password" :label="panelText.editPasswordLabel">
             <a-input-password
               v-model="formData.password"
@@ -957,17 +957,17 @@ defineExpose({
             />
           </a-form-item>
         </div>
-        
+
         <a-form-item field="description" :label="panelText.description">
           <a-textarea v-model="formData.description" :placeholder="panelText.descriptionPlaceholder" />
         </a-form-item>
-        
+
         <a-form-item field="is_active">
           <a-space>
             <a-checkbox v-model="formData.is_active">{{ panelText.enableConfig }}</a-checkbox>
           </a-space>
         </a-form-item>
-        
+
         <div class="text-right">
           <a-button type="text" @click="handleTestFormConnection" :loading="testingConnection">
             {{ panelText.testConnection }}
@@ -1063,26 +1063,26 @@ defineExpose({
   border-color: var(--db-card-border);
   box-shadow: var(--db-shadow);
   transition: all 0.2s;
-  
+
   &:hover {
     border-color: var(--db-card-hover-border);
     transform: translateY(-2px);
     box-shadow: var(--db-shadow-hover);
   }
-  
+
   /* 调整列宽度比例和间距 */
   .custom-grid {
     /* 名称/类型列 auto 自适应（类型列宽度由 JS 按标签内容动态撑开） */
     grid-template-columns: auto auto minmax(140px, 1fr) minmax(0, 1fr) minmax(0, 1fr) !important;
     column-gap: 0 !important;
   }
-  
+
   /* 数据库/用户名列允许收缩（配合省略号截断），避免挤压名称与类型列 */
   .custom-grid > div:nth-child(4),
   .custom-grid > div:nth-child(5) {
     min-width: 0 !important;
   }
-  
+
   .col-name {
     min-width: 0 !important;
     max-width: none !important;
@@ -1091,7 +1091,7 @@ defineExpose({
     /* 名称过长时截断为省略号，避免溢出覆盖类型标签 */
     overflow: hidden !important;
   }
-  
+
   .col-name .config-name {
     display: inline-block;
     overflow: hidden;
@@ -1099,7 +1099,7 @@ defineExpose({
     white-space: nowrap;
     /* 不设置 max-width: 100%（会干扰 grid 轨道 max-content 计算） */
   }
-  
+
   .col-type {
     width: auto !important;
     max-width: none !important;
@@ -1107,24 +1107,24 @@ defineExpose({
     padding-right: 8px !important;
     margin-left: 0 !important;
   }
-  
+
   .col-host {
     min-width: 140px !important;
     padding-left: 8px !important;
   }
-  
+
   /* 卡片布局结构 */
   .flex.items-center.gap-3.w-full {
     display: flex;
     align-items: center;
     width: 100%;
-    
+
     /* 图标容器固定宽度（用精确类名，避免误匹配其他 first-child 元素） */
     .config-icon-shell {
       flex: 0 0 auto;
       width: 32px; /* 确保图标容器有固定宽度 */
     }
-    
+
     /* 配置信息容器可伸缩 */
     > .config-value-shell {
       flex: 1 1 auto;
@@ -1138,71 +1138,71 @@ defineExpose({
       position: relative;
       overflow: visible;
       box-sizing: border-box;
-      
+
       /* 五列不等宽网格布局 */
       .grid.grid-cols-5 {
         display: grid;
         grid-template-columns: auto auto minmax(140px, 1fr) minmax(0, 1fr) minmax(0, 1fr);
         gap: 0.5rem;
         width: 100%;
-        
+
         /* 创建不同的列间距 */
         > div:nth-child(1) {
           padding-right: 0;
         }
-        
+
         > div:nth-child(2) {
           padding-left: 0;
         }
-        
+
         /* 每列通用样式 */
         > div {
           overflow: visible;
           white-space: nowrap;
-          
+
           /* 确保所有内容垂直居中 */
           display: flex;
           align-items: center;
           min-height: 24px;
           justify-content: flex-start;
-          
+
           /* 第三、四、五列特殊处理 */
           &:nth-child(3),
           &:nth-child(4),
           &:nth-child(5) {
             justify-content: center;
           }
-          
+
           /* 第五列特殊处理 */
           &:last-child {
             justify-content: space-between;
           }
         }
-        
+
         /* 名称列样式 */
         .config-name {
           font-weight: 600;
           white-space: nowrap;
           overflow: visible;
         }
-        
+
         /* 标签文本样式 */
         .config-meta-label {
           margin-right: 0.75rem;
           white-space: nowrap;
         }
-        
+
         /* 值文本样式 */
         .config-meta-value {
           font-weight: 500;
         }
       }
-      
+
       &:hover {
         background-color: var(--db-value-hover-bg);
       }
     }
-    
+
     /* 按钮组固定宽度（用精确类名，避免误匹配其他 last-child 元素） */
     .button-group {
       flex: 0 0 auto;
@@ -1220,7 +1220,7 @@ defineExpose({
 .custom-scrollbar {
   scrollbar-width: none; /* Firefox */
   -ms-overflow-style: none; /* IE and Edge */
-  
+
   &::-webkit-scrollbar {
     display: none; /* Chrome, Safari, Opera*/
   }
@@ -1241,13 +1241,13 @@ defineExpose({
     /* 在平板上减少为四列 */
     .grid.grid-cols-5 {
       grid-template-columns: repeat(4, minmax(0, 1fr));
-      
+
       /* 隐藏数据库列 */
       > div:nth-child(4) {
         display: none;
       }
     }
-    
+
     .flex.flex-shrink-0.flex-nowrap {
       .arco-btn span {
         display: none;
@@ -1262,21 +1262,21 @@ defineExpose({
     .flex.items-center.gap-3.w-full {
       gap: 0.5rem;
     }
-    
+
     .flex-1.min-w-0 {
       padding: 8px;
     }
-    
+
     /* 在手机上减少为三列 */
     .grid.grid-cols-5 {
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      
+
       /* 隐藏类型列 */
       > div:nth-child(2) {
         display: none;
       }
     }
-    
+
     .flex.flex-shrink-0.flex-nowrap {
       .arco-btn {
         padding: 0 4px;
@@ -1301,7 +1301,7 @@ defineExpose({
 }
 
 /* 编辑和删除按钮的宽度统一 */
-:deep(.edit-button), 
+:deep(.edit-button),
 :deep(.delete-button) {
   min-width: 52px;
 }
@@ -1433,4 +1433,4 @@ defineExpose({
   padding-left: 2px !important;
   padding-right: 8px !important;
 }
-</style> 
+</style>

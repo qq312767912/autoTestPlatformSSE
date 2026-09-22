@@ -50,7 +50,7 @@ const getMethodColor = (method: string) => {
     case 'POST': return 'text-green-500'
     case 'PUT': return 'text-orange-500'
     case 'DELETE': return 'text-red-500'
-    case 'PATCH': return 'text-purple-500'
+    case 'PATCH': return 'text-cyan-500'
     default: return 'text-gray-400'
   }
 }
@@ -60,11 +60,22 @@ const getMethodColor = (method: string) => {
   <!-- 独立的卡片样式容器 -->
   <div class="api-tabs-card mb-2 rounded-lg shadow-lg overflow-hidden">
     <div class="px-2 py-2">
-      <div class="flex items-center gap-2 overflow-x-auto scrollbar-thin">
-        <!-- 页签列表 -->
-        <div
-          v-for="tab in tabs"
-          :key="tab.id"
+      <div class="flex items-center gap-2">
+        <!-- 固定在最前面的新建接口按钮，不随页签滚动 -->
+        <a-button
+          class="tabs-create-button"
+          size="small"
+          @click="handleCreateInterface"
+          title="新建接口"
+        >
+          <template #icon><icon-plus /></template>
+        </a-button>
+
+        <!-- 页签滚动区域 -->
+        <div class="flex items-center gap-2 overflow-x-auto scrollbar-thin min-w-0 flex-1">
+          <div
+            v-for="tab in tabs"
+            :key="tab.id"
           class="group flex items-center gap-2 px-3 py-2 rounded-md cursor-pointer min-w-max transition-all border"
           :class="tab.id === activeTabId
             ? 'tab-chip tab-chip--active'
@@ -78,7 +89,7 @@ const getMethodColor = (method: string) => {
           >
             {{ tab.method }}
           </span>
-          
+
           <!-- 接口名称 -->
           <span
             class="text-sm max-w-[180px] truncate"
@@ -87,7 +98,7 @@ const getMethodColor = (method: string) => {
           >
             {{ tab.name }}
           </span>
-          
+
           <!-- 响应状态指示器 -->
           <div v-if="tab.response?.status" class="flex items-center">
             <div
@@ -99,7 +110,7 @@ const getMethodColor = (method: string) => {
               }"
             ></div>
           </div>
-          
+
           <!-- 关闭按钮 - 只显示X -->
           <icon-close
             class="ml-1 w-3.5 h-3.5 cursor-pointer transition-all"
@@ -110,24 +121,11 @@ const getMethodColor = (method: string) => {
             title="关闭页签"
           />
         </div>
-        
-        <div v-if="tabs.length === 0" class="tabs-empty-state py-1 px-3">
-          <a-button type="primary" size="small" @click="handleCreateInterface">
-            <template #icon><icon-plus /></template>
-            新建接口
-          </a-button>
-          <span class="tabs-empty-hint text-sm">请从这里新建接口，或从左侧选择已有接口开始调试</span>
-        </div>
 
-        <a-button
-          v-else
-          class="tabs-create-button"
-          size="small"
-          @click="handleCreateInterface"
-          title="新建接口"
-        >
-          <template #icon><icon-plus /></template>
-        </a-button>
+        <div v-if="tabs.length === 0" class="tabs-empty-state py-1 px-3">
+          <span class="tabs-empty-hint text-sm">当前没有打开的接口，可点击左侧 + 新建，或从模块列表选择已有接口开始调试</span>
+        </div>
+        </div>
       </div>
     </div>
   </div>

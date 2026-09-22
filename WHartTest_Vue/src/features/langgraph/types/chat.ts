@@ -23,10 +23,16 @@ export interface ChatRequest {
   image?: string; // 图片base64编码（不含前缀），可选
   images?: string[]; // 多张图片base64编码（不含前缀），可选
   file_ids?: number[]; // 附件 file_id 列表，可选
-  
+
   // Playwright 脚本生成参数
   generate_playwright_script?: boolean; // 是否在任务完成后自动生成 Playwright 脚本
   test_case_id?: number; // 关联的测试用例ID，生成脚本时必需
+
+  // 兼容旧版 LLMConfig 与智能执行调用方的可选运行时字段
+  module_key?: string;
+  runtime_mode?: string;
+  resolved_source?: string;
+  resolved_bundle_id?: number;
 }
 
 /**
@@ -65,6 +71,7 @@ export interface ChatHistoryMessage {
   step?: number; // Agent Loop步骤号
   max_steps?: number; // Agent Loop最大步骤数
   sse_event_type?: string; // 'message' | 'tool_result' SSE事件类型
+  tool_input?: unknown;
 }
 
 /**
@@ -80,6 +87,7 @@ export interface ChatHistoryResponseData {
   history: ChatHistoryMessage[];
   context_token_count?: number; // 上下文Token使用量
   context_limit?: number; // 上下文Token限制
+  has_more?: boolean;
 }
 
 /**

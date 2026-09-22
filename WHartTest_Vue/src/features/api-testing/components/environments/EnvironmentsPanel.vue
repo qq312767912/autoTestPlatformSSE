@@ -5,18 +5,18 @@ import { useAppI18n } from '@/composables/useAppI18n'
 import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
 import {
-  getEnvironments, 
-  createEnvironment, 
-  deleteEnvironment, 
-  updateEnvironment, 
-  cloneEnvironment, 
+  getEnvironments,
+  createEnvironment,
+  deleteEnvironment,
+  updateEnvironment,
+  cloneEnvironment,
   getEnvironmentDetail,
   type Environment,
   type EnvironmentVariable,
   batchCreateVariables
 } from '../../services/environmentService'
 import { getDatabaseConfigs, type DatabaseConfig } from '../../services/databaseConfigService'
-import { toArray } from '../../services/responseHelpers'
+import { useEnvironmentStore } from '../../stores/environmentStore'
 import EnvironmentList from './EnvironmentList.vue'
 import EnvironmentForm from './EnvironmentForm.vue'
 import GlobalHeadersPanel from './GlobalHeadersPanel.vue'
@@ -34,6 +34,7 @@ import {
 
 const projectStore = useProjectStore()
 const themeStore = useThemeStore()
+const environmentStore = useEnvironmentStore()
 const { isEnglish } = useAppI18n()
 const loading = ref(false)
 const formLoading = ref(false)
@@ -52,12 +53,32 @@ const actionText = computed(() => isEnglish.value
       saveChanges: 'Save Changes',
       addHeader: 'Add Header',
       addConfig: 'Add Config',
+      enabled: 'Enabled',
+      disabled: 'Disabled',
+      edit: 'Edit',
+      clone: 'Clone',
+      delete: 'Delete',
+      back: 'Back',
+      deleteConfirm: 'Delete this environment?',
+      deleteSuccess: 'Environment deleted successfully',
+      deleteFailed: 'Failed to delete environment',
+      selectProjectFirst: 'Select a project first',
     }
   : {
       saveEnvironment: '保存环境',
       saveChanges: '保存更改',
       addHeader: '添加请求头',
       addConfig: '添加配置',
+      enabled: '启用',
+      disabled: '禁用',
+      edit: '编辑',
+      clone: '克隆',
+      delete: '删除',
+      back: '返回',
+      deleteConfirm: '确定要删除这个环境吗？',
+      deleteSuccess: '删除环境成功',
+      deleteFailed: '删除环境失败',
+      selectProjectFirst: '请先选择项目',
     }
 )
 
@@ -90,15 +111,16 @@ const handleDelete = async (record: Environment) => {
   try {
     loading.value = true
     await deleteEnvironment(record.id)
-    Message.success('删除环境成功')
+    Message.success(actionText.value.deleteSuccess)
     await fetchEnvironments()
+    refreshSharedEnvironments()
     if (selectedEnvironment.value?.id === record.id) {
       selectedEnvironment.value = null
       activeTab.value = 'list'
     }
   } catch (error) {
     console.error('删除环境错误:', error)
-    Message.error('删除环境失败')
+    Message.error(actionText.value.deleteFailed)
   } finally {
     loading.value = false
   }
@@ -107,7 +129,7 @@ const handleDelete = async (record: Environment) => {
 // 切换到创建环境
 const switchToCreate = () => {
   if (!projectStore.currentProjectId) {
-    Message.warning('请先选择项目')
+    Message.warning(actionText.value.selectProjectFirst)
     return
   }
   createForm.value = {
@@ -128,7 +150,7 @@ const switchToCreate = () => {
 const handleCreate = async () => {
   try {
     formLoading.value = true
-    
+
     // 处理database_config值，将字符串"null"转换为null
     const formData = { ...createForm.value };
     if (formData.database_config == ("null" as any)) {
@@ -156,10 +178,11 @@ const handleCreate = async () => {
           Message.warning('环境创建成功，但变量创建失败')
         }
       }
-      
+
       Message.success('创建环境成功')
       resetCreateForm()
       await fetchEnvironments()
+      refreshSharedEnvironments()
       // 切换到列表页
       activeTab.value = 'list'
     }
@@ -168,6 +191,15 @@ const handleCreate = async () => {
     Message.error(error.message || '创建环境失败')
   } finally {
     formLoading.value = false
+  }
+}
+
+// 同步刷新顶部环境选择器等共享数据
+const refreshSharedEnvironments = () => {
+  if (projectStore.currentProjectId) {
+    environmentStore.fetchEnvironments(Number(projectStore.currentProjectId)).catch((error) => {
+      console.error('刷新环境选择器数据失败:', error)
+    })
   }
 }
 
@@ -183,9 +215,9 @@ const fetchEnvironments = async () => {
     const response = await getEnvironments({
       project_id: Number(projectStore.currentProjectId)
     })
-    environments.value = toArray<Environment>(response.data?.results ?? response.data)
-    console.log('获取到的环境列表:', environments.value)
-    
+    environments.value = response.data.results
+    console.log('获取到的环境列表:', response.data.results)
+
     // 获取数据库配置信息，用于显示数据库配置名称
     await enrichEnvironmentsWithDatabaseConfigNames()
   } catch (error) {
@@ -202,20 +234,31 @@ const enrichEnvironmentsWithDatabaseConfigNames = async () => {
     // 检查是否有环境关联了数据库配置
     const hasDbConfig = environments.value.some(env => env.database_config)
     if (!hasDbConfig) return
-    
+
     // 获取数据库配置信息
     const response = await getDatabaseConfigs(Number(projectStore.currentProjectId))
     console.log('数据库配置响应:', response)
-    
-    const dbConfigs = toArray<DatabaseConfig>(response.data?.results ?? response.data)
-    
+
+    // 获取实际的数据库配置数组
+    let dbConfigs: DatabaseConfig[] = []
+    const responseData = response.data
+
+    // 判断是否是分页格式的响应
+    if (responseData && typeof responseData === 'object' && 'results' in responseData && Array.isArray(responseData.results)) {
+      dbConfigs = responseData.results
+      console.log('从分页结果中获取数据库配置:', dbConfigs)
+    } else if (Array.isArray(responseData)) {
+      dbConfigs = responseData
+      console.log('直接使用数据库配置数组:', dbConfigs)
+    }
+
     if (dbConfigs.length > 0) {
       // 创建一个数据库配置ID到名称的映射
       const dbConfigMap = new Map<number, string>()
       dbConfigs.forEach(config => {
         dbConfigMap.set(config.id, config.name)
       })
-      
+
       // 更新环境的数据库配置名称
       environments.value.forEach(env => {
         if (env.database_config && dbConfigMap.has(env.database_config)) {
@@ -255,13 +298,13 @@ const handleViewDetail = async (record: Environment) => {
   try {
     // 设置加载状态
     loading.value = true
-    
+
     // 设置选中的环境，使UI立即响应
     selectedEnvironment.value = record
-    
+
     // 切换到详情页面，使UI立即响应用户操作
     activeTab.value = 'detail'
-    
+
     // 然后异步请求最新数据
     const response = await getEnvironmentDetail(record.id)
     if (response.data) {
@@ -283,11 +326,11 @@ const handleEdit = async (record: Environment) => {
   try {
     loading.value = true
     formLoading.value = true  // 同时设置表单加载状态
-    
+
     // 先切换到编辑页面并设置初始数据，让用户看到响应
     activeTab.value = 'edit'
     selectedEnvironment.value = record
-    
+
     // 使用记录中的数据先初始化表单
     editForm.value = {
       id: record.id,
@@ -306,10 +349,10 @@ const handleEdit = async (record: Environment) => {
     if (detailResponse.data) {
       const updatedRecord = detailResponse.data
       console.log('获取到完整的环境详情:', JSON.stringify(updatedRecord))
-      
+
       // 更新选中的环境
       selectedEnvironment.value = updatedRecord
-      
+
       // 设置数据库配置值
       let updatedDatabaseConfig: any = "null"
       if (updatedRecord.database_config_info) {
@@ -330,7 +373,7 @@ const handleEdit = async (record: Environment) => {
         verify_ssl: updatedRecord.verify_ssl === true,
         database_config_info: (updatedRecord as any).database_config_info
       } as any
-      
+
       console.log('编辑表单已更新:', {
         database_config: updatedDatabaseConfig,
         database_config_info: updatedRecord.database_config_info
@@ -347,13 +390,13 @@ const handleEdit = async (record: Environment) => {
 
 const handleEditSubmit = async () => {
   if (!selectedEnvironment.value) return
-  
+
   try {
     formLoading.value = true
-    
+
     // 准备提交数据
     const formData = { ...editForm.value }
-    
+
     // 处理数据库配置
     if (formData.database_config == ("null" as any)) {
       formData.database_config = null
@@ -361,21 +404,21 @@ const handleEditSubmit = async () => {
 
     // 移除不需要提交的字段
     delete (formData as any).database_config_info
-    
+
     // 提交更新
     const response = await updateEnvironment(selectedEnvironment.value.id, formData)
-    
+
     if (response.data) {
       Message.success('更新环境成功')
-      
+
       // 获取最新数据
       const detailResponse = await getEnvironmentDetail(selectedEnvironment.value.id)
       if (detailResponse.data) {
         const updatedEnv = detailResponse.data
-        
+
         // 更新选中的环境
         selectedEnvironment.value = updatedEnv
-        
+
         // 设置数据库配置值
         let updatedDatabaseConfig: any = "null"
         if ((updatedEnv as any).database_config_info) {
@@ -396,9 +439,10 @@ const handleEditSubmit = async () => {
           database_config_info: (updatedEnv as any).database_config_info
         } as any
       }
-      
+
       // 刷新环境列表
       fetchEnvironments()
+      refreshSharedEnvironments()
     }
   } catch (error) {
     console.error('更新环境失败:', error)
@@ -429,12 +473,13 @@ const handleClone = async (record: Environment) => {
       project_id: record.project,
       name: `${record.name} - 副本`
     })
-    
+
     if (cloneResponse.data) {
       Message.success('克隆环境成功')
-      
+
       // 异步刷新环境列表
       fetchEnvironments().then(() => {
+        refreshSharedEnvironments()
         // 列表刷新后，找到新克隆的环境并选中它
         const clonedEnv = environments.value.find(env => env.id === cloneResponse.data.id)
         if (clonedEnv) {
@@ -542,7 +587,7 @@ onMounted(() => {
             </div>
           </div>
         </div>
-        
+
         <div class="content-body flex items-center justify-center">
           <div class="text-center">
             <div class="mb-6">
@@ -576,7 +621,7 @@ onMounted(() => {
             </div>
           </div>
         </div>
-        
+
         <div class="content-body">
           <EnvironmentForm
             v-model="createForm"
@@ -607,7 +652,7 @@ onMounted(() => {
             </div>
           </div>
         </div>
-        
+
         <div class="content-body">
           <EnvironmentForm
             v-model="editForm"
@@ -634,7 +679,7 @@ onMounted(() => {
                   <a-tag
                     :color="selectedEnvironment.is_active ? 'green' : 'red'"
                     size="small"
-                  >{{ selectedEnvironment.is_active ? '启用' : '禁用' }}</a-tag>
+                  >{{ selectedEnvironment.is_active ? actionText.enabled : actionText.disabled }}</a-tag>
                 </div>
                 <div class="section-subtitle text-sm truncate max-w-md">{{ selectedEnvironment.base_url }}</div>
               </div>
@@ -642,29 +687,29 @@ onMounted(() => {
             <div class="flex gap-2">
               <a-button type="outline" size="small" @click="() => handleEdit(selectedEnvironment!)">
                 <template #icon><IconEdit /></template>
-                编辑
+                {{ actionText.edit }}
               </a-button>
               <a-button type="outline" size="small" @click="handleClone(selectedEnvironment!)">
                 <template #icon><IconCopy /></template>
-                克隆
+                {{ actionText.clone }}
               </a-button>
               <a-popconfirm
-                content="确定要删除这个环境吗？"
+                :content="actionText.deleteConfirm"
                 type="warning"
                 position="left"
                 @ok="handleDelete(selectedEnvironment!)"
               >
                 <a-button type="outline" status="danger" size="small">
-                  删除
+                  {{ actionText.delete }}
                 </a-button>
               </a-popconfirm>
               <a-button type="outline" size="small" @click="activeTab = 'list'">
-                返回
+                {{ actionText.back }}
               </a-button>
             </div>
           </div>
         </div>
-        
+
         <div class="content-body">
           <div class="h-full overflow-y-auto overflow-x-hidden custom-scrollbar space-y-4 pb-4 pr-1">
             <!-- 基本信息卡片 -->
@@ -679,7 +724,7 @@ onMounted(() => {
                   {{ selectedEnvironment.project_info?.name || selectedEnvironment.project_name }}
                 </div>
               </div>
-              
+
               <!-- 父环境 -->
               <div class="space-y-2" v-if="selectedEnvironment.parent_info">
                 <div class="flex items-center gap-2">
@@ -690,7 +735,7 @@ onMounted(() => {
                   {{ selectedEnvironment.parent_info.name }}
                 </div>
               </div>
-              
+
               <!-- 基础URL -->
               <div class="space-y-2">
                 <div class="flex items-center gap-2">
@@ -701,7 +746,7 @@ onMounted(() => {
                   {{ selectedEnvironment.base_url }}
                 </div>
               </div>
-              
+
               <!-- 验证SSL -->
               <div class="space-y-2">
                 <div class="flex items-center gap-2">
@@ -712,7 +757,7 @@ onMounted(() => {
                   {{ selectedEnvironment.verify_ssl === true ? '是' : '否' }}
                 </div>
               </div>
-              
+
               <!-- 关联数据库配置 - 使用新的数据结构 -->
               <div class="space-y-2" v-if="selectedEnvironment.database_config_info">
                 <div class="flex items-center gap-2">
@@ -734,7 +779,7 @@ onMounted(() => {
                   </div>
                 </div>
               </div>
-              
+
               <!-- 保留旧的数据库配置显示方式作为备选，防止旧接口数据结构导致显示问题 -->
               <div class="space-y-2" v-else-if="selectedEnvironment.database_config">
                 <div class="flex items-center gap-2">
@@ -750,7 +795,7 @@ onMounted(() => {
                   </span>
                 </div>
               </div>
-              
+
               <!-- 描述 -->
               <div class="space-y-2" v-if="selectedEnvironment.description">
                 <div class="flex items-center gap-2">
@@ -813,7 +858,7 @@ onMounted(() => {
                     </div>
                   </div>
                 </div>
-                
+
                 <!-- 无变量时的提示 -->
                 <div
                   v-if="!selectedEnvironment.variables?.length"
@@ -851,7 +896,7 @@ onMounted(() => {
             </div>
           </div>
         </div>
-        
+
         <div class="content-body">
           <GlobalHeadersPanel ref="globalHeadersPanel" />
         </div>
@@ -881,7 +926,7 @@ onMounted(() => {
             </div>
           </div>
         </div>
-        
+
         <div class="content-body">
           <DatabaseConfigPanel ref="databaseConfigPanel" />
         </div>
@@ -931,7 +976,7 @@ onMounted(() => {
 .custom-scrollbar {
   scrollbar-width: none; /* Firefox */
   -ms-overflow-style: none; /* IE and Edge */
-  
+
   &::-webkit-scrollbar {
     display: none; /* Chrome, Safari, Opera*/
   }
@@ -962,7 +1007,7 @@ onMounted(() => {
   padding: 1.5rem;
   scrollbar-width: none; /* Firefox */
   -ms-overflow-style: none; /* IE and Edge */
-  
+
   &::-webkit-scrollbar {
     display: none; /* Chrome, Safari, Opera*/
   }
@@ -1012,7 +1057,7 @@ onMounted(() => {
 /* 图标容器样式 */
 .w-10.h-10.rounded-lg {
   transition: all 0.3s ease;
-  
+
   &:hover {
     transform: translateY(-2px);
     box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
@@ -1027,7 +1072,7 @@ h2.text-xl {
 /* 圆形图标背景 */
 .rounded-full {
   transition: all 0.3s ease;
-  
+
   &:hover {
     transform: scale(1.05);
     box-shadow: 0 0 20px rgba(30, 41, 59, 0.18);
@@ -1037,7 +1082,7 @@ h2.text-xl {
 /* 按钮样式增强 */
 :deep(.arco-btn) {
   transition: all 0.2s ease;
-  
+
   &:hover {
     transform: translateY(-1px);
   }
@@ -1107,4 +1152,4 @@ h2.text-xl {
 :deep(.arco-switch-checked) {
   background-color: rgba(16, 185, 129, 0.2);
 }
-</style> 
+</style>

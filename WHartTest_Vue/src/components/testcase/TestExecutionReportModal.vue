@@ -231,7 +231,7 @@ const reportText = computed(() => (
         cancelled: 'Cancelled',
         error: 'Error',
         skip: 'Skipped',
-        aiExecutionProcess: (count: number) => `🤖 AI execution process (${count} steps)`,
+        aiExecutionProcess: (count: number) => `AI execution process (${count} steps)`,
         testResult: 'Test result',
         summary: 'Summary',
         testCompleted: 'Test completed',
@@ -270,7 +270,7 @@ const reportText = computed(() => (
         cancelled: '已取消',
         error: '错误',
         skip: '跳过',
-        aiExecutionProcess: (count: number) => `🤖 AI 执行过程（共 ${count} 个步骤）`,
+        aiExecutionProcess: (count: number) => `AI 执行过程（共 ${count} 个步骤）`,
         testResult: '测试结果',
         summary: '总结',
         testCompleted: '测试完成',
@@ -490,7 +490,7 @@ const handlePrev = () => {
   const screenshots = getCurrentScreenshots();
   const total = screenshots.length;
   if (!total || total <= 1) return;
-  
+
   // 计算新的索引
   currentSlideIndex.value = (currentSlideIndex.value - 1 + total) % total;
 };
@@ -499,7 +499,7 @@ const handleNext = () => {
   const screenshots = getCurrentScreenshots();
   const total = screenshots.length;
   if (!total || total <= 1) return;
-  
+
   // 计算新的索引
   currentSlideIndex.value = (currentSlideIndex.value + 1) % total;
 };

@@ -111,6 +111,25 @@ class TestCase(models.Model):
         default='functional',
         blank=True,
     )
+    ui_test_case = models.ForeignKey(
+        'ui_automation.UiTestCase',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='bound_testcases',
+        verbose_name=_('绑定的UI自动化用例')
+    )
+    execution_mode = models.CharField(
+        _('默认执行模式'),
+        max_length=20,
+        choices=[
+            ('hybrid', _('智能双模(脚本优先+AI介入)')),
+            ('script_only', _('仅脚本执行')),
+            ('ai_only', _('纯AI执行')),
+        ],
+        default='hybrid',
+        blank=True,
+    )
 
     class Meta:
         verbose_name = _('用例')
@@ -335,13 +354,13 @@ class TestSuite(models.Model):
     )
     created_at = models.DateTimeField(_('创建时间'), auto_now_add=True)
     updated_at = models.DateTimeField(_('更新时间'), auto_now=True)
-    
+
     class Meta:
         verbose_name = _('测试套件')
         verbose_name_plural = _('测试套件')
         ordering = ['-created_at']
         unique_together = ('project', 'name')
-    
+
     def __str__(self):
         return f"{self.project.name} - {self.name}"
 
@@ -357,7 +376,7 @@ class TestExecution(models.Model):
         ('failed', _('失败')),
         ('cancelled', _('已取消')),
     ]
-    
+
     suite = models.ForeignKey(
         TestSuite,
         on_delete=models.CASCADE,
@@ -384,7 +403,7 @@ class TestExecution(models.Model):
     failed_count = models.PositiveIntegerField(_('失败数'), default=0)
     skipped_count = models.PositiveIntegerField(_('跳过数'), default=0)
     error_count = models.PositiveIntegerField(_('错误数'), default=0)
-    
+
     # Celery任务ID,用于追踪和取消任务
     celery_task_id = models.CharField(_('任务ID'), max_length=255, blank=True, null=True)
 
@@ -397,22 +416,22 @@ class TestExecution(models.Model):
 
     created_at = models.DateTimeField(_('创建时间'), auto_now_add=True)
     updated_at = models.DateTimeField(_('更新时间'), auto_now=True)
-    
+
     class Meta:
         verbose_name = _('测试执行记录')
         verbose_name_plural = _('测试执行记录')
         ordering = ['-created_at']
-    
+
     def __str__(self):
         return f"{self.suite.name} - {self.get_status_display()} - {self.created_at.strftime('%Y-%m-%d %H:%M:%S')}"
-    
+
     @property
     def duration(self):
         """计算执行时长(秒)"""
         if self.started_at and self.completed_at:
             return (self.completed_at - self.started_at).total_seconds()
         return None
-    
+
     @property
     def pass_rate(self):
         """计算通过率"""
@@ -433,7 +452,7 @@ class TestCaseResult(models.Model):
         ('skip', _('跳过')),
         ('error', _('错误')),
     ]
-    
+
     execution = models.ForeignKey(
         TestExecution,
         on_delete=models.CASCADE,
@@ -454,33 +473,47 @@ class TestCaseResult(models.Model):
     )
     error_message = models.TextField(_('错误信息'), blank=True, null=True)
     stack_trace = models.TextField(_('堆栈跟踪'), blank=True, null=True)
-    
+
     # 执行时间统计
     started_at = models.DateTimeField(_('开始时间'), null=True, blank=True)
     completed_at = models.DateTimeField(_('完成时间'), null=True, blank=True)
     execution_time = models.FloatField(_('执行耗时(秒)'), null=True, blank=True)
-    
+
     # MCP相关信息
     mcp_session_id = models.CharField(_('MCP会话ID'), max_length=255, blank=True, null=True)
-    
+
     # 截图信息(JSON格式存储截图路径列表)
     screenshots = models.JSONField(_('截图列表'), default=list, blank=True)
-    
+
     # 执行日志
     execution_log = models.TextField(_('执行日志'), blank=True, null=True)
-    
+
+    # 混合执行与AI介入相关信息
+    execution_mode = models.CharField(_('执行模式'), max_length=20, default='hybrid', blank=True)
+    is_ai_intervened = models.BooleanField(_('是否AI介入'), default=False)
+    ai_diagnosis = models.JSONField(_('AI诊断报告'), null=True, blank=True)
+    self_healing_info = models.JSONField(_('自愈信息'), null=True, blank=True)
+    ui_execution_record = models.ForeignKey(
+        'ui_automation.UiExecutionRecord',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='testcase_results',
+        verbose_name=_('关联的UI执行记录')
+    )
+
     created_at = models.DateTimeField(_('创建时间'), auto_now_add=True)
     updated_at = models.DateTimeField(_('更新时间'), auto_now=True)
-    
+
     class Meta:
         verbose_name = _('测试用例执行结果')
         verbose_name_plural = _('测试用例执行结果')
         ordering = ['execution', 'created_at']
         unique_together = ('execution', 'testcase')
-    
+
     def __str__(self):
         return f"{self.testcase.name} - {self.get_status_display()}"
-    
+
     @property
     def duration(self):
         """计算执行时长(秒)"""

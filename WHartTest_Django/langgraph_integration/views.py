@@ -115,17 +115,17 @@ async def auto_summarize_session_title(llm, chat_session, user_message):
             "3. 只返回标题文本，不要包含任何解释、说明或引言。\n\n"
             f"用户输入内容：\n{truncated_message}"
         )
-        
+
         logger.info(f"auto_summarize_session_title: Summarizing title for session {chat_session.session_id}")
         response = await llm.ainvoke([HumanMessage(content=summary_prompt)])
         new_title = response.content.strip()
-        
+
         # 清理标题中的引号或多余字符
         new_title = new_title.replace('"', '').replace("'", "").replace("“", "").replace("”", "").strip()
         if new_title and len(new_title) > 0:
             if len(new_title) > 100:
                 new_title = new_title[:97] + "..."
-            
+
             # 提取大模型返回的真实 Token 使用数据
             input_tokens = 0
             output_tokens = 0
@@ -204,7 +204,7 @@ async def auto_summarize_session_title(llm, chat_session, user_message):
                 except Exception as db_err:
                     logger.error(f"auto_summarize_session_title: Database update and token recording error: {db_err}")
                     return None
-            
+
             updated = await update_title_and_tokens()
             if updated:
                 chat_session.title = updated
@@ -1907,7 +1907,7 @@ def sync_chat_messages_from_checkpointer(chat_session, user, thread_id):
                                         if url and url.startswith("data:image/"):
                                             image_urls.append(url)
                         content = "".join(text_parts) if text_parts else "[包含图片的消息]"
-                        
+
                         has_requirement_doc_images = isinstance(content, str) and (
                             "docimg://" in content or "/api/requirements/documents/" in content
                         )
@@ -1936,7 +1936,7 @@ def sync_chat_messages_from_checkpointer(chat_session, user, thread_id):
                     if hasattr(msg, "additional_kwargs") and msg.additional_kwargs:
                         agent_info = msg.additional_kwargs.get("agent")
                         agent_type = msg.additional_kwargs.get("agent_type")
-                        
+
                         # 新版格式存储在 metadata 字典中
                         meta = msg.additional_kwargs.get("metadata", {})
                         if meta:
@@ -1945,7 +1945,7 @@ def sync_chat_messages_from_checkpointer(chat_session, user, thread_id):
                             step = meta.get("step")
                             max_steps = meta.get("max_steps")
                             sse_event_type = meta.get("sse_event_type")
-                            
+
                             if step is not None:
                                 metadata["step"] = step
                             if max_steps is not None:
@@ -2021,7 +2021,7 @@ def sync_chat_messages_from_checkpointer(chat_session, user, thread_id):
                 )
 
             if messages_to_create:
-                ChatMessage.objects.bulk_create(messages_to_create)
+                ChatMessage.objects.bulk_create(messages_to_create, ignore_conflicts=True)
                 logger.info(f"sync_chat_messages_from_checkpointer: Successfully bulk-created {len(messages_to_create)} ChatMessage records.")
 
     except Exception as e:
@@ -3070,7 +3070,7 @@ class UserChatSessionsAPIView(APIView):
         try:
             # 校验会话是否存在并且属于当前用户
             chat_session = ChatSession.objects.get(session_id=session_id, user=user)
-            
+
             # 如果提供了 project_id，进行权限和匹配校验
             if project_id:
                 project = check_project_permission(user, project_id)
