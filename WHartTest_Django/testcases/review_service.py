@@ -274,7 +274,7 @@ def _write_report(review, rows, issues, pending, governance, uncovered=None, chu
     detail = workbook.create_sheet("问题明细")
     headers = [
         "Sheet", "行号", "用例编号/名称", "模块", "原文", "严重程度", "问题类型", "问题说明",
-        "修改建议", "判定", "问题确认", "修改点", "不采纳原因",
+        "修改建议", "判定", "问题确认", "问题描述", "修改点", "不采纳原因",
     ]
     detail.append(headers)
     for item in issues:
@@ -282,7 +282,7 @@ def _write_report(review, rows, issues, pending, governance, uncovered=None, chu
             [item.get(k, "") for k in [
                 "sheet", "row", "case_id", "module", "original", "severity", "issue_type",
                 "description", "suggestion", "judgement",
-            ]] + ["", "", ""]
+            ]] + ["", "", "", ""]
         )
     confirmation_validation = DataValidation(
         type="list", formula1='"是,否"', allow_blank=True,
@@ -410,8 +410,9 @@ def _write_report(review, rows, issues, pending, governance, uncovered=None, chu
     detail.column_dimensions["I"].width = 48
     detail.column_dimensions["J"].width = 16
     detail.column_dimensions["K"].width = 14
-    detail.column_dimensions["L"].width = 36
+    detail.column_dimensions["L"].width = 48
     detail.column_dimensions["M"].width = 36
+    detail.column_dimensions["N"].width = 36
     for row_index in range(2, detail.max_row + 1):
         severity = str(detail.cell(row_index, 6).value or "")
         if severity in risk_styles:

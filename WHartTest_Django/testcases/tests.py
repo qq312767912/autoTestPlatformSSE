@@ -300,12 +300,12 @@ class TestCaseReviewReportTests(TestCase):
             self.assertFalse(generated["问题明细"].sheet_view.showGridLines)
             self.assertEqual(generated["问题明细"].freeze_panes, "A2")
             self.assertEqual(
-                [generated["问题明细"].cell(1, column).value for column in range(11, 14)],
-                ["问题确认", "修改点", "不采纳原因"],
+                [generated["问题明细"].cell(1, column).value for column in range(11, 15)],
+                ["问题确认", "问题描述", "修改点", "不采纳原因"],
             )
             self.assertEqual(
-                [generated["问题明细"].cell(2, column).value for column in range(11, 14)],
-                [None, None, None],
+                [generated["问题明细"].cell(2, column).value for column in range(11, 15)],
+                [None, None, None, None],
             )
             validations = list(generated["问题明细"].data_validations.dataValidation)
             self.assertEqual(len(validations), 1)
