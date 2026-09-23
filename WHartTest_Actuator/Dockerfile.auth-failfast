@@ -1,0 +1,17 @@
+ARG BASE_IMAGE=wharttest-250-actuator:update-ac65a6fb-v2.8-r2-arm64
+FROM ${BASE_IMAGE}
+
+ARG BUILD_REVISION=unknown
+
+LABEL org.opencontainers.image.title="WHartTest Actuator" \
+      org.opencontainers.image.revision="${BUILD_REVISION}"
+
+# r2 已是完整 Alpine/musl ARM64 镜像；本层只替换认证失败收尾逻辑，
+# docker save 会携带全部父层，内网导入不依赖旧 tag 预先存在。
+COPY consumer.py /app/consumer.py
+
+RUN python -m py_compile /app/consumer.py \
+    && grep -q '执行器无法获取用例数据' /app/consumer.py \
+    && grep -q "Alpine Linux" /etc/os-release \
+    && ldd --version 2>&1 | grep -qi musl \
+    && test -x /usr/bin/chromium-browser

@@ -20,6 +20,10 @@ grep -q -- '--workers=1' "$SUPERVISOR_CONFIG" || {
   echo "Supervisor 配置不是单 worker，拒绝执行" >&2
   exit 1
 }
+grep -q -- '--pool=solo --concurrency=1' "$SUPERVISOR_CONFIG" || {
+  echo "Celery 配置不是 solo 单进程，拒绝执行" >&2
+  exit 1
+}
 
 compose=(docker compose -p offline-images -f "$BASE_COMPOSE" -f "$OVERRIDE_COMPOSE")
 "${compose[@]}" config >/dev/null
@@ -50,7 +54,7 @@ echo "后端容器状态："
 docker inspect wharttest-backend --format 'status={{.State.Status}} restarts={{.RestartCount}} image={{.Config.Image}}'
 
 echo "Supervisor 实际配置："
-docker exec wharttest-backend sh -c "grep -n 'command=uvicorn' /app/supervisord.conf"
+docker exec wharttest-backend sh -c "grep -nE 'command=(uvicorn|celery .*worker)' /app/supervisord.conf"
 
 echo "Uvicorn 进程："
 docker exec wharttest-backend sh -c "ps -ef | grep '[u]vicorn' || true"

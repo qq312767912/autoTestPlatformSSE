@@ -20,7 +20,10 @@ wait_healthy() {
     status="$(docker inspect "$container" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{if .State.Running}}running{{else}}stopped{{end}}{{end}}' 2>/dev/null || true)"
     case "$status" in
       healthy|running) echo "[通过] $container: $status"; return 0 ;;
-      unhealthy|stopped) docker logs --tail 100 "$container"; return 1 ;;
+      # 容器初次启动会执行数据库迁移、技能同步和超时任务收尾，
+      # healthcheck 在此期间可能短暂进入 unhealthy，应继续等待至上限。
+      unhealthy) ;;
+      stopped) docker logs --tail 100 "$container"; return 1 ;;
     esac
     sleep 5
     elapsed=$((elapsed + 5))
@@ -52,7 +55,7 @@ else
 fi
 
 echo "[升级] 替换 Backend 和 Frontend（Backend 入口脚本会执行数据库迁移）"
-"${compose[@]}" up -d --no-deps backend frontend
+"${compose[@]}" up -d --pull never --no-deps backend frontend
 wait_healthy wharttest-backend 300
 wait_healthy wharttest-frontend 180
 
@@ -70,7 +73,7 @@ else
 fi
 
 echo "[恢复] Backend 网络恢复后重新拉起三个执行器"
-"${compose[@]}" up -d --no-deps actuator-01 actuator-02 actuator-03
+"${compose[@]}" up -d --pull never --no-deps actuator-01 actuator-02 actuator-03
 wait_healthy wharttest-actuator-01 180
 wait_healthy wharttest-actuator-02 180
 wait_healthy wharttest-actuator-03 180

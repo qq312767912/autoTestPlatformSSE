@@ -129,7 +129,7 @@ class TaskConsumer:
 
         url = f"{self.api_base_url}/api/token/"
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.post(url, json={
                     "username": self.api_username,
                     "password": self.api_password
@@ -143,7 +143,8 @@ class TaskConsumer:
                     logger.info("获取API Token成功")
                     return self._api_token
                 else:
-                    logger.error(f"获取Token失败: {response.status_code}")
+                    detail = response.text[:500].replace('\n', ' ')
+                    logger.error(f"获取Token失败: {response.status_code}, body={detail}")
                     return None
         except Exception as e:
             logger.error(f"获取Token请求失败: {e}")
@@ -785,6 +786,21 @@ class TaskConsumer:
         # 从API获取用例详情
         case_data = await self._fetch_test_case(case_id)
         if not case_data:
+            # 认证失败/API 不可用时不能静默 return，否则 Backend 不会释放
+            # slot，用例状态也会永远停在“执行中”。
+            await self.ws_client.send_result(
+                UiSocketEnum.CASE_RESULT,
+                {
+                    'case_id': case_id,
+                    'execution_request_id': execution_request_id,
+                    'status': 'failed',
+                    'message': '执行器无法获取用例数据，请检查执行器平台账号密码和 Backend API',
+                    'batch_id': batch_id,
+                    'executor_id': executor_id,
+                    'executor_name': executor_name,
+                },
+                self._current_user,
+            )
             return
 
         # 获取环境配置
@@ -918,7 +934,20 @@ class TaskConsumer:
 
             case_data = await self._fetch_test_case(case_id)
             if not case_data:
-                logger.warning(f"用例 {case_id} 数据获取失败，跳过")
+                message = '执行器无法获取用例数据，请检查执行器平台账号密码和 Backend API'
+                logger.warning(f"用例 {case_id} 数据获取失败，上报失败")
+                await self.ws_client.send_result(
+                    UiSocketEnum.CASE_RESULT,
+                    {
+                        'case_id': case_id,
+                        'status': 'failed',
+                        'message': message,
+                        'batch_id': batch_id,
+                        'executor_id': executor_id,
+                        'executor_name': executor_name,
+                    },
+                    self._current_user,
+                )
                 continue
 
             # 获取环境配置

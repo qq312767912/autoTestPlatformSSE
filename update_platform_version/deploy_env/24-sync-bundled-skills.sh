@@ -18,7 +18,7 @@
 #
 # 安全约定：
 #   * 默认只读；任何写动作都要显式 --apply。
-#   * 写入前先把目标技能目录整体打包备份到 deploy_env/backups/。
+#   * 写入前先把目标技能目录整体打包备份到 deploy_env 同级 backups/。
 #   * 默认不覆盖已存在文件，避免顶掉你在内网手工调整过的技能。
 #   * 改完宿主机目录即时对容器生效（只读 bind mount），无需重启容器。
 set -euo pipefail
@@ -38,7 +38,8 @@ BASE_DIR="${BASE_DIR:-/projects/ai-test-platform}"
 UPDATE_DIR="${UPDATE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 HOTFIX_SKILLS="$UPDATE_DIR/hotfix/bundled_skills"
 BACKEND_CONTAINER="${BACKEND_CONTAINER:-wharttest-backend}"
-BACKUP_DIR="$UPDATE_DIR/backups"
+PACKAGE_DIR="$(cd "$UPDATE_DIR/.." && pwd)"
+BACKUP_DIR="${BACKUP_DIR:-$PACKAGE_DIR/backups}"
 
 # ------------------------------------------------------------ 目标目录推导
 # 基础 compose 里是相对路径挂载 `./skills:/app/bundled_skills:ro`，

@@ -71,12 +71,13 @@ RUN set -eux; \
     sed -i '/^langgraph-checkpoint-sqlite/d' requirements.txt; \
     # fastembed 依赖 onnxruntime（无 musllinux ARM64 wheel），Alpine 版知识库仅支持纯向量检索
     sed -i '/^fastembed/d' requirements.txt; \
+    # ddddocr 同样依赖 onnxruntime，且 Backend 无调用；验证码 OCR 由 Actuator 处理
+    sed -i '/^ddddocr/d' requirements.txt; \
     install_requirements() { \
       for index in "${PIP_INDEX_URL}" ${PIP_INDEX_FALLBACKS}; do \
         [ -n "$index" ] || continue; \
         echo "uv pip install via $index"; \
         if uv pip install --python /opt/venv/bin/python --no-cache \
-          --prerelease=allow \
           --default-index "$index" \
           -r requirements.txt; then \
           return 0; \
@@ -120,6 +121,7 @@ RUN sed -i "s#https://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" /etc/apk
     git \
     nodejs \
     npm \
+    chromium \
     libgomp \
     libpq \
     libjpeg-turbo \
@@ -189,10 +191,17 @@ COPY testcases/ /app/testcases/
 COPY utils/ /app/utils/
 COPY wharttest_django/ /app/wharttest_django/
 
-# Playwright 在 Alpine ARM64 上不可用，UI 自动化由独立的 playwright-mcp 服务提供
-# agent-browser 在 ARM64 上跳过浏览器安装；OpenCodeReview CLI 必须完整安装，
-# 代码审查会直接调用 `ocr review`。
+# Python Playwright 在 Alpine ARM64 上不可用；UI 录制器使用 Node Playwright
+# 驱动 Alpine 系统 Chromium，构建时安装全部依赖，内网运行时禁止 npm 下载。
+# OpenCodeReview CLI 必须完整安装，代码审查会直接调用 `ocr review`。
+ENV PLAYWRIGHT_AUTO_INSTALL=false \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium-browser
 RUN npm config set registry "${NPM_REGISTRY}" 2>/dev/null && \
+    cd /app/ui_automation/recorder && \
+    npm ci --omit=dev --ignore-scripts && \
+    node -e "require.resolve('playwright')" && \
+    test -x /usr/bin/chromium-browser && \
     npm install -g agent-browser @alibaba-group/open-code-review && \
     command -v ocr >/dev/null && ocr --version && \
     case "$(uname -m)" in \

@@ -61,6 +61,47 @@ class PlaywrightExecutorCaptchaTest(unittest.TestCase):
         self.assertIn('abcd', msg)
         mock_target_locator.fill.assert_awaited_once_with('abcd')
 
+    def test_captcha_recognize_uses_vision_mcp_when_configured(self):
+        step = StepConfig(
+            step_id=13,
+            operation_type='captcha_recognize',
+            locator_type='xpath',
+            locator_value='//img[@id="captcha"]',
+            ope_value={
+                'target_locator': {
+                    'locator_type': 'xpath',
+                    'locator_value': '//input[@name="code"]',
+                },
+                'retry_count': 1,
+            },
+        )
+        mock_page = MagicMock()
+        mock_img_locator = MagicMock()
+        mock_img_locator.screenshot = AsyncMock(return_value=b'captcha_png')
+        mock_target_locator = MagicMock()
+        mock_target_locator.fill = AsyncMock()
+        mock_page.locator.side_effect = lambda val: (
+            mock_img_locator if 'captcha' in val else mock_target_locator
+        )
+
+        async def run_test():
+            with patch.dict('os.environ', {'VISION_MCP_URL': 'http://vision-mcp:8010/mcp'}):
+                with patch.object(
+                    self.executor,
+                    '_recognize_captcha_with_vision_mcp',
+                    new=AsyncMock(return_value='7391'),
+                ) as vision_ocr:
+                    result = await self.executor._execute_captcha_recognize(
+                        mock_page, mock_img_locator, step
+                    )
+                    vision_ocr.assert_awaited_once_with(b'captcha_png')
+                    return result
+
+        success, msg, sc = asyncio.run(run_test())
+        self.assertTrue(success)
+        self.assertIn('7391', msg)
+        mock_target_locator.fill.assert_awaited_once_with('7391')
+
     def test_captcha_recognize_missing_target_locator(self):
         step = StepConfig(
             step_id=11,
@@ -95,6 +136,7 @@ class PlaywrightExecutorCaptchaTest(unittest.TestCase):
         )
         mock_page = MagicMock()
         mock_img_locator = MagicMock()
+        mock_img_locator.screenshot = AsyncMock(return_value=b'fake_image_bytes')
 
         async def run_test():
             with patch.object(self.executor, '_get_ocr_instance', return_value=None):

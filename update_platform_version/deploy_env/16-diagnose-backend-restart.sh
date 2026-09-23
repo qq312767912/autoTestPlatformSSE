@@ -5,7 +5,7 @@ UPDATE_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$UPDATE_DIR/logs"
 LOG_FILE="$LOG_DIR/backend-restart-$(date '+%Y%m%d-%H%M%S').log"
 BACKEND_CONTAINER="${BACKEND_CONTAINER:-wharttest-backend}"
-EXPECTED_IMAGE="${EXPECTED_BACKEND_IMAGE:-wharttest-250-backend:update-d595a628-review-fix-r5-arm64}"
+EXPECTED_IMAGE="${EXPECTED_BACKEND_IMAGE:-wharttest-250-backend:update-ac65a6fb-v2.8-r3-kombu562-arm64}"
 BASE_COMPOSE="${BASE_COMPOSE:-/projects/ai-test-platform/offline-images/docker-compose.offline.yml}"
 UPDATE_COMPOSE="$UPDATE_DIR/docker-compose.update.yml"
 

@@ -3,7 +3,9 @@ set -euo pipefail
 
 UPDATE_DIR="$(cd "$(dirname "$0")" && pwd)"
 STAMP="$(date '+%Y%m%d-%H%M%S')"
-BACKUP_DIR="$UPDATE_DIR/backups/$STAMP"
+PACKAGE_DIR="$(cd "$UPDATE_DIR/.." && pwd)"
+BACKUP_ROOT="${BACKUP_ROOT:-$PACKAGE_DIR/backups}"
+BACKUP_DIR="$BACKUP_ROOT/$STAMP"
 mkdir -p "$BACKUP_DIR"
 
 echo "[备份] 保存当前容器及镜像基线"

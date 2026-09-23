@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from executor import PlaywrightExecutor
 from consumer import TaskConsumer
-from models import CaseResultModel, StepResultModel
+from models import CaseResultModel, StepResultModel, UiSocketEnum
 
 
 class ExecutorMemoryReleaseTest(unittest.IsolatedAsyncioTestCase):
@@ -204,6 +204,25 @@ class ConsumerMemoryReleaseTest(unittest.TestCase):
 
 
 class ConsumerFinallyReleaseTest(unittest.IsolatedAsyncioTestCase):
+    async def test_execute_test_case_reports_failure_when_api_data_unavailable(self):
+        consumer = TaskConsumer(ws_client=MagicMock(), api_base_url="http://x")
+        consumer.ws_client.send_result = AsyncMock()
+        consumer._current_user = "u1"
+        consumer._fetch_test_case = AsyncMock(return_value=None)
+
+        await consumer.execute_test_case({
+            "case_id": 9,
+            "execution_request_id": "req-1",
+            "executor_id": 2,
+        })
+
+        consumer.ws_client.send_result.assert_awaited_once()
+        call = consumer.ws_client.send_result.await_args
+        self.assertEqual(call.args[0], UiSocketEnum.CASE_RESULT)
+        self.assertEqual(call.args[1]["case_id"], 9)
+        self.assertEqual(call.args[1]["status"], "failed")
+        self.assertIn("账号密码", call.args[1]["message"])
+
     async def test_execute_test_case_releases_on_send_error(self):
         consumer = TaskConsumer(ws_client=MagicMock(), api_base_url="http://x")
         consumer.ws_client.send_result = AsyncMock(side_effect=RuntimeError("ws down"))

@@ -7,7 +7,7 @@ PACKAGE_DIR="$(cd "$UPDATE_DIR/.." && pwd)"
 OVERRIDE_COMPOSE="$UPDATE_DIR/docker-compose.update.yml"
 SECRET_DIR="$UPDATE_DIR/secrets"
 SECRET_FILE="$SECRET_DIR/actuator_api_password"
-ACTUATOR_IMAGE="wharttest-250-actuator:update-178fb3ed-arm64-r4"
+ACTUATOR_IMAGE="wharttest-250-actuator:update-ac65a6fb-v2.8-r3-auth-failfast-arm64"
 LOG_DIR="$UPDATE_DIR/logs"
 LOG_FILE="$LOG_DIR/start-actuators-$(date '+%Y%m%d-%H%M%S').log"
 
@@ -54,6 +54,32 @@ if [ ! -s "$SECRET_FILE" ]; then
     chmod 600 "$SECRET_FILE"
   fi
 fi
+
+# 密钥文件存在不代表仍是平台当前密码。启动前必须实际换取 Token，
+# 避免执行器看似在线，但用例下发后因 HTTP 400 一直停在“执行中”。
+network="$(docker inspect wharttest-backend --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{end}}')"
+[ -n "$network" ] || { echo "无法确定 Backend Docker 网络" >&2; exit 1; }
+if ! docker run --rm --network "$network" \
+  -e ACTUATOR_API_USERNAME="${ACTUATOR_API_USERNAME:-admin}" \
+  -v "$SECRET_FILE:/run/secrets/actuator_api_password:ro" \
+  --entrypoint /usr/local/bin/python3.12 "$ACTUATOR_IMAGE" -c '
+import json, os, sys, urllib.error, urllib.request
+password = open("/run/secrets/actuator_api_password", encoding="utf-8").read().strip()
+payload = json.dumps({"username": os.environ["ACTUATOR_API_USERNAME"], "password": password}).encode()
+request = urllib.request.Request("http://backend:8000/api/token/", data=payload, headers={"Content-Type": "application/json"})
+try:
+    with urllib.request.urlopen(request, timeout=15) as response:
+        body = json.loads(response.read().decode())
+        assert ((body.get("data") or {}).get("access") or body.get("access"))
+except Exception as exc:
+    print(f"Actuator API credential validation failed: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+'; then
+  echo "执行器平台凭据已失效。请执行：" >&2
+  echo "  bash ${PACKAGE_DIR}/fix-actuator-api-credentials.sh" >&2
+  exit 1
+fi
+echo "执行器平台凭据校验通过。"
 
 compose=(docker compose -p offline-images -f "$BASE_COMPOSE" -f "$OVERRIDE_COMPOSE")
 "${compose[@]}" config >/dev/null

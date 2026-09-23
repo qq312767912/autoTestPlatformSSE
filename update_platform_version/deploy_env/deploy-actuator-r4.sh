@@ -5,8 +5,8 @@ PLATFORM_DIR="${1:-/projects/ai-test-platform}"
 IMAGE_DIR="${PLATFORM_DIR}/update_platform_version/images"
 BASE_COMPOSE="${PLATFORM_DIR}/offline-images/docker-compose.offline.yml"
 UPDATE_COMPOSE="${PLATFORM_DIR}/update_platform_version/deploy_env/docker-compose.update.yml"
-CHECKSUM_FILE="${PLATFORM_DIR}/update_platform_version/deploy_env/actuator-update-178fb3ed-arm64-r4.sha256"
-PART_PREFIX="${IMAGE_DIR}/actuator-update-178fb3ed-arm64-r4.tar.gz.part"
+CHECKSUM_FILE="${PLATFORM_DIR}/update_platform_version/deploy_env/SHA256SUMS"
+PART_PREFIX="${IMAGE_DIR}/actuator-ac65a6fb-v2.8-r3-auth-failfast-arm64.tar.gz.part"
 START_SCRIPT="${PLATFORM_DIR}/update_platform_version/deploy_env/07-start-actuators.sh"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 LOG_FILE="${PLATFORM_DIR}/update_platform_version/deploy-actuator-r4-${STAMP}.log"
@@ -23,13 +23,16 @@ done
 
 echo "1/5 校验镜像分卷"
 cd "$PLATFORM_DIR"
-shasum -a 256 -c "$CHECKSUM_FILE"
+grep 'actuator-ac65a6fb-v2.8-r3-auth-failfast-arm64' "$CHECKSUM_FILE" | while read -r digest file; do
+  actual="$(sha256sum "${PLATFORM_DIR}/update_platform_version/deploy_env/${file}" | awk '{print $1}')"
+  [ "$actual" = "$digest" ] || { echo "校验失败: $file" >&2; exit 1; }
+done
 
 echo "2/5 合并并导入镜像（不生成超大中间文件）"
 cat "${PART_PREFIX}"* | gzip -dc | docker load
 
 echo "3/5 验证镜像"
-docker image inspect wharttest-250-actuator:update-178fb3ed-arm64-r4 \
+docker image inspect wharttest-250-actuator:update-ac65a6fb-v2.8-r3-auth-failfast-arm64 \
   --format '架构={{.Architecture}} 大小={{.Size}} revision={{index .Config.Labels "org.opencontainers.image.revision"}}'
 
 echo "4/5 逐个更新三个执行器，不重启其他服务"

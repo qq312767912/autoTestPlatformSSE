@@ -5,11 +5,12 @@
 # 用法：
 #   bash build-images.sh backend     # 只重建 Backend（Dockerfile.alpine，Alpine/musl 完整构建）
 #   bash build-images.sh frontend    # 只重建 Frontend
+#   bash build-images.sh actuator    # 只重建 Actuator（Alpine/musl ARM64）
 #   bash build-images.sh pack        # 只做 docker save + gzip + 分卷 + SHA256SUMS
 #   bash build-images.sh all         # 全流程
 #
 # 约定：
-#   REV   版本标识（默认 d595a628-review-fix-r5）。它会同时写入镜像 tag 后缀与
+#   REV   版本标识（默认由当前 Git HEAD 生成）。它会同时写入镜像 tag 后缀与
 #         OCI 标签 org.opencontainers.image.revision，deploy_env/03-import-images.sh
 #         会用同一字符串校验镜像版本，三者必须一致。
 #   PART_SIZE 单个分卷大小（默认 280m），内网按 300MB 单文件上限传输。
@@ -17,6 +18,7 @@
 # 产物：
 #   update_platform_version/images/backend-<REV>-arm64.tar.gz.part*
 #   update_platform_version/images/frontend-<REV>-arm64.tar.gz.part*
+#   update_platform_version/images/actuator-<REV>-arm64.tar.gz.part*
 #   update_platform_version/deploy_env/SHA256SUMS
 #   update_platform_version/build-logs/*.log
 #
@@ -38,9 +40,10 @@ done
 export PATH
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-REV="${REV:-d595a628-review-fix-r5}"
+REV="${REV:-$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)-v2.8-r3-kombu562}"
 BACKEND_IMAGE="wharttest-250-backend:update-${REV}-arm64"
 FRONTEND_IMAGE="wharttest-250-frontend:update-${REV}-arm64"
+ACTUATOR_IMAGE="wharttest-250-actuator:update-${REV}-arm64"
 IMAGES_DIR="$REPO_ROOT/update_platform_version/images"
 LOG_DIR="$REPO_ROOT/update_platform_version/build-logs"
 DEPLOY_ENV_DIR="$REPO_ROOT/update_platform_version/deploy_env"
@@ -57,7 +60,7 @@ require_docker() {
   actual="$(docker info --format '{{.OSType}}/{{.Architecture}}')"
   case "$actual" in
     linux/aarch64|linux/arm64) ;;
-    *) fail "当前 Docker 架构为 $actual，需要原生 linux/arm64 才能构建麒麟 ARM64 镜像" ;;
+    *) fail "当前 Docker 架构为 ${actual}，需要原生 linux/arm64 才能构建麒麟 ARM64 镜像" ;;
   esac
   log "Docker 就绪：$actual"
 }
@@ -65,7 +68,7 @@ require_docker() {
 build_backend() {
   require_docker
   mkdir -p "$LOG_DIR"
-  log "构建 Backend：$BACKEND_IMAGE（Dockerfile.alpine / Alpine-musl）"
+  log "构建 Backend：${BACKEND_IMAGE}（Dockerfile.alpine / Alpine-musl）"
   docker buildx build \
     --platform "$PLATFORM" \
     --progress=plain \
@@ -94,6 +97,22 @@ build_frontend() {
   assert_frontend
 }
 
+build_actuator() {
+  require_docker
+  mkdir -p "$LOG_DIR"
+  log "构建 Actuator：${ACTUATOR_IMAGE}（Dockerfile.alpine-arm64 / Alpine-musl）"
+  docker buildx build \
+    --platform "$PLATFORM" \
+    --progress=plain \
+    --build-arg BUILD_REVISION="$REV" \
+    -f "$REPO_ROOT/WHartTest_Actuator/Dockerfile.alpine-arm64" \
+    -t "$ACTUATOR_IMAGE" \
+    --load \
+    "$REPO_ROOT/WHartTest_Actuator" \
+    2>&1 | tee "$LOG_DIR/actuator-full-${REV}-alpine-arm64.log"
+  assert_actuator
+}
+
 # 构建后立即验证硬性要求，避免把不合格镜像打包装车。
 assert_backend() {
   log "校验 Backend 镜像"
@@ -104,14 +123,18 @@ assert_backend() {
     command -v ocr >/dev/null
     ocr --version
     npm list -g --depth=0 @alibaba-group/open-code-review >/dev/null
+    test -x /usr/bin/chromium-browser
+    cd /app/ui_automation/recorder
+    node -e "require.resolve(\"playwright\")"
     [ -f /app/testcases/review_service.py ]
     [ -f /app/bundled_skills/test-case-clarity-review/references/review-rules.md ]
-    echo "Alpine/musl + OpenCodeReview(ocr CLI) + 用例审查 Skill 就绪"
+    python -c "import celery,kombu,redis; assert (celery.__version__,kombu.__version__,redis.__version__) == (\"5.4.0\",\"5.6.2\",\"5.2.0\")"
+    echo "Alpine/musl + OpenCodeReview(ocr CLI) + UI 录制器 Chromium/Playwright + 用例审查 Skill 就绪"
   '
   local revision
   revision="$(docker image inspect "$BACKEND_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
-  [ "$revision" = "$REV" ] || fail "镜像标签 revision=$revision，期望 $REV"
-  log "Backend 校验通过（revision=$revision）"
+  [ "$revision" = "$REV" ] || fail "镜像标签 revision=${revision}，期望 $REV"
+  log "Backend 校验通过（revision=${revision}）"
 }
 
 assert_frontend() {
@@ -123,8 +146,24 @@ assert_frontend() {
   '
   local revision
   revision="$(docker image inspect "$FRONTEND_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
-  [ "$revision" = "$REV" ] || fail "镜像标签 revision=$revision，期望 $REV"
-  log "Frontend 校验通过（revision=$revision）"
+  [ "$revision" = "$REV" ] || fail "镜像标签 revision=${revision}，期望 $REV"
+  log "Frontend 校验通过（revision=${revision}）"
+}
+
+assert_actuator() {
+  log "校验 Actuator 镜像"
+  docker run --rm --entrypoint /bin/sh "$ACTUATOR_IMAGE" -c '
+    set -e
+    grep -q "Alpine Linux" /etc/os-release
+    ldd --version 2>&1 | grep -qi musl
+    test -x /usr/bin/chromium-browser
+    test -f /app/main.py
+    python -c "import playwright; import websockets"
+  '
+  local revision
+  revision="$(docker image inspect "$ACTUATOR_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+  [ "$revision" = "$REV" ] || fail "镜像标签 revision=${revision}，期望 $REV"
+  log "Actuator 校验通过（revision=${revision}）"
 }
 
 # docker save → gzip → 按 PART_SIZE 分卷，删除中间整包。
@@ -143,7 +182,7 @@ pack_image() {
 write_sha256sums() {
   log "生成 deploy_env/SHA256SUMS"
   local sums=""
-  for name in "backend-${REV}-arm64" "frontend-${REV}-arm64"; do
+  for name in "backend-${REV}-arm64" "frontend-${REV}-arm64" "actuator-${REV}-arm64"; do
     sum_prefix="../images/${name}.tar.gz"
     for part in "$IMAGES_DIR/${name}.tar.gz.part"*; do
       [ -e "$part" ] || continue
@@ -166,6 +205,7 @@ pack() {
   mkdir -p "$IMAGES_DIR"
   pack_image "$BACKEND_IMAGE"  "backend-${REV}-arm64"
   pack_image "$FRONTEND_IMAGE" "frontend-${REV}-arm64"
+  pack_image "$ACTUATOR_IMAGE" "actuator-${REV}-arm64"
   write_sha256sums
   log "打包完成"
 }
@@ -173,7 +213,8 @@ pack() {
 case "${1:-}" in
   backend)  build_backend ;;
   frontend) build_frontend ;;
+  actuator) build_actuator ;;
   pack)     pack ;;
-  all)      build_backend; build_frontend; pack ;;
+  all)      build_backend; build_frontend; build_actuator; pack ;;
   *)        sed -n '2,29p' "$0"; exit 1 ;;
 esac

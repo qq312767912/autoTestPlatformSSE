@@ -1,0 +1,56 @@
+# syntax=docker/dockerfile:1.7
+# 在原生 ARM64 Alpine/musl 中从官方源码构建 ONNX Runtime Python wheel。
+ARG PYTHON_BASE_IMAGE=python:3.12-alpine
+FROM ${PYTHON_BASE_IMAGE} AS builder
+
+ARG ONNXRUNTIME_VERSION=1.29.0
+ARG ONNXRUNTIME_REF=v1.29.0
+ARG ONNXRUNTIME_COMMIT=2e2543fbe9fae542f921d47a72d21d5a4ef0b710
+ARG BUILD_JOBS=4
+ARG PIP_INDEX_URL=https://pypi.org/simple
+
+WORKDIR /src
+
+RUN apk add --no-cache \
+      bash build-base cmake ninja git git-lfs linux-headers python3-dev \
+    && python -m pip install --no-cache-dir -i "${PIP_INDEX_URL}" \
+      'numpy<3' packaging 'setuptools>=70' wheel
+
+RUN git clone --filter=blob:none --recursive --shallow-submodules \
+      --branch "${ONNXRUNTIME_REF}" --depth 1 \
+      https://github.com/microsoft/onnxruntime.git /src/onnxruntime \
+    && test "$(git -C /src/onnxruntime rev-parse HEAD)" = "${ONNXRUNTIME_COMMIT}"
+
+WORKDIR /src/onnxruntime
+
+RUN ./build.sh \
+      --config Release \
+      --update --build \
+      --parallel "${BUILD_JOBS}" \
+      --build_wheel \
+      --skip_tests \
+      --allow_running_as_root \
+      --cmake_generator Ninja \
+      --cmake_extra_defines \
+        onnxruntime_USE_TELEMETRY=OFF \
+        onnxruntime_BUILD_UNIT_TESTS=OFF \
+        onnxruntime_BUILD_BENCHMARKS=OFF \
+        CMAKE_BUILD_TYPE=Release \
+    && wheel_path="$(find build/Linux/Release/dist -name 'onnxruntime-*.whl' -print -quit)" \
+    && test -n "$wheel_path" \
+    && mkdir -p /out \
+    && cp "$wheel_path" "/out/onnxruntime-${ONNXRUNTIME_VERSION}-cp312-cp312-musllinux_1_2_aarch64.whl"
+
+# 使用同一 Alpine/musl 基础环境安装并执行最小推理前检查。
+FROM ${PYTHON_BASE_IMAGE} AS verifier
+COPY --from=builder /out/ /wheels/
+COPY --from=builder /usr/local/lib/python3.12/site-packages/numpy/ /usr/local/lib/python3.12/site-packages/numpy/
+COPY --from=builder /usr/local/lib/python3.12/site-packages/numpy.libs/ /usr/local/lib/python3.12/site-packages/numpy.libs/
+RUN apk add --no-cache libstdc++ libgomp \
+    && python -m pip install --no-cache-dir --no-deps /wheels/*.whl \
+    && python -c 'import onnxruntime as ort, platform; assert platform.machine() in ("aarch64", "arm64"); assert "CPUExecutionProvider" in ort.get_available_providers(); print(ort.__version__, ort.get_available_providers())' \
+    && touch /verified
+
+FROM scratch AS artifact
+COPY --from=builder /out/ /
+COPY --from=verifier /verified /verified

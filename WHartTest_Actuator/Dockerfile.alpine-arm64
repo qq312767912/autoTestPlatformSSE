@@ -4,6 +4,7 @@ ARG PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.12-alpine
 FROM ${PYTHON_BASE_IMAGE}
 
 ARG BUILD_REVISION=unknown
+ARG ALPINE_MIRROR=https://dl-cdn.alpinelinux.org/alpine
 
 WORKDIR /app
 
@@ -17,7 +18,7 @@ ENV PYTHONUNBUFFERED=1 \
 LABEL org.opencontainers.image.title="WHartTest Actuator" \
       org.opencontainers.image.revision="${BUILD_REVISION}"
 
-RUN sed -i 's|https://dl-cdn.alpinelinux.org/alpine|https://mirrors.tuna.tsinghua.edu.cn/alpine|g' /etc/apk/repositories \
+RUN sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" /etc/apk/repositories \
     && apk add --no-cache \
         chromium \
         nodejs \
@@ -39,7 +40,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     else \
         PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"; \
     fi; \
-    grep -v -E '^[[:space:]]*playwright==' /app/requirements.txt > /tmp/requirements-alpine.txt; \
+    # ddddocr 依赖无 ARM64 musllinux wheel 的 onnxruntime；代码已支持缺失时可诊断降级。
+    grep -v -E '^[[:space:]]*(playwright|ddddocr)[<>=~!]' /app/requirements.txt > /tmp/requirements-alpine.txt; \
     printf '%s\n' 'pyee>=13,<14' 'greenlet>=3.1.1,<4' >> /tmp/requirements-alpine.txt; \
     python -m pip install --retries 10 --timeout 600 -i "${PIP_INDEX_URL}" -r /tmp/requirements-alpine.txt; \
     python -m pip download --retries 10 --timeout 600 -i "${PIP_INDEX_URL}" \

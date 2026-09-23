@@ -1,5 +1,5 @@
 x-actuator-common: &actuator-common
-  image: wharttest-250-actuator:update-178fb3ed-arm64-r4
+  image: wharttest-250-actuator:update-ac65a6fb-v2.8-r3-auth-failfast-arm64
   pull_policy: never
   # 麒麟 ARM64 64KB 页环境中通过 PATH/symlink 启动 `python main.py`
   # 可能在 CPython getpath 阶段异常；使用绝对解释器和脚本路径规避。
@@ -20,6 +20,8 @@ x-actuator-common: &actuator-common
     WHARTTEST_ACTUATOR_PERSISTENT: "false"
     WHARTTEST_ACTUATOR_BROWSER_TYPE: chromium
     WHARTTEST_ACTUATOR_TRACE_ENABLED: "true"
+    VISION_MCP_URL: http://vision-mcp:8010/mcp
+    VISION_MCP_SHARED_DIR: /app/data/vision-mcp-captcha
   secrets:
     - actuator_api_password
   volumes:
@@ -36,16 +38,32 @@ x-actuator-common: &actuator-common
 # 与内网当前 docker-compose.offline.yml 叠加使用，覆盖升级服务并新增三个执行器。
 services:
   backend:
-    image: wharttest-250-backend:update-d595a628-review-fix-r5-arm64
+    image: wharttest-250-backend:update-ac65a6fb-v2.8-r3-kombu562-arm64
+    # 录制浏览器/本地虚拟执行器运行在 Backend 容器内，与独立 Actuator
+    # 一样需要内网 SSE 域名映射，否则 page.goto 会报 ERR_NAME_NOT_RESOLVED。
+    extra_hosts:
+      - "www.test.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "www.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "static.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "static.test.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "media.sseinfo.com:${SSE_TEST_HOST_IP:-10.122.215.111}"
     volumes:
       # 唯一保留的挂载：Celery 单 Worker 配置。
-      # ⚠️ 自 update-d595a628-review-fix-r5 起，Backend 镜像已完整包含此前的全部代码修复
+      # ⚠️ 自 update-ac65a6fb-v2.8-r1 起，Backend 镜像已完整包含此前的全部代码修复
       #    （用例审查并发与重试、代码审查共同祖先比较等），因此不再挂载 hotfix/ 代码覆盖层。
       #    挂载旧副本会盖掉新镜像的改动，并让 05-verify.sh 失去“镜像是否真的更新”的判别力。
       #    确需在不重建镜像的前提下临时改后端代码时，叠加 docker-compose.hotfix.yml
       #    （19/22/23-apply-*-hotfix.sh 会自动叠加）。
       - /projects/ai-test-platform/update_platform_version/deploy_env/supervisord.single-worker.conf:/app/supervisord.conf:ro
     environment:
+      # 内网 Redis 当前未启用 AUTH。基础 Compose 若残留 REDIS_PASSWORD 拼接，
+      # Celery 会显示 redis://:**@redis:6379/0，连接重试约 20 秒后退出。
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_BROKER_READ_URL: redis://redis:6379/0
+      CELERY_BROKER_WRITE_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      CHANNEL_REDIS_URL: redis://redis:6379/2
+      DJANGO_CACHE_REDIS_URL: redis://redis:6379/1
       VISION_MCP_URL: http://vision-mcp:8010/mcp
       VISION_API_BASE_URL: ${VISION_API_BASE_URL:-}
       VISION_MCP_BASE_URL: ${VISION_MCP_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
@@ -59,7 +77,7 @@ services:
       VISION_MCP_TIMEOUT_SECONDS: ${VISION_MCP_TIMEOUT_SECONDS:-120}
 
   frontend:
-    image: wharttest-250-frontend:update-d595a628-review-fix-r5-arm64
+    image: wharttest-250-frontend:update-ac65a6fb-v2.8-r1-arm64
     # 与后端共享持久化媒体目录，确保 Skill 生成的交付物可由 Nginx 下载。
     volumes:
       - /projects/ai-test-platform/offline-images/data/media:/app/data/media:ro
@@ -70,6 +88,12 @@ services:
     volumes:
       - /projects/ai-test-platform/update_platform_version/deploy_env/playwright-mcp-entrypoint.sh:/opt/wharttest/playwright-mcp-entrypoint.sh:ro
       - /projects/ai-test-platform/update_platform_version/deploy_env/playwright-mcp-config.template.json:/opt/wharttest/playwright-mcp-config.template.json:ro
+    extra_hosts:
+      - "www.test.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "www.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "static.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "static.test.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "media.sseinfo.com:${SSE_TEST_HOST_IP:-10.122.215.111}"
 
   vision-mcp:
     image: wharttest-250-vision-mcp:update-01339484-arm64-r2

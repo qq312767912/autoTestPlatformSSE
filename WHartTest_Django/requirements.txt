@@ -259,6 +259,11 @@ langdetect==1.0.9
 # https://github.com/celery/celery/blob/main/LICENSE
 celery==5.4.0
 
+# Celery 5.4.0 允许 kombu >=5.3.4,<6；必须固定稳定版。
+# 未固定且允许预发布时会解析到 5.7.0a1，该版本要求 redis-py >=6.1，
+# 与本项目的 redis==5.2.0 冲突，导致 worker 启动即退出。
+kombu==5.6.2
+
 # Celery Beat 数据库调度器 - BSD许可证
 # https://github.com/celery/django-celery-beat/blob/main/LICENSE
 django-celery-beat==2.8.1

@@ -2,6 +2,7 @@
 websockets>=12.0
 pydantic>=2.0
 httpx>=0.25.0
+mcp>=1.0.0  # 调用 Vision MCP 进行验证码 OCR
 tomli>=2.0  # TOML配置文件解析 (Python < 3.11)
 tomli_w>=1.0  # TOML配置文件写入
 playwright==1.61.0  # 与 Docker 基础镜像 mcr.microsoft.com/playwright/python:v1.61.0-jammy 保持一致

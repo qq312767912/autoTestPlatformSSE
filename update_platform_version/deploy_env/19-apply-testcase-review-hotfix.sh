@@ -4,7 +4,7 @@ set -euo pipefail
 BASE_COMPOSE="${BASE_COMPOSE:-/projects/ai-test-platform/offline-images/docker-compose.offline.yml}"
 UPDATE_DIR="$(cd "$(dirname "$0")" && pwd)"
 UPDATE_COMPOSE="$UPDATE_DIR/docker-compose.update.yml"
-# 新版 Backend 镜像（update-d595a628-review-fix-r5 起）已内置全部代码修复，代码挂载已从
+# 新版 Backend 镜像（update-ac65a6fb-v2.8-r1 起）已内置全部代码修复，代码挂载已从
 # docker-compose.update.yml 移出到本覆盖层；跑本脚本即等同“临时启用挂载层”。
 HOTFIX_COMPOSE="$UPDATE_DIR/docker-compose.hotfix.yml"
 

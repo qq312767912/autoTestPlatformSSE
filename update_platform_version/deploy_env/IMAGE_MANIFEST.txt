@@ -1,39 +1,44 @@
-WHartTest 内网 ARM64 增量升级镜像
-应用版本: backend d595a628-review-fix-r5 + frontend d595a628-review-fix-r5 + actuator-r4
-源码基线: dev@d595a628（上一版为 1ed4e374）
+WHartTest 内网增量升级镜像清单
+应用版本: upstream v2.8.0 + dev@ac65a6fbf0f0
+目标平台: linux/arm64，Alpine/musl，兼容麒麟 ARM64 64KB 页
 
-wharttest-250-backend:update-d595a628-review-fix-r5-arm64
-  platform: linux/arm64
-  image ID: sha256:46d3db834581199080723576f38a90b325e090385f9c802b6f565d42febbf8be
-  image size: 566865916 bytes
-  transfer: images/backend-d595a628-review-fix-r5-arm64.tar.gz.part000(280.0MB) + part001(258.5MB) = 538.6MB
-  build: WHartTest_Django/Dockerfile.alpine（Alpine/musl ARM64 完整构建，两阶段：build-base/gcc/musl-dev/cargo + musl wheel）
-  runtime: Alpine Linux / musl / Python 3.11.16 / @alibaba-group/open-code-review v1.12.5 / ocr CLI (/usr/local/bin/ocr) / agent-browser 0.38.1 / Celery concurrency 8 / 代码审查专用 LLM
-  features: 用例审查 20行2并发分片+可配置重试退避+单批降级+熔断+45分钟预算 / 列表接口不再回传 _checkpoint / 代码审查差异按共同祖先比较 / 快速·标准·深度分析模式 / 审查模型复用 / GitLab 连接安全删除 / master 默认分支
-  note: 本版起镜像内置全部代码修复，docker-compose.update.yml 不再挂载 hotfix/ 代码覆盖层
+本次必须导入（分卷位于同级 images/ 目录）:
 
-wharttest-250-frontend:update-d595a628-review-fix-r5-arm64
-  platform: linux/arm64
-  image ID: sha256:6eb1d5b96290fb7a096d2bcbe5420418a1e7ac5bc8face344f505cba41ca5491
-  image size: 30902407 bytes
-  transfer: images/frontend-d595a628-review-fix-r5-arm64.tar.gz.part000(29.3MB)
-  build: WHartTest_Vue/Dockerfile
-  features: 代码审查 HTML/测试分析报告导出（本版新增） / 用例审查断点续审提示与覆盖率告警 / 长模块名概览单列布局与安全换行 / 代码审查模式选择
+1. wharttest-250-backend:update-ac65a6fb-v2.8-r3-kombu562-arm64
+   build: WHartTest_Django/Dockerfile.alpine
+   base/runtime: Alpine Linux + musl
+   required tools: @alibaba-group/open-code-review, ocr CLI
+   UI recorder: Node Playwright + Alpine system Chromium（内网运行时不下载）
+   Python: celery 5.4.0 + kombu 5.6.2 + redis-py 5.2.0（稳定兼容组合）
+   transfer: backend-ac65a6fb-v2.8-r3-kombu562-arm64.tar.gz.part000/001/002
 
-wharttest-250-vision-mcp:update-01339484-arm64-r2
-  source revision: 01339484c66c281fdddaea22683a68c40b7835bd
-  platform: linux/arm64
-  image ID: sha256:435c042f3b76fb73ce24d095a0b43615a471bf6e12a00631a179aaa9e00dfa27
-  build: WHartTest_Vision_MCP/Dockerfile.alpine
-  runtime: Alpine edge / musl / native aarch64 ONNX Runtime
+2. wharttest-250-frontend:update-ac65a6fb-v2.8-r1-arm64
+   build: WHartTest_Vue/Dockerfile
+   transfer: frontend-ac65a6fb-v2.8-r1-arm64.tar.gz.part000
 
-wharttest-250-actuator:update-178fb3ed-arm64-r4
-  source revision: 178fb3ed-networkidle-fix
-  platform: linux/arm64
-  image ID: sha256:83e9819ccbf441e08f22790aa2d3e71f9a8380ebd6df328f90224530caabdc38
-  image size: 500521612 bytes (Docker 本地内容大小)
-  build: WHartTest_Actuator/Dockerfile.hotfix-r4 (base: update-01339484-arm64-r3)
-  runtime: Python 3.12 / Playwright 1.61.0 / Alpine system Chromium / musl ARM64
-  compatibility: Kylin ARM64 64KB page / avoids Debian image-layer read failure
-  deployment: one image, three isolated containers
-  fix: use domcontentloaded instead of networkidle for dynamic site navigation
+3. wharttest-250-actuator:update-ac65a6fb-v2.8-r3-auth-failfast-arm64
+   build: 基于已验证的 r2 Alpine/musl 完整镜像叠加 Dockerfile.auth-failfast
+   base/runtime: Alpine Linux + musl
+   transfer: actuator-ac65a6fb-v2.8-r3-auth-failfast-arm64.tar.gz.part000/001
+   auth fail-fast: Token/API 认证失败时立即回传失败并释放 slot，不再卡在执行中。
+   captcha OCR: 通过 VISION_MCP_URL 自动调用 Vision MCP/RapidOCR，识别后填入指定输入框。
+   shared path: /app/data/vision-mcp-captcha（Actuator 与 Vision MCP 共享挂载）
+
+可复用，本包不重复传输:
+
+- postgres:16-alpine
+- redis:7-alpine
+- qdrant/qdrant:latest
+- mcr.microsoft.com/playwright/mcp:latest
+- wharttest-250-vision-mcp:update-01339484-arm64-r2
+- 内网现有 WHartTest MCP 镜像（WHartTest_MCP 源码无变化）
+- 内网现有微信插件宿主镜像（WHartTest_WeixinPluginHost 源码无变化）
+
+不可复用旧 Backend/Frontend/Actuator：与 d595a628 基线相比对应目录均有实质代码变更。
+
+附加离线构建件（不是容器镜像）:
+
+- wheels/onnxruntime-1.29.0-cp312-cp312-musllinux_1_2_aarch64.whl
+  source: microsoft/onnxruntime v1.29.0 @ 2e2543fbe9fae542f921d47a72d21d5a4ef0b710
+  runtime: Python 3.12, ARM64, Alpine/musl, CPUExecutionProvider
+  telemetry: 编译时关闭

@@ -88,6 +88,23 @@ function installPlaywright(skillDir) {
   }
 }
 
+function findChromiumExecutable() {
+  const configured = String(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || '').trim();
+  const candidates = [
+    configured,
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+    '/usr/bin/google-chrome',
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch (_) {}
+  }
+  return '';
+}
+
 // ---------------------------------------------------------------------------
 // 页面注入的录制捕获脚本（运行在浏览器页面中）
 // ---------------------------------------------------------------------------
@@ -1370,6 +1387,10 @@ async function cmdStart(params) {
     headless: process.env.HEADLESS !== 'false',
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   };
+  const chromiumExecutable = findChromiumExecutable();
+  if (chromiumExecutable) {
+    launchOptions.executablePath = chromiumExecutable;
+  }
   try {
     state.browser = await chromium.launch(launchOptions);
     state.context = await state.browser.newContext(buildContextOptions(viewport, params.storage_state));

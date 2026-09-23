@@ -11,6 +11,7 @@ import logging
 import os
 import time
 import traceback
+import uuid
 from pathlib import Path
 from typing import Any, Optional, Union
 from dataclasses import dataclass, field
@@ -1071,6 +1072,75 @@ class PlaywrightExecutor:
                 self._ocr_instance = None
         return self._ocr_instance
 
+    @staticmethod
+    def _plain_mcp_result(value: Any) -> Any:
+        """将 MCP CallToolResult 归一化为普通 Python 值。"""
+        if isinstance(value, dict):
+            if set(value) == {'result'}:
+                return PlaywrightExecutor._plain_mcp_result(value['result'])
+            if value.get('type') == 'text' and 'text' in value:
+                return PlaywrightExecutor._plain_mcp_result(value['text'])
+            return value
+        if isinstance(value, str):
+            try:
+                return PlaywrightExecutor._plain_mcp_result(json.loads(value))
+            except json.JSONDecodeError:
+                return value
+        if isinstance(value, list):
+            normalized = [PlaywrightExecutor._plain_mcp_result(item) for item in value]
+            return normalized[0] if len(normalized) == 1 else normalized
+        content = getattr(value, 'content', None)
+        if content is not None:
+            return PlaywrightExecutor._plain_mcp_result(content)
+        text = getattr(value, 'text', None)
+        if text is not None:
+            return PlaywrightExecutor._plain_mcp_result(text)
+        return value
+
+    async def _recognize_captcha_with_vision_mcp(self, image_bytes: bytes) -> str:
+        """把验证码截图写入共享目录，通过 Vision MCP 的 RapidOCR 识别。"""
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        mcp_url = os.environ.get('VISION_MCP_URL', '').strip()
+        if not mcp_url:
+            raise RuntimeError('VISION_MCP_URL 未配置')
+
+        shared_dir = Path(os.environ.get('VISION_MCP_SHARED_DIR', '/app/data/vision-mcp-captcha'))
+        shared_dir.mkdir(parents=True, exist_ok=True)
+        image_path = shared_dir / f'captcha-{uuid.uuid4().hex}.png'
+        image_path.write_bytes(image_bytes)
+        try:
+            # mcp 1.x 返回 (read, write, session_id)，mcp 2.x 返回 (read, write)。
+            async with streamable_http_client(mcp_url) as streams:
+                read, write = streams[:2]
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(
+                        'extract_text_from_screenshot',
+                        {'image_path': str(image_path), 'provider': 'rapidocr'},
+                    )
+                    if getattr(result, 'isError', False):
+                        raise RuntimeError(f'Vision MCP OCR 返回错误: {result.content}')
+            payload = self._plain_mcp_result(result)
+            if not isinstance(payload, dict):
+                raise RuntimeError('Vision MCP OCR 返回格式异常')
+            return str(payload.get('full_text') or '').replace('\n', '').strip()
+        finally:
+            try:
+                image_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning('删除验证码临时图片失败: %s', image_path)
+
+    async def _recognize_captcha(self, image_bytes: bytes) -> str:
+        """Vision MCP 优先；未配置时兼容本地 ddddocr。"""
+        if os.environ.get('VISION_MCP_URL', '').strip():
+            return await self._recognize_captcha_with_vision_mcp(image_bytes)
+        ocr = self._get_ocr_instance()
+        if ocr is None:
+            raise RuntimeError('Vision MCP 未配置，且执行器未安装 ddddocr')
+        return str(await asyncio.to_thread(ocr.classification, image_bytes) or '').strip()
+
     def _resolve_target_locator(self, page: Page, target_info: dict):
         """根据目标信息解析出定位器（支持 iframe 与 下标）"""
         frame = page
@@ -1099,10 +1169,6 @@ class PlaywrightExecutor:
         img_locator: Any,
         step: StepConfig,
     ) -> tuple[bool, str, str | None]:
-        ocr = self._get_ocr_instance()
-        if ocr is None:
-            return False, "执行器未安装 ddddocr 库，请安装依赖: pip install ddddocr", None
-
         ope_val = step.ope_value if isinstance(step.ope_value, dict) else {}
         target_info = ope_val.get('target_locator')
         if not target_info or not target_info.get('locator_value'):
@@ -1125,10 +1191,8 @@ class PlaywrightExecutor:
             try:
                 # 1. 截取验证码图片元素截图
                 img_bytes = await img_locator.screenshot(type="png")
-                # 2. 调用 ddddocr 进行识别（放到线程池中避免阻塞 Playwright async 事件循环）
-                recognized = await asyncio.to_thread(ocr.classification, img_bytes)
-                if isinstance(recognized, str):
-                    recognized = recognized.strip()
+                # 2. 内网执行器优先调用 Vision MCP；本地未配置时兼容 ddddocr。
+                recognized = await self._recognize_captcha(img_bytes)
 
                 logger.info(f"步骤 {step.step_id}: 验证码识别尝试 [{attempt}/{max_retries}] 结果: '{recognized}'")
 
