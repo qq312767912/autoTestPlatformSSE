@@ -7,7 +7,7 @@
 ## 2. V1 范围与假设
 
 - 支持精确主机名（FQDN）到 IPv4 的映射，暂不支持通配域名和 IPv6。
-- 同步范围为平台宿主机、Backend、Celery、所有 Actuator 和 Playwright/Recorder 容器。
+- 同步范围为私有云宿主机、Backend（含 Celery/Recorder）、三个 Actuator、Playwright MCP，以及需要访问目标系统资源的 Vision MCP 容器。
 - 不自动修改普通用户电脑的 hosts/DNS；用户需在本机浏览器直接访问被测系统时，由内网 DNS 或终端运维策略解析。
 - Web/Backend 容器不获得宿主机 root 权限。宿主机同步由最小权限的本地同步脚本/服务执行，且只维护 `/etc/hosts` 中的 WHartTest 标记区块。
 - 配置分为“草稿”和“已发布版本”，编辑不会立即影响正在运行的测试。
@@ -36,9 +36,9 @@
 
 ### FR-3 节点同步
 
-1. 当新版本发布成功时，平台容器应通过统一的内网 DNS/CoreDNS 配置获得相同解析结果。
+1. 当新版本发布成功时，私有云宿主机和目标容器应使用同一份已发布 hosts 映射获得相同解析结果。
 2. 当宿主机同步服务检测到新版本时，它应只替换 `/etc/hosts` 中 `BEGIN/END WHARTTEST MANAGED HOSTS` 标记内的内容，保留用户和系统的其他配置。
-3. 系统应展示宿主机、Backend/Celery、每个 Actuator 以及 Playwright/Recorder 的已同步版本、最后心跳时间和成功/失败状态。
+3. 系统应展示宿主机、Backend/Celery/Recorder、每个 Actuator、Playwright MCP 和 Vision MCP 的已同步版本、最后心跳时间和成功/失败状态。
 4. 如果个别节点同步失败，系统则应保留该节点上一个有效配置，允许管理员重试，且不将全局状态误报为全部成功。
 
 ### FR-4 诊断
@@ -66,7 +66,7 @@
 ## 7. 验收标准
 
 1. 管理员可以在系统管理中完成一条域名/IP 映射的新增、校验、发布、诊断和回滚。
-2. 发布后，宿主机、Backend/Celery、每个 Actuator 和 Playwright/Recorder 对该域名解析到同一 IPv4。
+2. 发布后，私有云宿主机、Backend/Celery/Recorder、三个 Actuator、Playwright MCP 和 Vision MCP 对该域名解析到同一 IPv4。
 3. 修改草稿但未发布时，正在使用的解析结果不变。
 4. 任一节点同步失败时，页面显示准确失败节点与原因，其他节点状态不被掩盖。
 5. 回滚后生成新版本，所有在线节点最终收敛到该版本。

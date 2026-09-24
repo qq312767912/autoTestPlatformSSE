@@ -50,6 +50,7 @@ flowchart LR
 - 宿主机 `/etc/hosts`。
 - `wharttest-backend`（同时覆盖 Django、Celery 和 Recorder）。
 - `wharttest-playwright-mcp`。
+- `wharttest-vision-mcp`（需要访问目标系统资源时）。
 - 名称满足 `wharttest-actuator-[A-Za-z0-9_.-]+` 的运行中执行器。
 
 同步服务在容器中以 root 用户执行固定的 hosts 更新程序，不拼接 shell 命令。由于 Docker 的 `/etc/hosts` 是特殊挂载，容器内采用“生成临时内容 → 校验 → 覆写挂载文件内容”，不尝试 rename `/etc/hosts`。
@@ -59,7 +60,7 @@ flowchart LR
 - `docker-compose.local.yml` 启动独立的 `wharttest-host-sync` 容器，通过只读发布 API和 Docker Socket同步明确白名单内的运行中容器。
 - 本地同步容器设置 `HOST_SYNC_APPLY_HOST=false`，不挂载、不读取也不修改 macOS 的 `/etc/hosts`；开发人员按需手工维护本机解析。
 - Backend 与本地同步容器使用仅供本地开发的共享 Token。Docker Socket 只挂载给隔离的同步容器，不挂载给 Web/Backend 容器。
-- 发布后最长约 30 秒应用到 Backend、Playwright MCP 和所有 `wharttest-actuator-*` 容器；容器重建后的配置漂移由下一轮同步自动修复。
+- 发布后最长约 30 秒应用到 Backend、Playwright MCP、Vision MCP 和所有 `wharttest-actuator-*` 容器；容器重建后的配置漂移由下一轮同步自动修复。
 
 ## 3. 数据模型
 

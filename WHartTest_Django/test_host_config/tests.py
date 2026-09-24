@@ -103,3 +103,16 @@ class AgentApiTests(TestCase):
             HTTP_AUTHORIZATION="Bearer agent-test-secret",
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_report_accepts_vision_mcp(self):
+        response = self.client.post(
+            "/api/test-host-config/agent/report/",
+            {"nodes": [{
+                "node_id": "wharttest-vision-mcp", "node_type": "vision", "display_name": "Vision MCP",
+                "applied_version": 1, "applied_checksum": "a" * 64, "status": "synced",
+            }]},
+            format="json",
+            HTTP_AUTHORIZATION="Bearer agent-test-secret",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["accepted"], 1)

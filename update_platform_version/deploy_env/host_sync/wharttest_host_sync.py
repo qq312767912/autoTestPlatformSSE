@@ -19,6 +19,7 @@ ACTUATOR_PATTERN = re.compile(r"^wharttest-actuator-[A-Za-z0-9_.-]+$")
 FIXED_CONTAINERS = {
     "wharttest-backend": ("backend", "Backend / Celery / Recorder"),
     "wharttest-playwright-mcp": ("playwright", "Playwright MCP"),
+    "wharttest-vision-mcp": ("vision", "Vision MCP"),
 }
 
 

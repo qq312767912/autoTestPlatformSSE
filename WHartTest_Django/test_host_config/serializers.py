@@ -75,8 +75,11 @@ class TestHostDiagnosisSerializer(serializers.ModelSerializer):
 
 
 class AgentNodeReportSerializer(serializers.Serializer):
-    node_id = serializers.RegexField(r"^(host|wharttest-(?:backend|playwright-mcp|actuator-[A-Za-z0-9_.-]+))$", max_length=128)
-    node_type = serializers.ChoiceField(choices=["host", "backend", "playwright", "actuator"])
+    node_id = serializers.RegexField(
+        r"^(host|wharttest-(?:backend|playwright-mcp|vision-mcp|actuator-[A-Za-z0-9_.-]+))$",
+        max_length=128,
+    )
+    node_type = serializers.ChoiceField(choices=["host", "backend", "playwright", "vision", "actuator"])
     display_name = serializers.CharField(max_length=128)
     applied_version = serializers.IntegerField(min_value=1, allow_null=True)
     applied_checksum = serializers.RegexField(r"^[a-f0-9]{64}$", allow_blank=True)

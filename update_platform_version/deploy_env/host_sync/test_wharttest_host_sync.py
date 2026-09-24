@@ -54,6 +54,28 @@ class ManagedBlockTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"HOST_SYNC_APPLY_HOST": "false"}, clear=False):
             self.assertFalse(MODULE.HostSyncAgent().apply_host_enabled)
 
+    def test_discovers_required_private_cloud_containers(self):
+        running = "\n".join([
+            "wharttest-backend",
+            "wharttest-actuator-1",
+            "wharttest-actuator-2",
+            "wharttest-actuator-3",
+            "wharttest-playwright-mcp",
+            "wharttest-vision-mcp",
+            "unrelated-container",
+        ])
+        with mock.patch.object(MODULE.subprocess, "run") as run:
+            run.return_value.stdout = running
+            names = {name for name, _node_type, _display_name in MODULE.HostSyncAgent().discover_containers()}
+        self.assertEqual(names, {
+            "wharttest-backend",
+            "wharttest-actuator-1",
+            "wharttest-actuator-2",
+            "wharttest-actuator-3",
+            "wharttest-playwright-mcp",
+            "wharttest-vision-mcp",
+        })
+
 
 if __name__ == "__main__":
     unittest.main()
