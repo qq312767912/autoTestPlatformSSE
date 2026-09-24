@@ -2,7 +2,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import OrchestratorTaskViewSet
-from .agent_loop_view import AgentLoopStreamAPIView, AgentLoopStopAPIView, AgentLoopResumeAPIView
+from .agent_loop_view import AgentLoopStreamAPIView, AgentLoopStopAPIView, AgentLoopResumeAPIView, LlmAuthStateListAPIView
 
 router = DefaultRouter()
 router.register(r'tasks', OrchestratorTaskViewSet, basename='orchestrator-task')
@@ -15,4 +15,5 @@ urlpatterns = [
     path('agent-loop/stop/', AgentLoopStopAPIView.as_view(), name='agent-loop-stop'),
     # Agent Loop 恢复接口 - HITL 审批后继续执行
     path('agent-loop/resume/', AgentLoopResumeAPIView.as_view(), name='agent-loop-resume'),
+    path('auth-states/', LlmAuthStateListAPIView.as_view(), name='llm-auth-state-list'),
 ]

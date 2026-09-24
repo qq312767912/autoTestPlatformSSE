@@ -20,6 +20,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 
 import logging
@@ -163,6 +164,8 @@ class _SessionEntry:
     skill_dir: str
     proc: "_PlaywrightNodeProcess"
     last_used_monotonic: float
+    auth_state_id: Optional[int] = None
+    auth_initialized: bool = False
 
 
 class _PlaywrightNodeProcess:
@@ -181,6 +184,7 @@ class _PlaywrightNodeProcess:
         self._stderr_tail: "deque[str]" = deque(maxlen=200)
         self._stdout_thread: Optional[threading.Thread] = None
         self._stderr_thread: Optional[threading.Thread] = None
+        self.last_page_url: Optional[str] = None
 
     def _server_script_path(self) -> str:
         return str(Path(__file__).with_name("playwright_persistent_server.js"))
@@ -342,6 +346,8 @@ class _PlaywrightNodeProcess:
     ) -> str:
         params: Dict[str, Any] = {"args": run_js_args or [], "env": env or {}}
         resp = self.request("exec", params=params, timeout_seconds=timeout_seconds)
+        state = resp.get("state") or {}
+        self.last_page_url = state.get("pageUrl") if isinstance(state, dict) else None
 
         stdout_lines = resp.get("stdout") or []
         stderr_lines = resp.get("stderr") or []
@@ -375,6 +381,17 @@ class _PlaywrightNodeProcess:
                     output = strip_terminal_control_sequences(str(err))
 
         return output
+
+    def initialize_context(
+        self, storage_state: Dict[str, Any], timeout_seconds: int = 30
+    ) -> None:
+        resp = self.request(
+            "initialize_context",
+            params={"storageState": storage_state},
+            timeout_seconds=timeout_seconds,
+        )
+        if not resp.get("ok", False):
+            raise PlaywrightPersistentSessionError(self._format_response_error(resp))
 
     def terminate(self, graceful: bool = True) -> None:
         if self._proc is None:
@@ -497,6 +514,7 @@ class PlaywrightSessionManager:
         skill_dir: str,
         run_js_args: List[str],
         env: Dict[str, str],
+        auth_binding: Optional[Dict[str, Any]] = None,
         timeout_seconds: int = 120,
     ) -> str:
         self._ensure_cleanup_thread()
@@ -507,7 +525,9 @@ class PlaywrightSessionManager:
 
         with self._lock:
             entry = self._entries.get(session_key)
-            if entry is None or os.path.abspath(entry.skill_dir) != skill_dir_abs:
+            requested_auth_id = (auth_binding or {}).get("auth_state_id")
+            binding_changed = entry is not None and entry.auth_state_id != requested_auth_id
+            if entry is None or os.path.abspath(entry.skill_dir) != skill_dir_abs or binding_changed:
                 if entry is not None:
                     try:
                         entry.proc.terminate(graceful=True)
@@ -518,6 +538,7 @@ class PlaywrightSessionManager:
                     skill_dir=skill_dir_abs,
                     proc=_PlaywrightNodeProcess(skill_dir_abs),
                     last_used_monotonic=now,
+                    auth_state_id=requested_auth_id,
                 )
                 self._entries[session_key] = entry
             else:
@@ -528,9 +549,21 @@ class PlaywrightSessionManager:
 
         entry.proc._start(env=env)
 
+        if auth_binding and not entry.auth_initialized:
+            entry.proc.initialize_context(auth_binding["storage_state"])
+            entry.auth_initialized = True
+
         output = entry.proc.exec_run_js(
             run_js_args=run_js_args, env=env, timeout_seconds=int(timeout_seconds)
         )
+        if auth_binding and self._is_login_page(
+            entry.proc.last_page_url,
+            auth_binding.get("login_url_patterns") or [],
+        ):
+            self.close_session(session_key)
+            raise PlaywrightPersistentSessionError(
+                "登录态已失效或被重定向到登录页，请重新录制登录态"
+            )
 
         # 执行结束后再次更新时间戳
         with self._lock:
@@ -539,6 +572,20 @@ class PlaywrightSessionManager:
                 updated.last_used_monotonic = time.monotonic()
 
         return output
+
+    @staticmethod
+    def _is_login_page(page_url: Optional[str], configured_patterns: List[str]) -> bool:
+        if not page_url or page_url == "about:blank":
+            return False
+        lowered = page_url.lower()
+        if any(pattern.lower() in lowered for pattern in configured_patterns):
+            return True
+        parsed = urlparse(page_url)
+        host = (parsed.hostname or "").lower()
+        path = (parsed.path or "/").lower()
+        if host.startswith(("login.", "passport.", "calogin.")):
+            return True
+        return any(token in path.split("/") for token in ("login", "signin", "sso"))
 
     def cleanup_expired(self) -> None:
         now = time.monotonic()
@@ -569,3 +616,9 @@ class PlaywrightSessionManager:
             keys = list(self._entries.keys())
         for k in keys:
             self.close_session(k)
+
+    def close_sessions_with_prefix(self, prefix: str) -> None:
+        with self._lock:
+            keys = [key for key in self._entries if key.startswith(prefix)]
+        for key in keys:
+            self.close_session(key)

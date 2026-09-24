@@ -29,6 +29,10 @@ from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from rest_framework import status
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from asgiref.sync import sync_to_async
 
@@ -69,6 +73,30 @@ from requirements.context_limits import (
     context_checker,
     get_context_limit_from_llm,
 )
+
+from .auth_state_binding import (
+    AuthStateBindingError,
+    auth_state_summary,
+    bind_chat_auth_state,
+    get_project_auth_states,
+)
+
+
+class LlmAuthStateListAPIView(APIView):
+    """聊天页专用登录态摘要接口，绝不返回 state_json。"""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        project_id = request.query_params.get("project_id")
+        project = check_project_permission(request.user, project_id) if project_id else None
+        if not project:
+            return Response(
+                {"detail": "项目不存在或无权访问"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        items = [auth_state_summary(item) for item in get_project_auth_states(project.id)]
+        return Response(items)
 
 logger = logging.getLogger(__name__)
 
@@ -879,6 +907,8 @@ class AgentLoopStreamAPIView(View):
         use_pytest: bool = True,
         file_ids: Optional[List[int]] = None,
         include_requirement_images: bool = False,
+        auth_state_id: Optional[int] = None,
+        auth_state_name: Optional[str] = None,
     ):
         """
         创建 SSE 流式生成器（LangChain v1 重构版）
@@ -888,6 +918,12 @@ class AgentLoopStreamAPIView(View):
         """
         thread_id = f"{request.user.id}_{project_id}_{session_id}"
         file_ids = file_ids or []
+        if auth_state_id and auth_state_name:
+            yield create_sse_data({
+                "type": "info",
+                "message": f"已使用登录态：{auth_state_name}",
+                "auth_state": {"id": auth_state_id, "name": auth_state_name},
+            })
         try:
             attached_files = await sync_to_async(validate_file_ids)(file_ids, project, request.user)
             llm_attachment_context = await sync_to_async(build_llm_attachment_context)(attached_files)
@@ -1011,6 +1047,7 @@ class AgentLoopStreamAPIView(View):
                 project_id=int(project_id),
                 test_case_id=test_case_id,
                 chat_session_id=session_id,
+                auth_state_id=auth_state_id,
             )
             tools.extend(builtin_tools)
             logger.info(f"AgentLoopStreamAPI: Added {len(builtin_tools)} builtin tools")
@@ -1621,7 +1658,28 @@ class AgentLoopStreamAPIView(View):
             session_id = uuid.uuid4().hex
             logger.info(f"AgentLoopStreamAPI: Generated new session_id: {session_id}")
 
-        # 5.1 清理陈旧停止信号，避免上一次"停止"残留影响本轮首次发送
+        # 5.1 在加载 LLM/工具前完成登录态绑定；Cookie/token 不进入模型参数。
+        try:
+            binding = await sync_to_async(bind_chat_auth_state)(
+                user=request.user,
+                project=project,
+                session_id=session_id,
+                message=user_message,
+                auth_state_provided="auth_state_id" in body_data,
+                auth_state_id=body_data.get("auth_state_id"),
+            )
+        except AuthStateBindingError as exc:
+            return api_error_response(str(exc), 400)
+
+        if binding.changed:
+            from orchestrator_integration.builtin_tools.skill_tools import close_playwright_chat_sessions
+            await sync_to_async(close_playwright_chat_sessions)(
+                request.user.id, int(project_id), session_id
+            )
+        bound_auth_state_id = binding.auth_state.id if binding.auth_state else None
+        bound_auth_state_name = binding.auth_state.name if binding.auth_state else None
+
+        # 5.2 清理陈旧停止信号，避免上一次"停止"残留影响本轮首次发送
         # 场景：前端先断开 SSE，再调用 stop API，可能导致信号留存到下一次请求
         if clear_stop_signal(session_id):
             logger.info(
@@ -1650,6 +1708,8 @@ class AgentLoopStreamAPIView(View):
                     use_pytest,
                     file_ids,
                     include_requirement_images,
+                    bound_auth_state_id,
+                    bound_auth_state_name,
                 ):
                     yield chunk
 
@@ -1679,6 +1739,8 @@ class AgentLoopStreamAPIView(View):
                 use_pytest,
                 file_ids,
                 include_requirement_images,
+                bound_auth_state_id,
+                bound_auth_state_name,
             )
 
     async def _handle_non_stream_request(
@@ -1700,6 +1762,8 @@ class AgentLoopStreamAPIView(View):
         use_pytest: bool = True,
         file_ids: Optional[List[int]] = None,
         include_requirement_images: bool = False,
+        auth_state_id: Optional[int] = None,
+        auth_state_name: Optional[str] = None,
     ) -> JsonResponse:
         """
         处理非流式请求，收集所有流式事件后返回统一 JSON 响应
@@ -1735,6 +1799,8 @@ class AgentLoopStreamAPIView(View):
                 use_pytest,
                 file_ids,
                 include_requirement_images,
+                auth_state_id,
+                auth_state_name,
             ):
                 # 解析 SSE 数据
                 if isinstance(chunk, str) and chunk.startswith("data: "):
@@ -2040,11 +2106,20 @@ class AgentLoopResumeAPIView(View):
                 try:
                     from orchestrator_integration.builtin_tools import get_builtin_tools
 
+                    resume_auth_state_id = await sync_to_async(
+                        lambda: ChatSession.objects.filter(
+                            session_id=session_id,
+                            user=user,
+                            project_id=project_id,
+                        ).values_list("auth_state_id", flat=True).first()
+                    )()
+
                     builtin_tools = get_builtin_tools(
                         user_id=user.id,
                         project_id=int(project_id) if project_id else 0,
                         test_case_id=None,
                         chat_session_id=session_id,
+                        auth_state_id=resume_auth_state_id,
                     )
                     tools.extend(builtin_tools)
                     logger.info(

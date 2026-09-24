@@ -5,6 +5,7 @@ export interface ChatRequest {
   message: string; // 用户发送的消息
   session_id?: string; // 可选, 字符串, 用于区分同一用户的不同对话会话/窗口
   project_id: string; // 项目ID，必需 (更新为string类型)
+  auth_state_id?: number | null; // LLM 页面探索使用的会话级登录态
 
   // 提示词相关参数
   prompt_id?: number; // 可选，指定使用的提示词ID
@@ -84,10 +85,23 @@ export interface ChatHistoryResponseData {
   project_name: string; // 🆕 新增项目名称字段
   prompt_id: number | null; // 🆕 新增提示词ID字段
   prompt_name: string | null; // 🆕 新增提示词名称字段
+  auth_state_id?: number | null;
+  auth_state_name?: string | null;
   history: ChatHistoryMessage[];
   context_token_count?: number; // 上下文Token使用量
   context_limit?: number; // 上下文Token限制
   has_more?: boolean;
+}
+
+export interface LlmAuthStateSummary {
+  id: number;
+  name: string;
+  env_config_id: number;
+  env_name: string;
+  base_url?: string | null;
+  credential_summary: string;
+  status: 'valid' | 'expired' | 'invalid' | 'disabled';
+  updated_at?: string | null;
 }
 
 /**

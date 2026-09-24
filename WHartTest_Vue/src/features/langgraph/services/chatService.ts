@@ -9,6 +9,7 @@ import type {
   ChatSessionsResponseData,
   ChatSessionDetail
 } from '@/features/langgraph/types/chat';
+import type { LlmAuthStateSummary } from '@/features/langgraph/types/chat';
 import type { ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
 import { parseToolResultDisplayPayload } from '@/features/langgraph/utils/toolResultParser';
 
@@ -148,6 +149,18 @@ const API_BASE_URL = '/lg/chat';
 const AGENT_LOOP_API_URL = '/orchestrator/agent-loop';
 // Agent Loop 停止 API 端点
 const AGENT_LOOP_STOP_API_URL = '/orchestrator/agent-loop/stop';
+
+export async function getLlmAuthStates(projectId: number | string): Promise<LlmAuthStateSummary[]> {
+  const response = await request<LlmAuthStateSummary[]>({
+    url: '/orchestrator/auth-states/',
+    method: 'GET',
+    params: { project_id: String(projectId) },
+  });
+  if (!response.success) {
+    throw new Error(response.error || '获取探索登录态失败');
+  }
+  return response.data || [];
+}
 
 // 获取API基础URL
 function getApiBaseUrl() {

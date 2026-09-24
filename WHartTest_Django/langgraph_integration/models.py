@@ -85,6 +85,12 @@ class ChatSession(models.Model):
     project = models.ForeignKey('projects.Project', on_delete=models.CASCADE, null=True, blank=True, verbose_name="关联项目")
     prompt = models.ForeignKey('prompts.UserPrompt', on_delete=models.SET_NULL, null=True, blank=True,
                                verbose_name="关联提示词", help_text="该会话使用的提示词")
+    auth_state = models.ForeignKey(
+        'ui_automation.UiAuthState', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='llm_chat_sessions',
+        verbose_name="LLM探索登录态",
+    )
+    auth_state_bound_at = models.DateTimeField(null=True, blank=True, verbose_name="登录态绑定时间")
 
     # Token 使用统计
     total_input_tokens = models.BigIntegerField(default=0, verbose_name="累计输入 Token",
@@ -108,6 +114,34 @@ class ChatSession(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.title}"
+
+
+class LlmAuthStateUsage(models.Model):
+    """LLM 探索使用登录态的脱敏审计记录。"""
+
+    RESULT_CHOICES = [
+        ('started', '已开始'),
+        ('succeeded', '成功'),
+        ('expired', '已过期'),
+        ('login_redirect', '跳转登录页'),
+        ('failed', '失败'),
+        ('closed', '已关闭'),
+    ]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    project = models.ForeignKey('projects.Project', on_delete=models.CASCADE)
+    chat_session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name='auth_state_usages')
+    auth_state_id_snapshot = models.BigIntegerField(verbose_name="登录态ID快照")
+    auth_state_name_snapshot = models.CharField(max_length=128, verbose_name="登录态名称快照")
+    target_origin = models.CharField(max_length=512, blank=True, default='')
+    result = models.CharField(max_length=32, choices=RESULT_CHOICES, default='started')
+    error_summary = models.CharField(max_length=512, blank=True, default='')
+    started_at = models.DateTimeField(auto_now_add=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-started_at']
+        indexes = [models.Index(fields=['chat_session', 'started_at'])]
 
 
 class TokenUsageRecord(models.Model):

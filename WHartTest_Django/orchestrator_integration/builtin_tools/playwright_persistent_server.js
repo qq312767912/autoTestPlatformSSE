@@ -420,6 +420,27 @@ state.page = page;
           return;
         }
 
+        if (method === 'initialize_context') {
+          await loadDeps();
+          if (state.context || state.page) {
+            send({ id, ok: false, error: 'Browser context is already initialized' });
+            return;
+          }
+          const storageState = params.storageState;
+          if (!storageState || typeof storageState !== 'object' || Array.isArray(storageState)) {
+            send({ id, ok: false, error: 'Invalid storageState' });
+            return;
+          }
+          const browserType = (process.env.PW_BROWSER_TYPE || 'chromium').toLowerCase();
+          state.browser = await helpers.launchBrowser(browserType);
+          state.context = await state.browser.newContext(
+            getContextOptionsWithHeaders({ storageState })
+          );
+          state.page = await state.context.newPage();
+          send({ id, ok: true, state: { initialized: true } });
+          return;
+        }
+
         if (method === 'exec') {
           await ensureBrowserContextPage();
           const code = resolveCodeFromArgs(params.args);

@@ -2051,6 +2051,19 @@ def _cleanup_mcp_session_for_chat(user_id, project_id, session_id):
             project_id,
             e,
         )
+    try:
+        from orchestrator_integration.builtin_tools.skill_tools import close_playwright_chat_sessions
+
+        close_playwright_chat_sessions(
+            int(user_id), int(project_id), str(session_id)
+        )
+    except Exception as e:
+        logger.warning(
+            "Playwright session cleanup failed for chat session_id=%s project_id=%s: %s",
+            session_id,
+            project_id,
+            e,
+        )
 
 class ChatHistoryAPIView(APIView):
     """
@@ -2108,13 +2121,18 @@ class ChatHistoryAPIView(APIView):
         # 获取会话信息（包括关联的提示词）
         prompt_id = None
         prompt_name = None
+        auth_state_id = None
+        auth_state_name = None
         try:
-            chat_session = ChatSession.objects.select_related("prompt").get(
+            chat_session = ChatSession.objects.select_related("prompt", "auth_state").get(
                 session_id=session_id, user=request.user, project_id=project_id
             )
             if chat_session.prompt:
                 prompt_id = chat_session.prompt.id
                 prompt_name = chat_session.prompt.name
+            if chat_session.auth_state:
+                auth_state_id = chat_session.auth_state.id
+                auth_state_name = chat_session.auth_state.name
         except ChatSession.DoesNotExist:
             pass  # 会话可能还没创建到数据库
 
@@ -2521,6 +2539,8 @@ class ChatHistoryAPIView(APIView):
                         "project_name": project.name,
                         "prompt_id": prompt_id,
                         "prompt_name": prompt_name,
+                        "auth_state_id": auth_state_id,
+                        "auth_state_name": auth_state_name,
                         "history": history_messages,
                         "context_token_count": context_token_count,
                         "context_limit": context_limit,

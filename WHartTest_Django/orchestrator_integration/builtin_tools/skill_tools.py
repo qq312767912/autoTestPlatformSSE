@@ -429,12 +429,14 @@ def get_skill_tools(
     project_id: Optional[int] = None,
     test_case_id: Optional[int] = None,
     chat_session_id: Optional[str] = None,
+    auth_state_id: Optional[int] = None,
 ) -> list[object]:
     """获取 Skill 工具列表（Skills 全局共享，不限制项目）"""
     current_user_id = user_id
     current_project_id = project_id if project_id is not None else 0
     current_test_case_id = test_case_id
     current_chat_session_id = chat_session_id
+    current_auth_state_id = auth_state_id
 
     @langchain_tool
     def read_skill_content(skill_name: str) -> str:
@@ -612,11 +614,19 @@ def get_skill_tools(
                     session_key = f"{current_user_id}_{current_project_id}_{chat_id_part}_{session_id}"
                     try:
                         manager = _get_playwright_session_manager()
+                        from orchestrator_integration.auth_state_binding import get_runtime_auth_binding
+                        auth_binding = get_runtime_auth_binding(
+                            user_id=current_user_id,
+                            project_id=current_project_id,
+                            chat_session_id=current_chat_session_id,
+                            auth_state_id=current_auth_state_id,
+                        )
                         output = manager.execute_run_js(
                             session_key=session_key,
                             skill_dir=skill_dir,
                             run_js_args=run_js_args,
                             env=env,
+                            auth_binding=auth_binding,
                             timeout_seconds=120,
                         )
                         logger.info(
@@ -866,3 +876,16 @@ def get_skill_tools(
         return _execute_single_skill_script(skill_name, command, session_id)
 
     return [read_skill_content, execute_skill_script]
+
+
+def close_playwright_chat_sessions(user_id: int, project_id: int, chat_session_id: str) -> None:
+    """关闭某个聊天会话派生的全部 Playwright 子会话。"""
+    _get_playwright_session_manager().close_sessions_with_prefix(
+        f"{user_id}_{project_id}_{chat_session_id}_"
+    )
+    from orchestrator_integration.auth_state_binding import close_auth_usage
+    close_auth_usage(
+        user_id=user_id,
+        project_id=project_id,
+        chat_session_id=chat_session_id,
+    )

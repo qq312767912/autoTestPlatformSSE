@@ -41,6 +41,31 @@
         @update:selected-prompt-id="selectedPromptId = $event"
       />
 
+      <div class="exploration-auth-bar">
+        <span class="exploration-auth-label">探索登录态</span>
+        <a-select
+          v-model="selectedAuthStateId"
+          class="exploration-auth-select"
+          allow-clear
+          :loading="authStatesLoading"
+          placeholder="不使用登录态"
+        >
+          <a-option
+            v-for="item in authStateOptions"
+            :key="item.id"
+            :value="item.id"
+            :disabled="item.status !== 'valid'"
+          >
+            {{ item.env_name }} / {{ item.name }} · {{ item.credential_summary }}
+            <template v-if="item.status !== 'valid'">（{{ item.status }}）</template>
+          </a-option>
+        </a-select>
+        <a-tag v-if="selectedAuthState" color="green">
+          已使用：{{ selectedAuthState.name }}
+        </a-tag>
+        <span v-else class="exploration-auth-empty">无痕上下文</span>
+      </div>
+
       <div class="chat-thread-surface">
         <ChatMessages
           ref="chatMessagesRef"
@@ -185,11 +210,13 @@ import {
   clearStreamState,
   latestContextUsage,
   stopAgentLoop,
-  resumeAgentLoop
+  resumeAgentLoop,
+  getLlmAuthStates
 } from '@/features/langgraph/services/chatService';
 import { getCurrentRuntimeLlmConfig, patchLlmConfigBundle } from '@/features/langgraph/services/llmConfigService';
 import { getUserPrompts } from '@/features/prompts/services/promptService';
 import type { ChatRequest, ChatHistoryMessage, ChatSessionDetail } from '@/features/langgraph/types/chat';
+import type { LlmAuthStateSummary } from '@/features/langgraph/types/chat';
 import type { LlmRuntimeConfig } from '@/features/langgraph/types/llmConfig';
 import { useProjectStore } from '@/store/projectStore';
 import { useLlmConfigRefresh } from '@/composables/useLlmConfigRefresh';
@@ -433,6 +460,34 @@ const isLoading = ref(false);
 const sessionId = ref<string>('');
 const chatSessions = ref<ChatSession[]>([]);
 const chatMessagesRef = ref<InstanceType<typeof ChatMessages> | null>(null);
+const selectedAuthStateId = ref<number | null>(null);
+const authStateOptions = ref<LlmAuthStateSummary[]>([]);
+const authStatesLoading = ref(false);
+const selectedAuthState = computed(() =>
+  authStateOptions.value.find(item => item.id === selectedAuthStateId.value) || null
+);
+
+const loadAuthStateOptions = async () => {
+  if (!projectStore.currentProjectId) {
+    authStateOptions.value = [];
+    selectedAuthStateId.value = null;
+    return;
+  }
+  authStatesLoading.value = true;
+  try {
+    authStateOptions.value = await getLlmAuthStates(projectStore.currentProjectId);
+    if (selectedAuthStateId.value && !authStateOptions.value.some(
+      item => item.id === selectedAuthStateId.value && item.status === 'valid'
+    )) {
+      selectedAuthStateId.value = null;
+    }
+  } catch (error) {
+    console.error('获取探索登录态失败:', error);
+    authStateOptions.value = [];
+  } finally {
+    authStatesLoading.value = false;
+  }
+};
 const TITLE_REFRESH_MAX_ATTEMPTS = 10;
 const TITLE_REFRESH_BASE_DELAY_MS = 1000;
 const TITLE_REFRESH_MAX_DELAY_MS = 5000;
@@ -1157,6 +1212,7 @@ const loadChatHistory = async () => {
         localStorage.setItem(PROMPT_STORAGE_KEY, String(data.prompt_id));
         console.log(`🔄 恢复会话提示词: ${data.prompt_name} (ID: ${data.prompt_id})`);
       }
+      selectedAuthStateId.value = data.auth_state_id ?? null;
 
       const tempMessages = buildHistoryMessages(data.history, formatHistoryTime);
 
@@ -1756,6 +1812,7 @@ const switchSession = async (id: string) => {
         localStorage.setItem(PROMPT_STORAGE_KEY, String(response.data.prompt_id));
         console.log(`🔄 切换会话时恢复提示词: ${response.data.prompt_name} (ID: ${response.data.prompt_id})`);
       }
+      selectedAuthStateId.value = response.data.auth_state_id ?? null;
 
       const tempMessages = buildHistoryMessages(response.data.history, formatHistoryTime);
 
@@ -1784,6 +1841,7 @@ const createNewChat = () => {
   sessionId.value = '';
   localStorage.removeItem('langgraph_session_id');
   messages.value = [];
+  selectedAuthStateId.value = null;
 
   // 重置历史记录分页状态
   historyOffset.value = 0;
@@ -2027,7 +2085,8 @@ const handleSendMessage = async (data: {
     message: finalMessage,
     session_id: sessionId.value || undefined,
     project_id: String(projectStore.currentProjectId), // 转换为string类型
-    file_ids: data.file_ids || []
+    file_ids: data.file_ids || [],
+    auth_state_id: selectedAuthStateId.value,
   };
 
   applyResolvedLlmConfigToRequest(requestData);
@@ -2339,8 +2398,10 @@ watch(() => projectStore.currentProjectId, async (newProjectId, oldProjectId) =>
     chatSessions.value = [];
     sessionId.value = '';
     localStorage.removeItem('langgraph_session_id');
+    selectedAuthStateId.value = null;
 
     // 重新加载会话列表
+    await loadAuthStateOptions();
     await loadSessionsFromServer();
   }
 }, { immediate: false });
@@ -2566,6 +2627,7 @@ watch(() => projectStore.currentProjectId, async (newProjectId, oldProjectId) =>
     // 只有在onMounted完成后才通过watch加载（避免重复）
     // 或者如果onMounted时没有项目，现在项目加载完成了，也需要加载
     if (isMountedLoadComplete || !oldProjectId) {
+      await loadAuthStateOptions();
       await loadSessionsFromServer();
       await loadChatHistory();
     }
@@ -2575,6 +2637,8 @@ watch(() => projectStore.currentProjectId, async (newProjectId, oldProjectId) =>
     messages.value = [];
     chatSessions.value = [];
     sessionId.value = '';
+    selectedAuthStateId.value = null;
+    authStateOptions.value = [];
   }
 });
 
@@ -2639,6 +2703,7 @@ onMounted(async () => {
 
   // 只有在有项目时才加载会话数据（避免watch中重复加载）
   if (projectStore.currentProjectId) {
+    await loadAuthStateOptions();
     // 🔧 修复：先加载会话列表，再加载当前会话历史
     // 这样可以避免 loadChatHistory 中的 updateSessionInList 导致重复
     await loadSessionsFromServer();
@@ -2675,6 +2740,7 @@ onActivated(async () => {
 
   // 0.2 重新拉取当前生效模型配置，避免 keep-alive 页面继续持有旧配置快照
   await loadCurrentLlmConfig();
+  await loadAuthStateOptions();
 
   // 1. 刷新左侧的会话列表
   await loadSessionsFromServer();
@@ -2743,6 +2809,30 @@ export default {
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.exploration-auth-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background: var(--color-bg-2, #fff);
+  border-bottom: 1px solid var(--color-border-2, #e5e6eb);
+}
+
+.exploration-auth-label {
+  flex: none;
+  color: var(--color-text-2, #4e5969);
+  font-size: 13px;
+}
+
+.exploration-auth-select {
+  width: min(520px, 55vw);
+}
+
+.exploration-auth-empty {
+  color: var(--color-text-3, #86909c);
+  font-size: 12px;
 }
 
 .diagram-preview-iframe {
