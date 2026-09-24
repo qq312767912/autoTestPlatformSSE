@@ -70,11 +70,17 @@ class HostSyncAgent:
         self.backup_root = Path(os.environ.get("HOST_SYNC_BACKUP_ROOT", "/projects/ai-test-platform/backups/host-sync"))
         self.state_file = Path(os.environ.get("HOST_SYNC_STATE_FILE", "/var/lib/wharttest-host-sync/state.json"))
         self.docker_bin = os.environ.get("HOST_SYNC_DOCKER_BIN", "docker")
+        self.apply_host_enabled = os.environ.get("HOST_SYNC_APPLY_HOST", "true").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
 
     def _token(self):
-        token = self.token_file.read_text(encoding="utf-8").strip()
+        try:
+            token = self.token_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            token = os.environ.get("TEST_HOST_SYNC_TOKEN", "").strip()
         if not token:
-            raise RuntimeError("同步 Token 文件为空")
+            raise RuntimeError("同步 Token 未配置")
         return token
 
     def _request(self, path, method="GET", data=None):
@@ -177,19 +183,20 @@ rm -f "$tmp"
         version = snapshot["version"]
         checksum = snapshot["checksum"]
         nodes = []
-        try:
-            changed = self.apply_host(block)
-            nodes.append({
-                "node_id": "host", "node_type": "host", "display_name": socket.gethostname(),
-                "applied_version": version, "applied_checksum": checksum, "status": "synced",
-                "message": "已更新" if changed else "已是最新配置", "details": {},
-            })
-        except Exception as exc:
-            nodes.append({
-                "node_id": "host", "node_type": "host", "display_name": socket.gethostname(),
-                "applied_version": None, "applied_checksum": "", "status": "failed",
-                "message": str(exc)[:500], "details": {},
-            })
+        if self.apply_host_enabled:
+            try:
+                changed = self.apply_host(block)
+                nodes.append({
+                    "node_id": "host", "node_type": "host", "display_name": socket.gethostname(),
+                    "applied_version": version, "applied_checksum": checksum, "status": "synced",
+                    "message": "已更新" if changed else "已是最新配置", "details": {},
+                })
+            except Exception as exc:
+                nodes.append({
+                    "node_id": "host", "node_type": "host", "display_name": socket.gethostname(),
+                    "applied_version": None, "applied_checksum": "", "status": "failed",
+                    "message": str(exc)[:500], "details": {},
+                })
         for container, node_type, display_name in self.discover_containers():
             try:
                 self.apply_container(container, block)

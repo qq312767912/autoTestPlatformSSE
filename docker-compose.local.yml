@@ -114,6 +114,8 @@ services:
       # Qdrant向量数据库
       - QDRANT_URL=http://qdrant:6333
       - HF_ENDPOINT=${DOCKER_HF_ENDPOINT:-https://huggingface.co}
+      # 本地开发同步服务仅修改容器 hosts，不修改 macOS 本机 hosts。
+      - TEST_HOST_SYNC_TOKEN=${TEST_HOST_SYNC_TOKEN:-wharttest-local-container-host-sync}
     depends_on:
       postgres:
         condition: service_healthy
@@ -257,6 +259,30 @@ services:
       retries: 3
       start_period: 20s
 
+  # 本地开发专用：发布域名配置后，只同步运行中容器的 /etc/hosts。
+  # macOS 本机 /etc/hosts 仍由开发人员手工维护。
+  host-sync:
+    build:
+      context: ./update_platform_version/deploy_env/host_sync
+      dockerfile: Dockerfile.local
+    container_name: wharttest-host-sync
+    environment:
+      - WHARTTEST_BACKEND_URL=http://backend:8000
+      - TEST_HOST_SYNC_TOKEN=${TEST_HOST_SYNC_TOKEN:-wharttest-local-container-host-sync}
+      - HOST_SYNC_APPLY_HOST=false
+      - HOST_SYNC_DOCKER_BIN=docker
+      - HOST_SYNC_INTERVAL_SECONDS=30
+      - HOST_SYNC_STATE_FILE=/var/lib/wharttest-host-sync/state.json
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - host-sync-state:/var/lib/wharttest-host-sync
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - wharttest-network
+    restart: unless-stopped
+
   # Xinference 模型推理服务（Embedding + Reranker）
   # xinference:
   #   image: xprobe/xinference:latest-cpu
@@ -310,6 +336,7 @@ volumes:
   xinference-data:
   xinference-cache:
   qdrant-data:
+  host-sync-state:
     # db.sqlite3 和 media 改用本地目录挂载，不再需要 named volume
     # playwright-screenshots 改用本地目录挂载，不再需要 named volume
 

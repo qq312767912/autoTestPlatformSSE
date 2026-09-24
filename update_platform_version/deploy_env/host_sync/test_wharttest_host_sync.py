@@ -1,7 +1,9 @@
 import importlib.util
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("wharttest_host_sync.py")
@@ -40,6 +42,17 @@ class ManagedBlockTests(unittest.TestCase):
         MODULE.verify_checksum(mappings, checksum)
         with self.assertRaises(ValueError):
             MODULE.verify_checksum(mappings, "0" * 64)
+
+    def test_agent_token_can_come_from_environment(self):
+        with mock.patch.dict(os.environ, {
+            "TEST_HOST_SYNC_TOKEN_FILE": "/missing/token",
+            "TEST_HOST_SYNC_TOKEN": "local-token",
+        }, clear=False):
+            self.assertEqual(MODULE.HostSyncAgent()._token(), "local-token")
+
+    def test_container_only_mode_disables_host_update(self):
+        with mock.patch.dict(os.environ, {"HOST_SYNC_APPLY_HOST": "false"}, clear=False):
+            self.assertFalse(MODULE.HostSyncAgent().apply_host_enabled)
 
 
 if __name__ == "__main__":
