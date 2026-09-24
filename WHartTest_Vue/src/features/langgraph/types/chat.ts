@@ -45,6 +45,13 @@ export interface ChatRequest {
    * 旁路模式不传，行为与过去一致。
    */
   attempt_id?: string;
+  // UI 一键生成上下文（凭据/登录态，仅平台侧 env 注入用，不进 LLM 上下文）
+  ui_generation?: {
+    env_config_id?: number; // 环境配置 ID
+    auth_state_id?: number; // 登录态 ID（与账号密码二选一）
+    username?: string; // 账号（未选登录态时使用）
+    password?: string; // 密码（未选登录态时使用）
+  };
 }
 
 /**

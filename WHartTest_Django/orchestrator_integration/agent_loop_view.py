@@ -54,10 +54,13 @@ from .middleware_config import (
     get_user_friendly_llm_error,
 )
 from .playwright_instructions import PLAYWRIGHT_SCRIPT_INSTRUCTION
+from .ui_generation_instructions import UI_CASE_GENERATION_INSTRUCTION
 from .generation_guard import (
-    GENERATION_MODE_MARKER,
+    GENERATION_MODE_INTERFACE_CASE,
+    GENERATION_MODE_UI_CASE,
     GenerationInterfaceCaseGuardMiddleware,
-    should_guard_generation_prompt,
+    GenerationUiCaseGuardMiddleware,
+    detect_generation_mode,
 )
 from .stop_signal import clear_stop_signal, should_stop
 from langgraph_integration.models import ChatMessage, ChatSession, LLMConfig
@@ -425,6 +428,47 @@ _LINKED_IMAGE_FETCH_TIMEOUT = _get_env_float(
 _MAX_SAFE_TOOL_MESSAGE_CHARS = _get_env_int(
     "AGENT_LOOP_MAX_SAFE_TOOL_MESSAGE_CHARS", 20000, min_value=1000
 )
+
+
+def _parse_ui_generation_context(raw: Any) -> Optional[dict]:
+    """解析 UI 一键生成上下文（凭据/登录态/环境），仅保留注入所需字段。
+
+    返回 dict 含：
+    - auth_state_id: 登录态 ID（可选）
+    - env_config_id: 环境配置 ID（可选）
+    - username / password: 账号密码明文（可选，仅用于 env 注入，禁止落库/日志）
+    - start_url: 起始页面 URL（可选，仅日志脱敏使用）
+
+    非法字段一律丢弃；非 dict 输入返回 None。
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    def _opt_int(key: str) -> Optional[int]:
+        value = raw.get(key)
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _opt_str(key: str) -> Optional[str]:
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+
+    context = {
+        "auth_state_id": _opt_int("auth_state_id"),
+        "env_config_id": _opt_int("env_config_id"),
+        "username": _opt_str("username"),
+        "password": _opt_str("password"),
+        "start_url": _opt_str("start_url"),
+    }
+    if not any(
+        [context["auth_state_id"], context["env_config_id"], context["username"], context["password"]]
+    ):
+        return None
+    return context
 
 
 def _extract_linked_image_urls(text: str) -> List[str]:
@@ -1502,6 +1546,8 @@ class AgentLoopStreamAPIView(View):
         auth_state_id: Optional[int] = None,
         auth_state_name: Optional[str] = None,
         generation_guard_enabled: bool = False,
+        generation_mode: Optional[str] = None,
+        ui_generation_context: Optional[dict] = None,
     ):
         """
         创建 SSE 流式生成器（LangChain v1 重构版）
@@ -1646,6 +1692,9 @@ class AgentLoopStreamAPIView(View):
                     if request._selected_skill_version is not None
                     else None
                 ),
+                ui_credential_context=(
+                    ui_generation_context if generation_mode == GENERATION_MODE_UI_CASE else None
+                ),
             )
             tools.extend(builtin_tools)
             logger.info(f"AgentLoopStreamAPI: Added {len(builtin_tools)} builtin tools")
@@ -1709,6 +1758,13 @@ class AgentLoopStreamAPIView(View):
                 ) + PLAYWRIGHT_SCRIPT_INSTRUCTION
                 logger.info(f"AgentLoopStreamAPI: 已追加脚本生成指令")
 
+            # 8.2 UI 一键生成会话：追加 UI 生成规范指令（与 default_templates 模板同源）
+            if generation_mode == GENERATION_MODE_UI_CASE:
+                effective_prompt = (
+                    (effective_prompt or "") + "\n\n" + UI_CASE_GENERATION_INSTRUCTION
+                )
+                logger.info("AgentLoopStreamAPI: 已追加 UI 用例生成规范指令")
+
             # 9. 构建用户消息（支持多模态：上传图片 + HTTP(S) 图片 + 需求文档图片）
             user_message_for_llm = user_message
             if llm_attachment_context:
@@ -1759,7 +1815,9 @@ class AgentLoopStreamAPIView(View):
                     tools=tools,
                     system_prompt=effective_prompt,
                 )
-                if generation_guard_enabled:
+                if generation_mode == GENERATION_MODE_UI_CASE:
+                    middleware = list(middleware) + [GenerationUiCaseGuardMiddleware()]
+                elif generation_mode == GENERATION_MODE_INTERFACE_CASE:
                     middleware = list(middleware) + [GenerationInterfaceCaseGuardMiddleware()]
 
                 agent = create_agent(
@@ -1770,7 +1828,7 @@ class AgentLoopStreamAPIView(View):
                     middleware=middleware,
                 )
                 logger.info(
-                    f"AgentLoopStreamAPI: Agent created with {len(tools)} tools"
+                    f"AgentLoopStreamAPI: Agent created with {len(tools)} tools (generation_mode={generation_mode or '-'})"
                 )
 
                 # 13. 配置调用参数
@@ -2313,6 +2371,7 @@ class AgentLoopStreamAPIView(View):
         request._flywheel_attempt = None
         request._flywheel_attempt_id = str(body_data.get("attempt_id") or "")
         generation_guard_enabled = should_guard_generation_prompt(user_message)
+        generation_mode = detect_generation_mode(user_message)
         session_id = body_data.get("session_id")
         project_id = body_data.get("project_id")
         knowledge_base_ids = _normalize_knowledge_base_ids(
@@ -2336,6 +2395,9 @@ class AgentLoopStreamAPIView(View):
         # 也必须忽略，避免同一 Skill 因个人提示词不同而产出结构漂移。
         prompt_id = None if request._flywheel_module_key == "test_plan_generation" else body_data.get("prompt_id")
         file_ids = body_data.get("file_ids", [])
+
+        # UI 一键生成上下文（凭据/登录态等，仅凭据注入用，不落库不进 LLM 上下文）
+        ui_generation_context = _parse_ui_generation_context(body_data.get("ui_generation"))
 
         # 调试日志：知识库参数
         logger.info(
@@ -2572,6 +2634,8 @@ class AgentLoopStreamAPIView(View):
                     bound_auth_state_id,
                     bound_auth_state_name,
                     generation_guard_enabled=generation_guard_enabled,
+                    generation_mode=generation_mode,
+                    ui_generation_context=ui_generation_context,
                 ):
                     yield chunk
 
@@ -2604,7 +2668,6 @@ class AgentLoopStreamAPIView(View):
                 bound_auth_state_id,
                 bound_auth_state_name,
             )
-
     async def _handle_non_stream_request(
         self,
         request,
@@ -2855,6 +2918,7 @@ class AgentLoopResumeAPIView(View):
         similarity_threshold: float = 0.3,
         top_k: int = 5,
         generation_guard_enabled: bool = False,
+        generation_mode: Optional[str] = None,
     ):
         """
         创建 Resume SSE 流式生成器
@@ -3021,7 +3085,9 @@ class AgentLoopResumeAPIView(View):
                     tools=tools,
                     system_prompt=resume_system_prompt,
                 )
-                if generation_guard_enabled:
+                if generation_mode == GENERATION_MODE_UI_CASE:
+                    middleware = list(middleware) + [GenerationUiCaseGuardMiddleware()]
+                elif generation_mode == GENERATION_MODE_INTERFACE_CASE:
                     middleware = list(middleware) + [GenerationInterfaceCaseGuardMiddleware()]
 
                 # 6. 创建 agent
@@ -3434,14 +3500,14 @@ class AgentLoopResumeAPIView(View):
 
         # 3. 返回 SSE 流式响应
         async def async_generator():
-            generation_guard_enabled = False
+            generation_mode = None
             try:
                 first_user_message = await sync_to_async(
                     lambda: ChatMessage.objects.filter(
                         session__session_id=session_id, role='human'
                     ).order_by('created_at').values_list('content', flat=True).first()
                 )()
-                generation_guard_enabled = should_guard_generation_prompt(first_user_message)
+                generation_mode = detect_generation_mode(first_user_message)
             except Exception:
                 logger.warning("[AgentLoopResumeAPI] 生成守护标记检测失败，按未启用处理")
 
@@ -3456,6 +3522,7 @@ class AgentLoopResumeAPIView(View):
                 similarity_threshold,
                 top_k,
                 generation_guard_enabled,
+                generation_mode,
             ):
                 yield chunk
 
