@@ -35,6 +35,6 @@
   - 检查日志与响应不含 Cookie/token
   - _Requirement: R1, R2, R3, R4, R5_
 
-- [ ] 7. 提交并推送 `origin/dev`
+- [x] 7. 提交并推送 `origin/dev`
   - 只提交本功能文件，不包含已有无关改动和本地部署产物
   - _Requirement: R1, R2, R3, R4, R5_
