@@ -254,6 +254,12 @@ const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束�
         component: () => import('../views/OperationLogView.vue'), // 动态导入操作日志页面。
       },
       {
+        path: 'test-host-config',
+        name: 'TestHostConfig',
+        component: () => import('@/features/test-host-config/views/TestHostConfigView.vue'),
+        meta: { requiredPermission: 'test_host_config.view_testhostmapping' },
+      },
+      {
         path: 'document-anonymization', // 定义文档脱敏管理子路径。
         name: 'DocumentAnonymization', // 定义文档脱敏管理路由名称。
         component: DocumentAnonymizationView, // 指定文档脱敏管理页面组件。
@@ -290,6 +296,7 @@ router.beforeEach((to, _from, next) => { // 注册全局前置守卫，在每次
   // 不需要认证的白名单路由
   const publicRoutes = ['Login', 'Register']; // 声明公开路由名称白名单。
   const isPublicRoute = publicRoutes.includes(to.name as string); // 判断目标路由是否属于公开白名单。
+  const requiredPermission = typeof to.meta.requiredPermission === 'string' ? to.meta.requiredPermission : '';
 
   if (!isLoggedIn && !isPublicRoute) { // 未登录且访问受保护路由时触发重定向。
     // 未登录且不是公开路由，重定向到登录页
@@ -299,6 +306,8 @@ router.beforeEach((to, _from, next) => { // 注册全局前置守卫，在每次
     // 已登录但访问登录/注册页，重定向到首页
     console.log('[Router Guard] 已登录，重定向到首页'); // 输出已登录访问公开页的重定向日志。
     next({ name: 'Dashboard' }); // 直接跳到仪表盘，避免重复登录/注册操作。
+  } else if (isLoggedIn && requiredPermission && !authStore.hasPermission(requiredPermission)) {
+    next({ name: 'Dashboard' });
   } else {
     console.log('[Router Guard] 放行'); // 输出路由放行日志。
     next(); // 满足条件时继续当前导航流程。

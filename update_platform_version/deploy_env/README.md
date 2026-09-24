@@ -28,6 +28,12 @@ bash 04-deploy.sh
 bash 05-verify.sh
 ```
 
+`04-deploy.sh` 会自动生成独立的域名同步 Token，并安装
+`wharttest-host-sync.timer`。管理员在“系统管理 → 测试域名配置”
+发布映射后，宿主机、Backend/Recorder、Playwright MCP 和所有
+`wharttest-actuator-*` 执行器会在 30 秒内同步。宿主机 hosts 备份位于
+`/projects/ai-test-platform/backups/host-sync/`。
+
 如果旧的执行器密钥文件与平台当前密码不一致，`07-start-actuators.sh`
 会在启动前拒绝继续。请在 `update_platform_version/` 目录执行独立修复脚本：
 

@@ -61,6 +61,7 @@ APP_LABEL_MAPPINGS = {
     'api_sync': 'API接口同步',
     'operation_logs': '操作日志审计',
     'file_management': '文件管理',
+    'test_host_config': '测试域名配置',
 }
 
 # 视图类与模块中文对应映射
@@ -81,6 +82,8 @@ MODULE_MAPPINGS = {
     'SystemConfigViewSet': '系统配置',
     'SystemConfigView': '系统配置',
     'OperationLogViewSet': '操作日志审计',
+    'TestHostMappingViewSet': '测试域名配置',
+    'TestHostVersionViewSet': '测试域名配置',
     
     # 项目与用例
     'ProjectViewSet': '项目管理',

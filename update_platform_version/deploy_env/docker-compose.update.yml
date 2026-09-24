@@ -55,7 +55,10 @@ services:
       #    确需在不重建镜像的前提下临时改后端代码时，叠加 docker-compose.hotfix.yml
       #    （19/22/23-apply-*-hotfix.sh 会自动叠加）。
       - /projects/ai-test-platform/update_platform_version/deploy_env/supervisord.single-worker.conf:/app/supervisord.conf:ro
+    secrets:
+      - test_host_sync_token
     environment:
+      TEST_HOST_SYNC_TOKEN_FILE: /run/secrets/test_host_sync_token
       # 内网 Redis 当前未启用 AUTH。基础 Compose 若残留 REDIS_PASSWORD 拼接，
       # Celery 会显示 redis://:**@redis:6379/0，连接重试约 20 秒后退出。
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -152,3 +155,5 @@ services:
 secrets:
   actuator_api_password:
     file: /projects/ai-test-platform/update_platform_version/deploy_env/secrets/actuator_api_password
+  test_host_sync_token:
+    file: /projects/ai-test-platform/update_platform_version/deploy_env/secrets/test_host_sync_token

@@ -148,6 +148,7 @@ INSTALLED_APPS = [
     'operation_logs',  # 用户操作日志。
     'file_management',  # 统一文件管理/附件中心。
     'code_analysis',  # 代码变更分析。
+    'test_host_config',  # 内网被测系统域名/IP 统一配置。
 ]
 
 # ASGI 配置（用于 Channels WebSocket）

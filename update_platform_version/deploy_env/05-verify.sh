@@ -59,6 +59,20 @@ ok 'Backend 录制浏览器目标域名与 HTTP 连通性'
 docker exec wharttest-backend /opt/venv/bin/python /app/manage.py migrate --check
 ok '数据库迁移状态'
 
+docker exec wharttest-backend /bin/sh -c '
+  test -f /app/test_host_config/models.py
+  test -s /run/secrets/test_host_sync_token
+'
+ok '测试域名配置后端模块与 Agent Token'
+
+systemctl is-enabled --quiet wharttest-host-sync.timer || fail 'wharttest-host-sync.timer 未启用'
+systemctl is-active --quiet wharttest-host-sync.timer || fail 'wharttest-host-sync.timer 未运行'
+systemctl start wharttest-host-sync.service || {
+  journalctl -u wharttest-host-sync.service -n 80 --no-pager || true
+  fail '宿主机域名同步执行失败'
+}
+ok '宿主机域名同步服务'
+
 docker exec wharttest-backend /opt/venv/bin/python -c '
 import os
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "wharttest_django.settings")

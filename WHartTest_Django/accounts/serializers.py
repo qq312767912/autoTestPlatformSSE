@@ -490,6 +490,7 @@ class ContentTypeSerializer(serializers.ModelSerializer):
             "llm_config": "系统管理",
             "message": "系统管理",
             "mcpserverconfig": "系统管理",
+            "test_host_config": "系统管理",
             # 系统核心应用（内容类型接口已排除 admin/contenttypes/sessions）
             "authtoken": "系统管理",
         }
@@ -538,6 +539,7 @@ class ContentTypeSerializer(serializers.ModelSerializer):
             "api_keys": "System Settings",
             "apikey": "System Settings",
             "mcp_tools": "System Settings",
+            "test_host_config": "System Settings",
             "skills": "System Settings",
             "llms": "System Settings",
             "llm_config": "System Settings",

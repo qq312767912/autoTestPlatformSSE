@@ -183,6 +183,8 @@ urlpatterns = [
     path("api/code-analysis/", include("code_analysis.urls")),
     # 挂载用例审查平台级路由（专用 LLM 配置）。
     path("api/testcases/", include("testcases.urls")),
+
+    path("api/test-host-config/", include("test_host_config.urls")),
     # 挂载 OpenAPI schema 接口。
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     # 挂载 Swagger UI。

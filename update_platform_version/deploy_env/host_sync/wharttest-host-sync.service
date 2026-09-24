@@ -1,0 +1,17 @@
+[Unit]
+Description=WHartTest managed host mapping synchronizer
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/wharttest/host-sync.env
+ExecStart=/usr/local/lib/wharttest-host-sync/wharttest_host_sync.py
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/hosts /var/lib/wharttest-host-sync /projects/ai-test-platform/backups/host-sync

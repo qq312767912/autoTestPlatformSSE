@@ -10,6 +10,19 @@ backup_dir="$(cat "$UPDATE_DIR/.latest-backup")"
 [ -f "$backup_dir/BACKUP_COMPLETE" ] || { echo "最近一次备份不完整：$backup_dir" >&2; exit 1; }
 
 compose=(docker compose -p offline-images -f "$BASE_COMPOSE" -f "$OVERRIDE_COMPOSE")
+
+host_sync_token="$UPDATE_DIR/secrets/test_host_sync_token"
+if [ ! -s "$host_sync_token" ]; then
+  mkdir -p "$UPDATE_DIR/secrets"
+  umask 077
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32 > "$host_sync_token"
+  else
+    python3 -c 'import secrets; print(secrets.token_hex(32))' > "$host_sync_token"
+  fi
+fi
+chmod 600 "$host_sync_token"
+
 "${compose[@]}" config >/dev/null
 
 wait_healthy() {
@@ -78,5 +91,14 @@ wait_healthy wharttest-actuator-01 180
 wait_healthy wharttest-actuator-02 180
 wait_healthy wharttest-actuator-03 180
 
-echo "Backend、Frontend 升级完成，三个执行器已恢复；Vision MCP 保持运行。"
+echo "[配置] 安装宿主机域名同步服务"
+if [ "${EUID}" -eq 0 ]; then
+  bash "$UPDATE_DIR/30-install-host-sync.sh"
+elif command -v sudo >/dev/null 2>&1; then
+  sudo bash "$UPDATE_DIR/30-install-host-sync.sh"
+else
+  echo "[警告] 当前用户非 root 且系统无 sudo，请稍后以 root 执行 30-install-host-sync.sh" >&2
+fi
+
+echo "Backend、Frontend 升级完成，三个执行器已恢复；域名同步服务已安装。"
 echo "请执行 05-verify.sh，并进行登录、代码审查、用例审查等人工验收。"

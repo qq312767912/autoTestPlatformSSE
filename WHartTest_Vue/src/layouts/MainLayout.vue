@@ -267,6 +267,10 @@
               <template #icon><icon-history /></template>
               <a href="#" @click="navigateWithoutProject($event, '/operation-logs')">{{ operationLogsMenuLabel }}</a>
             </a-menu-item>
+            <a-menu-item key="test-host-config" v-if="hasTestHostConfigPermission">
+              <template #icon><icon-link /></template>
+              <a href="#" @click="navigateWithoutProject($event, '/test-host-config')">{{ testHostConfigMenuLabel }}</a>
+            </a-menu-item>
           </a-sub-menu>
         </a-menu>
         <!-- 侧边栏底部收起/展开按钮 -->
@@ -354,6 +358,7 @@ import {
   IconMoonFill,
   IconList,
   IconRelation,
+  IconLink,
 } from '@arco-design/web-vue/es/icon';
 import '@arco-design/web-vue/dist/arco.css'; // 引入 Arco Design 样式
 
@@ -406,6 +411,7 @@ const usersMenuLabel = computed(() => (locale.value === 'en-US' ? 'Users' : tl('
 const organizationsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Teams' : tl('组织管理')));
 const permissionsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Access' : tl('权限管理')));
 const operationLogsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Logs' : tl('操作日志')));
+const testHostConfigMenuLabel = computed(() => (locale.value === 'en-US' ? 'Test Host Mapping' : tl('测试域名配置')));
 const modelsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Models' : tl('LLM配置')));
 const mcpMenuLabel = computed(() => (locale.value === 'en-US' ? 'MCP' : tl('MCP配置')));
 const skillsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Skills' : tl('Skills管理')));
@@ -464,6 +470,7 @@ const activeMenu = computed(() => {
   if (path.startsWith('/organizations')) return 'organizations';
   if (path.startsWith('/permissions')) return 'permissions';
   if (path.startsWith('/operation-logs')) return 'operation-logs';
+  if (path.startsWith('/test-host-config')) return 'test-host-config';
   if (path.startsWith('/llm-configs')) return 'llm-configs';
   if (path.startsWith('/langgraph-chat')) return 'langgraph-chat';
   if (path.startsWith('/task-center')) return 'task-center';
@@ -554,6 +561,10 @@ const hasOperationLogsPermission = computed(() => {
   return authStore.currentUser?.is_staff || authStore.hasPermission('operation_logs.view_operationlog');
 });
 
+const hasTestHostConfigPermission = computed(() => {
+  return authStore.hasPermission('test_host_config.view_testhostmapping');
+});
+
 const hasLlmConfigsPermission = computed(() => {
   return authStore.hasPermission('langgraph_integration.view_llmconfig') ||
          authStore.hasPermission('llm_config.view_llmconfiguration') ||
@@ -598,7 +609,8 @@ const hasSystemMenuItems = computed(() => {
          hasApiKeysPermission.value ||
          hasMcpConfigsPermission.value ||
          hasSkillsPermission.value ||
-         hasOperationLogsPermission.value;
+         hasOperationLogsPermission.value ||
+         hasTestHostConfigPermission.value;
 });
 
 // 切换侧边栏收起状态
