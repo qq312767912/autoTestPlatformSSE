@@ -20,5 +20,5 @@ def execute_testcase_review(self, review_id):
         raise
     except Exception as exc:
         logger.exception("测试用例审查失败: %s", review_id)
-        TestCaseReview.objects.filter(pk=review_id).update(status="failed", current_step="审查失败", error_message=str(exc)[:2000], completed_at=timezone.now())
+        TestCaseReview.objects.filter(pk=review_id).exclude(status="cancelled").update(status="failed", current_step="审查失败", error_message=str(exc)[:2000], completed_at=timezone.now())
         raise

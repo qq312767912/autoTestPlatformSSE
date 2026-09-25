@@ -137,6 +137,19 @@ class TestCaseReviewApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
         delay.assert_not_called()
 
+    @patch("celery.current_app.control.revoke")
+    def test_running_review_can_be_cancelled(self, revoke):
+        review = TestCaseReview.objects.create(
+            project=self.project, creator=self.user,
+            source_file=SimpleUploadedFile("cancel.xlsx", b"fake"), source_name="cancel.xlsx",
+            status="running", celery_task_id="celery-review-1",
+        )
+        response = self.client.post(f"/api/projects/{self.project.id}/testcase-reviews/{review.id}/cancel/")
+        self.assertEqual(response.status_code, 200)
+        review.refresh_from_db()
+        self.assertEqual(review.status, "cancelled")
+        revoke.assert_called_once_with("celery-review-1", terminate=True, signal="SIGTERM")
+
 
 class TestCaseReviewLLMGateTests(TestCase):
     """审查的前置条件：必须先由管理员配置并启用专用 LLM。"""

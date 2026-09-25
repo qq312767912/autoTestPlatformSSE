@@ -9,6 +9,7 @@
         <a-button @click="openNodes"><template #icon><icon-computer /></template>节点状态</a-button>
         <a-button @click="openVersions"><template #icon><icon-history /></template>版本历史</a-button>
         <a-button v-if="canChange" type="primary" @click="openEditor()"><template #icon><icon-plus /></template>新增映射</a-button>
+        <a-button v-if="canChange" @click="bulkVisible = true">批量导入</a-button>
         <a-button v-if="canPublish" type="primary" status="success" :disabled="!overview.pending_changes" @click="openPublish">
           <template #icon><icon-upload /></template>发布配置<span v-if="overview.pending_changes"> ({{ overview.pending_changes }})</span>
         </a-button>
@@ -62,6 +63,20 @@
         <a-form-item field="enabled" label="状态"><a-switch v-model="form.enabled" checked-text="启用" unchecked-text="停用" /></a-form-item>
         <a-form-item field="remark" label="备注"><a-textarea v-model="form.remark" :max-length="500" show-word-limit :auto-size="{ minRows: 3, maxRows: 6 }" /></a-form-item>
       </a-form>
+    </a-drawer>
+
+    <a-drawer :visible="bulkVisible" :width="860" title="批量导入 hosts" @cancel="bulkVisible = false" :footer="false">
+      <a-alert type="info">每行填写“IPv4 域名”，支持一行多个域名和 # 行尾注释。导入后仅保存为草稿，仍需发布配置。</a-alert>
+      <a-form layout="vertical" style="margin-top:16px">
+        <a-form-item label="系统名称"><a-input v-model="bulkSystemName" placeholder="例如：星企航测试环境" /></a-form-item>
+        <a-form-item label="hosts 原文"><a-textarea v-model="bulkText" :auto-size="{ minRows: 10, maxRows: 18 }" placeholder="202.122.117.52 oc.test.sse.com.cn&#10;202.122.117.52 pujiang.test.sse.com.cn" /></a-form-item>
+      </a-form>
+      <a-space><a-button type="primary" :loading="bulkLoading" @click="previewBulk">解析预览</a-button><a-button v-if="bulkPreview.rows?.length" status="success" :loading="bulkLoading" :disabled="bulkPreview.errors?.length || bulkPreview.conflicts?.length" @click="commitBulk(false)">导入有效配置</a-button></a-space>
+      <a-alert v-if="bulkPreview.conflicts?.length" type="warning" style="margin-top:14px">发现 {{ bulkPreview.conflicts.length }} 个 IP 冲突。确认后将覆盖草稿中的原 IP。 <a-link @click="commitBulk(true)">确认覆盖并导入</a-link></a-alert>
+      <a-table v-if="bulkPreview.rows?.length || bulkPreview.errors?.length" :data="bulkPreview.rows || []" :pagination="false" :scroll="{ y: 360 }" style="margin-top:14px">
+        <template #columns><a-table-column title="行" data-index="line" :width="60"/><a-table-column title="域名" data-index="hostname"/><a-table-column title="IPv4" data-index="ipv4" :width="150"/><a-table-column title="处理" :width="120"><template #cell="{record}">{{ record.action === 'create' ? '新增' : record.action === 'update' ? '覆盖' : '无变化' }}</template></a-table-column></template>
+      </a-table>
+      <a-alert v-for="error in bulkPreview.errors || []" :key="`${error.line}-${error.detail}`" type="error" style="margin-top:8px">第 {{ error.line }} 行：{{ error.detail }}（{{ error.text }}）</a-alert>
     </a-drawer>
 
     <a-drawer :visible="publishVisible" :width="680" title="发布配置" @cancel="publishVisible = false" @ok="confirmPublish" :ok-loading="publishing" ok-text="确认发布">
@@ -120,7 +135,7 @@ import { Message } from '@arco-design/web-vue';
 import { IconComputer, IconHistory, IconPlus, IconRefresh, IconUpload } from '@arco-design/web-vue/es/icon';
 import { useAuthStore } from '@/store/authStore';
 import {
-  createMapping, deleteMapping, getDiagnosis, getDiff, getOverview, listMappings,
+  bulkImportMappings, createMapping, deleteMapping, getDiagnosis, getDiff, getOverview, listMappings,
   listNodes, listVersions, publishMappings, rollbackVersion, startDiagnosis, updateMapping,
 } from '../service';
 import type {
@@ -144,6 +159,11 @@ const publishVisible = ref(false);
 const nodesVisible = ref(false);
 const versionsVisible = ref(false);
 const diagnosisVisible = ref(false);
+const bulkVisible = ref(false);
+const bulkLoading = ref(false);
+const bulkText = ref('');
+const bulkSystemName = ref('批量导入');
+const bulkPreview = ref<any>({ rows: [], errors: [], conflicts: [] });
 const editingId = ref<number | null>(null);
 const diagnosis = ref<TestHostDiagnosis | null>(null);
 const formRef = ref<FormInstance>();
@@ -195,6 +215,19 @@ async function saveMapping() {
   } catch (error) { showError(error); } finally { saving.value = false; }
 }
 async function removeMapping(id: number) { try { await deleteMapping(id); Message.success('已删除，发布后生效'); await refreshAll(); } catch (error) { showError(error); } }
+async function previewBulk() {
+  if (!bulkText.value.trim()) return Message.warning('请粘贴 hosts 配置');
+  bulkLoading.value = true;
+  try { bulkPreview.value = await bulkImportMappings({ text: bulkText.value, system_name: bulkSystemName.value, dry_run: true }); }
+  catch (error) { showError(error); } finally { bulkLoading.value = false; }
+}
+async function commitBulk(overwrite: boolean) {
+  bulkLoading.value = true;
+  try {
+    const result = await bulkImportMappings({ text: bulkText.value, system_name: bulkSystemName.value, dry_run: false, overwrite });
+    Message.success(`已导入 ${result.created_or_updated} 条配置，等待发布`); bulkVisible.value = false; bulkPreview.value = { rows: [], errors: [], conflicts: [] }; await refreshAll();
+  } catch (error) { showError(error); } finally { bulkLoading.value = false; }
+}
 
 async function openPublish() { try { Object.assign(diff, await getDiff()); publishVisible.value = true; } catch (error) { showError(error); } }
 async function confirmPublish() {

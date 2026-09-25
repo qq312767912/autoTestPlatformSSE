@@ -152,6 +152,8 @@ class AnalysisTask(models.Model):
     # 多选文档；保留旧单选字段，保证历史审查任务仍可读取。
     requirement_document_ids = models.JSONField(default=list, blank=True)
     api_document_ids = models.JSONField(default=list, blank=True)
+    knowledge_base_ids = models.JSONField(default=list, blank=True)
+    knowledge_document_ids = models.JSONField(default=list, blank=True)
     mode = models.CharField(max_length=20, choices=MODE_CHOICES, default="standard")
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default="pending", db_index=True)
     progress = models.PositiveSmallIntegerField(default=0)

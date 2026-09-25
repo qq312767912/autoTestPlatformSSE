@@ -3,7 +3,7 @@
     :visible="visible"
     :title="title || text.title"
     :mask-closable="finished"
-    width="min(1200px, calc(100vw - 24px))"
+    width="min(1500px, calc(100vw - 24px))"
     @cancel="emit('update:visible', false)"
   >
     <!-- 执行画面（只读）：与录制器画布同构的帧展示，无输入转发 -->
@@ -221,7 +221,13 @@ onUnmounted(() => {
   /* body 内只有画布区（状态栏在 footer 插槽）：高度 min(700px, 70vh-44px)
      保证 body 内容永不超全局 70vh 限高，不出现右侧滚动条；
      700px 与 1400:900 画布比例匹配（1200 弹窗宽度下画布恰好铺满，无左右深色留白） */
-  height: min(700px, calc(70vh - 44px));
+  width: 100%;
+  height: min(800px, calc(82vh - 44px));
+  min-width: 720px;
+  min-height: 420px;
+  max-width: 100%;
+  max-height: calc(85vh - 20px);
+  resize: both;
   min-height: 0;
   overflow: hidden;
   display: flex;

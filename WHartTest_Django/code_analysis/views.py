@@ -142,6 +142,21 @@ class ProjectRepositoryViewSet(viewsets.ModelViewSet):
         repo.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    @action(detail=True, methods=["post"], url_path="purge-local-copy")
+    @permission_required("code_analysis.change_projectrepository")
+    def purge_local_copy(self, request, pk=None):
+        """清理平台在容器内生成的审查副本，不删除仓库配置或远端仓库。"""
+        repo = self.get_object()
+        if not _can_access(request.user, repo.project_id):
+            raise PermissionDenied("无权清理该代码仓库副本")
+        running = repo.analysis_tasks.filter(status__in={
+            "queued", "fetching", "machine_analyzing", "ai_analyzing", "generating_tests",
+        }).exists()
+        if running:
+            return Response({"detail": "该仓库仍有审查任务正在执行，请先取消任务"}, status=status.HTTP_409_CONFLICT)
+        remove_ocr_repositories_for_repository(repo.id)
+        return Response({"detail": "容器内审查仓库副本已清理；仓库配置和历史记录已保留"})
+
     def _gitlab_client(self, repo, user):
         try:
             credential = UserGitLabCredential.objects.get(

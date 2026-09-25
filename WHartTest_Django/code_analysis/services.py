@@ -1270,6 +1270,16 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
         context_from_documents(task.requirement_document_ids, task.requirement_document_id, "需求文档"),
         context_from_documents(task.api_document_ids, task.api_document_id, "接口文档"),
     ])
+    if task.knowledge_document_ids:
+        from knowledge.models import Document
+        knowledge_documents = Document.objects.filter(
+            knowledge_base__project=task.project, status="completed", id__in=task.knowledge_document_ids,
+        ).values_list("title", "content")
+        knowledge_context = "\n\n".join(
+            f"【{title}】\n{(content or '')[:8000]}" for title, content in knowledge_documents
+        )[:12000]
+        if knowledge_context:
+            business_context += "\n知识库文档：\n" + knowledge_context
     # Agentic 审查的第一步：只读 MCP 按需收集变更文件的完整目标版本上下文。
     # 获取失败不影响原 Diff 审查。
     try:
@@ -1352,7 +1362,8 @@ def _run_context_test_enrichment(task, findings):
     """
     requirement_ids = list(task.requirement_document_ids or []) or ([task.requirement_document_id] if task.requirement_document_id else [])
     api_ids = list(task.api_document_ids or []) or ([task.api_document_id] if task.api_document_id else [])
-    if not (requirement_ids or api_ids):
+    knowledge_ids = list(task.knowledge_document_ids or [])
+    if not (requirement_ids or api_ids or knowledge_ids):
         return [], [], 0, "未关联需求或接口文档，未执行业务上下文补充"
     from langgraph_integration.views import create_llm_instance
     from requirements.models import RequirementDocument
@@ -1361,6 +1372,10 @@ def _run_context_test_enrichment(task, findings):
         document_ids = list(dict.fromkeys(requirement_ids + api_ids))
         documents = RequirementDocument.objects.filter(project=task.project, id__in=document_ids).values("title", "content")
         context = "\n\n".join(f"文档：{item['title']}\n{(item['content'] or '')[:8000]}" for item in documents)
+        if knowledge_ids:
+            from knowledge.models import Document
+            knowledge_documents = Document.objects.filter(knowledge_base__project=task.project, status="completed", id__in=knowledge_ids).values("title", "content")
+            context += "\n\n" + "\n\n".join(f"知识库文档：{item['title']}\n{(item['content'] or '')[:8000]}" for item in knowledge_documents)
         if not context:
             return [], [], 0, "关联文档尚未解析，未执行业务上下文补充"
         risk_context = [{key: value for key, value in finding.items() if key in {"change", "file", "severity", "impact", "evidence"}} for finding in findings[:80]]
@@ -1419,6 +1434,8 @@ def _reuse_cached_result(task, original_base_sha, original_head_sha):
             mode=task.mode, requirement_context=task.requirement_context, api_context=task.api_context,
             requirement_document_ids=task.requirement_document_ids,
             api_document_ids=task.api_document_ids,
+            knowledge_base_ids=task.knowledge_base_ids,
+            knowledge_document_ids=task.knowledge_document_ids,
             status="completed",
         ).exclude(pk=task.pk).order_by("-completed_at")
         source = next((candidate for candidate in candidates.iterator() if _cache_report_complete(candidate)), None)

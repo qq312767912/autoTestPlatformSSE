@@ -116,3 +116,29 @@ class AgentApiTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["accepted"], 1)
+
+
+class BulkImportApiTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_superuser("bulk-host-admin", "bulk@example.com", "x")
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_previews_and_imports_standard_hosts_text(self):
+        text = "202.122.117.52 oc.test.sse.com.cn\n202.122.117.52 pujiang.test.sse.com.cn # comment"
+        url = "/api/test-host-config/mappings/bulk-import/"
+        preview = self.client.post(url, {"text": text, "dry_run": True}, format="json")
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(len(preview.data["rows"]), 2)
+        result = self.client.post(url, {"text": text, "dry_run": False}, format="json")
+        self.assertEqual(result.status_code, 201)
+        self.assertEqual(result.data["created_or_updated"], 2)
+        self.assertEqual(TestHostMapping.objects.count(), 2)
+
+    def test_requires_explicit_overwrite_for_conflict(self):
+        TestHostMapping.objects.create(system_name="旧系统", hostname="oc.test.sse.com.cn", ipv4="202.122.117.51", created_by=self.user, updated_by=self.user)
+        url = "/api/test-host-config/mappings/bulk-import/"
+        response = self.client.post(url, {"text": "202.122.117.52 oc.test.sse.com.cn", "dry_run": False}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["can_import"])
+        self.assertEqual(TestHostMapping.objects.get().ipv4, "202.122.117.51")

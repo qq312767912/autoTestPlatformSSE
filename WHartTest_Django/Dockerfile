@@ -274,6 +274,7 @@ COPY ui_automation/ /app/ui_automation/
 COPY weixin_integration/ /app/weixin_integration/
 COPY testcase_templates/ /app/testcase_templates/
 COPY testcases/ /app/testcases/
+COPY test_host_config/ /app/test_host_config/
 COPY utils/ /app/utils/
 COPY wharttest_django/ /app/wharttest_django/
 COPY bundled_skills/ /app/bundled_skills/

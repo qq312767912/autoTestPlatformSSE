@@ -50,6 +50,65 @@ class TestHostMappingViewSet(viewsets.ModelViewSet):
             super().perform_destroy(instance)
             bump_draft_revision()
 
+    @action(detail=False, methods=["post"], url_path="bulk-import")
+    def bulk_import(self, request):
+        text = str(request.data.get("text") or "")
+        overwrite = request.data.get("overwrite", False) is True
+        dry_run = request.data.get("dry_run", True) is not False
+        system_name = str(request.data.get("system_name") or "批量导入").strip()[:100] or "批量导入"
+        rows, errors, seen = [], [], set()
+        from django.core.exceptions import ValidationError
+        from .validators import normalize_hostname, validate_safe_ipv4
+        for line_number, raw in enumerate(text.splitlines(), 1):
+            body = raw.split("#", 1)[0].strip()
+            if not body:
+                continue
+            parts = body.split()
+            if len(parts) < 2:
+                errors.append({"line": line_number, "text": raw, "detail": "格式应为：IPv4 域名"})
+                continue
+            try:
+                ipv4 = validate_safe_ipv4(parts[0])
+                hostnames = [normalize_hostname(value) for value in parts[1:]]
+            except ValidationError as exc:
+                errors.append({"line": line_number, "text": raw, "detail": "; ".join(exc.messages)})
+                continue
+            for hostname in hostnames:
+                if hostname in seen:
+                    errors.append({"line": line_number, "text": raw, "detail": f"域名 {hostname} 在导入内容中重复"})
+                    continue
+                seen.add(hostname)
+                existing = TestHostMapping.objects.filter(hostname=hostname).first()
+                rows.append({
+                    "line": line_number, "hostname": hostname, "ipv4": ipv4,
+                    "action": "unchanged" if existing and existing.ipv4 == ipv4 else "update" if existing else "create",
+                    "existing_ipv4": existing.ipv4 if existing else None,
+                })
+        conflicts = [row for row in rows if row["action"] == "update"]
+        if dry_run or errors or (conflicts and not overwrite):
+            return Response({"rows": rows, "errors": errors, "conflicts": conflicts, "can_import": not errors and (overwrite or not conflicts)})
+        changed = 0
+        with transaction.atomic():
+            for row in rows:
+                if row["action"] == "unchanged":
+                    continue
+                mapping, created = TestHostMapping.objects.get_or_create(
+                    hostname=row["hostname"],
+                    defaults={"ipv4": row["ipv4"], "system_name": system_name, "enabled": True,
+                              "remark": "批量导入", "updated_by": request.user, "created_by": request.user},
+                )
+                if not created:
+                    mapping.ipv4 = row["ipv4"]
+                    mapping.system_name = system_name
+                    mapping.enabled = True
+                    mapping.remark = "批量导入"
+                    mapping.updated_by = request.user
+                    mapping.save(update_fields=["ipv4", "system_name", "enabled", "remark", "updated_by", "updated_at"])
+                changed += 1
+            if changed:
+                bump_draft_revision()
+        return Response({"created_or_updated": changed, "unchanged": len(rows) - changed, "errors": []}, status=status.HTTP_201_CREATED)
+
     @action(detail=False, methods=["get"])
     def overview(self, request):
         state = TestHostConfigState.get_state()

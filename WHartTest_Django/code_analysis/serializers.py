@@ -171,4 +171,12 @@ class AnalysisTaskSerializer(serializers.ModelSerializer):
                 if len(normalized) != len(ids) or RequirementDocument.objects.filter(project=project, id__in=normalized).count() != len(normalized):
                     raise serializers.ValidationError({field: "所选文档不存在或不属于当前项目"})
                 data[field] = normalized
+            from knowledge.models import Document, KnowledgeBase
+            base_ids = list(dict.fromkeys(str(item) for item in (data.get("knowledge_base_ids") or []) if item))
+            document_ids = list(dict.fromkeys(str(item) for item in (data.get("knowledge_document_ids") or []) if item))
+            if len(base_ids) > 20 or KnowledgeBase.objects.filter(project=project, is_active=True, id__in=base_ids).count() != len(base_ids):
+                raise serializers.ValidationError({"knowledge_base_ids": "所选知识库不存在、未启用或不属于当前项目"})
+            if len(document_ids) > 20 or Document.objects.filter(knowledge_base__project=project, knowledge_base_id__in=base_ids, status="completed", id__in=document_ids).count() != len(document_ids):
+                raise serializers.ValidationError({"knowledge_document_ids": "所选知识库文档不存在、尚未解析或不属于所选知识库"})
+            data["knowledge_base_ids"], data["knowledge_document_ids"] = base_ids, document_ids
         return data

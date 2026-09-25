@@ -154,6 +154,20 @@ class TestCaseReviewViewSet(viewsets.ModelViewSet):
         review.save()
         return Response(self.get_serializer(review).data)
 
+    @action(detail=True, methods=["post"], url_path="cancel")
+    def cancel(self, request, *args, **kwargs):
+        review = self.get_object()
+        if review.status not in {"pending", "running"}:
+            return Response(self.get_serializer(review).data)
+        review.status = "cancelled"
+        review.current_step = "用户已取消"
+        review.completed_at = timezone.now()
+        review.save(update_fields=["status", "current_step", "completed_at", "updated_at"])
+        if review.celery_task_id:
+            from celery import current_app
+            current_app.control.revoke(review.celery_task_id, terminate=True, signal="SIGTERM")
+        return Response(self.get_serializer(review).data)
+
 
 class TestCaseReviewLLMConfigViewSet(viewsets.ModelViewSet):
     """用例审查专用 LLM 配置（平台级单例）。

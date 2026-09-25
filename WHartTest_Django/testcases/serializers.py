@@ -726,6 +726,7 @@ class TestCaseReviewSerializer(serializers.ModelSerializer):
         fields = [
             "id", "project", "creator", "creator_name", "source_file", "source_url",
             "source_name", "business_context", "review_mode", "selected_skill", "skill_name", "custom_rules",
+            "requirement_document_ids", "knowledge_base_ids", "knowledge_document_ids",
             "status", "current_step", "progress",
             "report_file", "report_url", "summary", "error_message", "celery_task_id",
             "started_at", "completed_at", "created_at", "updated_at",
@@ -759,6 +760,22 @@ class TestCaseReviewSerializer(serializers.ModelSerializer):
         validated_data["skill_name"] = skill.name if skill else "test-case-clarity-review"
         validated_data["skill_snapshot"] = build_skill_snapshot(skill)
         return super().create(validated_data)
+
+    def validate(self, attrs):
+        project_id = self.context["view"].kwargs.get("project_pk")
+        from requirements.models import RequirementDocument
+        from knowledge.models import Document, KnowledgeBase
+        requirement_ids = list(dict.fromkeys(str(item) for item in (attrs.get("requirement_document_ids") or []) if item))
+        base_ids = list(dict.fromkeys(str(item) for item in (attrs.get("knowledge_base_ids") or []) if item))
+        document_ids = list(dict.fromkeys(str(item) for item in (attrs.get("knowledge_document_ids") or []) if item))
+        if len(requirement_ids) > 20 or RequirementDocument.objects.filter(project_id=project_id, id__in=requirement_ids).count() != len(requirement_ids):
+            raise serializers.ValidationError({"requirement_document_ids": "所选需求文档不存在或不属于当前项目"})
+        if len(base_ids) > 20 or KnowledgeBase.objects.filter(project_id=project_id, is_active=True, id__in=base_ids).count() != len(base_ids):
+            raise serializers.ValidationError({"knowledge_base_ids": "所选知识库不存在、未启用或不属于当前项目"})
+        if len(document_ids) > 20 or Document.objects.filter(knowledge_base__project_id=project_id, knowledge_base_id__in=base_ids, status="completed", id__in=document_ids).count() != len(document_ids):
+            raise serializers.ValidationError({"knowledge_document_ids": "所选知识库文档不存在、尚未解析或不属于所选知识库"})
+        attrs.update(requirement_document_ids=requirement_ids, knowledge_base_ids=base_ids, knowledge_document_ids=document_ids)
+        return attrs
 
     @staticmethod
     def _url(request, field):

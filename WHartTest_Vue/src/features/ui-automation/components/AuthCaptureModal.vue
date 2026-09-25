@@ -4,7 +4,7 @@
     :title="text.title"
     :footer="false"
     :mask-closable="true"
-    width="min(1200px, calc(100vw - 24px))"
+    width="min(1500px, calc(100vw - 24px))"
     @cancel="handleClose"
   >
     <div class="auth-capture-live">
@@ -413,7 +413,13 @@ onUnmounted(() => {
 .auth-capture-live {
   display: flex;
   gap: 12px;
-  height: min(560px, calc(70vh - 44px));
+  width: 100%;
+  height: min(760px, calc(82vh - 44px));
+  min-width: 760px;
+  min-height: 420px;
+  max-width: 100%;
+  max-height: calc(85vh - 20px);
+  resize: both;
   min-height: 0;
   overflow: hidden;
 }

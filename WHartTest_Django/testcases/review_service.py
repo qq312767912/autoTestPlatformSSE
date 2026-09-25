@@ -494,6 +494,8 @@ def _write_report(review, rows, issues, pending, governance, uncovered=None, chu
 
 def run_testcase_review(review_id):
     review = TestCaseReview.objects.get(pk=review_id)
+    if review.status == "cancelled":
+        return {"cancelled": True}
     review.status = "running"
     review.started_at = timezone.now()
     review.current_step = "读取测试用例"
@@ -504,6 +506,18 @@ def run_testcase_review(review_id):
         raise ValueError("文件中没有可审查的非空内容")
     config = _get_testcase_review_llm_config()
     skill_prompt = _skill_prompt(review)
+    context_parts = []
+    if review.requirement_document_ids:
+        from requirements.models import RequirementDocument
+        docs = RequirementDocument.objects.filter(project=review.project, id__in=review.requirement_document_ids).values_list("title", "content")
+        context_parts.extend(f"【需求文档：{title}】\n{(content or '')[:8000]}" for title, content in docs)
+    if review.knowledge_document_ids:
+        from knowledge.models import Document
+        docs = Document.objects.filter(knowledge_base__project=review.project, status="completed", id__in=review.knowledge_document_ids).values_list("title", "content")
+        context_parts.extend(f"【知识库文档：{title}】\n{(content or '')[:8000]}" for title, content in docs)
+    document_context = "\n\n".join(context_parts)[:20000]
+    if document_context:
+        skill_prompt += "\n\n# 本次审查参考文档（只能据此判断，不得臆造）\n" + document_context
     if review.custom_rules.strip():
         skill_prompt += "\n\n# 本次用户指定的审查规则（在不违反质量边界的前提下优先执行）\n" + review.custom_rules.strip()
     issues, pending, governance = [], [], []
@@ -519,6 +533,8 @@ def run_testcase_review(review_id):
     deadline = monotonic() + TESTCASE_REVIEW_TOTAL_BUDGET_SECONDS
 
     def review_one(index, chunk):
+        if TestCaseReview.objects.filter(pk=review_id, status="cancelled").exists():
+            raise RuntimeError("任务已取消")
         # 底层 SDK 重试保持关闭：重试与退避统一由本层管理，单批最坏耗时才能
         # 按 attempts × review_timeout 估算，进而受总时间预算约束。
         llm = create_llm_instance(
@@ -588,6 +604,9 @@ def run_testcase_review(review_id):
     circuit_broken = False
     with ThreadPoolExecutor(max_workers=workers) as executor:
         while cursor < len(waiting):
+            if TestCaseReview.objects.filter(pk=review_id, status="cancelled").exists():
+                executor.shutdown(wait=False, cancel_futures=True)
+                return {"cancelled": True}
             if monotonic() >= deadline:
                 break
             wave = waiting[cursor:cursor + workers]
@@ -633,6 +652,9 @@ def run_testcase_review(review_id):
         )
     with state_lock:
         persist_progress()
+
+    if TestCaseReview.objects.filter(pk=review_id, status="cancelled").exists():
+        return {"cancelled": True}
 
     if not ordered_results:
         first_error = next(iter(uncovered.values()), "未知原因")

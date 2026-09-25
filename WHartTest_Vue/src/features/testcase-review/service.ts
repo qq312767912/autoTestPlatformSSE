@@ -14,7 +14,7 @@ export interface TestCaseReview {
   selected_skill?: number;
   skill_name: string;
   custom_rules: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
   current_step: string;
   progress: number;
   report_url?: string;
@@ -46,6 +46,9 @@ export async function createReview(projectId: number, file: File, options: {
   reviewMode: 'general' | 'specified';
   selectedSkill?: number;
   customRules: string;
+  requirementDocumentIds: string[];
+  knowledgeBaseIds: string[];
+  knowledgeDocumentIds: string[];
 }) {
   const form = new FormData();
   form.append('source_file', file);
@@ -53,6 +56,9 @@ export async function createReview(projectId: number, file: File, options: {
   form.append('review_mode', options.reviewMode);
   form.append('custom_rules', options.customRules);
   if (options.selectedSkill) form.append('selected_skill', String(options.selectedSkill));
+  form.append('requirement_document_ids', JSON.stringify(options.requirementDocumentIds));
+  form.append('knowledge_base_ids', JSON.stringify(options.knowledgeBaseIds));
+  form.append('knowledge_document_ids', JSON.stringify(options.knowledgeDocumentIds));
   const response = await http.post(`/projects/${projectId}/testcase-reviews/`, form);
   return response.data as TestCaseReview;
 }
@@ -66,6 +72,11 @@ export async function diagnoseReviewFile(projectId: number, file: File) {
 
 export async function retryReview(projectId: number, id: number) {
   const response = await http.post(`/projects/${projectId}/testcase-reviews/${id}/retry/`);
+  return response.data as TestCaseReview;
+}
+
+export async function cancelReview(projectId: number, id: number) {
+  const response = await http.post(`/projects/${projectId}/testcase-reviews/${id}/cancel/`);
   return response.data as TestCaseReview;
 }
 

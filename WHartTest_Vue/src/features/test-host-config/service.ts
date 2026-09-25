@@ -27,6 +27,10 @@ export function createMapping(payload: MappingPayload) {
   return dataOrThrow(request<TestHostMapping>({ url: `${base}/mappings/`, method: 'POST', data: payload }));
 }
 
+export function bulkImportMappings(payload: { text: string; system_name?: string; overwrite?: boolean; dry_run?: boolean }) {
+  return dataOrThrow(request<any>({ url: `${base}/mappings/bulk-import/`, method: 'POST', data: payload }));
+}
+
 export function updateMapping(id: number, payload: MappingPayload) {
   return dataOrThrow(request<TestHostMapping>({ url: `${base}/mappings/${id}/`, method: 'PATCH', data: payload }));
 }

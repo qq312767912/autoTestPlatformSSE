@@ -530,6 +530,7 @@ class TestCaseReview(models.Model):
         ("running", _("审查中")),
         ("completed", _("已完成")),
         ("failed", _("失败")),
+        ("cancelled", _("已取消")),
     ]
     MODE_CHOICES = [("general", _("通用审查")), ("specified", _("指定 Skill 审查"))]
 
@@ -543,6 +544,9 @@ class TestCaseReview(models.Model):
     skill_name = models.CharField(max_length=255, default="test-case-clarity-review")
     skill_snapshot = models.TextField(blank=True, default="")
     custom_rules = models.TextField(blank=True, default="")
+    requirement_document_ids = models.JSONField(default=list, blank=True)
+    knowledge_base_ids = models.JSONField(default=list, blank=True)
+    knowledge_document_ids = models.JSONField(default=list, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
     current_step = models.CharField(max_length=255, blank=True, default="等待执行")
     progress = models.PositiveSmallIntegerField(default=0)

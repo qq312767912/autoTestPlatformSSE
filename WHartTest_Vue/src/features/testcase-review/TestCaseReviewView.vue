@@ -51,7 +51,8 @@
             </div>
             <div class="actions">
               <a-button v-if="item.report_url" type="primary" @click="download(item.report_url)">下载报告</a-button>
-              <a-button v-if="item.status === 'failed'" @click="retry(item)">重试</a-button>
+              <a-button v-if="['completed','failed','cancelled'].includes(item.status)" @click="retry(item)">重跑</a-button>
+              <a-popconfirm v-if="['pending','running'].includes(item.status)" content="确认取消？取消后任务将不再继续生成报告。" @ok="cancel(item)"><a-button status="warning">取消</a-button></a-popconfirm>
               <a-popconfirm content="删除记录、源文件和报告？" @ok="remove(item)">
                 <a-button status="danger" type="text">删除</a-button>
               </a-popconfirm>
@@ -111,7 +112,14 @@
         </section>
 
         <section class="form-section">
-          <div class="form-section-title"><span>03</span><div><strong>补充审查信息</strong><small>内容越明确，审查结论越贴近实际业务</small></div></div>
+          <div class="form-section-title"><span>03</span><div><strong>选择参考文档</strong><small>可多选需求文档及知识库中的具体文档</small></div></div>
+          <a-form-item label="需求文档（可选）"><a-select v-model="requirementDocumentIds" multiple allow-clear allow-search :max-tag-count="2" placeholder="选择需求文档"><a-option v-for="doc in requirementDocuments" :key="doc.id" :value="doc.id">{{ doc.title }}</a-option></a-select></a-form-item>
+          <a-form-item label="知识库（可选）"><a-select v-model="knowledgeBaseIds" multiple allow-clear allow-search :max-tag-count="2" placeholder="先选择知识库"><a-option v-for="kb in knowledgeBases" :key="kb.id" :value="kb.id">{{ kb.name }}</a-option></a-select></a-form-item>
+          <a-form-item v-if="knowledgeBaseIds.length" label="知识库文档（可多选）"><KnowledgeDocumentScopeSelector :knowledge-base-ids="knowledgeBaseIds" :knowledge-bases="knowledgeBases" scope-mode="selected" :document-ids="knowledgeDocumentIds" @update:document-ids="knowledgeDocumentIds = $event" @update:scope-mode="() => {}" /></a-form-item>
+        </section>
+
+        <section class="form-section">
+          <div class="form-section-title"><span>04</span><div><strong>补充审查信息</strong><small>内容越明确，审查结论越贴近实际业务</small></div></div>
           <a-form-item label="业务背景（可选）">
             <a-textarea v-model="businessContext" :max-length="5000" show-word-limit :auto-size="{ minRows: 4, maxRows: 8 }"
               placeholder="例如：订单取消仅允许待支付状态；重点检查金额、权限和状态流转。未知规则可留空，报告会标记为待业务确认。" />
@@ -166,6 +174,7 @@ import { useProjectStore } from '@/store/projectStore';
 import { useAuthStore } from '@/store/authStore';
 import {
   copyPlatformLlmConfig,
+  cancelReview,
   createReview,
   deleteReview,
   diagnoseReviewFile,
@@ -180,6 +189,10 @@ import {
   type TestCaseReviewLlmConfig,
 } from './service';
 import { SkillService } from '@/features/skills/services/skillService';
+import * as codeReviewApi from '@/features/code-analysis/service';
+import { KnowledgeService } from '@/features/knowledge/services/knowledgeService';
+import KnowledgeDocumentScopeSelector from '@/features/knowledge/components/KnowledgeDocumentScopeSelector.vue';
+import type { KnowledgeBase } from '@/features/knowledge/types/knowledge';
 
 const projectStore = useProjectStore();
 const projectId = computed(() => projectStore.currentProjectId);
@@ -194,6 +207,11 @@ const reviewMode = ref<'general' | 'specified'>('general');
 const selectedSkillId = ref<number>();
 const customRules = ref('');
 const availableSkills = ref<any[]>([]);
+const requirementDocuments = ref<any[]>([]);
+const requirementDocumentIds = ref<string[]>([]);
+const knowledgeBases = ref<KnowledgeBase[]>([]);
+const knowledgeBaseIds = ref<string[]>([]);
+const knowledgeDocumentIds = ref<string[]>([]);
 let timer: number | undefined;
 
 const authStore = useAuthStore();
@@ -216,7 +234,7 @@ const llmConfigForm = reactive<TestCaseReviewLlmConfig>({
 
 const statusMeta = (status: TestCaseReview['status']) => ({
   pending: { label: '等待中', color: 'gray' }, running: { label: '审查中', color: 'blue' },
-  completed: { label: '已完成', color: 'green' }, failed: { label: '失败', color: 'red' },
+  completed: { label: '已完成', color: 'green' }, failed: { label: '失败', color: 'red' }, cancelled: { label: '已取消', color: 'gray' },
 }[status]);
 const formatTime = (value: string) => value ? new Date(value).toLocaleString() : '-';
 
@@ -231,7 +249,12 @@ async function load(silent = false) {
   if (!silent) loading.value = true;
   try {
     reviews.value = await listReviews(projectId.value);
-    availableSkills.value = (await SkillService.getSkills(projectId.value)).filter(skill => skill.is_active);
+    if (!silent || !availableSkills.value.length) {
+      const [skills, docs, bases] = await Promise.all([SkillService.getSkills(projectId.value), codeReviewApi.getProjectDocuments(projectId.value), KnowledgeService.getKnowledgeBases({ project: projectId.value, is_active: true, page_size: 100 })]);
+      availableSkills.value = skills.filter(skill => skill.is_active);
+      requirementDocuments.value = docs;
+      knowledgeBases.value = Array.isArray(bases) ? bases : (bases.results || []);
+    }
   }
   catch (error: any) { if (!silent) Message.error(error?.message || '加载审查记录失败'); }
   finally { loading.value = false; }
@@ -336,9 +359,13 @@ async function submit() {
       reviewMode: reviewMode.value,
       selectedSkill: selectedSkillId.value,
       customRules: customRules.value.trim(),
+      requirementDocumentIds: requirementDocumentIds.value,
+      knowledgeBaseIds: knowledgeBaseIds.value,
+      knowledgeDocumentIds: knowledgeDocumentIds.value,
     });
     Message.success('审查任务已创建'); createVisible.value = false; selectedFile.value = null; fileList.value = [];
-    businessContext.value = ''; customRules.value = ''; reviewMode.value = 'general'; selectedSkillId.value = undefined; await load();
+    businessContext.value = ''; customRules.value = ''; reviewMode.value = 'general'; selectedSkillId.value = undefined;
+    requirementDocumentIds.value = []; knowledgeBaseIds.value = []; knowledgeDocumentIds.value = []; await load();
   } catch (error: any) {
     // 未配置专用 LLM 时后端返回 409：提示应指向管理员，而不是让用户改表单。
     const detail = error?.response?.data?.detail;
@@ -349,6 +376,7 @@ async function submit() {
   finally { submitting.value = false; }
 }
 async function retry(item: TestCaseReview) { if (!projectId.value) return; await retryReview(projectId.value, item.id); Message.success('已重新提交'); await load(); }
+async function cancel(item: TestCaseReview) { if (!projectId.value) return; await cancelReview(projectId.value, item.id); Message.success('任务已取消'); await load(); }
 async function remove(item: TestCaseReview) { if (!projectId.value) return; await deleteReview(projectId.value, item.id); Message.success('已删除'); await load(); }
 function download(url: string) { const link = document.createElement('a'); link.href = url; link.download = ''; document.body.appendChild(link); link.click(); link.remove(); }
 
@@ -360,5 +388,6 @@ onBeforeUnmount(() => { if (timer) window.clearInterval(timer); });
 <style scoped>
 .review-page{padding:24px;min-height:100%;background:#f5f7fa;color:#1d2939}.hero{display:flex;justify-content:space-between;align-items:flex-end;padding:34px 38px;margin-bottom:20px;border-radius:16px;color:white;background:linear-gradient(120deg,#15395b,#0f766e);box-shadow:0 12px 30px rgba(21,57,91,.16)}.eyebrow{font-size:12px;letter-spacing:2px;color:#99f6e4}.hero h1{font-size:30px;margin:8px 0}.hero p{margin:0;max-width:760px;color:#d8edf0;line-height:1.7}.hero-actions{display:flex;gap:10px;align-items:center;flex:none}.content-card{background:#fff;border:1px solid #e5e9f0;border-radius:14px;padding:24px}.section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}.section-head h2{margin:0 0 5px;font-size:20px}.section-head span,.meta,.step,.hint{font-size:13px;color:#8492a6}.review-list{display:grid;gap:12px}.review-item{display:flex;gap:16px;align-items:flex-start;padding:20px;border:1px solid #e8edf3;border-radius:12px;transition:.2s}.review-item:hover{border-color:#9dd8d2;box-shadow:0 5px 18px rgba(15,118,110,.08)}.file-mark{flex:none;width:48px;height:48px;border-radius:10px;display:grid;place-items:center;background:#e8f7f4;color:#0f766e;font-weight:700}.review-main{min-width:0;flex:1}.review-title-row{display:flex;gap:10px;align-items:center}.review-title-row strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta{margin:6px 0}.skill-line{display:flex;gap:8px;align-items:center;margin:7px 0;font-size:12px}.skill-line span{padding:2px 8px;border-radius:99px;background:#edf7f5;color:#0f766e}.skill-line b{font-weight:500;color:#526173}.step{margin-top:5px}.summary{display:flex;gap:16px;margin-top:10px;font-size:13px}.danger{color:#d4380d}.warning{color:#d46b08}.actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.coverage-warning{margin-top:9px;padding:8px 12px;border:1px solid #ffe0a3;border-radius:8px;background:#fff8e8;color:#b54708;font-size:13px;line-height:1.6}
 .modal-title{display:flex;align-items:center;justify-content:center;gap:9px;font-size:17px}.modal-title-mark{display:grid;place-items:center;width:24px;height:24px;border-radius:8px;background:#e8f7f4;color:#0f766e;font-size:14px;font-weight:800}.review-form-intro{display:flex;flex-direction:column;gap:5px;margin:-4px 0 18px;padding:15px 17px;border:1px solid #dcece8;border-radius:10px;background:linear-gradient(120deg,#f3faf8,#f8fbff)}.review-form-intro strong{font-size:15px;color:#234657}.review-form-intro span{font-size:13px;color:#718096}.review-form{display:grid;gap:14px}.form-section{padding:18px 20px 5px;border:1px solid #e5eaf0;border-radius:12px;background:#fff}.form-section-title{display:flex;align-items:center;gap:11px;margin-bottom:16px}.form-section-title>span{display:grid;place-items:center;width:32px;height:32px;border-radius:9px;background:#15395b;color:#fff;font-size:11px;font-weight:700;letter-spacing:.5px}.form-section-title>div{display:flex;flex-direction:column;gap:2px}.form-section-title strong{font-size:15px;color:#253748}.form-section-title small{font-size:12px;color:#96a2b2}.field-stack{display:flex;flex-direction:column;width:100%;gap:8px}.review-mode-group{display:grid!important;grid-template-columns:1fr 1fr;width:100%}.review-mode-group :deep(.arco-radio-button){display:flex;justify-content:center}.review-upload{display:block;width:100%}.review-upload :deep(.arco-upload){width:100%}.review-upload :deep(.arco-upload-drag){width:100%;min-height:112px;border-radius:10px;background:#f8fafc;border-color:#cad6e2;transition:.2s}.review-upload :deep(.arco-upload-drag:hover){border-color:#0f8f82;background:#f3faf8}.review-form :deep(.arco-form-item){margin-bottom:16px}.review-form :deep(.arco-form-item-content){width:100%}.review-form :deep(.arco-textarea-wrapper){border-radius:8px;background:#f8fafc}.review-form :deep(.arco-select-view){border-radius:8px;background:#f8fafc}
+.review-list{max-height:calc(100vh - 330px);min-height:180px;overflow-y:auto;padding-right:6px}
 @media(max-width:760px){.hero,.review-item{align-items:stretch;flex-direction:column}.actions{justify-content:flex-end}.form-section{padding:15px 14px 2px}.review-mode-group{grid-template-columns:1fr}.review-form-intro{margin-top:0}}
 </style>

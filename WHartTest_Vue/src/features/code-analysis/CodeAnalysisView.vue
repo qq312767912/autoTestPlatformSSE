@@ -243,6 +243,8 @@
         </template>
         <a-form-item label="需求文档（可选）"><a-select v-model="form.requirement_document_ids" multiple allow-clear placeholder="可选择多篇已上传的需求文档" :max-tag-count="2"><a-option v-for="doc in projectDocuments" :key="doc.id" :value="doc.id">{{ doc.title }}</a-option></a-select></a-form-item>
         <a-form-item label="接口文档（可选）"><a-select v-model="form.api_document_ids" multiple allow-clear placeholder="可选择多篇已上传的接口/设计文档" :max-tag-count="2"><a-option v-for="doc in projectDocuments" :key="doc.id" :value="doc.id">{{ doc.title }}</a-option></a-select></a-form-item>
+        <a-form-item label="知识库（可选）"><a-select v-model="form.knowledge_base_ids" multiple allow-clear placeholder="先选择知识库" :max-tag-count="2"><a-option v-for="kb in knowledgeBases" :key="kb.id" :value="kb.id">{{ kb.name }}</a-option></a-select></a-form-item>
+        <a-form-item v-if="form.knowledge_base_ids.length" label="知识库文档（可多选）"><KnowledgeDocumentScopeSelector :knowledge-base-ids="form.knowledge_base_ids" :knowledge-bases="knowledgeBases" scope-mode="selected" :document-ids="form.knowledge_document_ids" @update:document-ids="form.knowledge_document_ids = $event" @update:scope-mode="() => {}" /></a-form-item>
         <a-form-item label="分析模式" class="analysis-mode-form-item">
           <a-radio-group v-model="form.mode" class="analysis-mode-selector">
             <a-radio
@@ -294,7 +296,7 @@
         <a-empty v-if="!repositories.length" description="当前项目暂无代码仓库" />
         <div v-for="repo in repositories" :key="`setting-${repo.id}`" class="repository-setting-row">
           <div><b>{{ repo.name }}</b><small>{{ repo.source_type === 'local_git' ? `本地 Git · ${repo.local_path}` : `GitLab · ${repo.path_with_namespace}` }}</small><div v-if="canChangeRepositories && repo.source_type === 'gitlab'" class="repository-edit-fields"><a-input v-model="repo.gitlab_project_id" size="small" placeholder="项目 ID 或 group/project" /><a-input v-model="repo.default_branch" size="small" placeholder="默认分支" /></div></div>
-          <div class="repository-setting-actions"><span>{{ repo.analysis_task_count || 0 }} 条审查记录</span><a-button v-if="canChangeRepositories && repo.source_type === 'gitlab'" type="text" size="small" @click="validateRepository(repo)">保存并校验</a-button><a-button v-if="canDeleteRepositories" status="danger" type="text" size="small" @click="removeRepository(repo)"><template #icon><icon-delete /></template>删除</a-button></div>
+          <div class="repository-setting-actions"><span>{{ repo.analysis_task_count || 0 }} 条审查记录</span><a-button v-if="canChangeRepositories && repo.source_type === 'gitlab'" type="text" size="small" @click="validateRepository(repo)">保存并校验</a-button><a-button v-if="canChangeRepositories" type="text" size="small" @click="purgeRepository(repo)">清理容器副本</a-button><a-button v-if="canDeleteRepositories" status="danger" type="text" size="small" @click="removeRepository(repo)"><template #icon><icon-delete /></template>删除</a-button></div>
         </div>
       </section>
     </a-modal>
@@ -310,6 +312,9 @@ import { useAuthStore } from '@/store/authStore';
 import type { AnalysisExecutionLog, AnalysisTask, CodeRepository, GitLabConnection, MergeRequest, RepositoryCommit } from './types';
 import * as api from './service';
 import { downloadHtmlReport } from './reportExport';
+import { KnowledgeService } from '@/features/knowledge/services/knowledgeService';
+import KnowledgeDocumentScopeSelector from '@/features/knowledge/components/KnowledgeDocumentScopeSelector.vue';
+import type { KnowledgeBase } from '@/features/knowledge/types/knowledge';
 
 const projectStore = useProjectStore();
 const authStore = useAuthStore();
@@ -326,6 +331,7 @@ const canAddConnections = computed(() => authStore.hasPermission('code_analysis.
 const canDeleteConnections = computed(() => authStore.hasPermission('code_analysis.delete_gitlabconnection'));
 const canManageCredentials = computed(() => authStore.hasPermission('code_analysis.add_usergitlabcredential') || authStore.hasPermission('code_analysis.change_usergitlabcredential'));
 const tasks = ref<AnalysisTask[]>([]), repositories = ref<CodeRepository[]>([]), connections = ref<GitLabConnection[]>([]), mergeRequests = ref<MergeRequest[]>([]), repositoryCommits = ref<RepositoryCommit[]>([]), projectDocuments = ref<any[]>([]);
+const knowledgeBases = ref<KnowledgeBase[]>([]);
 const loading = ref(false), submitting = ref(false), mrLoading = ref(false), commitLoading = ref(false), createVisible = ref(false), configVisible = ref(false);
 const llmConfigVisible = ref(false), llmConfigSaving = ref(false), llmConfigTesting = ref(false);
 const platformLlmConfigs = ref<api.PlatformLlmConfigOption[]>([]), platformLlmLoading = ref(false), platformLlmCopying = ref(false), selectedPlatformLlmId = ref<number>();
@@ -343,7 +349,7 @@ const analysisModeOptions = [
   { value:'standard', label:'标准', badge:'推荐', summary:'规则扫描 + AI 降级分析' },
   { value:'deep', label:'深度', badge:'完整', summary:'规则 + AI 降级 + OCR 审查' },
 ] as const;
-const form = reactive<any>({ repository:null, source_type:'commits', merge_request_iid:null, base_sha:undefined, head_sha:undefined, requirement_document_ids:[], api_document_ids:[], mode:'standard' });
+const form = reactive<any>({ repository:null, source_type:'commits', merge_request_iid:null, base_sha:undefined, head_sha:undefined, requirement_document_ids:[], api_document_ids:[], knowledge_base_ids:[], knowledge_document_ids:[], mode:'standard' });
 const modeDescription = computed(() => ({
   quick:'仅规则扫描：速度最快，不调用 AI 或 OCR。',
   standard:'规则扫描 + AI 降级分析：适合日常审查，不调用 OCR。',
@@ -525,11 +531,14 @@ async function openSuggestedPatch(item:any){
 }
 async function loadBase(){
   const id=projectStore.currentProjectId;if(!id)return;
-  [connections.value,repositories.value,projectDocuments.value]=await Promise.all([
+  const [loadedConnections,loadedRepositories,loadedDocuments,loadedKnowledgeBases]=await Promise.all([
     canViewConnections.value ? api.getConnections() : Promise.resolve([]),
     canViewRepositories.value ? api.getRepositories(id) : Promise.resolve([]),
     api.getProjectDocuments(id),
+    KnowledgeService.getKnowledgeBases({project:id,is_active:true,page_size:100}),
   ]);
+  connections.value=loadedConnections;repositories.value=loadedRepositories;projectDocuments.value=loadedDocuments;
+  knowledgeBases.value=Array.isArray(loadedKnowledgeBases)?loadedKnowledgeBases:(loadedKnowledgeBases.results||[]);
 }
 async function refreshExecutionLogs(){if(!selectedTask.value)return;try{executionLogs.value=await api.getExecutionLogs(selectedTask.value.id)}catch{executionLogs.value=[]}}
 async function loadTasks(silent=false){ const id=projectStore.currentProjectId;if(!id && !isPlatformAdmin.value)return;if(!silent)loading.value=true;try{tasks.value=await api.getTasks(isPlatformAdmin.value ? undefined : id!);if(selectedTask.value){selectedTask.value=tasks.value.find(task=>task.id===selectedTask.value?.id)||null;await refreshExecutionLogs()}}catch(e:any){if(!silent)Message.error(e.message)}finally{if(!silent)loading.value=false} }
@@ -537,6 +546,7 @@ async function openCreate(){
   await loadBase();
   if(!repositories.value.length){configVisible.value=true;Message.info('请先关联本地 Git 仓库或完成 GitLab 配置');return}
   form.repository=null;form.source_type='commits';form.base_sha=undefined;form.head_sha=undefined;form.merge_request_iid=null;
+  form.requirement_document_ids=[];form.api_document_ids=[];form.knowledge_base_ids=[];form.knowledge_document_ids=[];
   repositoryCommits.value=[];mergeRequests.value=[];
   createVisible.value=true;
 }
@@ -577,6 +587,9 @@ function removeRepository(repo:CodeRepository){
     hideCancel:false,
     onOk:async()=>{try{await api.deleteRepository(repo.id);repositories.value=repositories.value.filter(item=>item.id!==repo.id);connections.value=await api.getConnections();Message.success('代码仓库及平台拉取目录已删除')}catch(e:any){Message.error(e.message||'删除代码仓库失败')}}
   })
+}
+function purgeRepository(repo:CodeRepository){
+  Modal.warning({title:'清理容器内代码副本？',content:`仅清理“${repo.name}”由审查任务生成的容器内副本，不删除仓库配置、历史报告或远端仓库。后续执行时会重新拉取。`,hideCancel:false,onOk:async()=>{try{const result=await api.purgeRepositoryCopy(repo.id);Message.success(result?.detail||'容器内代码副本已清理')}catch(e:any){Message.error(e.message||'清理失败')}}})
 }
 async function saveRepositoryBranch(repo:CodeRepository){
   const branch=String(repo.default_branch||'').trim();
