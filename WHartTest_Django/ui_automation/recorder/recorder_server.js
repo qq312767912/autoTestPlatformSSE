@@ -1445,14 +1445,27 @@ async function cmdStart(params) {
 // 事件接收节奏（前端→Node 串行排队），表现为鼠标/点击/输入全面迟缓。
 // 排队深度设上限：积压超过阈值时丢弃最老的移动事件（保点击/键入优先）。
 const inputQueue = [];
-const INPUT_QUEUE_MAX = 24;
+const INPUT_QUEUE_MAX = 160;
 let inputDraining = false;
 
 function enqueueInput(params) {
   // 移动事件可合并：队列里已有未执行的 move 就地覆盖坐标（永不增加延迟）
   if (params.type === 'mouse' && params.event === 'move') {
+    // 拖拽轨迹（特别是滑块验证）不能合并成一次瞬移，否则目标站点会判定验证失败。
+    if (params.dragging) {
+      if (inputQueue.length >= INPUT_QUEUE_MAX) {
+        const hoverMoveIdx = inputQueue.findIndex(
+          (p) => p.type === 'mouse' && p.event === 'move' && !p.dragging,
+        );
+        if (hoverMoveIdx >= 0) inputQueue.splice(hoverMoveIdx, 1);
+        else inputQueue.shift();
+      }
+      inputQueue.push(params);
+      drainInputQueue();
+      return { ok: true };
+    }
     const pendingMove = inputQueue.findLast
-      ? inputQueue.findLast((p) => p.type === 'mouse' && p.event === 'move')
+      ? inputQueue.findLast((p) => p.type === 'mouse' && p.event === 'move' && !p.dragging)
       : null;
     if (pendingMove) {
       pendingMove.x = Number(params.x) || 0;
@@ -1501,8 +1514,10 @@ async function applyInput(params) {
     if (params.event === 'move') {
       await state.page.mouse.move(x, y);
     } else if (params.event === 'down') {
+      await state.page.mouse.move(x, y);
       await state.page.mouse.down({ button, clickCount: Number(params.clickCount) || 1 });
     } else if (params.event === 'up') {
+      await state.page.mouse.move(x, y);
       await state.page.mouse.up({ button, clickCount: Number(params.clickCount) || 1 });
     }
   } else if (type === 'wheel') {

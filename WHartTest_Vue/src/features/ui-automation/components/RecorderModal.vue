@@ -224,6 +224,7 @@
           :style="canvasStyle"
           @pointerdown="onPointerDown"
           @pointerup="onPointerUp"
+          @pointercancel="onPointerCancel"
           @pointermove="onPointerMove"
           @wheel="onWheel"
         />
@@ -1118,6 +1119,8 @@ function canvasPoint(e: PointerEvent | WheelEvent) {
 }
 
 let lastMoveSent = 0
+let pointerDragging = false
+let activePointerId: number | null = null
 
 function onPointerDown(e: PointerEvent) {
   if (!recording.value) return
@@ -1135,6 +1138,10 @@ function onPointerDown(e: PointerEvent) {
     uiWebSocket.recorderAssert(assertMode.value, x, y, assertValue.value.trim() || undefined)
     return
   }
+  pointerDragging = true
+  activePointerId = e.pointerId
+  lastMoveSent = 0
+  canvasRef.value?.setPointerCapture?.(e.pointerId)
   uiWebSocket.recorderInput({
     type: 'mouse',
     event: 'down',
@@ -1142,11 +1149,13 @@ function onPointerDown(e: PointerEvent) {
     y,
     button: e.button === 2 ? 'right' : 'left',
     clickCount: e.detail || 1,
+    dragging: true,
+    clientTs: Date.now(),
   })
 }
 
 function onPointerUp(e: PointerEvent) {
-  if (!recording.value) return
+  if (!recording.value || !pointerDragging) return
   const { x, y } = canvasPoint(e)
   uiWebSocket.recorderInput({
     type: 'mouse',
@@ -1155,17 +1164,36 @@ function onPointerUp(e: PointerEvent) {
     y,
     button: e.button === 2 ? 'right' : 'left',
     clickCount: e.detail || 1,
+    dragging: pointerDragging,
+    clientTs: Date.now(),
   })
+  if (activePointerId === e.pointerId) {
+    canvasRef.value?.releasePointerCapture?.(e.pointerId)
+  }
+  pointerDragging = false
+  activePointerId = null
   e.preventDefault()
+}
+
+function onPointerCancel(e: PointerEvent) {
+  if (!pointerDragging) return
+  onPointerUp(e)
 }
 
 function onPointerMove(e: PointerEvent) {
   if (!recording.value) return
   const now = Date.now()
-  if (now - lastMoveSent < 30) return
+  if (now - lastMoveSent < (pointerDragging ? 12 : 30)) return
   lastMoveSent = now
   const { x, y } = canvasPoint(e)
-  uiWebSocket.recorderInput({ type: 'mouse', event: 'move', x, y })
+  uiWebSocket.recorderInput({
+    type: 'mouse',
+    event: 'move',
+    x,
+    y,
+    dragging: pointerDragging,
+    clientTs: now,
+  })
 }
 
 function onWheel(e: WheelEvent) {
