@@ -15,7 +15,7 @@ from langgraph_integration.models import LLMConfig
 from .models import AnalysisTask, AnalysisTaskExecutionLog, CodeAnalysisLLMConfig, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
 from .serializers import GitLabConnectionSerializer, ProjectRepositorySerializer
 from .review_mcp import CodeReviewMCP
-from .services import AI_REVIEW_LANGUAGE_RULE, AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _apply_verification_results, _attach_finding_diff_evidence, _classify_finding, _diff_line_stats, _effective_deep_coverage, _ensure_not_cancelled, _generate_fix_patches, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_fallback_diffs, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _prioritize_findings_for_report, _reuse_cached_result, _review_payload_needs_chinese_retry, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, retry_ocr_analysis, run_analysis
+from .services import AI_REVIEW_LANGUAGE_RULE, AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _apply_verification_results, _attach_finding_diff_evidence, _classify_finding, _diff_line_stats, _effective_deep_coverage, _ensure_not_cancelled, _generate_fix_patches, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_fallback_diffs, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _prioritize_findings_for_report, _related_source_context, _reuse_cached_result, _review_payload_needs_chinese_retry, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, retry_ocr_analysis, run_analysis
 
 
 class CodeReviewPromptLanguageTests(SimpleTestCase):
@@ -86,6 +86,19 @@ class ReviewPipelineToolTests(SimpleTestCase):
         self.assertEqual(active[0]["severity"], "high")
         self.assertEqual([item["key"] for item in rejected], ["false-positive"])
 
+    def test_verification_reads_related_files_from_search_hits(self):
+        mcp = SimpleNamespace(read_file=lambda path: "\n".join(f"line {index}" for index in range(1, 80)))
+        cache = {}
+        contexts = _related_source_context(
+            mcp,
+            ["app/views.py:25:serializer.save()", "app/views.py:40:duplicate", "app/models.py:12:class Item"],
+            "app/serializers.py",
+            cache,
+        )
+        self.assertEqual([item["file"] for item in contexts], ["app/views.py", "app/models.py"])
+        self.assertIn("25: line 25", contexts[0]["source_excerpt"])
+        self.assertIn("app/views.py", cache)
+
     @patch("code_analysis.services._validate_suggested_patch", return_value=(True, ""))
     @patch("code_analysis.services._get_code_analysis_llm_config", return_value=object())
     @patch("langgraph_integration.views.create_llm_instance")
@@ -119,6 +132,7 @@ class ReviewPipelineToolTests(SimpleTestCase):
         if engine == "tree-sitter":
             self.assertEqual(chunks[0]["kind"], "function_definition")
 
+    @patch.dict(os.environ, {"SEMGREP_SCANNER_URL": ""})
     @patch("code_analysis.review_mcp.shutil.which", return_value="/usr/bin/semgrep")
     @patch("code_analysis.review_mcp.subprocess.run")
     def test_semgrep_json_is_normalized_as_static_finding(self, run, _which):

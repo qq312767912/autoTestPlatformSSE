@@ -1529,6 +1529,32 @@ def _apply_verification_results(findings, verdicts):
     return active, rejected
 
 
+def _related_source_context(mcp, search_hits, current_path, source_cache, max_files=5):
+    """沿检索命中读取目标 Commit 的相关文件，而不是只把 grep 单行交给核验模型。"""
+    contexts, seen_paths = [], set()
+    for hit in search_hits:
+        match = re.match(r"^(.+?):(\d+):(.*)$", str(hit), flags=re.DOTALL)
+        if not match:
+            continue
+        path, line_text, matched_text = match.groups()
+        if not path or path == current_path or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        if path not in source_cache:
+            try:
+                source_cache[path] = mcp.read_file(path)[:30000]
+            except Exception:
+                source_cache[path] = ""
+        lines = source_cache[path].splitlines()
+        center = max(0, int(line_text) - 1)
+        start, end = max(0, center - 18), min(len(lines), center + 19)
+        excerpt = "\n".join(f"{index + 1}: {lines[index]}" for index in range(start, end))[:3500]
+        contexts.append({"file": path, "matched_line": int(line_text), "match": matched_text[:500], "source_excerpt": excerpt})
+        if len(contexts) >= max_files:
+            break
+    return contexts
+
+
 def _verify_findings_against_target(task, findings, review_client=None):
     """使用目标 Commit 源码和跨文件检索对 AI 候选做独立反证。"""
     if task.mode == "quick" or not findings:
@@ -1569,13 +1595,15 @@ def _verify_findings_against_target(task, findings, review_client=None):
                 except Exception:
                     search_cache[identifier] = []
             related.extend(search_cache[identifier])
+        related = list(dict.fromkeys(related))[:20]
         candidates.append({
             **{key: finding.get(key) for key in (
                 "key", "change", "file", "severity", "disposition", "confidence",
                 "evidence", "trigger", "impact", "recommendation",
             )},
             "target_source_excerpt": target_excerpt,
-            "related_code": list(dict.fromkeys(related))[:20],
+            "related_code_matches": related,
+            "related_source_context": _related_source_context(mcp, related, path, source_cache),
         })
 
     verdicts, tokens, errors = [], 0, []
@@ -1586,7 +1614,9 @@ def _verify_findings_against_target(task, findings, review_client=None):
             "你是代码审查反证员。逐条验证候选问题，必须先尝试用目标 Commit 源码和跨文件检索结果推翻它。"
             "仅变更了字段、路由、应用注册、组件属性或容器入口，不等于存在缺陷；若相关定义、调用方、配置或兼容逻辑已同步，必须 rejected。"
             "confirmed 要求完整证据能直接证明可复现错误；needs_confirmation 仅用于代码无法决定的业务或运行环境问题；advisory 仅用于非正确性改进。"
-            "可以调整 severity，但不得因影响范围大就标高风险。每个 key 必须返回一项。"
+            "severity 必须独立判断：可导致越权、敏感数据泄露或篡改、不可恢复数据损坏、核心服务大面积不可用的已确认问题为 high；"
+            "局部接口 500、可恢复的数据重复或功能局部失效通常为 medium；低概率且影响有限为 low。不得为了报告好看强行产生 high，也不得把已证明的高影响缺陷机械降级。"
+            "每个 key 必须返回一项。"
             "仅输出严格 JSON：{\"items\":[{\"key\":\"\",\"verdict\":\"confirmed|needs_confirmation|rejected|advisory\","
             "\"severity\":\"high|medium|low\",\"reason\":\"\",\"counter_evidence\":\"\"}]}\n"
             f"待核验候选：{json.dumps(batch, ensure_ascii=False)}"

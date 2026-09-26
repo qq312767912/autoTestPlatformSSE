@@ -31,12 +31,26 @@ class CodeReviewMCP:
         return self.client.raw_file(self.task.repository.gitlab_project_id, path, ref)[:self.MAX_FILE_CHARS]
 
     def search_code(self, query, ref=None):
-        """在本地 Git 目标提交中检索字面量；最多返回 12 个命中。"""
-        if self.task.repository.source_type != "local_git" or not query or len(query) > 120:
+        """在目标提交中检索字面量；统一返回 path:line:content。"""
+        if not query or len(query) > 120:
             return []
+        ref = ref or self.task.head_sha
+        if self.task.repository.source_type != "local_git":
+            if not self.client:
+                return []
+            project_id = self.task.repository.gitlab_project_id
+            payload = self.client.get(
+                f"/projects/{project_id}/search",
+                {"scope": "blobs", "search": query, "ref": ref, "per_page": self.MAX_RESULTS},
+            )
+            return [
+                f"{item.get('path') or item.get('filename')}:{item.get('startline') or 1}:{str(item.get('data') or '').strip()}"
+                for item in payload[:self.MAX_RESULTS]
+                if item.get("path") or item.get("filename")
+            ]
         from .services import LocalGitClient
         git = LocalGitClient(self.task.repository.local_path)
-        output = git._git("grep", "-n", "-I", "-e", query, ref or self.task.head_sha)
+        output = git._git("grep", "-n", "-I", "-e", query, ref)
         return output.splitlines()[:self.MAX_RESULTS]
 
     def git_history(self, path):
