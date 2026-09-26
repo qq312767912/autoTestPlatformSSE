@@ -14,7 +14,8 @@ from projects.models import Project, ProjectMember
 from langgraph_integration.models import LLMConfig
 from .models import AnalysisTask, AnalysisTaskExecutionLog, CodeAnalysisLLMConfig, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
 from .serializers import GitLabConnectionSerializer, ProjectRepositorySerializer
-from .services import AI_REVIEW_LANGUAGE_RULE, AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _diff_line_stats, _ensure_not_cancelled, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _reuse_cached_result, _review_payload_needs_chinese_retry, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, retry_ocr_analysis, run_analysis
+from .review_mcp import CodeReviewMCP
+from .services import AI_REVIEW_LANGUAGE_RULE, AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _apply_verification_results, _attach_finding_diff_evidence, _classify_finding, _diff_line_stats, _effective_deep_coverage, _ensure_not_cancelled, _generate_fix_patches, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_fallback_diffs, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _prioritize_findings_for_report, _reuse_cached_result, _review_payload_needs_chinese_retry, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, retry_ocr_analysis, run_analysis
 
 
 class CodeReviewPromptLanguageTests(SimpleTestCase):
@@ -33,6 +34,121 @@ class CodeReviewPromptLanguageTests(SimpleTestCase):
         self.assertFalse(_review_payload_needs_chinese_retry({
             "risks": [{"change": "新增 usci 字段", "impact": "可能影响现有客户端兼容性"}],
         }))
+
+    def test_findings_are_layered_without_dropping_coverage(self):
+        confirmed = _classify_finding({
+            "source": "static_scan", "severity": "high", "confidence": 1,
+            "evidence": "syntax error",
+        })
+        pending = _classify_finding({
+            "source": "ai_analysis", "severity": "high", "confidence": .92,
+            "evidence": "value may be empty",
+        })
+        advisory = _classify_finding({
+            "source": "machine_rule", "severity": "low", "confidence": 1,
+            "evidence": "unused branch",
+        })
+        self.assertEqual(confirmed["disposition"], "confirmed")
+        self.assertTrue(confirmed["verified"])
+        self.assertEqual(pending["disposition"], "needs_confirmation")
+        self.assertFalse(pending["verified"])
+        self.assertEqual(advisory["disposition"], "advisory")
+
+
+class ReviewPipelineToolTests(SimpleTestCase):
+    def test_developer_report_keeps_critical_findings_and_limits_noise(self):
+        findings = [
+            {"key": f"high-{index}", "severity": "high", "disposition": "needs_confirmation", "confidence": .8}
+            for index in range(5)
+        ] + [
+            {"key": f"confirmed-{index}", "severity": "medium", "disposition": "confirmed", "confidence": .9}
+            for index in range(4)
+        ] + [
+            {"key": f"noise-{index}", "severity": "medium", "disposition": "needs_confirmation", "confidence": .6}
+            for index in range(20)
+        ]
+        visible, screening = _prioritize_findings_for_report(findings)
+        self.assertEqual(len(visible), 9)
+        self.assertTrue(all(item in visible for item in findings[:9]))
+        self.assertEqual(screening, {"candidate_count": 29, "displayed_count": 9, "suppressed_count": 20, "display_limit": 15})
+
+    def test_verification_rejects_counter_evidenced_candidate(self):
+        findings = [
+            {"key": "false-positive", "severity": "high", "disposition": "needs_confirmation"},
+            {"key": "real-risk", "severity": "medium", "disposition": "needs_confirmation"},
+        ]
+        active, rejected = _apply_verification_results(findings, [
+            {"key": "false-positive", "verdict": "rejected", "severity": "low", "reason": "调用方已同步"},
+            {"key": "real-risk", "verdict": "confirmed", "severity": "high", "reason": "空值路径可复现"},
+        ])
+        self.assertEqual([item["key"] for item in active], ["real-risk"])
+        self.assertEqual(active[0]["disposition"], "confirmed")
+        self.assertEqual(active[0]["severity"], "high")
+        self.assertEqual([item["key"] for item in rejected], ["false-positive"])
+
+    @patch("code_analysis.services._validate_suggested_patch", return_value=(True, ""))
+    @patch("code_analysis.services._get_code_analysis_llm_config", return_value=object())
+    @patch("langgraph_integration.views.create_llm_instance")
+    def test_fix_patches_only_request_high_risk_findings(self, create_llm, _config, _validate):
+        create_llm.return_value.invoke.return_value = SimpleNamespace(
+            content='{"items":[{"key":"high-1","patch":"--- a/app.py\\n+++ b/app.py\\n"}]}',
+            usage_metadata={"total_tokens": 9},
+        )
+        findings = [
+            {"key": "high-1", "severity": "high", "disposition": "confirmed", "file": "app.py", "change": "高风险"},
+            {"key": "high-unconfirmed", "severity": "high", "disposition": "needs_confirmation", "file": "app.py", "change": "待确认高风险"},
+            {"key": "medium-1", "severity": "medium", "file": "app.py", "change": "中风险"},
+        ]
+        tokens, _note = _generate_fix_patches(
+            SimpleNamespace(mode="standard"), findings,
+            [{"path": "app.py", "diff": "@@ -1 +1 @@\n-old\n+new"}],
+        )
+        self.assertEqual(tokens, 9)
+        self.assertEqual(findings[0]["patch_status"], "applicable")
+        self.assertNotIn("patch_status", findings[1])
+        self.assertNotIn("patch_status", findings[2])
+        prompt = create_llm.return_value.invoke.call_args.args[0]
+        self.assertIn("high-1", prompt)
+        self.assertNotIn("high-unconfirmed", prompt)
+        self.assertNotIn("medium-1", prompt)
+
+    def test_ast_chunker_explicitly_falls_back_without_runtime_parser(self):
+        task = SimpleNamespace(head_sha="head", repository=SimpleNamespace(source_type="local_git"))
+        chunks, engine = CodeReviewMCP(task)._ast_chunks("service.py", "def execute():\n    return 1\n")
+        self.assertIn(engine, {"tree-sitter", "fallback"})
+        if engine == "tree-sitter":
+            self.assertEqual(chunks[0]["kind"], "function_definition")
+
+    @patch("code_analysis.review_mcp.shutil.which", return_value="/usr/bin/semgrep")
+    @patch("code_analysis.review_mcp.subprocess.run")
+    def test_semgrep_json_is_normalized_as_static_finding(self, run, _which):
+        run.return_value = SimpleNamespace(stdout='{"results":[{"check_id":"rule.shell","path":"app.py","start":{"line":8},"extra":{"message":"危险调用","severity":"ERROR","lines":"shell=True"}}],"errors":[]}')
+        task = SimpleNamespace(repository=SimpleNamespace(source_type="local_git"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "app.py").write_text("print('ok')", encoding="utf-8")
+            findings, note = CodeReviewMCP(task)._run_semgrep(root, [{"path": "app.py"}])
+        self.assertEqual(findings[0]["rule_id"], "rule.shell")
+        self.assertEqual(findings[0]["severity"], "high")
+        self.assertIn("发现 1 条", note)
+
+    @patch.dict(os.environ, {"SEMGREP_SCANNER_URL": "http://semgrep-scanner:8080"})
+    @patch("requests.post")
+    def test_semgrep_uses_independent_scanner_when_configured(self, post):
+        post.return_value.json.return_value = {
+            "results": [{"check_id": "rule.eval", "path": "app.py", "start": {"line": 1},
+                         "extra": {"message": "禁止 eval", "severity": "ERROR", "lines": "eval(data)"}}],
+            "errors": [],
+        }
+        post.return_value.raise_for_status.return_value = None
+        task = SimpleNamespace(repository=SimpleNamespace(source_type="local_git"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "app.py").write_text("eval(data)\n", encoding="utf-8")
+            findings, _ = CodeReviewMCP(task)._run_semgrep(root, [{"path": "app.py"}])
+        self.assertEqual(post.call_args.args[0], "http://semgrep-scanner:8080/scan")
+        self.assertEqual(post.call_args.kwargs["json"]["files"][0]["content"], "eval(data)\n")
+        self.assertEqual(findings[0]["rule_id"], "rule.eval")
 
 
 class DiffRuleTests(TestCase):
@@ -113,6 +229,17 @@ class DiffRuleTests(TestCase):
         payload["manifest"]["coverage"]["failed"] = []
         self.assertFalse(_ocr_needs_resume(payload))
 
+    def test_deep_review_only_falls_back_for_ocr_failed_files(self):
+        diffs = [{"path": "done.py"}, {"path": "failed.py"}]
+        diagnostics = {
+            "selected": 2, "completed": 1, "reused": 0,
+            "failure_details": [{"path": "failed.py"}],
+        }
+        self.assertEqual(_ocr_fallback_diffs(diffs, diagnostics, True), [{"path": "failed.py"}])
+        self.assertEqual(_ocr_fallback_diffs(diffs, diagnostics, False), diffs)
+        self.assertEqual(_effective_deep_coverage(diagnostics, 1, 100), 100)
+        self.assertEqual(_effective_deep_coverage(diagnostics, 1, 50), 75)
+
     def test_invalid_ocr_result_preserves_timeout_reason(self):
         result = SimpleNamespace(returncode=-15, stderr="upstream did not finish")
         reason = _invalid_ocr_result_reason({}, result, True, 20, Path("result.json"))
@@ -139,7 +266,7 @@ class DiffRuleTests(TestCase):
         task = AnalysisTask.objects.create(
             project=project, repository=repository, creator=user, source_type="commits",
             base_sha="a" * 40, head_sha="b" * 40, mode="deep", status="fetching", raw_diff="diff -- app.py\n+ok",
-            change_report={"summary": {"risk_count": 1}, "findings": [], "ocr_status": {"status": "completed", "coverage": 100}},
+            change_report={"schema_version": 6, "summary": {"risk_count": 1}, "findings": [], "ocr_status": {"status": "completed", "coverage": 100}},
             test_report={"summary": {"test_point_count": 1}, "iteration_summary": {"title": "登录变更", "change_groups": [{"name": "登录"}]}, "test_requirements": [point]},
             machine_coverage=100, ai_coverage=100,
         )
@@ -167,7 +294,7 @@ class DiffRuleTests(TestCase):
         )
         patch_text = "\n".join([
             "diff --git a/app.py b/app.py", "--- a/app.py", "+++ b/app.py",
-            "@@ -1 +1 @@", "-old", "+new", "",
+            "@@ -1 +1 @@", "-old", "+new",
         ])
         with patch("code_analysis.services._target_file_content", return_value="old\n"):
             applicable, message = _validate_suggested_patch(task, patch_text)
@@ -208,6 +335,19 @@ class DiffRuleTests(TestCase):
 
     def test_diff_line_stats_excludes_file_headers(self):
         self.assertEqual(_diff_line_stats("--- a/a.py\n+++ b/a.py\n-old\n+new\n+more"), (2, 1))
+
+    def test_html_report_evidence_contains_changed_content_and_both_line_numbers(self):
+        diff = "@@ -10,4 +10,4 @@\n keep_before\n-old_call(value)\n+new_call(value)\n keep_after"
+        findings = _attach_finding_diff_evidence(
+            [{"file": "app.py", "line_start": 11, "evidence": "old_call(value)"}],
+            [{"path": "app.py", "diff": diff}],
+        )
+        self.assertEqual(findings[0]["line_side"], "old")
+        self.assertEqual(findings[0]["line_start"], 11)
+        removed = next(line for line in findings[0]["change_lines"] if line["type"] == "removed")
+        added = next(line for line in findings[0]["change_lines"] if line["type"] == "added")
+        self.assertEqual((removed["old_line"], removed["content"]), (11, "old_call(value)"))
+        self.assertEqual((added["new_line"], added["content"]), (11, "new_call(value)"))
 
     def test_python_permission_decorator_removal_is_high_risk(self):
         findings = _parse_diff("-@login_required\n def view(): pass\n", "app/views.py", set())
@@ -778,14 +918,15 @@ class AnalysisLifecycleTests(TransactionTestCase):
             patch("code_analysis.services._run_iteration_test_design", return_value=(iteration_summary, iteration_points, 3, "迭代分析完成")) as iteration,
             patch("code_analysis.services._run_context_test_enrichment", return_value=([], [], 0, "无文档补充")) as context,
             patch("code_analysis.services._run_risk_test_design", return_value=({}, 0, "无风险测试点")) as risk_design,
+            patch("code_analysis.services._generate_fix_patches", return_value=(11, "已预生成建议修复")) as fix_patches,
         ):
             expected = {
-                "quick": {"ai": 0, "ocr": 0, "iteration": 0, "context": 0, "risk": 0},
-                "standard": {"ai": 1, "ocr": 0, "iteration": 1, "context": 1, "risk": 1},
-                "deep": {"ai": 1, "ocr": 1, "iteration": 1, "context": 1, "risk": 1},
+                "quick": {"ai": 0, "ocr": 0, "iteration": 0, "context": 0, "risk": 0, "fix": 0},
+                "standard": {"ai": 1, "ocr": 0, "iteration": 1, "context": 1, "risk": 1, "fix": 1},
+                "deep": {"ai": 0, "ocr": 1, "iteration": 1, "context": 1, "risk": 1, "fix": 0},
             }
             for index, (mode, calls) in enumerate(expected.items()):
-                ai_batches.reset_mock(); ocr.reset_mock(); iteration.reset_mock(); context.reset_mock(); risk_design.reset_mock()
+                ai_batches.reset_mock(); ocr.reset_mock(); iteration.reset_mock(); context.reset_mock(); risk_design.reset_mock(); fix_patches.reset_mock()
                 task = AnalysisTask.objects.create(
                     project=self.project, repository=self.repository, creator=self.user,
                     source_type="commits", base_sha=f"base-{index}", head_sha=f"head-{index}", mode=mode,
@@ -798,6 +939,7 @@ class AnalysisLifecycleTests(TransactionTestCase):
                 self.assertEqual(iteration.call_count, calls["iteration"], mode)
                 self.assertEqual(context.call_count, calls["context"], mode)
                 self.assertEqual(risk_design.call_count, calls["risk"], mode)
+                self.assertEqual(fix_patches.call_count, calls["fix"], mode)
                 self.assertEqual(task.change_report["ocr_status"]["status"], "completed" if mode == "deep" else "skipped")
 
     @patch("code_analysis.tasks.retry_code_analysis_ocr.delay")
@@ -835,13 +977,13 @@ class AnalysisLifecycleTests(TransactionTestCase):
 
     @patch("code_analysis.views.generate_suggested_patch")
     def test_suggested_patch_is_generated_on_demand_and_persisted(self, generate):
-        finding = {"key": "risk-1", "file": "app.py", "change": "风险", "severity": "high"}
+        finding = {"key": "risk-1", "file": "app.py", "change": "风险", "severity": "high", "disposition": "confirmed"}
         generated = {**finding, "suggested_patch": "--- a/app.py\n+++ b/app.py\n", "patch_status": "reference", "patch_validation_message": "仅供参考"}
         generate.return_value = (generated, 12, "已生成")
         task = AnalysisTask.objects.create(
             project=self.project, repository=self.repository, creator=self.user,
             source_type="commits", base_sha="a" * 40, head_sha="b" * 40,
-            status="completed", change_report={"summary": {}, "findings": [finding]},
+            status="degraded", change_report={"summary": {}, "findings": [finding]},
         )
         client = APIClient(); client.force_authenticate(self.user)
         response = client.post(
@@ -852,6 +994,22 @@ class AnalysisLifecycleTests(TransactionTestCase):
         self.assertEqual(task.change_report["findings"][0]["patch_status"], "reference")
         self.assertEqual(task.token_usage, 12)
         generate.assert_called_once()
+
+    @patch("code_analysis.views.generate_suggested_patch")
+    def test_suggested_patch_rejects_non_high_risk_finding(self, generate):
+        finding = {"key": "risk-medium", "file": "app.py", "change": "中风险", "severity": "medium"}
+        task = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="a" * 40, head_sha="b" * 40,
+            status="completed", change_report={"summary": {}, "findings": [finding]},
+        )
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.post(
+            f"/api/code-analysis/tasks/{task.id}/suggested-patch/", {"finding_key": "risk-medium"}, format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("仅已确认的高风险", response.data["detail"])
+        generate.assert_not_called()
 
     @patch("code_analysis.tasks.run_code_analysis.delay")
     def test_second_analysis_is_accepted_as_queued(self, delay):

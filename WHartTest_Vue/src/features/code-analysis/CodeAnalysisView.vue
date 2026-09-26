@@ -107,13 +107,17 @@
                 <b>失败文件补审：</b>OCR 失败的 {{ ocrDiagnostics.fallback.file_count || 0 }} 个文件已继续交给平台 AI 分析；补审覆盖 {{ ocrDiagnostics.fallback.coverage || 0 }}%，综合 AI 覆盖 {{ ocrDiagnostics.fallback.effective_coverage || 0 }}%。
                 <span v-if="ocrDiagnostics.fallback.status === 'failed'">补审失败，但已保留 OCR 完成结果，迭代总结和需求测试点仍会继续生成。</span>
               </div>
+              <div v-if="ocrDiagnostics.optimization?.strategy === 'ocr_primary_ai_fallback'" class="ocr-fallback-note">
+                <b>深度审查优化：</b>OpenCodeReview 作为语义主审，已避免 {{ ocrDiagnostics.optimization.duplicate_ai_files_avoided || 0 }} 个文件被平台 AI 重复审查；仅对 OCR 失败文件执行补审。
+              </div>
               <div v-if="ocrDiagnostics.tool_failures?.length" class="ocr-tool-failure"><b>工具调用失败</b><p v-for="(failure,index) in ocrDiagnostics.tool_failures" :key="index">{{ failure.tool_name }}：{{ failure.error }}</p></div>
             </a-collapse-item>
           </a-collapse>
           <div class="report-summary">
-            <span>风险总数 <b>{{ selectedTask.change_report?.summary?.risk_count || 0 }}</b></span>
+            <span>核心问题 <b>{{ selectedTask.change_report?.summary?.risk_count || 0 }}</b></span>
             <span class="risk-number">高风险 <b>{{ selectedTask.change_report?.summary?.high_risk_count || 0 }}</b></span>
           </div>
+          <div v-if="selectedTask.change_report?.summary?.suppressed_risk_count" class="ocr-fallback-note">已全量扫描 {{ selectedTask.change_report.summary.candidate_risk_count }} 条候选，开发报告仅保留 {{ selectedTask.change_report.summary.risk_count }} 条核心问题；其中反证排除 {{ selectedTask.change_report.summary.rejected_risk_count || 0 }} 条，其余低优先级或低证据候选不占用开发阅读篇幅。</div>
           <div v-if="selectedTask.change_report?.summary?.source_counts" class="quality-breakdown"><b>风险来源</b><span v-for="(count, source) in selectedTask.change_report.summary.source_counts" :key="source">{{ sourceName(String(source)) }} {{ count }}</span></div>
           <div v-if="selectedTask.change_report?.findings?.length" class="finding-filter">
             <a-select v-model="riskSeverityFilter" allow-clear placeholder="全部风险级别" :style="{width:'148px'}"><a-option value="high">高风险</a-option><a-option value="medium">中风险</a-option><a-option value="low">低风险</a-option></a-select>
@@ -125,11 +129,18 @@
             <p>{{ item.file }} <a-tag class="risk-type" color="gray">{{ riskType(item) }}</a-tag></p>
             <div class="code-snippet"><div class="snippet-caption"><span>风险凭据</span><small>{{ item.line_start ? `旧版本第 ${item.line_start} 行` : '未定位源码行' }}</small></div><div v-for="(line, index) in evidenceLines(item)" :key="index" class="snippet-line"><span>{{ item.line_start ? item.line_start + index : '—' }}</span><code>{{ line || ' ' }}</code></div></div>
             <div class="finding-detail"><b>影响：</b><span>{{ item.impact || '需结合代码上下文和完整 Diff 确认实际影响范围' }}</span></div>
+            <div v-if="item.verification_reason" class="finding-detail"><b>核验结论：</b><span>{{ item.verification_reason }}</span></div>
+            <div v-if="item.disposition === 'needs_confirmation' && item.counter_evidence" class="finding-detail"><b>待确认依据：</b><span>{{ item.counter_evidence }}</span></div>
             <div class="finding-detail"><b>建议：</b><span>{{ item.recommendation || '覆盖相关正常流程、异常分支及调用链后再决定是否修复' }}</span></div>
+            <div v-if="selectedTask.mode === 'standard' && item.severity === 'high' && item.disposition === 'confirmed'" class="inline-fix">
+              <div><b>建议修复</b><a-tag size="small" :color="item.patch_status === 'applicable' ? 'green' : 'gray'">{{ item.patch_status === 'applicable' ? '已通过补丁校验' : '仅供参考' }}</a-tag></div>
+              <pre v-if="item.suggested_patch"><code>{{ item.suggested_patch }}</code></pre>
+              <p v-else>{{ item.patch_validation_message || '未生成可展示的修复补丁' }}</p>
+            </div>
             <div class="patch-actions">
               <a-link class="diff-link" @click="openDiff(item)"><icon-file /> 查看相关 Diff</a-link>
-              <a-link class="diff-link fix-link" :disabled="patchLoadingKey === item.key" @click="openSuggestedPatch(item)"><icon-file /> {{ patchLoadingKey === item.key ? '正在生成…' : '查看建议修复' }}</a-link>
-              <a-tag v-if="item.patch_status" size="small" :color="item.patch_status === 'applicable' ? 'green' : 'gray'">{{ item.patch_status === 'applicable' ? '可应用' : '仅供参考' }}</a-tag>
+              <a-link v-if="item.severity === 'high' && item.disposition === 'confirmed'" class="diff-link fix-link" :disabled="patchLoadingKey === item.key" @click="openSuggestedPatch(item)"><icon-file /> {{ patchLoadingKey === item.key ? '正在生成…' : '查看建议修复' }}</a-link>
+              <a-tag v-if="item.severity === 'high' && item.disposition === 'confirmed' && item.patch_status" size="small" :color="item.patch_status === 'applicable' ? 'green' : 'gray'">{{ item.patch_status === 'applicable' ? '可应用' : '仅供参考' }}</a-tag>
             </div>
           </div>
           <a-empty v-if="selectedTask.change_report?.findings?.length && !filteredFindings.length" description="没有符合筛选条件的风险" />
@@ -220,7 +231,8 @@
 
     <a-modal v-model:visible="diffVisible" :title="diffTitle" width="960px" :footer="false" unmount-on-close>
       <a-alert v-if="diffNotice" :type="diffNoticeType" class="diff-notice">{{ diffNotice }}</a-alert>
-      <a-spin :loading="diffLoading" style="width:100%"><div v-if="diffLines.length" class="diff-view"><div v-for="(line, index) in diffLines" :key="index" class="diff-line" :class="diffLineClass(line)"><span>{{ index + 1 }}</span><code>{{ line || ' ' }}</code></div></div><a-empty v-else-if="!diffLoading" description="未生成可展示的建议修复补丁" /></a-spin>
+      <div v-if="diffFixPlan" class="fix-plan"><b>建议修改方案</b><p>{{ diffFixPlan }}</p><small v-if="diffFixLocation">修改位置：{{ diffFixLocation }}</small></div>
+      <a-spin :loading="diffLoading" style="width:100%"><div v-if="diffLines.length" class="diff-view"><div v-for="(line, index) in diffLines" :key="index" class="diff-line" :class="diffLineClass(line)"><span>{{ index + 1 }}</span><code>{{ line || ' ' }}</code></div></div><a-empty v-else-if="!diffLoading" description="未生成可应用补丁，请按上方修改方案处理" /></a-spin>
     </a-modal>
 
     <a-modal v-model:visible="createVisible" title="新建代码审查" width="720px" :ok-loading="submitting" @ok="submitTask">
@@ -309,7 +321,7 @@ import { Message, Modal } from '@arco-design/web-vue';
 import { IconDelete, IconDown, IconDownload, IconFile, IconPlus, IconQuestionCircle, IconRefresh, IconSettings } from '@arco-design/web-vue/es/icon';
 import { useProjectStore } from '@/store/projectStore';
 import { useAuthStore } from '@/store/authStore';
-import type { AnalysisExecutionLog, AnalysisTask, CodeRepository, GitLabConnection, MergeRequest, RepositoryCommit } from './types';
+import type { AnalysisExecutionLog, AnalysisTask, CodeRepository, Finding, GitLabConnection, MergeRequest, RepositoryCommit } from './types';
 import * as api from './service';
 import { downloadHtmlReport } from './reportExport';
 import { KnowledgeService } from '@/features/knowledge/services/knowledgeService';
@@ -342,7 +354,7 @@ const riskSeverityFilter = ref<string|undefined>();
 const riskTypeFilter = ref<string|undefined>();
 const testPriorityFilter = ref<string|undefined>();
 const testTypeFilter = ref<string[]>([]);
-const diffVisible = ref(false), diffLoading = ref(false), diffTitle = ref('代码 Diff'), diffText = ref(''), diffNotice = ref(''), diffNoticeType = ref<'success'|'warning'|'info'>('info');
+const diffVisible = ref(false), diffLoading = ref(false), diffTitle = ref('代码 Diff'), diffText = ref(''), diffNotice = ref(''), diffNoticeType = ref<'success'|'warning'|'info'>('info'), diffFixPlan = ref(''), diffFixLocation = ref('');
 const patchLoadingKey = ref('');
 const analysisModeOptions = [
   { value:'quick', label:'快速', badge:'极速', summary:'仅规则扫描，不调用模型' },
@@ -504,9 +516,46 @@ const iterationConclusion = (task:AnalysisTask) => {
   if (risks) return `发现 ${risks} 项风险提示，建议结合影响范围执行回归`;
   return '未发现明显高风险变化，建议完成常规变更回归';
 };
+async function prepareChangeHtmlReport(task:AnalysisTask):Promise<AnalysisTask>{
+  // AnalysisTask 来自 Vue reactive Proxy，structuredClone 会抛 DataCloneError；报告数据本身为 JSON。
+  const prepared:AnalysisTask=JSON.parse(JSON.stringify(task));
+  const findings:Finding[]=prepared.change_report?.findings || [];
+  const diffCache=new Map<string,Promise<string>>();
+  const loadDiff=(item:Finding) => {
+    const file=item.file || '';
+    if(!diffCache.has(file)) diffCache.set(file,api.getTaskDiff(task.id,file).then(payload=>String(payload?.diff||'')));
+    return diffCache.get(file)!;
+  };
+  let cursor=0;
+  const worker=async()=>{
+    while(cursor<findings.length){
+      const index=cursor++;
+      const item=findings[index];
+      try{
+        const fullDiff=await loadDiff(item);
+        item.related_diff=relevantDiffFragment(fullDiff,item.line_start,item.evidence);
+      }catch(error:unknown){item.related_diff_error=error instanceof Error ? error.message : '读取相关 Diff 失败'}
+      if(item.severity==='high' && item.disposition==='confirmed'){
+        try{
+          const generated=item.patch_status ? item : await api.generateSuggestedPatch(task.id,item.key);
+          Object.assign(item,generated);
+        }catch(error:unknown){
+          item.patch_status='reference';
+          item.patch_validation_message=error instanceof Error ? `建议修复生成失败：${error.message}` : '建议修复生成失败';
+        }
+      }
+    }
+  };
+  await Promise.all(Array.from({length:Math.min(2,findings.length)},()=>worker()));
+  return prepared;
+}
 async function download(task:AnalysisTask,type:'change'|'test',format:string){
   try{
-    if(format==='html') downloadHtmlReport(task,type);
+    if(format==='html'){
+      Message.info(type==='change' ? '正在整理相关 Diff 和已确认高风险建议修复，完成后自动下载' : '正在生成 HTML 报告');
+      const reportTask=type==='change' ? await prepareChangeHtmlReport(task) : task;
+      downloadHtmlReport(reportTask,type);
+    }
     else if(format==='md') await api.downloadReport(task.id,type);
     else throw new Error('不支持的报告格式');
     Message.success(`${format==='html'?'HTML':'Markdown'} 报告下载已开始`);
@@ -516,11 +565,14 @@ async function openLlmConfig(){llmConfigVisible.value=true;selectedPlatformLlmId
 async function usePlatformLlmConfig(){if(!selectedPlatformLlmId.value)return;platformLlmCopying.value=true;try{const saved=await api.copyPlatformLlmConfig(selectedPlatformLlmId.value);Object.assign(llmConfigForm,saved,{api_key:''});selectedPlatformLlmId.value=undefined;Message.success('已复制为代码审查专用配置，可继续调整或测试连接')}catch(e:any){Message.error(e.message||'复制 LLM 配置失败')}finally{platformLlmCopying.value=false}}
 async function saveLlmConfig(){if(!llmConfigForm.config_name||!llmConfigForm.api_url||!llmConfigForm.name||(!llmConfigForm.api_key&&!llmConfigForm.has_api_key)){Message.warning('请完整填写代码审查模型配置');return}llmConfigSaving.value=true;try{const saved=await api.saveCodeAnalysisLlmConfig({...llmConfigForm});Object.assign(llmConfigForm,saved,{api_key:''});llmConfigVisible.value=false;Message.success('代码审查专用 LLM 已保存')}catch(e:any){Message.error(e.message||'保存代码审查模型配置失败')}finally{llmConfigSaving.value=false}}
 async function testLlmConfig(){if(!llmConfigForm.id)return;llmConfigTesting.value=true;try{const result=await api.testCodeAnalysisLlmConfig(llmConfigForm.id);Message.success(result?.message||'连接测试成功')}catch(e:any){Message.error(e.message||'连接测试失败')}finally{llmConfigTesting.value=false}}
-async function openDiff(item:any){if(!selectedTask.value)return;diffVisible.value=true;diffLoading.value=true;diffText.value='';diffNotice.value='';diffTitle.value=`相关 Diff · ${item.file || '变更文件'}`;try{const payload=await api.getTaskDiff(selectedTask.value.id,item.file);diffText.value=relevantDiffFragment(payload?.diff||'',item.line_start,item.evidence)}catch(e:any){Message.error(e.message||'读取 Diff 失败')}finally{diffLoading.value=false}}
+async function openDiff(item:any){if(!selectedTask.value)return;diffVisible.value=true;diffLoading.value=true;diffText.value='';diffNotice.value='';diffFixPlan.value='';diffFixLocation.value='';diffTitle.value=`相关 Diff · ${item.file || '变更文件'}`;try{const payload=await api.getTaskDiff(selectedTask.value.id,item.file);diffText.value=relevantDiffFragment(payload?.diff||'',item.line_start,item.evidence)}catch(e:any){Message.error(e.message||'读取 Diff 失败')}finally{diffLoading.value=false}}
 async function openSuggestedPatch(item:any){
   if(!selectedTask.value || patchLoadingKey.value)return;
+  if(item.severity!=='high' || item.disposition!=='confirmed'){Message.warning('仅已确认的高风险问题支持生成建议修复');return}
   patchLoadingKey.value=item.key;
   diffVisible.value=true;diffLoading.value=true;diffTitle.value=`建议修复 · ${item.file || '变更文件'}`;diffText.value='';
+  diffFixPlan.value=item.recommendation || '根据风险凭据检查相关调用链，补充边界处理和可执行验证。';
+  diffFixLocation.value=`${item.file || '未知文件'}${item.line_start ? `:${item.line_start}` : ''}`;
   diffNoticeType.value='info';diffNotice.value='纯审阅模式：正在生成最小修复补丁，平台不会修改仓库。';
   try{
     const generated=item.patch_status ? item : await api.generateSuggestedPatch(selectedTask.value.id,item.key);
@@ -631,7 +683,7 @@ onBeforeUnmount(()=>{if(pollTimer)window.clearInterval(pollTimer)});
 .repository-edit-fields{display:flex;gap:8px;margin-top:8px}.repository-edit-fields>:first-child{width:260px}.repository-edit-fields>:last-child{width:130px}
 .download-arrow{margin-left:7px;color:#718096;font-size:12px}
 .commit-hint{margin:-8px 0 16px;color:#8792a2;font-size:12px;line-height:1.5}
-.patch-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:11px}.patch-actions .diff-link{margin-top:0}.fix-link{color:#16827d}.diff-notice{margin-bottom:12px}
+.inline-fix{margin-top:11px}.inline-fix>div{display:flex;align-items:center;gap:8px;margin-bottom:5px}.inline-fix pre{max-height:260px;margin:0;padding:10px 12px;overflow:auto;border:1px solid #dfe6eb;border-radius:8px;background:#f6f8fa;color:#26333f;font:12px/1.55 "SFMono-Regular",Consolas,monospace;white-space:pre-wrap}.inline-fix p{margin:0;padding:8px 10px;border-radius:7px;background:#f6f8fa;color:#8792a2;font-size:12px}.patch-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:11px}.patch-actions .diff-link{margin-top:0}.fix-link{color:#16827d}.diff-notice{margin-bottom:12px}.fix-plan{margin:0 0 12px;padding:13px 15px;border:1px solid #dce9ea;border-radius:9px;background:#f5faf9;color:#455b62}.fix-plan b{display:block;color:#176b67}.fix-plan p{margin:6px 0;line-height:1.7;white-space:pre-wrap}.fix-plan small{color:#718096;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .ocr-status-alert{margin:0 0 10px}.ocr-retry-button{margin:0 0 14px}.ocr-status-alert b{margin-right:8px}.ocr-status-alert span{line-height:1.6}.finding-detail{display:grid;grid-template-columns:52px minmax(0,1fr);gap:6px;margin-top:12px;color:#526273;line-height:1.65}.finding-detail b{color:#344054}
 .ocr-fallback-note{margin-top:10px;padding:9px;border-radius:7px;background:#eef8f3;color:#376b55;font-size:11px}
 .ocr-resume-note{margin-top:10px;padding:9px;border-radius:7px;background:#eef5ff;color:#315f91;font-size:11px}

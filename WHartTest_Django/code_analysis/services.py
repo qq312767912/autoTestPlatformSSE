@@ -35,6 +35,8 @@ AI_REVIEW_LANGUAGE_RULE = (
     "还有 test_requirements 的全部描述字段。代码标识符、文件路径、接口名、字段名和必要的原始代码片段保持原文，"
     "但解释这些证据的句子必须使用中文；即使 Diff、源码注释或业务上下文是英文，也不得输出英文审查结论。"
 )
+CODE_REVIEW_REPORT_SCHEMA_VERSION = 6
+DEVELOPER_REPORT_FINDING_LIMIT = 15
 
 # OpenCodeReview 参数统一维护。内网自建模型不限制 token；OCR 需要保留原生上下文，
 # 否则多轮工具调用可能在上下文压缩阶段提前结束。
@@ -480,6 +482,83 @@ def _diff_line_stats(diff_text):
     return additions, deletions
 
 
+def _diff_evidence_for_finding(finding, diff_text, context_lines=3):
+    """为 HTML 报告保存可独立核验的 Diff 证据。
+
+    优先用 evidence 原文定位，其次使用模型/扫描器给出的行号；同时保留新旧行号，
+    避免“第 N 行”无法判断是修改前还是修改后。
+    """
+    hunks, current = [], None
+    old_line = new_line = None
+    for raw in str(diff_text or "").splitlines():
+        match = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", raw)
+        if match:
+            current = {"header": raw, "lines": []}
+            hunks.append(current)
+            old_line, new_line = int(match.group(1)), int(match.group(3))
+            continue
+        if current is None or raw.startswith(("---", "+++")):
+            continue
+        kind = "added" if raw.startswith("+") else ("removed" if raw.startswith("-") else "context")
+        current["lines"].append({
+            "type": kind,
+            "old_line": old_line if kind != "added" else None,
+            "new_line": new_line if kind != "removed" else None,
+            "content": raw[1:] if raw[:1] in {"+", "-", " "} else raw,
+        })
+        if kind != "added":
+            old_line += 1
+        if kind != "removed":
+            new_line += 1
+    if not hunks:
+        return {}
+    evidence_lines = [line.strip() for line in str(finding.get("evidence") or "").splitlines() if len(line.strip()) >= 4]
+    target_line = finding.get("line_start")
+    selected = anchor = None
+    for hunk in hunks:
+        for index, line in enumerate(hunk["lines"]):
+            if any(needle in line["content"].strip() or line["content"].strip() in needle for needle in evidence_lines):
+                selected, anchor = hunk, index
+                break
+        if selected:
+            break
+    if selected is None and target_line:
+        for hunk in hunks:
+            for index, line in enumerate(hunk["lines"]):
+                if target_line in {line["old_line"], line["new_line"]}:
+                    selected, anchor = hunk, index
+                    break
+            if selected:
+                break
+    selected = selected or hunks[0]
+    anchor = 0 if anchor is None else anchor
+    start, end = max(0, anchor - context_lines), min(len(selected["lines"]), anchor + context_lines + 1)
+    excerpt = selected["lines"][start:end]
+    if not any(line["type"] in {"added", "removed"} for line in excerpt):
+        changed = next((index for index, line in enumerate(selected["lines"]) if line["type"] != "context"), anchor)
+        start, end = max(0, changed - context_lines), min(len(selected["lines"]), changed + context_lines + 1)
+        excerpt = selected["lines"][start:end]
+    anchor_line = selected["lines"][anchor] if selected["lines"] else {}
+    line_side = "old" if anchor_line.get("type") == "removed" else "new"
+    resolved_line = anchor_line.get("old_line") if line_side == "old" else anchor_line.get("new_line")
+    return {
+        "diff_header": selected["header"],
+        "change_lines": excerpt,
+        "line_side": line_side,
+        "line_start": resolved_line or finding.get("line_start"),
+    }
+
+
+def _attach_finding_diff_evidence(findings, analyzable_diffs):
+    diffs = {item.get("path", ""): item.get("diff", "") for item in analyzable_diffs}
+    enriched = []
+    for finding in findings:
+        item = dict(finding)
+        item.update(_diff_evidence_for_finding(item, diffs.get(item.get("file", ""), "")))
+        enriched.append(item)
+    return enriched
+
+
 def _impact_scope_count(files):
     """以变更文件的前两级目录归并影响范围；根目录文件单独计入。"""
     scopes = set()
@@ -787,6 +866,28 @@ def _ocr_needs_resume(payload):
     return bool(payload and payload.get("session_id") and coverage.get("failed"))
 
 
+def _ocr_fallback_diffs(analyzable_diffs, diagnostics, ocr_usable):
+    """OCR 成功文件不重复审查；仅返回失败文件，完全不可用时返回全部。"""
+    if not ocr_usable:
+        return list(analyzable_diffs)
+    failed_paths = {
+        str(item.get("path") or "")
+        for item in diagnostics.get("failure_details") or []
+        if item.get("path")
+    }
+    return [item for item in analyzable_diffs if item.get("path") in failed_paths]
+
+
+def _effective_deep_coverage(diagnostics, fallback_file_count, fallback_coverage):
+    """合并 OCR 已覆盖文件与失败文件补审覆盖，口径始终基于原始选中文件。"""
+    selected = int(diagnostics.get("selected") or 0)
+    ocr_covered = int(diagnostics.get("completed") or 0) + int(diagnostics.get("reused") or 0)
+    if selected <= 0:
+        return round(float(fallback_coverage or 0), 1)
+    fallback_covered = fallback_file_count * float(fallback_coverage or 0) / 100
+    return round(min(selected, ocr_covered + fallback_covered) / selected * 100, 1)
+
+
 def _invalid_ocr_result_reason(payload, result, timed_out, timeout_minutes, output_path):
     """为无效 OCR 输出保留真实超时、退出码和 stderr，避免只显示 empty。"""
     status = payload.get("status") if payload else None
@@ -991,7 +1092,7 @@ def _validate_suggested_patch(task, patch_text, review_client=None):
                     target.write_text(content, encoding="utf-8")
             result = subprocess.run(
                 ["git", "apply", "--check", "--recount", "-"], cwd=root,
-                input=patch_text, text=True, capture_output=True, timeout=15,
+                input=patch_text.rstrip() + "\n", text=True, capture_output=True, timeout=15,
             )
             return result.returncode == 0, (result.stderr or result.stdout).strip()[-500:]
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
@@ -999,54 +1100,78 @@ def _validate_suggested_patch(task, patch_text, review_client=None):
 
 
 def _generate_fix_patches(task, findings, analyzable_diffs, review_client=None):
-    """批量生成纯审阅补丁，并将可应用性校验结果写回对应风险。"""
-    if task.mode == "quick" or not findings:
-        for finding in findings:
-            finding.update({"suggested_patch": "", "patch_status": "reference", "patch_validation_message": "快速模式不生成 AI 修复建议"})
-        return 0, "快速模式未生成建议修复"
+    """仅为已确认高风险批量生成纯审阅补丁，并写回可应用性校验结果。"""
+    high_risk_findings = [
+        finding for finding in findings
+        if finding.get("severity") == "high" and finding.get("disposition") == "confirmed"
+    ]
+    if task.mode == "quick" or not high_risk_findings:
+        return 0, "没有需要生成建议修复的已确认高风险问题"
     from langgraph_integration.views import create_llm_instance
-    for finding in findings:
+    for finding in high_risk_findings:
         finding.update({"suggested_patch": "", "patch_status": "reference", "patch_validation_message": "未生成有效补丁"})
     try:
         config = _get_code_analysis_llm_config()
         diff_by_path = {item.get("path", ""): item.get("diff", "") for item in analyzable_diffs}
-        source = []
-        for finding in findings[:40]:
-            source.append({
+        target_source_by_path = {}
+        for finding in high_risk_findings:
+            path = finding.get("file", "")
+            if path in target_source_by_path:
+                continue
+            try:
+                content = _target_file_content(task, path, review_client)
+                lines = content.splitlines()
+                center = max(0, int(finding.get("line_start") or 1) - 1)
+                start, end = max(0, center - 80), min(len(lines), center + 81)
+                target_source_by_path[path] = "\n".join(
+                    f"{index + 1}: {lines[index]}" for index in range(start, end)
+                )[:16_000]
+            except (ValueError, OSError, AttributeError, subprocess.CalledProcessError):
+                target_source_by_path[path] = ""
+        tokens = 0
+        for start in range(0, len(high_risk_findings), 40):
+            batch = high_risk_findings[start:start + 40]
+            source = [{
                 "key": finding.get("key"), "file": finding.get("file"),
                 "problem": finding.get("change"), "impact": finding.get("impact"),
                 "recommendation": finding.get("recommendation"), "evidence": finding.get("evidence"),
                 "original_diff": diff_by_path.get(finding.get("file", ""), "")[:6000],
-            })
-        prompt = (
-            "你是代码修复补丁生成器。针对每条风险，基于目标版本代码和原始 Diff 生成最小化 unified diff。"
-            "补丁必须应用于目标版本（变更完成后的代码），文件头使用 --- a/路径 和 +++ b/路径；"
-            "不得输出 Markdown 代码围栏，不得修改与风险无关的代码，不确定时 patch 返回空字符串。"
-            "仅输出严格 JSON：{\"items\":[{\"key\":\"\",\"patch\":\"完整 unified diff 或空字符串\"}]}。\n"
-            f"风险与变更：{json.dumps(source, ensure_ascii=False)}"
-        )
-        response = create_llm_instance(config, temperature=0).invoke(prompt)
-        payload = _json_from_response(getattr(response, "content", response))
-        mapped = {str(item.get("key")): str(item.get("patch") or "").strip() for item in payload.get("items", [])}
-        for finding in findings:
-            patch_text = mapped.get(str(finding.get("key")), "")
-            if patch_text.startswith("```"):
-                patch_text = re.sub(r"^```(?:diff)?\s*|\s*```$", "", patch_text, flags=re.DOTALL).strip()
-            finding["suggested_patch"] = patch_text[:100_000]
-            if patch_text:
-                applicable, message = _validate_suggested_patch(task, patch_text, review_client)
-                finding["patch_status"] = "applicable" if applicable else "reference"
-                finding["patch_validation_message"] = message or ("已通过 git apply --check" if applicable else "补丁未通过校验")
-        usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
-        tokens = int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0)
-        applicable_count = sum(1 for item in findings if item.get("patch_status") == "applicable")
-        return tokens, f"已生成建议修复，{applicable_count} 项通过 git apply --check"
+                "target_source_excerpt": target_source_by_path.get(finding.get("file", ""), ""),
+            } for finding in batch]
+            prompt = (
+                "你是代码修复补丁生成器。针对每条风险，基于目标版本代码和原始 Diff 生成最小化 unified diff。"
+                "补丁必须应用于目标版本（变更完成后的代码），文件头使用 --- a/路径 和 +++ b/路径；"
+                "补丁的上下文行必须与 target_source_excerpt 中的真实源码完全一致，行号仅用于定位，不能写入补丁内容；"
+                "不得输出 Markdown 代码围栏，不得修改与风险无关的代码，不确定时 patch 返回空字符串。"
+                "仅输出严格 JSON：{\"items\":[{\"key\":\"\",\"patch\":\"完整 unified diff 或空字符串\"}]}。\n"
+                f"风险与变更：{json.dumps(source, ensure_ascii=False)}"
+            )
+            response = create_llm_instance(config, temperature=0).invoke(prompt)
+            payload = _json_from_response(getattr(response, "content", response))
+            mapped = {str(item.get("key")): str(item.get("patch") or "").strip() for item in payload.get("items", [])}
+            for finding in batch:
+                patch_text = mapped.get(str(finding.get("key")), "")
+                if patch_text.startswith("```"):
+                    patch_text = re.sub(r"^```(?:diff)?\s*|\s*```$", "", patch_text, flags=re.DOTALL).strip()
+                # unified diff 必须以换行结束，否则 git apply 会将内容完整的补丁误报为 corrupt patch。
+                patch_text = patch_text.rstrip() + "\n" if patch_text else ""
+                finding["suggested_patch"] = patch_text[:100_000]
+                if patch_text:
+                    applicable, message = _validate_suggested_patch(task, patch_text, review_client)
+                    finding["patch_status"] = "applicable" if applicable else "reference"
+                    finding["patch_validation_message"] = message or ("已通过 git apply --check" if applicable else "补丁未通过校验")
+            usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
+            tokens += int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0)
+        applicable_count = sum(1 for item in high_risk_findings if item.get("patch_status") == "applicable")
+        return tokens, f"已为 {len(high_risk_findings)} 项已确认高风险生成建议修复，{applicable_count} 项通过 git apply --check"
     except Exception as exc:
         return 0, f"建议修复生成未完成：{exc}"
 
 
 def generate_suggested_patch(task, finding, review_client=None):
     """按需为单个风险生成建议补丁；该流程只读源码，不会应用补丁。"""
+    if finding.get("severity") != "high" or finding.get("disposition") != "confirmed":
+        raise ValueError("仅已确认的高风险问题支持生成建议修复")
     path = finding.get("file", "")
     marker = f"diff -- {path}\n"
     raw_diff = task.raw_diff or ""
@@ -1236,17 +1361,21 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
     except Exception as exc:
         return [], [], [], 0, 0, f"代码审查专用 LLM 不可用，已仅生成机器分析结果：{exc}"
 
-    max_files = 24 if task.mode == "standard" else 60
+    # 标准模式必须覆盖本次范围内的全部可分析文件。批次仍用于控制单次上下文，
+    # 但不能再因为文件数量上限只审查前 N 个文件。
+    max_files = len(analyzable_diffs)
     max_chars = 5000 if task.mode == "standard" else 9000
     batches = []
     current, current_size = [], 0
     for item in analyzable_diffs[:max_files]:
         path = item["path"]
-        snippet = item["diff"][:max_chars]
-        block = f"FILE: {path}\n{snippet}"
-        if current and current_size + len(block) > 14000:
-            batches.append("\n\n".join(current)); current, current_size = [], 0
-        current.append(block); current_size += len(block)
+        diff_text = item["diff"] or ""
+        chunks = [diff_text[offset:offset + max_chars] for offset in range(0, len(diff_text), max_chars)] or [""]
+        for chunk_index, snippet in enumerate(chunks, start=1):
+            block = f"FILE: {path} (DIFF PART {chunk_index}/{len(chunks)})\n{snippet}"
+            if current and current_size + len(block) > 14000:
+                batches.append("\n\n".join(current)); current, current_size = [], 0
+            current.append(block); current_size += len(block)
     if current:
         batches.append("\n\n".join(current))
 
@@ -1288,14 +1417,16 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
     except Exception:
         repository_context = []
     prompt_head = (
-        "你是测试代码审查助手。机器规则结论不可删除。只分析给出的局部 Diff，不推测未提供源码。"
+        "你是面向开发人员的代码审查助手。机器规则命中必须保留，但可以根据源码证据将其归入确定缺陷、待确认风险或改进建议，不能把候选命中一律描述为已确认缺陷。只分析给出的局部 Diff，不推测未提供源码。"
         f"{AI_REVIEW_LANGUAGE_RULE}"
         "按三步完成：先说明变更文件/模块；再识别类型（接口、SQL、配置、数据模型、权限、前端UI、任务/脚本等）；"
         "最后只基于明确证据评估影响范围并生成回归点。不得把单独出现的闭合标签、截断代码或未提供的上下文判断为模板语法/编译错误；"
         "模板、XML、Vue 等语法问题只有在同一 Diff 中存在明确不匹配证据时才可报告。"
         "对每条高风险或中风险，必须同时给出基于该风险结论的中文测试标题、触发条件和可判定预期；低风险无需给风险测试内容。"
-        "输出严格JSON：{\"impact_modules\":[{\"module\":\"\",\"change_type\":\"\",\"impact\":\"\",\"regression_scope\":\"\"}],\"risks\":[{\"change\":\"\",\"file\":\"\",\"severity\":\"high|medium|low\","
-        "\"confidence\":0.0,\"evidence\":\"\",\"impact\":\"\",\"test_title\":\"\",\"test_objective\":\"\",\"test_expected_result\":\"\"}],\"test_requirements\":[{\"title\":\"\","
+        "每条风险必须给出可定位的文件和代码证据，并填写 disposition：confirmed 仅用于有明确触发链路和可验证错误结果的缺陷；needs_confirmation 用于需要业务规则、运行环境或调用方信息才能定性的风险；advisory 用于不影响正确性的改进建议。"
+        "同时填写 trigger（如何触发）、recommendation（开发如何修改或验证）；证据不足时不得使用 confirmed。"
+        "输出严格JSON：{\"impact_modules\":[{\"module\":\"\",\"change_type\":\"\",\"impact\":\"\",\"regression_scope\":\"\"}],\"risks\":[{\"change\":\"\",\"file\":\"\",\"line_start\":0,\"severity\":\"high|medium|low\","
+        "\"disposition\":\"confirmed|needs_confirmation|advisory\",\"confidence\":0.0,\"evidence\":\"\",\"trigger\":\"\",\"impact\":\"\",\"recommendation\":\"\",\"test_title\":\"\",\"test_objective\":\"\",\"test_expected_result\":\"\"}],\"test_requirements\":[{\"title\":\"\","
         "\"objective\":\"\",\"expected_result\":\"\",\"priority\":\"high|medium|low\",\"test_type\":\"\"}]}。"
     )
     def analyze_batch(index, batch):
@@ -1355,6 +1486,174 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
     return ai_findings, test_points, impact_modules, used, coverage, note
 
 
+def _classify_finding(finding):
+    """将覆盖范围与缺陷定性分离，避免用少报问题换取高采纳率。"""
+    item = dict(finding)
+    disposition = str(item.get("disposition") or "").strip().lower()
+    if disposition not in {"confirmed", "needs_confirmation", "advisory"}:
+        source = item.get("source")
+        confidence = float(item.get("confidence") or 0)
+        if source == "static_scan":
+            disposition = "confirmed"
+        elif source == "ai_analysis":
+            disposition = "confirmed" if confidence >= 0.85 and item.get("evidence") and item.get("trigger") else "needs_confirmation"
+        elif item.get("severity") == "low":
+            disposition = "advisory"
+        else:
+            disposition = "needs_confirmation"
+    item["disposition"] = disposition
+    item["verified"] = disposition == "confirmed"
+    return item
+
+
+def _apply_verification_results(findings, verdicts):
+    """合并反证裁决；rejected 候选仅记统计，不交付给开发。"""
+    allowed = {"confirmed", "needs_confirmation", "rejected", "advisory"}
+    mapped = {str(item.get("key")): item for item in verdicts if str(item.get("verdict")) in allowed}
+    active, rejected = [], []
+    for finding in findings:
+        item = dict(finding)
+        verdict = mapped.get(str(item.get("key")), {})
+        decision = verdict.get("verdict") or item.get("disposition") or "needs_confirmation"
+        item["verification_reason"] = str(verdict.get("reason") or "")[:2000]
+        item["counter_evidence"] = str(verdict.get("counter_evidence") or "")[:3000]
+        item["verdict"] = decision
+        if verdict.get("severity") in {"high", "medium", "low"}:
+            item["severity"] = verdict["severity"]
+        if decision == "rejected":
+            rejected.append(item)
+            continue
+        item["disposition"] = decision
+        item["verified"] = decision == "confirmed"
+        active.append(item)
+    return active, rejected
+
+
+def _verify_findings_against_target(task, findings, review_client=None):
+    """使用目标 Commit 源码和跨文件检索对 AI 候选做独立反证。"""
+    if task.mode == "quick" or not findings:
+        return findings, [], 0, "快速模式未执行 AI 反证审查"
+    from langgraph_integration.views import create_llm_instance
+    from .review_mcp import CodeReviewMCP
+    try:
+        config = _get_code_analysis_llm_config()
+    except Exception as exc:
+        return findings, [], 0, f"反证审查未执行：{exc}"
+
+    mcp = CodeReviewMCP(task, review_client)
+    source_cache, search_cache = {}, {}
+    candidates = []
+    for finding in findings:
+        path = str(finding.get("file") or "")
+        if path not in source_cache:
+            try:
+                source_cache[path] = mcp.read_file(path)[:30000]
+            except Exception:
+                source_cache[path] = ""
+        source_lines = source_cache[path].splitlines()
+        center = max(0, int(finding.get("line_start") or 1) - 1)
+        excerpt_start = max(0, center - 55)
+        excerpt_end = min(len(source_lines), center + 56)
+        target_excerpt = "\n".join(
+            f"{line_number + 1}: {source_lines[line_number]}"
+            for line_number in range(excerpt_start, excerpt_end)
+        )[:6000]
+        identifiers = re.findall(r"[A-Za-z_$][\w$]{3,}", " ".join([
+            str(finding.get("change") or ""), str(finding.get("evidence") or ""),
+        ]))
+        related = []
+        for identifier in list(dict.fromkeys(identifiers))[:4]:
+            if identifier not in search_cache:
+                try:
+                    search_cache[identifier] = mcp.search_code(identifier)
+                except Exception:
+                    search_cache[identifier] = []
+            related.extend(search_cache[identifier])
+        candidates.append({
+            **{key: finding.get(key) for key in (
+                "key", "change", "file", "severity", "disposition", "confidence",
+                "evidence", "trigger", "impact", "recommendation",
+            )},
+            "target_source_excerpt": target_excerpt,
+            "related_code": list(dict.fromkeys(related))[:20],
+        })
+
+    verdicts, tokens, errors = [], 0, []
+    batches = [candidates[index:index + 10] for index in range(0, len(candidates), 10)]
+
+    def verify_batch(index, batch):
+        prompt = (
+            "你是代码审查反证员。逐条验证候选问题，必须先尝试用目标 Commit 源码和跨文件检索结果推翻它。"
+            "仅变更了字段、路由、应用注册、组件属性或容器入口，不等于存在缺陷；若相关定义、调用方、配置或兼容逻辑已同步，必须 rejected。"
+            "confirmed 要求完整证据能直接证明可复现错误；needs_confirmation 仅用于代码无法决定的业务或运行环境问题；advisory 仅用于非正确性改进。"
+            "可以调整 severity，但不得因影响范围大就标高风险。每个 key 必须返回一项。"
+            "仅输出严格 JSON：{\"items\":[{\"key\":\"\",\"verdict\":\"confirmed|needs_confirmation|rejected|advisory\","
+            "\"severity\":\"high|medium|low\",\"reason\":\"\",\"counter_evidence\":\"\"}]}\n"
+            f"待核验候选：{json.dumps(batch, ensure_ascii=False)}"
+        )
+        response = create_llm_instance(config, temperature=0).invoke(prompt, response_format={"type": "json_object"})
+        payload = _json_from_response(getattr(response, "content", response))
+        usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
+        used = int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0)
+        return index, payload.get("items") or [], used
+
+    with ThreadPoolExecutor(max_workers=min(3, len(batches)), thread_name_prefix="finding-verification") as executor:
+        futures = [executor.submit(verify_batch, index, batch) for index, batch in enumerate(batches)]
+        for index, future in enumerate(futures):
+            try:
+                _, items, used = future.result()
+                verdicts.extend(items)
+                tokens += used
+            except Exception as exc:
+                errors.append(f"批次{index + 1}失败：{exc}")
+    active, rejected = _apply_verification_results(findings, verdicts)
+    note = f"反证审查完成，排除 {len(rejected)} 条候选"
+    if errors:
+        note += "；" + "；".join(errors)
+    return active, rejected, tokens, note
+
+
+def _prioritize_findings_for_report(findings, limit=DEVELOPER_REPORT_FINDING_LIMIT):
+    """全量扫描后只向开发交付核心问题。
+
+    所有高风险和已确认缺陷必须保留；剩余名额按风险、处置类型、证据完整度和置信度补齐。
+    候选数和筛除数单独记录，不以截断文件范围换取精简报告。
+    """
+    severity_rank = {"high": 3, "medium": 2, "low": 1}
+    disposition_rank = {"confirmed": 3, "needs_confirmation": 2, "advisory": 1}
+
+    def score(item):
+        evidence_quality = sum(bool(str(item.get(field) or "").strip()) for field in ("evidence", "trigger", "impact"))
+        return (
+            disposition_rank.get(item.get("disposition"), 0),
+            severity_rank.get(item.get("severity"), 0),
+            1 if item.get("source") in {"static_scan", "machine_rule"} else 0,
+            evidence_quality,
+            float(item.get("confidence") or 0),
+        )
+
+    eligible = [
+        item for item in findings
+        if item.get("disposition") == "confirmed"
+        or (
+            item.get("disposition") == "needs_confirmation"
+            and item.get("severity") in {"high", "medium"}
+            and float(item.get("confidence") or 0) >= 0.75
+        )
+    ]
+    ordered = sorted(eligible, key=score, reverse=True)
+    essential = [item for item in ordered if item.get("severity") == "high" or item.get("disposition") == "confirmed"]
+    essential_keys = {str(item.get("key")) for item in essential}
+    remaining = [item for item in ordered if str(item.get("key")) not in essential_keys]
+    visible = [*essential, *remaining[:max(0, limit - len(essential))]]
+    return visible, {
+        "candidate_count": len(findings),
+        "displayed_count": len(visible),
+        "suppressed_count": max(0, len(findings) - len(visible)),
+        "display_limit": limit,
+    }
+
+
 def _run_context_test_enrichment(task, findings):
     """OCR 已完成源码审查后，以可选业务文档补充测试需求和回归范围。
 
@@ -1403,6 +1702,8 @@ def _cache_report_complete(task):
         return False
     if task.mode == "quick":
         return True
+    if change.get("schema_version") != CODE_REVIEW_REPORT_SCHEMA_VERSION:
+        return False
     summary = report.get("iteration_summary") or {}
     ai_complete = (
         bool(summary.get("title")) and bool(summary.get("change_groups"))
@@ -1639,22 +1940,22 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         else:
             task.status, task.progress, task.current_step = "ai_analyzing", 65, "执行 AI 降级分析"
             task.save(update_fields=["status", "progress", "current_step", "updated_at"])
-            # 标准与深度模式都必须跑 AI 分批分析；深度模式在此基础上额外跑 OCR。
+            # 迭代需求分析可与代码语义审查并行；OCR 内部仍保持单并发。
             executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="iteration-design")
             iteration_future = executor.submit(
                 _analysis_stage, task.pk, "迭代需求分析", _run_iteration_test_design,
                 task, analyzable_diffs, list(findings),
             )
             try:
-                ai_findings, _unused_points, impact_modules, ai_tokens, ai_coverage, ai_note = _analysis_stage(
-                    task.pk, "AI降级分析", _run_ai_batches,
-                    task, analyzable_diffs, findings,
-                    client if task.repository.source_type != "local_git" else None,
-                )
-                findings.extend(ai_findings)
-                token_usage += ai_tokens
-
-                if task.mode == "deep":
+                if task.mode == "standard":
+                    ai_findings, _unused_points, impact_modules, ai_tokens, ai_coverage, ai_note = _analysis_stage(
+                        task.pk, "AI分析", _run_ai_batches,
+                        task, analyzable_diffs, findings,
+                        client if task.repository.source_type != "local_git" else None,
+                    )
+                    findings.extend(ai_findings)
+                    token_usage += ai_tokens
+                else:
                     ocr_findings, ocr_tokens, ocr_note, ocr_completed, ocr_coverage, ocr_diagnostics = _analysis_stage(
                         task.pk, "OCR审查", _run_open_code_review, task,
                     )
@@ -1664,6 +1965,35 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
                         findings.extend(ocr_findings)
                         token_usage += chinese_tokens
                         ocr_note = f"{ocr_note}；{chinese_note}" if chinese_note else ocr_note
+                    fallback_diffs = _ocr_fallback_diffs(analyzable_diffs, ocr_diagnostics, ocr_completed)
+                    fallback_coverage = 100 if not fallback_diffs else 0
+                    if fallback_diffs:
+                        fallback_findings, _unused_points, impact_modules, fallback_tokens, fallback_coverage, fallback_note = _analysis_stage(
+                            task.pk, "OCR失败文件补审", _run_ai_batches,
+                            task, fallback_diffs, findings,
+                            client if task.repository.source_type != "local_git" else None,
+                        )
+                        findings.extend(fallback_findings)
+                        token_usage += fallback_tokens
+                        ai_note = fallback_note
+                    else:
+                        ai_note = "OpenCodeReview 已覆盖全部文件，已跳过重复的平台 AI 语义审查"
+                    ai_coverage = _effective_deep_coverage(
+                        ocr_diagnostics, len(fallback_diffs), fallback_coverage,
+                    )
+                    ocr_diagnostics["fallback"] = {
+                        "triggered": bool(fallback_diffs),
+                        "file_count": len(fallback_diffs),
+                        "files": [item.get("path") for item in fallback_diffs],
+                        "coverage": fallback_coverage,
+                        "effective_coverage": ai_coverage,
+                        "status": "completed" if fallback_coverage >= 100 else ("partial" if fallback_coverage > 0 else "failed"),
+                    }
+                    ocr_diagnostics["optimization"] = {
+                        "strategy": "ocr_primary_ai_fallback",
+                        "duplicate_ai_files_avoided": max(0, len(analyzable_diffs) - len(fallback_diffs)),
+                        "total_analyzable_files": len(analyzable_diffs),
+                    }
                     AnalysisTaskExecutionLog.objects.create(
                         task=task, event="stage_finished", message="OCR 完整度诊断",
                         detail={"stage": "OCR完整度", **ocr_diagnostics},
@@ -1694,14 +2024,35 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         _ensure_not_cancelled(task)
         task.status, task.progress, task.current_step = "generating_tests", 82, "生成测试分析报告"
         task.save(update_fields=["status", "progress", "current_step", "updated_at"])
-        findings = _deduplicate_findings(findings)
-        for finding in findings:
-            finding["verified"] = finding.get("source") != "ai_analysis"
-        # 建议修复不阻塞主报告。用户在报告中点击后，才对单个风险生成并校验补丁。
-        for finding in findings:
-            finding.pop("suggested_patch", None)
-            finding.pop("patch_status", None)
-            finding.pop("patch_validation_message", None)
+        classified_findings = [_classify_finding(item) for item in _deduplicate_findings(findings)]
+        # 全量扫描结论仍计入候选统计；只对最可能进入开发报告的候选做目标 Commit 反证核验，
+        # 避免标准模式为大量低证据提示付出不必要的模型调用。
+        verification_candidates, _ = _prioritize_findings_for_report(classified_findings, limit=30)
+        findings, rejected_findings, verification_tokens, verification_note = _verify_findings_against_target(
+            task, verification_candidates,
+            client if task.repository.source_type != "local_git" else None,
+        )
+        token_usage += verification_tokens
+        findings, finding_screening = _prioritize_findings_for_report(findings)
+        finding_screening.update({
+            "candidate_count": len(classified_findings),
+            "rejected_count": len(rejected_findings),
+            "verification_candidate_count": len(verification_candidates),
+            "suppressed_count": max(0, len(classified_findings) - len(findings)),
+        })
+        findings = _attach_finding_diff_evidence(findings, analyzable_diffs)
+        if task.mode == "standard":
+            fix_tokens, fix_note = _generate_fix_patches(
+                task, findings, analyzable_diffs,
+                client if task.repository.source_type != "local_git" else None,
+            )
+            token_usage += fix_tokens
+        else:
+            fix_note = "建议修复保持按需生成"
+            for finding in findings:
+                finding.pop("suggested_patch", None)
+                finding.pop("patch_status", None)
+                finding.pop("patch_validation_message", None)
         if task.mode == "quick":
             risk_test_points, risk_test_tokens = {}, 0
             risk_test_note = "快速模式仅使用规则扫描结果生成规则化测试点"
@@ -1710,13 +2061,16 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         for finding in findings:
             finding.pop("_risk_test_point", None)
         token_usage += risk_test_tokens
-        ai_note = f"{ai_note}；建议修复改为按需生成；{risk_test_note}"
+        ai_note = f"{ai_note}；{verification_note}；{fix_note}；{risk_test_note}"
         task.raw_diff = "\n\n".join(raw_parts)[:2_000_000]
         severity_counts = {}
         source_counts = {}
+        disposition_counts = {}
         for finding in findings:
             severity_counts[finding["severity"]] = severity_counts.get(finding["severity"], 0) + 1
             source_counts[finding["source"]] = source_counts.get(finding["source"], 0) + 1
+            disposition = finding.get("disposition", "needs_confirmation")
+            disposition_counts[disposition] = disposition_counts.get(disposition, 0) + 1
         if task.mode != "deep":
             ocr_status = {"status": "skipped", "message": f"{task.get_mode_display()}模式未启用 OCR", "coverage": 0, "diagnostics": ocr_diagnostics}
         elif ocr_completed and ocr_coverage >= 100:
@@ -1726,11 +2080,13 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         else:
             ocr_status = {"status": "failed", "message": ocr_note, "coverage": 0, "diagnostics": ocr_diagnostics}
         task.change_report = _sanitize_json_value({
-            "summary": {"changed_files": len(files), "impact_scope_count": _impact_scope_count(files), "additions": total_additions, "deletions": total_deletions, "changed_lines": total_additions + total_deletions, "risk_count": len(findings), "high_risk_count": sum(1 for x in findings if x["severity"] == "high"), "severity_counts": severity_counts, "source_counts": source_counts},
+            "schema_version": CODE_REVIEW_REPORT_SCHEMA_VERSION,
+            "summary": {"changed_files": len(files), "analyzed_files": len(analyzable_diffs), "excluded_files": sum(1 for x in files if x["excluded"]), "impact_scope_count": _impact_scope_count(files), "additions": total_additions, "deletions": total_deletions, "changed_lines": total_additions + total_deletions, "risk_count": len(findings), "candidate_risk_count": finding_screening["candidate_count"], "suppressed_risk_count": finding_screening["suppressed_count"], "rejected_risk_count": finding_screening["rejected_count"], "confirmed_count": disposition_counts.get("confirmed", 0), "needs_confirmation_count": disposition_counts.get("needs_confirmation", 0), "advisory_count": disposition_counts.get("advisory", 0), "high_risk_count": sum(1 for x in findings if x["severity"] == "high"), "severity_counts": severity_counts, "source_counts": source_counts, "disposition_counts": disposition_counts},
             "files": files, "findings": findings, "impact_modules": impact_modules,
             "impact_summary": sorted({x["impact"] for x in findings}),
             "analysis_note": "；".join([*static_notes, ai_note]),
             "ocr_status": ocr_status,
+            "coverage": {"scope_files": len(files), "analyzed_files": len(analyzable_diffs), "excluded_files": sum(1 for x in files if x["excluded"]), "machine_percent": 100, "ai_percent": ai_coverage, "finding_screening": finding_screening},
         })
         drafts = []
         # 代码审查报告中的高、中风险逐条生成风险测试点；低风险不生成专项测试点。

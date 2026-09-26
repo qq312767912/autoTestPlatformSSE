@@ -1,0 +1,19 @@
+rules:
+  - id: wharttest.python.dynamic-exec
+    languages: [python]
+    severity: ERROR
+    message: 动态执行外部内容可能导致任意代码执行
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: exec(...)
+  - id: wharttest.python.shell-true
+    languages: [python]
+    severity: ERROR
+    message: subprocess 启用 shell=True 时必须确认参数不可被外部输入控制
+    pattern: subprocess.$FUNC(..., shell=True, ...)
+  - id: wharttest.javascript.dynamic-eval
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: eval 执行动态内容可能导致脚本注入
+    pattern: eval(...)

@@ -37,6 +37,14 @@ x-actuator-common: &actuator-common
 
 # 与内网当前 docker-compose.offline.yml 叠加使用，覆盖升级服务并新增三个执行器。
 services:
+  semgrep-scanner:
+    image: ${SEMGREP_SCANNER_IMAGE:-wharttest-250-semgrep:latest}
+    pull_policy: never
+    container_name: wharttest-semgrep
+    networks:
+      - wharttest-network
+    restart: unless-stopped
+
   backend:
     image: wharttest-250-backend:update-ac65a6fb-v2.8-r3-kombu562-arm64
     # 录制浏览器/本地虚拟执行器运行在 Backend 容器内，与独立 Actuator
@@ -78,6 +86,11 @@ services:
       VISION_MCP_MODEL: ${VISION_MCP_MODEL:-glm-4.6v-flash}
       VISION_API_TIMEOUT_SECONDS: ${VISION_API_TIMEOUT_SECONDS:-}
       VISION_MCP_TIMEOUT_SECONDS: ${VISION_MCP_TIMEOUT_SECONDS:-120}
+      # Semgrep 独立扫描器，避免污染 Backend 的 Alpine/musl 运行时。
+      SEMGREP_SCANNER_URL: http://semgrep-scanner:8080
+    depends_on:
+      semgrep-scanner:
+        condition: service_healthy
 
   frontend:
     image: wharttest-250-frontend:update-ac65a6fb-v2.8-r1-arm64

@@ -62,6 +62,13 @@ services:
       - wharttest-network
     restart: unless-stopped
 
+  semgrep-scanner:
+    image: wharttest-250-semgrep:latest
+    container_name: wharttest-semgrep
+    networks:
+      - wharttest-network
+    restart: unless-stopped
+
   # 后端 Django 服务（含 Celery Worker 和 Beat）
   backend:
     image: wharttest-250-backend:latest
@@ -104,6 +111,7 @@ services:
       - DOCX_EDITOR_PUBLIC_BASE_URL=${DOCX_EDITOR_PUBLIC_BASE_URL:-}
       - DOCX_EDITOR_SERVICE_KEY=${DOCX_EDITOR_SERVICE_KEY:-docx-editor-default-integration-key-2026}
       - QDRANT_URL=http://qdrant:6333
+      - SEMGREP_SCANNER_URL=http://semgrep-scanner:8080
       - HF_ENDPOINT=${HF_ENDPOINT:-https://huggingface.co}
     depends_on:
       postgres:
@@ -112,6 +120,8 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_started
+      semgrep-scanner:
+        condition: service_healthy
       weixin-plugin-host:
         condition: service_started
     networks:

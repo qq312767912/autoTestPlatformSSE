@@ -49,6 +49,13 @@ services:
       retries: 5
     command: redis-server --appendonly yes
 
+  semgrep-scanner:
+    image: ${DOCKER_SEMGREP_IMAGE:-wharttest-250-semgrep:latest}
+    container_name: wharttest-semgrep
+    networks:
+      - wharttest-network
+    restart: unless-stopped
+
   # 后端 Django 服务（包含Celery Worker和Beat）
   backend:
     image: ${DOCKER_BACKEND_IMAGE:-ghcr.io/mgdaaslab/wharttest-backend:latest}
@@ -95,6 +102,7 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       # Qdrant向量数据库
       - QDRANT_URL=http://qdrant:6333
+      - SEMGREP_SCANNER_URL=http://semgrep-scanner:8080
       # 内部API基础URL - 使用localhost因为在同一容器
       - DJANGO_BASE_URL=http://localhost:8000
       - WEIXIN_PLUGIN_HOST_URL=http://weixin-plugin-host:3001
@@ -106,6 +114,8 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_started
+      semgrep-scanner:
+        condition: service_healthy
       weixin-plugin-host:
         condition: service_started
     networks:

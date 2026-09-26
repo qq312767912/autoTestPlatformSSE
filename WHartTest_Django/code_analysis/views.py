@@ -432,13 +432,15 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
     def suggested_patch(self, request, pk=None):
         """按需生成单条修复建议；仅校验补丁，不修改被审查仓库。"""
         task = self.get_object()
-        if task.status not in {"completed", "partial"}:
+        if task.status not in {"completed", "degraded", "partial"}:
             return Response({"detail": "报告完成后才能生成建议修复"}, status=status.HTTP_409_CONFLICT)
         finding_key = str(request.data.get("finding_key") or "")
         findings = (task.change_report or {}).get("findings") or []
         finding = next((item for item in findings if str(item.get("key")) == finding_key), None)
         if not finding:
             return Response({"detail": "未找到对应风险点"}, status=status.HTTP_404_NOT_FOUND)
+        if finding.get("severity") != "high" or finding.get("disposition") != "confirmed":
+            return Response({"detail": "仅已确认的高风险问题支持生成建议修复"}, status=status.HTTP_400_BAD_REQUEST)
         if finding.get("patch_status"):
             return Response(finding)
 
@@ -508,10 +510,11 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
                     "```", str(item.get("evidence", "")), "```", "",
                     f"- 影响：{item.get('impact', '')}",
                     f"- 建议：{item.get('recommendation') or '覆盖相关正常流程、异常分支及调用链后再决定是否修复'}", "",
-                    f"- 建议修复状态：{'可应用' if item.get('patch_status') == 'applicable' else '仅供参考'}", "",
                 ])
-                if item.get("suggested_patch"):
-                    lines.extend(["```diff", str(item["suggested_patch"]), "```", ""])
+                if item.get("severity") == "high":
+                    lines.extend([f"- 建议修复状态：{'可应用' if item.get('patch_status') == 'applicable' else '仅供参考'}", ""])
+                    if item.get("suggested_patch"):
+                        lines.extend(["```diff", str(item["suggested_patch"]), "```", ""])
             lines.extend(["## 变更文件", ""])
             lines.extend(f"- `{item.get('path', '')}`" for item in report.get("files", []))
         else:
