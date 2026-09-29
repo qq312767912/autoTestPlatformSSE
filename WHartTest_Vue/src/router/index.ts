@@ -30,6 +30,7 @@ import FileManagementView from '@/features/file-management/views/FileManagementV
 import DocumentAnonymizationView from '@/views/DocumentAnonymizationView.vue'; // 导入文档脱敏管理页面组件。
 import CodeAnalysisView from '@/features/code-analysis/CodeAnalysisView.vue';
 import KnowledgeGraphView from '@/features/knowledge-graph/KnowledgeGraphView.vue';
+import KnowledgeEvolutionView from '@/features/knowledge-evolution/KnowledgeEvolutionView.vue';
 import TestCaseReviewView from '@/features/testcase-review/TestCaseReviewView.vue';
 
 const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束为 RouteRecordRaw。
@@ -133,6 +134,11 @@ const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束�
         path: 'knowledge-graph',
         name: 'KnowledgeGraph',
         component: KnowledgeGraphView,
+      },
+      {
+        path: 'knowledge-evolution',
+        name: 'KnowledgeEvolution',
+        component: KnowledgeEvolutionView,
       },
       {
         path: 'requirements/:id', // 定义需求文档详情动态路径，:id 为文档主键参数。

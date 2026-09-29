@@ -232,6 +232,10 @@
               <template #icon><icon-safe /></template>
               <a href="#" @click="checkProjectAndNavigate($event, '/document-anonymization')">{{ anonymizationMenuLabel }}</a>
             </a-menu-item>
+            <a-menu-item key="knowledge-evolution" v-if="hasKnowledgeEvolutionPermission">
+              <template #icon><icon-loop /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-evolution')">{{ knowledgeEvolutionMenuLabel }}</a>
+            </a-menu-item>
           </a-sub-menu>
 
           <!-- 系统管理子菜单 -->
@@ -364,6 +368,7 @@ import {
   IconList,
   IconRelation,
   IconLink,
+  IconLoop,
 } from '@arco-design/web-vue/es/icon';
 import '@arco-design/web-vue/dist/arco.css'; // 引入 Arco Design 样式
 
@@ -405,6 +410,7 @@ const fileManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'File
 const knowledgeMenuLabel = computed(() => (locale.value === 'en-US' ? 'RAG' : tl('知识库管理')));
 const knowledgeListLabel = computed(() => (locale.value === 'en-US' ? 'Knowledge List' : tl('知识库列表')));
 const knowledgeGraphMenuLabel = computed(() => (locale.value === 'en-US' ? 'Knowledge Graph' : tl('知识图谱')));
+const knowledgeEvolutionMenuLabel = computed(() => (locale.value === 'en-US' ? 'Feedback & Eval' : tl('反馈与测评')));
 const apiKeysMenuLabel = computed(() => (locale.value === 'en-US' ? 'Keys' : tl('KEY管理')));
 const testManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Testing' : tl('测试管理')));
 const caseManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Cases' : tl('用例管理')));
@@ -484,6 +490,7 @@ const activeMenu = computed(() => {
   if (path.startsWith('/knowledge-graph')) return 'knowledge-graph';
   if (path.startsWith('/knowledge-management')) return 'knowledge-list';
   if (path.startsWith('/document-anonymization')) return 'document-anonymization';
+  if (path.startsWith('/knowledge-evolution')) return 'knowledge-evolution';
   if (path.startsWith('/api-keys')) return 'api-keys';
   if (path.startsWith('/remote-mcp-configs')) return 'remote-mcp-configs';
   // 其他路由对应的菜单项
@@ -596,9 +603,16 @@ const hasAnonymizationPermission = computed(() => {
   return authStore.hasPermission('knowledge.anonymize_document');
 });
 
+const hasKnowledgeEvolutionPermission = computed(() => {
+  return authStore.hasPermission('knowledge_evolution.view_evaluationsuite') ||
+         authStore.hasPermission('knowledge_evolution.view_feedback') ||
+         authStore.hasPermission('knowledge_evolution.view_knowledgecandidate') ||
+         authStore.currentUser?.is_staff;
+});
+
 // 检查是否有知识库管理菜单项的权限
 const hasKnowledgeMenuItems = computed(() => {
-  return hasKnowledgePermission.value || hasAnonymizationPermission.value;
+  return hasKnowledgePermission.value || hasAnonymizationPermission.value || hasKnowledgeEvolutionPermission.value;
 });
 
 // 检查是否有测试管理菜单项的权限

@@ -86,16 +86,27 @@ class EvaluationSuiteSerializer(serializers.ModelSerializer):
 class EvaluationRunSerializer(serializers.ModelSerializer):
     suite_name = serializers.CharField(source="suite.name", read_only=True)
     result_summary = serializers.SerializerMethodField()
+    l0_score = serializers.SerializerMethodField()
+    l1_score = serializers.SerializerMethodField()
+    l2_score = serializers.SerializerMethodField()
+    l3_score = serializers.SerializerMethodField()
+    policy_version = serializers.SerializerMethodField()
+    model_name = serializers.SerializerMethodField()
+    cost_usd = serializers.SerializerMethodField()
 
     class Meta:
         model = EvaluationRun
         fields = [
             "id", "suite", "suite_name", "name", "config", "status",
             "metrics_summary", "cost_summary", "result_summary",
+            "l0_score", "l1_score", "l2_score", "l3_score",
+            "policy_version", "model_name", "cost_usd",
             "triggered_by", "started_at", "finished_at", "created_at", "updated_at",
         ]
         read_only_fields = [
             "status", "metrics_summary", "cost_summary", "result_summary",
+            "l0_score", "l1_score", "l2_score", "l3_score",
+            "policy_version", "model_name", "cost_usd",
             "started_at", "finished_at", "created_at", "updated_at",
         ]
 
@@ -105,6 +116,24 @@ class EvaluationRunSerializer(serializers.ModelSerializer):
         completed = qs.filter(status="completed").count()
         failed = qs.filter(status="failed").count()
         return {"total": total, "completed": completed, "failed": failed}
+
+    def _get_metric(self, obj, key):
+        metrics = obj.metrics_summary or {}
+        return metrics.get(key)
+
+    def get_l0_score(self, obj): return self._get_metric(obj, "l0_score")
+    def get_l1_score(self, obj): return self._get_metric(obj, "l1_score")
+    def get_l2_score(self, obj): return self._get_metric(obj, "l2_score")
+    def get_l3_score(self, obj): return self._get_metric(obj, "l3_score")
+
+    def get_policy_version(self, obj):
+        return (obj.config or {}).get("policy_version") or (obj.config or {}).get("policy_id") or ""
+
+    def get_model_name(self, obj):
+        return (obj.config or {}).get("model_version") or (obj.config or {}).get("model_name") or ""
+
+    def get_cost_usd(self, obj):
+        return (obj.cost_summary or {}).get("total_usd") or (obj.cost_summary or {}).get("estimated_cost_usd")
 
 
 class EvaluationResultSerializer(serializers.ModelSerializer):
