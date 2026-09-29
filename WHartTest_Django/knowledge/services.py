@@ -1486,12 +1486,16 @@ class VectorStoreManager:
             # 确保集合存在（触发 vector_store 属性会创建集合）
             _ = self.vector_store
 
-            # 文档分块
-            text_splitter = RecursiveCharacterTextSplitter(
+            # 文档分块：任务 5 改用结构感知分块，保留章节/表格/代码块边界
+            from .chunkers import StructuredTextChunker
+
+            full_text = documents[0].page_content if documents else ""
+            doc_type = document_obj.document_type or "txt"
+            chunker = StructuredTextChunker(
                 chunk_size=self.knowledge_base.chunk_size,
                 chunk_overlap=self.knowledge_base.chunk_overlap,
             )
-            chunks = text_splitter.split_documents(documents)
+            chunks = chunker.split_text(full_text, document_type=doc_type)
 
             # 生成唯一的 vector_ids
             vector_ids = [str(uuid.uuid4()) for _ in chunks]
@@ -1608,6 +1612,14 @@ class VectorStoreManager:
                 start_index=chunk.metadata.get("start_index"),
                 end_index=chunk.metadata.get("end_index"),
                 page_number=chunk.metadata.get("page"),
+                section_title=chunk.metadata.get("section") or "",
+                block_type=chunk.metadata.get("block_type") or "mixed",
+                location={
+                    "page": chunk.metadata.get("page"),
+                    "section": chunk.metadata.get("section"),
+                    "heading_level": chunk.metadata.get("heading_level"),
+                    "merged_blocks": chunk.metadata.get("merged_blocks") or [],
+                },
             )
             chunk_objects.append(chunk_obj)
 

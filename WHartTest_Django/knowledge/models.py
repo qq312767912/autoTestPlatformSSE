@@ -281,6 +281,25 @@ class DocumentChunk(models.Model):
     end_index = models.PositiveIntegerField(_('结束位置'), null=True, blank=True)
     page_number = models.PositiveIntegerField(_('页码'), null=True, blank=True)
 
+    # 任务 5：结构感知分块新增字段
+    section_title = models.CharField(_('章节标题'), max_length=500, blank=True, null=True)
+    block_type = models.CharField(
+        _('块类型'), max_length=32, blank=True, null=True,
+        choices=[
+            ('heading', '标题'),
+            ('paragraph', '段落'),
+            ('table', '表格'),
+            ('code_block', '代码块'),
+            ('list', '列表'),
+            ('mixed', '合并块'),
+        ],
+        help_text=_('分块来源的结构类型'),
+    )
+    location = models.JSONField(
+        _('来源定位'), default=dict, blank=True,
+        help_text=_('原文定位：page/section/heading_level/table_index/code_lang 等'),
+    )
+
     created_at = models.DateTimeField(_('创建时间'), auto_now_add=True)
 
     class Meta:

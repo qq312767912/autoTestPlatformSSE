@@ -86,6 +86,12 @@ services:
       - ./WHartTest_Skills:/app/bundled_skills:ro
       # 仅供“代码审查-本地 Git”开发验证使用；服务内只接受 /workspace 下的相对路径。
       - ./:/workspace:ro
+      # 开发阶段挂载核心源码，避免每次改模型/配置都重建 backend 镜像。
+      - ./WHartTest_Django/knowledge:/app/knowledge:ro
+      - ./WHartTest_Django/knowledge_evolution:/app/knowledge_evolution:ro
+      - ./WHartTest_Django/orchestrator_integration:/app/orchestrator_integration:ro
+      - ./WHartTest_Django/wharttest_django/settings.py:/app/wharttest_django/settings.py:ro
+      - ./WHartTest_Django/wharttest_django/urls.py:/app/wharttest_django/urls.py:ro
       - ./WHartTest_Django/supervisord.conf:/app/supervisord.conf:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"

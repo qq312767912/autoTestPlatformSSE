@@ -1,6 +1,15 @@
 from rest_framework import serializers
 
-from .models import FeedbackEvent, GenerationOutput, RetrievalTrace
+from .models import (
+    EvaluationCase,
+    EvaluationResult,
+    EvaluationRun,
+    EvaluationSuite,
+    FeedbackEvent,
+    GenerationOutput,
+    KnowledgeCandidate,
+    RetrievalTrace,
+)
 
 
 class RetrievalTraceSerializer(serializers.ModelSerializer):
@@ -59,3 +68,68 @@ class FeedbackEventSerializer(serializers.ModelSerializer):
         event.full_clean()
         event.save()
         return event
+
+
+class EvaluationSuiteSerializer(serializers.ModelSerializer):
+    case_count = serializers.IntegerField(source="cases.count", read_only=True)
+
+    class Meta:
+        model = EvaluationSuite
+        fields = [
+            "id", "project", "name", "suite_type", "task_type", "description",
+            "split_ratio", "is_active", "case_count", "created_by", "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+
+class EvaluationRunSerializer(serializers.ModelSerializer):
+    suite_name = serializers.CharField(source="suite.name", read_only=True)
+    result_summary = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EvaluationRun
+        fields = [
+            "id", "suite", "suite_name", "name", "config", "status",
+            "metrics_summary", "cost_summary", "result_summary",
+            "triggered_by", "started_at", "finished_at", "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "status", "metrics_summary", "cost_summary", "result_summary",
+            "started_at", "finished_at", "created_at", "updated_at",
+        ]
+
+    def get_result_summary(self, obj):
+        qs = obj.results.all()
+        total = qs.count()
+        completed = qs.filter(status="completed").count()
+        failed = qs.filter(status="failed").count()
+        return {"total": total, "completed": completed, "failed": failed}
+
+
+class EvaluationResultSerializer(serializers.ModelSerializer):
+    case_number = serializers.IntegerField(source="case.case_number", read_only=True)
+    split = serializers.CharField(source="case.split", read_only=True)
+
+    class Meta:
+        model = EvaluationResult
+        fields = [
+            "id", "run", "case", "case_number", "split", "status",
+            "predicted_payload", "latency_ms", "token_usage", "estimated_cost_usd",
+            "l0_score", "l1_score", "l2_score", "l3_score", "raw_scores",
+            "error_message", "created_at", "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class KnowledgeCandidateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = KnowledgeCandidate
+        fields = [
+            "id", "project", "kind", "origin", "payload", "level", "confidence",
+            "source_snapshot", "evidence", "feedback_event_ids", "state",
+            "dedup_key", "promoted_asset", "extracted_by", "prompt_version",
+            "review_reason", "reviewed_by", "reviewed_at", "created_by",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = ["id", "dedup_key", "created_at", "updated_at"]
