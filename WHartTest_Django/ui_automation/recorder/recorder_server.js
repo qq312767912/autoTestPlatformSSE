@@ -48,9 +48,17 @@ function pushEvent(event, data) {
 }
 
 function serverLog(...args) {
+  const line = '[recorder_server] ' + args.map(String).join(' ') + '\n';
   try {
-    process.stderr.write('[recorder_server] ' + args.map(String).join(' ') + '\n');
+    process.stderr.write(line);
   } catch (_) {}
+  // 拖拽诊断不能只依赖父进程的 DEBUG 日志；生产环境通常会过滤该级别。
+  // 仅将诊断行额外落到容器临时文件，不记录输入值或页面正文。
+  if (line.includes('[drag-diagnostic]')) {
+    try {
+      fs.appendFileSync('/tmp/wharttest-recorder-drag.log', line, 'utf8');
+    } catch (_) {}
+  }
 }
 
 function parseCli(argv) {
@@ -111,7 +119,7 @@ function findChromiumExecutable() {
 
 const INIT_SCRIPT = () => {
   if (window.__whart) return;
-  window.__whart = { hovered: null, describe: null, lastZoneClick: null };
+  window.__whart = { hovered: null, describe: null, lastZoneClick: null, dragDiagnostic: null };
 
   function cleanText(s, max) {
     return (s || '').replace(/\\s+/g, ' ').trim().slice(0, max || 40);
@@ -793,6 +801,39 @@ const INIT_SCRIPT = () => {
     if (e.target && e.target.nodeType === 1) {
       window.__whart.hovered = e.target;
     }
+    var drag = window.__whart.dragDiagnostic;
+    if (drag && e.buttons) {
+      drag.moves += 1;
+      drag.lastX = Math.round(e.clientX);
+      drag.lastY = Math.round(e.clientY);
+    }
+  }, true);
+
+  // 滑块验证诊断：只汇总拖拽起止和 move 数，不记录用户输入内容。
+  // 该事件在 capture 阶段监听，即使目标页面阻止冒泡也能证明浏览器 DOM 已收到轨迹。
+  document.addEventListener('pointerdown', function (e) {
+    if (e.button !== 0) return;
+    window.__whart.dragDiagnostic = {
+      startX: Math.round(e.clientX),
+      startY: Math.round(e.clientY),
+      lastX: Math.round(e.clientX),
+      lastY: Math.round(e.clientY),
+      startedAt: Date.now(),
+      moves: 0,
+      target: e.target && e.target.tagName ? e.target.tagName : '',
+    };
+  }, true);
+
+  document.addEventListener('pointerup', function (e) {
+    var drag = window.__whart.dragDiagnostic;
+    if (!drag || e.button !== 0) return;
+    drag.endX = Math.round(e.clientX);
+    drag.endY = Math.round(e.clientY);
+    drag.durationMs = Date.now() - drag.startedAt;
+    if (window.__whartReport) {
+      window.__whartReport({ t: 'drag_diagnostic', diagnostic: drag });
+    }
+    window.__whart.dragDiagnostic = null;
   }, true);
 
   document.addEventListener('click', function (e) {
@@ -1023,6 +1064,7 @@ const state = {
   lastFrameTs: 0,          // 最近一次推帧时间（screencast 高帧率 / 截图基线兜底）
   tracePath: null,         // 执行 trace.zip 落盘路径（start_trace 设置，stop_trace 消费）
   pageErrors: [],          // 页面 JS 错误（pageerror 事件，执行日志展示用）
+  lastDragAt: 0,           // 最近一次拖拽松开时间，用于限定验证码网络诊断窗口
   finished: false,
 };
 
@@ -1066,6 +1108,18 @@ async function buildIframeChain(frame) {
 
 async function handleReport(payload, frame) {
   if (!state.running || state.preRunning || !payload || !payload.t) return;
+  if (payload.t === 'drag_diagnostic') {
+    const d = payload.diagnostic || {};
+    serverLog(
+      '[drag-diagnostic] DOM received',
+      `target=${String(d.target || '-')}`,
+      `start=(${Number(d.startX) || 0},${Number(d.startY) || 0})`,
+      `end=(${Number(d.endX) || 0},${Number(d.endY) || 0})`,
+      `moves=${Number(d.moves) || 0}`,
+      `durationMs=${Number(d.durationMs) || 0}`,
+    );
+    return;
+  }
   // iframe 内元素：自动识别并附带 iframe 定位链，入库时填充 is_iframe/iframe_locator。
   // 元素表达式保持最内层 frame 文档相对（执行器先 frame_locator 进 frame 再定位）。
   if (payload.el && frame && !frame.isDetached() && frame !== state.page.mainFrame()) {
@@ -1385,7 +1439,13 @@ async function cmdStart(params) {
 
   const launchOptions = {
     headless: process.env.HEADLESS !== 'false',
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      `--window-size=${viewport.width},${viewport.height}`,
+      '--window-position=0,0',
+    ],
   };
   const chromiumExecutable = findChromiumExecutable();
   if (chromiumExecutable) {
@@ -1447,6 +1507,7 @@ async function cmdStart(params) {
 const inputQueue = [];
 const INPUT_QUEUE_MAX = 160;
 let inputDraining = false;
+let replayDragDiagnostic = null;
 
 function enqueueInput(params) {
   // 移动事件可合并：队列里已有未执行的 move 就地覆盖坐标（永不增加延迟）
@@ -1513,12 +1574,27 @@ async function applyInput(params) {
     const button = params.button || 'left';
     if (params.event === 'move') {
       await state.page.mouse.move(x, y);
+      if (replayDragDiagnostic) replayDragDiagnostic.moves += 1;
     } else if (params.event === 'down') {
       await state.page.mouse.move(x, y);
       await state.page.mouse.down({ button, clickCount: Number(params.clickCount) || 1 });
+      if (button === 'left') {
+        replayDragDiagnostic = { startX: x, startY: y, moves: 0, startedAt: Date.now() };
+      }
     } else if (params.event === 'up') {
       await state.page.mouse.move(x, y);
+      if (button === 'left' && replayDragDiagnostic) state.lastDragAt = Date.now();
       await state.page.mouse.up({ button, clickCount: Number(params.clickCount) || 1 });
+      if (button === 'left' && replayDragDiagnostic) {
+        serverLog(
+          '[drag-diagnostic] Playwright dispatched',
+          `start=(${replayDragDiagnostic.startX},${replayDragDiagnostic.startY})`,
+          `end=(${x},${y})`,
+          `moves=${replayDragDiagnostic.moves}`,
+          `durationMs=${Date.now() - replayDragDiagnostic.startedAt}`,
+        );
+        replayDragDiagnostic = null;
+      }
     }
   } else if (type === 'wheel') {
     await state.page.mouse.wheel(Number(params.deltaX) || 0, Number(params.deltaY) || 0);
@@ -1567,6 +1643,41 @@ function attachPageDiagnostics(page) {
       const msg = String((err && err.message) || err || 'undefined');
       state.pageErrors.push(msg.slice(0, 200));
       if (state.pageErrors.length > 20) state.pageErrors.shift();
+    });
+  } catch (_) {}
+  try {
+    page.on('response', async (response) => {
+      // 只观察拖拽前后 15 秒内的 XHR/fetch；不记录请求体、Cookie 或查询参数。
+      if (!state.lastDragAt || Math.abs(Date.now() - state.lastDragAt) > 15000) return;
+      const request = response.request();
+      const resourceType = request.resourceType();
+      if (resourceType !== 'xhr' && resourceType !== 'fetch') return;
+      let safeUrl = '';
+      try {
+        const parsed = new URL(response.url());
+        safeUrl = parsed.origin + parsed.pathname;
+      } catch (_) {
+        safeUrl = String(response.url() || '').split('?')[0].split('#')[0];
+      }
+      let body = '';
+      const contentType = String(response.headers()['content-type'] || '').toLowerCase();
+      if (contentType.includes('json') || contentType.includes('text')) {
+        try {
+          body = (await response.text()).slice(0, 2000)
+            .replace(/("(?:token|ticket|cookie|session|secret|password|sign)"\s*:\s*")[^"]*(")/gi, '$1***$2')
+            .replace(/(1\d{2})\d{4}(\d{4})/g, '$1****$2');
+        } catch (_) {}
+      }
+      const line = JSON.stringify({
+        ts: new Date().toISOString(),
+        method: request.method(),
+        type: resourceType,
+        status: response.status(),
+        url: safeUrl,
+        body,
+      });
+      try { fs.appendFileSync('/tmp/wharttest-captcha-network.log', line + '\n', 'utf8'); } catch (_) {}
+      serverLog('[captcha-network]', line);
     });
   } catch (_) {}
 }

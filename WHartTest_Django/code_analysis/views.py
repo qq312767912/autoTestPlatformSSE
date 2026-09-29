@@ -21,12 +21,33 @@ def _can_access(user, project_id):
     return user.is_superuser or ProjectMember.objects.filter(project_id=project_id, user=user).exists()
 
 
+def _graph_task_queryset(user):
+    queryset = AnalysisTask.objects.select_related("project", "repository", "creator").filter(
+        status__in={"completed", "degraded", "partial"},
+    ).order_by("-completed_at", "-created_at")
+    if not (user.is_superuser or user.is_staff):
+        queryset = queryset.filter(project__members__user=user)
+    return queryset
+
+
+def _require_graph_permission(user):
+    if not (user.is_superuser or user.is_staff or user.has_perm("code_analysis.view_analysistask")):
+        raise PermissionDenied("无权查看知识图谱")
+
+
 def _stop_analysis_task(task):
     """同时停止 OCR 进程组和 Celery 任务。
 
     先停 OCR，再终止 Celery worker 子进程，避免 ocr CLI 成为孤儿进程。
     """
     terminate_ocr_processes(task.pk)
+    try:
+        from .graph_client import CodeReviewGraphClient
+        if CodeReviewGraphClient.enabled():
+            CodeReviewGraphClient().cancel(task.pk)
+    except Exception:
+        # CRG 只是增强层，它的取消失败不得阻塞主任务取消。
+        pass
     if task.celery_task_id:
         current_app.control.revoke(task.celery_task_id, terminate=True, signal="SIGTERM")
 
@@ -324,6 +345,104 @@ class CredentialViewSet(viewsets.ModelViewSet):
         return Response({"success": True, "version": version})
 
 
+class KnowledgeGraphSourceViewSet(viewsets.ViewSet):
+    """Unified graph-source boundary. Code repositories are the first adapter."""
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _source(task):
+        graph = (task.change_report or {}).get("graph_context") or {}
+        diagnostics = graph.get("diagnostics") or {}
+        counts = graph.get("counts") or {}
+        return {
+            "id": f"code:{task.pk}",
+            "type": "code_repository",
+            "name": task.repository.name,
+            "description": task.title or f"{task.base_sha[:8]} → {task.head_sha[:8]}",
+            "project": {"id": task.project_id, "name": task.project.name},
+            "snapshot": {
+                "id": str(task.pk),
+                "commit": graph.get("graph_commit") or task.head_sha,
+                "base_commit": task.base_sha,
+                "created_at": task.completed_at or task.created_at,
+                "crg_version": graph.get("crg_version") or diagnostics.get("crg_version") or "",
+            },
+            "status": graph.get("status", "unavailable"),
+            "stats": {
+                "nodes": diagnostics.get("node_count", 0),
+                "edges": diagnostics.get("edge_count", 0),
+                "changed_symbols": counts.get("changed_symbols", 0),
+                "affected_files": counts.get("affected_files", 0),
+                "related_tests": counts.get("related_tests", 0),
+            },
+            "capabilities": ["overview", "search", "filter", "neighborhood", "provenance"],
+            "provenance": {
+                "source_type": "code_repository",
+                "source_id": str(task.repository_id),
+                "snapshot_id": str(task.pk),
+                "analysis_task_id": str(task.pk),
+            },
+        }
+
+    def list(self, request):
+        _require_graph_permission(request.user)
+        project_id = request.query_params.get("project")
+        queryset = _graph_task_queryset(request.user)
+        if project_id:
+            queryset = queryset.filter(project_id=project_id)
+        sources = []
+        seen_repositories = set()
+        for task in queryset[:500]:
+            graph = (task.change_report or {}).get("graph_context") or {}
+            if graph.get("status") != "completed" or task.repository_id in seen_repositories:
+                continue
+            seen_repositories.add(task.repository_id)
+            sources.append(self._source(task))
+        return Response({
+            "results": sources,
+            "source_types": [
+                {"value": "code_repository", "label": "代码仓库", "enabled": True},
+                {"value": "knowledge_document", "label": "知识库文档", "enabled": False},
+            ],
+        })
+
+    def _task(self, request, pk):
+        _require_graph_permission(request.user)
+        prefix, separator, task_id = str(pk or "").partition(":")
+        if prefix != "code" or not separator:
+            raise PermissionDenied("不支持的图谱数据源")
+        try:
+            return _graph_task_queryset(request.user).get(pk=task_id)
+        except (AnalysisTask.DoesNotExist, ValueError):
+            raise PermissionDenied("图谱数据源不存在或无权访问")
+
+    def retrieve(self, request, pk=None):
+        task = self._task(request, pk)
+        return Response(self._source(task))
+
+    @action(detail=True, methods=["get"], url_path="graph")
+    def graph(self, request, pk=None):
+        from .graph_client import CodeReviewGraphClient, GraphUnavailable
+
+        task = self._task(request, pk)
+        def csv(name):
+            return [value for value in request.query_params.get(name, "").split(",") if value]
+        try:
+            payload = CodeReviewGraphClient().browse(
+                task,
+                search=request.query_params.get("search", ""),
+                node_kinds=csv("node_kinds"),
+                edge_kinds=csv("edge_kinds"),
+                center=request.query_params.get("center", ""),
+                depth=request.query_params.get("depth", 1),
+                limit=request.query_params.get("limit", 120),
+            )
+        except (GraphUnavailable, ValueError) as exc:
+            return Response({"detail": f"图谱查询失败：{exc}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        payload["source"] = self._source(task)
+        return Response(payload)
+
+
 class AnalysisTaskViewSet(viewsets.ModelViewSet):
     serializer_class = AnalysisTaskSerializer
     permission_classes = [IsAuthenticated, HasModelPermission]
@@ -345,6 +464,12 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("无权删除该分析任务")
         task_id = task.pk
         _stop_analysis_task(task)
+        try:
+            from .graph_client import CodeReviewGraphClient
+            if CodeReviewGraphClient.enabled():
+                CodeReviewGraphClient().delete(task_id)
+        except Exception:
+            pass
         task.delete()
         remove_ocr_repository(task_id)
         return Response(status=status.HTTP_204_NO_CONTENT)

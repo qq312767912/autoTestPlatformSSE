@@ -2224,7 +2224,23 @@ class KnowledgeBaseService:
             logger.info(f"   🕐 总耗时: {total_time:.3f}s")
             logger.info(f"   📊 返回结果数: {len(search_results)}")
 
-            return {
+            evolution_ids = None
+            try:
+                from knowledge_evolution.services import record_knowledge_query
+                evolution_ids = record_knowledge_query(
+                    knowledge_base=self.knowledge_base,
+                    user=user,
+                    query=query_text,
+                    answer=answer,
+                    sources=search_results,
+                    retrieval_time=retrieval_time,
+                    generation_time=generation_time,
+                    total_time=total_time,
+                )
+            except Exception:
+                logger.exception("检索轨迹记录器不可用，不影响当前查询")
+
+            result = {
                 "query": query_text,
                 "answer": answer,
                 "sources": search_results,
@@ -2232,6 +2248,9 @@ class KnowledgeBaseService:
                 "generation_time": generation_time,
                 "total_time": total_time,
             }
+            if evolution_ids:
+                result["trace_id"], result["output_id"] = evolution_ids
+            return result
 
         except Exception as e:
             logger.error(f"知识库查询失败: {e}")

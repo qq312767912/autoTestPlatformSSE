@@ -379,6 +379,18 @@ class RecorderSessionManager:
         with self._lock:
             return [s for s in self._sessions.values() if s.user_id == user_id]
 
+    def has_active_kind(self, kind: str) -> bool:
+        """检查是否已有指定类型的存活会话。
+
+        有界面登录态录制共用同一个 Xvfb/noVNC 桌面，因此必须串行，
+        否则多个 Chromium 窗口会互相覆盖并导致保存错误的登录态。
+        """
+        with self._lock:
+            return any(
+                session.alive and getattr(self._metas.get(session_id), 'kind', None) == kind
+                for session_id, session in self._sessions.items()
+            )
+
     def close(self, session_id: str, graceful: bool = True) -> None:
         with self._lock:
             session = self._sessions.pop(session_id, None)

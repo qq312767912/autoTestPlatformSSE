@@ -1,20 +1,20 @@
 # WHartTest v2.8 内网 ARM64 增量升级包
 
-本包对应 `dev@ac65a6fbf0f0`，目标为麒麟 ARM64（64KB 页）离线环境。
+本包对应 `dev@b6613a398ece`，目标为麒麟 ARM64（64KB 页）离线环境。
 
 ## 包目录结构
 
 ```text
 update_platform_version/
 ├── deploy_env/       # 本 zip 解压后的脚本
-└── images/           # 6 个镜像分卷，不放入 zip
+└── images/           # Backend、Frontend、Semgrep、CRG 镜像分卷，不放入 zip
 ```
 
 请将 `deploy_env.zip` 与 `images/` 一起携带到内网。解压后保持上述同级目录结构。
 
 ## 可复用镜像
 
-本次不重新打包 PostgreSQL、Redis、Qdrant、Playwright MCP、Vision MCP、WHartTest MCP 和微信插件宿主。详见 `IMAGE_MANIFEST.txt`。
+本次不重新打包三个 Actuator、PostgreSQL、Redis、Qdrant、Playwright MCP、Vision MCP、WHartTest MCP、Host Sync 和微信插件宿主。详见 `IMAGE_MANIFEST.txt`。
 
 ## 升级步骤
 
@@ -28,11 +28,21 @@ bash 04-deploy.sh
 bash 05-verify.sh
 ```
 
+`04-deploy.sh` 不依赖可能因覆盖解压而丢失的 `.latest-backup` 标记，而是自动查找
+`backups/` 下当天最近一次带 `BACKUP_COMPLETE` 的完整备份。当天只需成功执行过一次
+`02-backup.sh` 即可重复部署；当天没有完整备份时才会阻断。
+
+恢复执行器时，`04-deploy.sh` 会调用 `07-start-actuators.sh`。如果执行器密码文件因覆盖
+部署包而丢失，脚本会优先从仍存在的旧执行器中恢复；无法恢复时只会在终端隐藏提示一次
+平台管理员当前登录密码，不再直接以缺失 secret 的状态并发重建三个执行器。
+
 `04-deploy.sh` 会自动生成独立的域名同步 Token，并安装
 `wharttest-host-sync.timer`。管理员在“系统管理 → 测试域名配置”
 发布映射后，宿主机、Backend/Recorder、Playwright MCP 和所有
 `wharttest-actuator-*` 执行器会在 30 秒内同步。宿主机 hosts 备份位于
 `/projects/ai-test-platform/backups/host-sync/`。
+若覆盖部署目录导致 `test_host_sync_token` 文件丢失，`30-install-host-sync.sh`
+会优先从正在运行的 Backend 容器恢复同一 Token，不会生成一个与 Backend 不匹配的新值。
 
 如果旧的执行器密钥文件与平台当前密码不一致，`07-start-actuators.sh`
 会在启动前拒绝继续。请在 `update_platform_version/` 目录执行独立修复脚本：
@@ -81,7 +91,21 @@ export BASE_COMPOSE=/实际路径/docker-compose.offline.yml
 - npm 全局安装 `@alibaba-group/open-code-review`
 - 内置 Alpine 系统 Chromium 和录制器 Node Playwright，运行时无需联网下载
 - Python 依赖为 `celery 5.4.0 + kombu 5.6.2 + redis-py 5.2.0`
-- Backend OCI revision 为 `ac65a6fb-v2.8-r3-kombu562`
+- Backend OCI revision 为 `b6613a39-v2.8-r5-code-review-backend-hostcfg1`
+
+本次新增独立 Alpine/musl Semgrep Scanner 容器。它无数据库、无数据卷、无外部端口，
+只通过 Docker 内网的 `http://semgrep-scanner:8080` 接收 Backend 的只读扫描请求。
+
+## Code Review Graph 隔离服务
+
+CRG 使用独立 Alpine/musl ARM64 镜像，不安装进 Backend。`04-deploy.sh`
+会自动生成 `secrets/crg_internal_token`，创建只读仓库根目录与 UID 10001
+可写的图谱目录，启动 `wharttest-crg` 后再启动 Backend。CRG 不暴露
+宿主机端口；任务浅仓库挂载为只读，图谱目录独立持久化。
+
+`05-verify.sh` 会校验 CRG 2.3.9、Alpine/musl、非 root 运行用户、图谱目录
+写权限和 Backend→CRG 内网连通性。回退时只停止 CRG 容器，保留
+`data/code-review-graphs` 便于排查或重新升级。
 
 ## 备份与回滚
 

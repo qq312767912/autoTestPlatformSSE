@@ -1,6 +1,6 @@
 from rest_framework.routers import DefaultRouter
 
-from .views import AnalysisTaskViewSet, CodeAnalysisLLMConfigViewSet, CredentialViewSet, GitLabConnectionViewSet, ProjectRepositoryViewSet, TestRequirementDraftViewSet
+from .views import AnalysisTaskViewSet, CodeAnalysisLLMConfigViewSet, CredentialViewSet, GitLabConnectionViewSet, KnowledgeGraphSourceViewSet, ProjectRepositoryViewSet, TestRequirementDraftViewSet
 
 router = DefaultRouter()
 router.register("connections", GitLabConnectionViewSet, basename="code-analysis-connections")
@@ -9,4 +9,5 @@ router.register("repositories", ProjectRepositoryViewSet, basename="code-analysi
 router.register("credentials", CredentialViewSet, basename="code-analysis-credentials")
 router.register("tasks", AnalysisTaskViewSet, basename="code-analysis-tasks")
 router.register("test-requirements", TestRequirementDraftViewSet, basename="code-analysis-test-requirements")
+router.register("graph-sources", KnowledgeGraphSourceViewSet, basename="knowledge-graph-sources")
 urlpatterns = router.urls

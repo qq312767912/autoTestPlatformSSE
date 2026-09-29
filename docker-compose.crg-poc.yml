@@ -1,0 +1,31 @@
+services:
+  backend:
+    # Keep the currently verified local backend image; this PoC overlays only
+    # the CRG integration files and never rebuilds the main backend image.
+    image: ${CRG_POC_BACKEND_IMAGE:-wharttest-250-backend:local-semgrep-verify}
+    volumes:
+      - ./WHartTest_Django/code_analysis/graph_client.py:/app/code_analysis/graph_client.py:ro
+      - ./WHartTest_Django/code_analysis/review_mcp.py:/app/code_analysis/review_mcp.py:ro
+      - ./WHartTest_Django/code_analysis/serializers.py:/app/code_analysis/serializers.py:ro
+      - ./WHartTest_Django/code_analysis/services.py:/app/code_analysis/services.py:ro
+      - ./WHartTest_Django/code_analysis/urls.py:/app/code_analysis/urls.py:ro
+      - ./WHartTest_Django/code_analysis/views.py:/app/code_analysis/views.py:ro
+      - ./WHartTest_Django/code_analysis/test_graph_integration.py:/app/code_analysis/test_graph_integration.py:ro
+      - ./WHartTest_Django/code_analysis/test_graph_workbench.py:/app/code_analysis/test_graph_workbench.py:ro
+      # Phase 0 knowledge flywheel overlay: observability only, no ranking changes.
+      - ./WHartTest_Django/knowledge_evolution:/app/knowledge_evolution:ro
+      - ./WHartTest_Django/knowledge/services.py:/app/knowledge/services.py:ro
+      - ./WHartTest_Django/knowledge/serializers.py:/app/knowledge/serializers.py:ro
+      - ./WHartTest_Django/orchestrator_integration/agent_loop_view.py:/app/orchestrator_integration/agent_loop_view.py:ro
+      - ./WHartTest_Django/testcases/serializers.py:/app/testcases/serializers.py:ro
+      - ./WHartTest_Django/testcases/tasks.py:/app/testcases/tasks.py:ro
+      - ./WHartTest_Django/wharttest_django/settings.py:/app/wharttest_django/settings.py:ro
+      - ./WHartTest_Django/wharttest_django/urls.py:/app/wharttest_django/urls.py:ro
+      - ${CRG_JAVA_REPOSITORY_PATH:-/Users/chenxin42/Desktop/code/压测工具/baidu-rpc}:/workspace/external/baidu-rpc:ro
+    environment:
+      - CODE_REVIEW_GRAPH_URL=http://crg-service:8080
+      - CODE_REVIEW_GRAPH_TOKEN=${CRG_INTERNAL_TOKEN:-change-this-crg-token}
+      - CODE_REVIEW_GRAPH_ENABLED=${CODE_REVIEW_GRAPH_ENABLED:-true}
+    depends_on:
+      crg-service:
+        condition: service_healthy

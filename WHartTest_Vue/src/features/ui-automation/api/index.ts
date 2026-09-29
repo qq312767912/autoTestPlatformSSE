@@ -340,6 +340,8 @@ export interface RecorderSessionInfo {
   session_id: string
   viewport: { width: number; height: number }
   base_url: string
+  /** 有界面登录态录制器地址；缺省时回退到 Canvas 帧流 */
+  desktop_url?: string
   page_id: number
   page_step_id: number
   pre_executed?: number

@@ -37,6 +37,20 @@ if [ ! -e "$secret_file" ]; then
   chmod 600 "$secret_file"
 fi
 
+# CRG 的内部 Token 需在 Compose 预检时就存在；后续部署复用同一文件。
+crg_token_file="$secret_dir/crg_internal_token"
+if [ ! -s "$crg_token_file" ]; then
+  umask 077
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32 > "$crg_token_file"
+  else
+    python3 -c 'import secrets; print(secrets.token_hex(32))' > "$crg_token_file"
+  fi
+fi
+chmod 600 "$crg_token_file"
+CRG_INTERNAL_TOKEN="$(cat "$crg_token_file")"
+export CRG_INTERNAL_TOKEN
+
 for container in wharttest-backend wharttest-frontend wharttest-postgres wharttest-redis wharttest-qdrant wharttest-mcp wharttest-playwright-mcp; do
   docker inspect "$container" >/dev/null 2>&1 || fail "缺少当前容器：$container"
   running="$(docker inspect "$container" --format '{{.State.Running}}')"

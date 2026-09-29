@@ -9,7 +9,15 @@
   >
     <div class="auth-capture-live">
       <div ref="canvasWrapRef" class="auth-capture-canvas-wrap">
+        <iframe
+          v-if="desktopUrl"
+          class="auth-capture-desktop"
+          :src="desktopUrl"
+          title="Login state desktop"
+          allow="clipboard-read; clipboard-write"
+        />
         <canvas
+          v-else
           ref="canvasRef"
           class="auth-capture-canvas"
           :style="canvasStyle"
@@ -127,6 +135,7 @@ const sessionId = ref('')
 const saving = ref(false)
 const nameVisible = ref(false)
 const authName = ref('')
+const desktopUrl = ref('')
 
 const canvasStyle = computed(() => ({
   aspectRatio: `${viewport.width} / ${viewport.height}`,
@@ -318,21 +327,29 @@ function unbindCanvasListeners() {
 async function startCapture() {
   if (!props.env) return
   sessionId.value = ''
+  desktopUrl.value = ''
   hasFrame.value = false
   try {
     await uiWebSocket.connect()
-    const info = extractResponseData<{ session_id: string; viewport?: { width: number; height: number } } | null>(
+    const info = extractResponseData<{
+      session_id: string
+      viewport?: { width: number; height: number }
+      desktop_url?: string
+    } | null>(
       await recorderApi.authCapture(props.env.id),
     )
     if (!info) throw new Error(text.value.startFailed)
     sessionId.value = info.session_id
+    desktopUrl.value = info.desktop_url || ''
     if (info.viewport?.width && info.viewport?.height) {
       viewport.width = info.viewport.width
       viewport.height = info.viewport.height
     }
     uiWebSocket.recorderStart(info.session_id)
-    bindCanvasListeners()
-    nextTick(fitCanvas)
+    if (!desktopUrl.value) {
+      bindCanvasListeners()
+      nextTick(fitCanvas)
+    }
   } catch (e: any) {
     Message.error(e?.detail || e?.error || e?.message || text.value.startFailed)
     emit('update:visible', false)
@@ -349,6 +366,7 @@ async function handleClose() {
       // 忽略关闭失败（会话可能已结束）
     }
     sessionId.value = ''
+    desktopUrl.value = ''
   }
   emit('update:visible', false)
 }
@@ -443,6 +461,14 @@ onUnmounted(() => {
   max-width: 100%;
   max-height: 100%;
   cursor: crosshair;
+}
+
+.auth-capture-desktop {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #111827;
 }
 
 .auth-capture-ime-input {

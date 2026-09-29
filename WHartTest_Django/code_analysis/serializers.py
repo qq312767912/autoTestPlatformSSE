@@ -130,6 +130,8 @@ class AnalysisTaskSerializer(serializers.ModelSerializer):
     creator_name = serializers.CharField(source="creator.username", read_only=True)
     executor_name = serializers.CharField(source="executor.username", read_only=True, default=None)
     test_requirement_drafts = TestRequirementDraftSerializer(many=True, read_only=True)
+    trace_id = serializers.SerializerMethodField()
+    output_id = serializers.SerializerMethodField()
     class Meta:
         model = AnalysisTask
         exclude = ["raw_diff"]
@@ -149,6 +151,12 @@ class AnalysisTaskSerializer(serializers.ModelSerializer):
         ]
         data["test_report"] = report
         return data
+
+    def get_trace_id(self, obj):
+        return (obj.change_report or {}).get("evolution", {}).get("trace_id")
+
+    def get_output_id(self, obj):
+        return (obj.change_report or {}).get("evolution", {}).get("output_id")
 
     def validate(self, data):
         repository, project = data.get("repository"), data.get("project")

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BACKEND_IMAGE='wharttest-250-backend:update-ac65a6fb-v2.8-r3-kombu562-arm64'
-FRONTEND_IMAGE='wharttest-250-frontend:update-ac65a6fb-v2.8-r1-arm64'
+BACKEND_IMAGE='wharttest-250-backend:update-b6613a39-v2.8-r5-code-review-backend-hostcfg1-arm64'
+FRONTEND_IMAGE='wharttest-250-frontend:update-b6613a39-v2.8-r5-code-review-arm64'
+SEMGREP_IMAGE='wharttest-250-semgrep:update-b6613a39-v2.8-r5-code-review-semgrep-musl1-arm64'
+CRG_IMAGE='wharttest-250-crg:update-b6613a39-v2.8-r5-code-review-crg1-arm64'
 ACTUATOR_IMAGE='wharttest-250-actuator:update-ac65a6fb-v2.8-r3-auth-failfast-arm64'
-REVISION='ac65a6fb-v2.8-r3-kombu562'
+REVISION='b6613a39-v2.8-r5-code-review-backend-hostcfg1'
 
 fail() { echo "[失败] $*" >&2; exit 1; }
 ok() { echo "[通过] $*"; }
@@ -22,6 +24,11 @@ verify_container() {
 
 verify_container wharttest-backend "$BACKEND_IMAGE"
 verify_container wharttest-frontend "$FRONTEND_IMAGE"
+verify_container wharttest-semgrep "$SEMGREP_IMAGE"
+verify_container wharttest-crg "$CRG_IMAGE"
+
+crg_revision="$(docker image inspect "$CRG_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+[ "$crg_revision" = "b6613a39-v2.8-r5-code-review-crg1" ] || fail "CRG revision=$crg_revision，期望 b6613a39-v2.8-r5-code-review-crg1"
 
 for index in 01 02 03; do
   verify_container "wharttest-actuator-$index" "$ACTUATOR_IMAGE"
@@ -47,6 +54,39 @@ docker exec wharttest-backend /bin/sh -c '
   python -c "import celery,kombu,redis; assert (celery.__version__,kombu.__version__,redis.__version__) == (\"5.4.0\",\"5.6.2\",\"5.2.0\")"
 '
 ok 'Backend Alpine/musl、OpenCodeReview/ocr CLI、录制器 Chromium/Playwright 与 Celery solo worker'
+
+semgrep_revision="$(docker image inspect "$SEMGREP_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+[ "$semgrep_revision" = "b6613a39-v2.8-r5-code-review-semgrep-musl1" ] || fail "Semgrep revision=$semgrep_revision，期望 b6613a39-v2.8-r5-code-review-semgrep-musl1"
+docker exec wharttest-semgrep /bin/sh -c '
+  grep -q "Alpine Linux" /etc/os-release
+  ldd --version 2>&1 | grep -qi musl
+  semgrep --version >/dev/null
+'
+ok 'Semgrep Scanner 为 Alpine/musl ARM64 运行时'
+docker exec wharttest-backend /opt/venv/bin/python -c '
+import os, requests
+url = os.environ["SEMGREP_SCANNER_URL"].rstrip("/")
+health = requests.get(url + "/health", timeout=10).json()
+assert health.get("status") == "ok" and health.get("semgrep") is True, health
+'
+ok 'Backend 到独立 Semgrep Scanner 的内部连接'
+
+docker exec wharttest-crg /bin/sh -c '
+  set -e
+  grep -q "Alpine Linux" /etc/os-release
+  ldd --version 2>&1 | grep -qi musl
+  test "$(id -u)" = "10001"
+  code-review-graph --version | grep -q "2.3.9"
+  test -w /graphs
+'
+docker exec wharttest-backend /opt/venv/bin/python -c '
+import os, requests
+url = os.environ["CODE_REVIEW_GRAPH_URL"].rstrip("/")
+health = requests.get(url + "/health", timeout=10).json()
+assert health.get("status") == "ok" and health.get("crg_version") == "2.3.9", health
+assert health.get("writable_graph_root") is True, health
+'
+ok 'CRG Alpine/musl ARM64、非 root、图谱目录可写且 Backend 内网可达'
 
 docker exec wharttest-backend getent hosts www.test.sse.com.cn >/dev/null
 docker exec wharttest-backend /opt/venv/bin/python -c '

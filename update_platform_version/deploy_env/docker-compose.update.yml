@@ -37,8 +37,23 @@ x-actuator-common: &actuator-common
 
 # 与内网当前 docker-compose.offline.yml 叠加使用，覆盖升级服务并新增三个执行器。
 services:
+  crg-service:
+    image: ${CRG_IMAGE:-wharttest-250-crg:update-b6613a39-v2.8-r5-code-review-crg1-arm64}
+    pull_policy: never
+    container_name: wharttest-crg
+    restart: unless-stopped
+    environment:
+      CRG_INTERNAL_TOKEN: ${CRG_INTERNAL_TOKEN:?CRG_INTERNAL_TOKEN must be set by 04-deploy.sh}
+      CRG_BUILD_TIMEOUT: ${CRG_BUILD_TIMEOUT:-600}
+      CRG_QUERY_TIMEOUT: ${CRG_QUERY_TIMEOUT:-120}
+    volumes:
+      - /projects/ai-test-platform/offline-images/data/code-analysis-repositories:/repositories:ro
+      - /projects/ai-test-platform/offline-images/data/code-review-graphs:/graphs
+    networks:
+      - wharttest-network
+
   semgrep-scanner:
-    image: ${SEMGREP_SCANNER_IMAGE:-wharttest-250-semgrep:latest}
+    image: ${SEMGREP_SCANNER_IMAGE:-wharttest-250-semgrep:update-b6613a39-v2.8-r5-code-review-semgrep-musl1-arm64}
     pull_policy: never
     container_name: wharttest-semgrep
     networks:
@@ -46,7 +61,7 @@ services:
     restart: unless-stopped
 
   backend:
-    image: wharttest-250-backend:update-ac65a6fb-v2.8-r3-kombu562-arm64
+    image: wharttest-250-backend:update-b6613a39-v2.8-r5-code-review-backend-hostcfg1-arm64
     # 录制浏览器/本地虚拟执行器运行在 Backend 容器内，与独立 Actuator
     # 一样需要内网 SSE 域名映射，否则 page.goto 会报 ERR_NAME_NOT_RESOLVED。
     extra_hosts:
@@ -67,6 +82,9 @@ services:
       - test_host_sync_token
     environment:
       TEST_HOST_SYNC_TOKEN_FILE: /run/secrets/test_host_sync_token
+      RECORDER_DESKTOP_ENABLED: "true"
+      RECORDER_DESKTOP_DISPLAY: ":99"
+      RECORDER_DESKTOP_PUBLIC_URL: "/novnc/vnc.html?autoconnect=1&resize=scale&reconnect=1&show_dot=1"
       # 内网 Redis 当前未启用 AUTH。基础 Compose 若残留 REDIS_PASSWORD 拼接，
       # Celery 会显示 redis://:**@redis:6379/0，连接重试约 20 秒后退出。
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -88,12 +106,17 @@ services:
       VISION_MCP_TIMEOUT_SECONDS: ${VISION_MCP_TIMEOUT_SECONDS:-120}
       # Semgrep 独立扫描器，避免污染 Backend 的 Alpine/musl 运行时。
       SEMGREP_SCANNER_URL: http://semgrep-scanner:8080
+      CODE_REVIEW_GRAPH_URL: http://crg-service:8080
+      CODE_REVIEW_GRAPH_TOKEN: ${CRG_INTERNAL_TOKEN:?CRG_INTERNAL_TOKEN must be set by 04-deploy.sh}
+      CODE_REVIEW_GRAPH_ENABLED: ${CODE_REVIEW_GRAPH_ENABLED:-true}
     depends_on:
       semgrep-scanner:
         condition: service_healthy
+      crg-service:
+        condition: service_healthy
 
   frontend:
-    image: wharttest-250-frontend:update-ac65a6fb-v2.8-r1-arm64
+    image: wharttest-250-frontend:update-b6613a39-v2.8-r5-code-review-arm64
     # 与后端共享持久化媒体目录，确保 Skill 生成的交付物可由 Nginx 下载。
     volumes:
       - /projects/ai-test-platform/offline-images/data/media:/app/data/media:ro

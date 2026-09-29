@@ -54,6 +54,24 @@ class ManagedBlockTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"HOST_SYNC_APPLY_HOST": "false"}, clear=False):
             self.assertFalse(MODULE.HostSyncAgent().apply_host_enabled)
 
+    def test_apply_host_falls_back_when_atomic_replace_hits_mount_point(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hosts = root / "hosts"
+            hosts.write_text("127.0.0.1 localhost\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {
+                "HOST_SYNC_HOSTS_FILE": str(hosts),
+                "HOST_SYNC_BACKUP_ROOT": str(root / "backups"),
+                "HOST_SYNC_STATE_FILE": str(root / "state.json"),
+            }, clear=False):
+                agent = MODULE.HostSyncAgent()
+                busy = OSError(16, "Device or resource busy")
+                with mock.patch.object(MODULE.os, "replace", side_effect=busy):
+                    changed = agent.apply_host("# BEGIN WHARTTEST MANAGED HOSTS\n10.0.0.3\ta.example.com\n# END WHARTTEST MANAGED HOSTS\n")
+            self.assertTrue(changed)
+            self.assertIn("10.0.0.3\ta.example.com", hosts.read_text(encoding="utf-8"))
+            self.assertEqual(len(list((root / "backups").glob("*/hosts"))), 1)
+
     def test_discovers_required_private_cloud_containers(self):
         running = "\n".join([
             "wharttest-backend",

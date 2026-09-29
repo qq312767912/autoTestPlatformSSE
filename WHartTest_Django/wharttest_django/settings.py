@@ -128,6 +128,7 @@ INSTALLED_APPS = [
     "mcp_tools",  # MCP 工具应用。
     "api_keys",  # API Key 管理应用。
     "knowledge",  # 知识库应用。
+    "knowledge_evolution",  # 知识数据飞轮与测评。
     "prompts",  # 提示词管理应用。
     "requirements",  # 需求评审应用。
     "orchestrator_integration",  # 智能编排应用。
@@ -466,7 +467,7 @@ SIMPLE_JWT = {
 }
 
 # 日志输出目录
-LOGS_DIR = BASE_DIR / "data" / "logs"
+LOGS_DIR = Path(os.getenv("WHARTTEST_LOGS_DIR", str(BASE_DIR / "data" / "logs")))
 # 自动创建日志目录。
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 

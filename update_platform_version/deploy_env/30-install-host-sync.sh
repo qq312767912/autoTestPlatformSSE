@@ -14,9 +14,21 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 if [[ ! -s "$TOKEN_SOURCE" ]]; then
-  echo "缺少同步密钥: $TOKEN_SOURCE" >&2
-  echo "可执行: openssl rand -hex 32 > '$TOKEN_SOURCE' && chmod 600 '$TOKEN_SOURCE'" >&2
-  exit 1
+  echo "部署目录中的同步密钥缺失，尝试从正在运行的 Backend 恢复..."
+  install -d -m 0700 "$(dirname "$TOKEN_SOURCE")"
+  token_tmp="$(mktemp)"
+  trap 'rm -f "$token_tmp"' EXIT
+  if docker exec wharttest-backend test -s /run/secrets/test_host_sync_token >/dev/null 2>&1 && \
+     docker exec wharttest-backend cat /run/secrets/test_host_sync_token > "$token_tmp" && \
+     [[ -s "$token_tmp" ]]; then
+    install -m 0600 "$token_tmp" "$TOKEN_SOURCE"
+    echo "已从 Backend 恢复同步密钥（内容不会输出）。"
+  else
+    echo "无法从 Backend 恢复同步密钥。请先运行 04-deploy.sh，使 Backend 与新 Token 一起重建。" >&2
+    exit 1
+  fi
+  rm -f "$token_tmp"
+  trap - EXIT
 fi
 
 install -d -m 0755 "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR" "$BACKUP_DIR"
@@ -33,5 +45,10 @@ install -m 0644 "$SOURCE_DIR/wharttest-host-sync.service" /etc/systemd/system/wh
 install -m 0644 "$SOURCE_DIR/wharttest-host-sync.timer" /etc/systemd/system/wharttest-host-sync.timer
 systemctl daemon-reload
 systemctl enable --now wharttest-host-sync.timer
-systemctl start wharttest-host-sync.service
+if ! systemctl start wharttest-host-sync.service; then
+  echo "宿主机域名同步首次执行失败，诊断信息如下：" >&2
+  systemctl --no-pager --full status wharttest-host-sync.service >&2 || true
+  journalctl -u wharttest-host-sync.service -n 100 --no-pager >&2 || true
+  exit 1
+fi
 systemctl --no-pager --full status wharttest-host-sync.service || true

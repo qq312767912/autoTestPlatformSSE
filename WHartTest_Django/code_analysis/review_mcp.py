@@ -137,13 +137,47 @@ class CodeReviewMCP:
                 "ast_chunks": chunks, "related_code": list(dict.fromkeys(related))[:20],
                 "source": source[:6000] if not chunks else "",
             })
-        return {"parser": "tree-sitter" if "tree-sitter" in engines else "fallback", "items": items}
+        graph_context = {"status": "skipped", "diagnostics": {"degraded_reason": "CRG 未启用"}}
+        try:
+            from .graph_client import CodeReviewGraphClient
+            if CodeReviewGraphClient.enabled() and self.task.mode == "standard":
+                graph = CodeReviewGraphClient()
+                prepared = graph.prepare(self.task)
+                graph_context = graph.collect_context(
+                    self.task, [item.get("path") for item in diffs],
+                )
+                graph_context.setdefault("diagnostics", {})
+                graph_context["diagnostics"].update({
+                    "prepare_ms": prepared.get("duration_ms", 0),
+                    "query_ms": graph_context.get("duration_ms", 0),
+                    "crg_version": graph_context.get("crg_version") or prepared.get("crg_version"),
+                    "parse_status": prepared.get("parse_status"),
+                    "node_count": (prepared.get("stats") or {}).get("nodes", 0),
+                    "edge_count": (prepared.get("stats") or {}).get("edges", 0),
+                    "degraded_reason": "",
+                })
+            elif CodeReviewGraphClient.enabled():
+                graph_context = {
+                    "status": "skipped",
+                    "diagnostics": {"degraded_reason": "PoC 首期仅对标准模式启用 CRG"},
+                }
+        except Exception as exc:
+            graph_context = {
+                "status": "unavailable",
+                "diagnostics": {"degraded_reason": str(exc)[:1000]},
+            }
+        return {
+            "parser": "tree-sitter" if "tree-sitter" in engines else "fallback",
+            "items": items,
+            "graph_context": graph_context,
+        }
 
     @contextmanager
     def _repository_root(self):
         if self.task.repository.source_type == "local_git":
-            from .services import LocalGitClient
-            yield LocalGitClient(self.task.repository.local_path).path
+            from .services import _managed_local_repository
+            with _managed_local_repository(self.task) as prepared:
+                yield prepared[0]
             return
         from .services import _managed_gitlab_repository
         with _managed_gitlab_repository(self.task) as prepared:

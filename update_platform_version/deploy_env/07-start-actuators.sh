@@ -34,9 +34,19 @@ mkdir -p "$SECRET_DIR"
 chmod 700 "$SECRET_DIR"
 
 if [ ! -s "$SECRET_FILE" ]; then
-  echo "执行器密钥文件缺失，优先从现有执行器恢复..."
+  echo "执行器密钥文件缺失，优先从当天备份或现有执行器恢复..."
   recovered=false
+  today="$(date '+%Y%m%d')"
+  for candidate in "$PACKAGE_DIR/backups/$today-"*/deploy-secrets/actuator_api_password; do
+    if [ -s "$candidate" ]; then
+      cp "$candidate" "$SECRET_FILE"
+      chmod 600 "$SECRET_FILE"
+      recovered=true
+      echo "已从当天备份恢复执行器密钥（内容不会输出）。"
+    fi
+  done
   for candidate in wharttest-actuator-01 wharttest-actuator-02 wharttest-actuator-03; do
+    [ "$recovered" = false ] || break
     if docker exec "$candidate" test -s /run/secrets/actuator_api_password >/dev/null 2>&1; then
       docker exec "$candidate" cat /run/secrets/actuator_api_password > "$SECRET_FILE"
       chmod 600 "$SECRET_FILE"

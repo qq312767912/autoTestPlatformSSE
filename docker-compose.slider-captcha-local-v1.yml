@@ -1,0 +1,7 @@
+# 本地 A/B 验证：禁用录制器的页面动画冻结注入。
+# 滑块验证码依赖 requestAnimationFrame/动画时钟和轨迹采样，修改这些行为
+# 可能导致服务端验证失败。该覆盖只影响 Backend 内的录制/登录态采集浏览器。
+services:
+  backend:
+    environment:
+      RECORDER_FREEZE_ANIMATION: "false"

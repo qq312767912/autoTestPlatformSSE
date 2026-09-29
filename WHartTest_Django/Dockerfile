@@ -133,6 +133,11 @@ RUN if [ "$APT_BASE_URL" != "http://deb.debian.org" ]; then \
     git \
     nodejs \
     npm \
+    xvfb \
+    x11vnc \
+    openbox \
+    novnc \
+    websockify \
     # fastembed/onnxruntime 所需的 OpenMP 依赖
     libgomp1 \
     # Playwright 所需的系统依赖
@@ -170,6 +175,8 @@ COPY --from=builder /opt/venv /opt/venv
 
 # 复制第三方许可证声明文件（用于对外分发合规）
 COPY THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
+COPY docker/start-recorder-desktop.sh /app/docker/start-recorder-desktop.sh
+RUN chmod +x /app/docker/start-recorder-desktop.sh
 
 # 安装 Playwright 浏览器（Chromium）—— 镜像源失败时自动回退官方源
 RUN set -eux; \
@@ -261,6 +268,7 @@ COPY code_analysis/ /app/code_analysis/
 COPY httprunner/ /app/httprunner/
 COPY file_management/ /app/file_management/
 COPY knowledge/ /app/knowledge/
+COPY knowledge_evolution/ /app/knowledge_evolution/
 COPY langgraph_integration/ /app/langgraph_integration/
 COPY mcp_tools/ /app/mcp_tools/
 COPY operation_logs/ /app/operation_logs/
@@ -290,7 +298,7 @@ RUN find /app -type f \( -name "*.sqlite*" -o -name "*.db" -o -name "*.sql" \) -
 RUN mkdir -p media static nltk_data /app/data/logs /app/data/run
 
 # 暴露端口
-EXPOSE 8000
+EXPOSE 8000 6080
 
 # 设置启动脚本为入口点
 ENTRYPOINT ["/app/entrypoint.sh"]

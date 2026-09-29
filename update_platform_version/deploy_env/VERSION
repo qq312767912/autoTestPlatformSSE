@@ -1,8 +1,11 @@
-release=update-ac65a6fb-v2.8-r3-kombu562-arm64-actuator-r3-auth-failfast
-git_commit=ac65a6fbf0f0
+release=update-b6613a39-v2.8-r5-code-review-arm64
+git_commit=b6613a398ece
 upstream_version=v2.8.0
 platform=linux/arm64
 libc=musl
 actuator_revision=ac65a6fb-v2.8-r3-auth-failfast
-backend_revision=ac65a6fb-v2.8-r3-kombu562
-build_date=2026-09-23
+backend_revision=b6613a39-v2.8-r5-code-review-backend-hostcfg1
+frontend_revision=b6613a39-v2.8-r5-code-review
+semgrep_revision=b6613a39-v2.8-r5-code-review-semgrep-musl1
+crg_revision=b6613a39-v2.8-r5-code-review-crg1
+build_date=2026-09-29

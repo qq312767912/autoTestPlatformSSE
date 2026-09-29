@@ -126,11 +126,17 @@
           </div>
           <div v-for="item in filteredFindings" :key="item.key" class="finding">
             <div class="finding-head"><div><a-tag :color="severityColor(item.severity)">{{ severityLabel(item.severity) }}</a-tag><strong>{{ item.change }}</strong></div><span class="confidence">{{ sourceName(item.source) }} · {{ item.verified === false ? '待人工确认' : confidenceText(item.confidence) }}</span></div>
+            <div class="verification-strip">
+              <a-tag :color="verificationColor(item)">{{ verificationLabel(item) }}</a-tag>
+              <span>目标 Commit {{ item.target_commit_verified === false ? '未完成验证' : '已核验' }}</span>
+              <span>触发路径 {{ item.trigger_reachable === false ? '未证明可达' : '已证明/待确认' }}</span>
+            </div>
             <p>{{ item.file }} <a-tag class="risk-type" color="gray">{{ riskType(item) }}</a-tag></p>
             <div class="code-snippet"><div class="snippet-caption"><span>风险凭据</span><small>{{ item.line_start ? `旧版本第 ${item.line_start} 行` : '未定位源码行' }}</small></div><div v-for="(line, index) in evidenceLines(item)" :key="index" class="snippet-line"><span>{{ item.line_start ? item.line_start + index : '—' }}</span><code>{{ line || ' ' }}</code></div></div>
             <div class="finding-detail"><b>影响：</b><span>{{ item.impact || '需结合代码上下文和完整 Diff 确认实际影响范围' }}</span></div>
             <div v-if="item.verification_reason" class="finding-detail"><b>核验结论：</b><span>{{ item.verification_reason }}</span></div>
-            <div v-if="item.disposition === 'needs_confirmation' && item.counter_evidence" class="finding-detail"><b>待确认依据：</b><span>{{ item.counter_evidence }}</span></div>
+            <div v-if="evidenceList(item.supporting_evidence).length" class="verification-evidence supporting"><b>支持证据</b><ul><li v-for="evidence in evidenceList(item.supporting_evidence)" :key="evidence">{{ evidence }}</li></ul></div>
+            <div v-if="evidenceList(item.counter_evidence).length" class="verification-evidence counter"><b>反证/保护逻辑</b><ul><li v-for="evidence in evidenceList(item.counter_evidence)" :key="evidence">{{ evidence }}</li></ul></div>
             <div class="finding-detail"><b>建议：</b><span>{{ item.recommendation || '覆盖相关正常流程、异常分支及调用链后再决定是否修复' }}</span></div>
             <div v-if="selectedTask.mode === 'standard' && item.severity === 'high' && item.disposition === 'confirmed'" class="inline-fix">
               <div><b>建议修复</b><a-tag size="small" :color="item.patch_status === 'applicable' ? 'green' : 'gray'">{{ item.patch_status === 'applicable' ? '已通过补丁校验' : '仅供参考' }}</a-tag></div>
@@ -145,6 +151,24 @@
           </div>
           <a-empty v-if="selectedTask.change_report?.findings?.length && !filteredFindings.length" description="没有符合筛选条件的风险" />
           <a-empty v-if="!selectedTask.change_report?.findings?.length" description="未发现确定性风险" />
+        </a-tab-pane>
+        <a-tab-pane key="impact" title="影响分析">
+          <div class="report-toolbar"><div><h3>图谱影响链</h3><p>仅扩展审查上下文，不缩减完整 Diff 覆盖</p></div><a-tag :color="graphStatusColor">{{ graphStatusLabel }}</a-tag></div>
+          <a-alert v-if="graphContext?.diagnostics?.degraded_reason" type="warning" class="graph-alert">图谱已降级：{{ graphContext.diagnostics.degraded_reason }}</a-alert>
+          <div class="graph-console">
+            <aside>
+              <span v-for="metric in graphMetrics" :key="metric.label"><small>{{ metric.label }}</small><b>{{ metric.value }}</b></span>
+            </aside>
+            <section>
+              <div class="graph-meta"><span>Commit <code>{{ shortSha(graphContext?.graph_commit || selectedTask.head_sha) }}</code></span><span>建图 {{ durationText(graphContext?.diagnostics?.prepare_ms) }}</span><span>查询 {{ durationText(graphContext?.duration_ms || graphContext?.diagnostics?.query_ms) }}</span><span>映射 {{ graphContext?.coverage?.mapped_changed_files || 0 }}/{{ graphContext?.coverage?.requested_changed_files || 0 }} 文件</span></div>
+              <a-collapse :bordered="false" class="impact-chains">
+                <a-collapse-item v-for="group in graphGroups" :key="group.key" :header="`${group.label}（${group.items.length}）`">
+                  <div v-if="group.items.length" class="impact-chain-list"><article v-for="(entity,index) in group.items" :key="`${group.key}-${index}-${entityTitle(entity)}`"><b>{{ entityTitle(entity) }}</b><code v-if="entityPath(entity)">{{ entityPath(entity) }}</code><small v-if="entity.kind || entity.coverage">{{ entity.kind || entity.coverage }}</small></article></div>
+                  <a-empty v-else description="本次未识别到相关节点" />
+                </a-collapse-item>
+              </a-collapse>
+            </section>
+          </div>
         </a-tab-pane>
         <a-tab-pane key="test" title="测试分析报告">
           <div class="report-toolbar"><div><h3>需求测试点与风险点</h3><p>需求测试点仍为草稿，确认后再转正式用例</p></div><a-dropdown trigger="click" @select="download(selectedTask, 'test', $event)"><a-button type="outline"><template #icon><icon-download /></template>下载报告<icon-down class="download-arrow" /></a-button><template #content><a-doption value="md">Markdown 文档（.md）</a-doption><a-doption value="html">前端样式网页（.html）</a-doption></template></a-dropdown></div>
@@ -321,7 +345,7 @@ import { Message, Modal } from '@arco-design/web-vue';
 import { IconDelete, IconDown, IconDownload, IconFile, IconPlus, IconQuestionCircle, IconRefresh, IconSettings } from '@arco-design/web-vue/es/icon';
 import { useProjectStore } from '@/store/projectStore';
 import { useAuthStore } from '@/store/authStore';
-import type { AnalysisExecutionLog, AnalysisTask, CodeRepository, Finding, GitLabConnection, MergeRequest, RepositoryCommit } from './types';
+import type { AnalysisExecutionLog, AnalysisTask, CodeRepository, Finding, GitLabConnection, GraphEntity, MergeRequest, RepositoryCommit } from './types';
 import * as api from './service';
 import { downloadHtmlReport } from './reportExport';
 import { KnowledgeService } from '@/features/knowledge/services/knowledgeService';
@@ -386,6 +410,34 @@ const riskType = (item:any) => {
 };
 const availableRiskTypes = computed(() => Array.from(new Set((selectedTask.value?.change_report?.findings || []).map(riskType))).sort());
 const filteredFindings = computed(() => (selectedTask.value?.change_report?.findings || []).filter(item => (!riskSeverityFilter.value || item.severity === riskSeverityFilter.value) && (!riskTypeFilter.value || riskType(item) === riskTypeFilter.value)).slice().sort((a,b) => (severityOrder[a.severity] ?? 9) - (severityOrder[b.severity] ?? 9)));
+const graphContext = computed(() => selectedTask.value?.change_report?.graph_context);
+const graphStatusLabel = computed(() => ({completed:'图谱已就绪',unavailable:'图谱降级',skipped:'未启用图谱'} as Record<string,string>)[graphContext.value?.status || ''] || '无图谱数据');
+const graphStatusColor = computed(() => graphContext.value?.status === 'completed' ? 'green' : (graphContext.value?.status === 'unavailable' ? 'orange' : 'gray'));
+const graphMetrics = computed(() => {
+  const counts = graphContext.value?.counts || {};
+  return [
+    {label:'变更符号',value:counts.changed_symbols || 0}, {label:'影响文件',value:counts.affected_files || 0},
+    {label:'调用关系',value:counts.callers || 0}, {label:'相关测试',value:counts.related_tests || 0},
+    {label:'影响流程',value:counts.affected_flows || 0}, {label:'测试缺口',value:counts.test_gaps || 0},
+  ];
+});
+const graphGroups = computed<Array<{key:string;label:string;items:GraphEntity[]}>>(() => {
+  const preview = graphContext.value?.preview || {};
+  return [
+    {key:'changed_symbols',label:'变更符号',items:preview.changed_symbols || []},
+    {key:'affected_files',label:'影响文件',items:(preview.affected_files || []).map(file => ({file_path:file} as GraphEntity))},
+    {key:'callers',label:'调用方与导入关系',items:preview.callers || []},
+    {key:'affected_flows',label:'受影响流程',items:preview.affected_flows || []},
+    {key:'related_tests',label:'已有测试',items:preview.related_tests || []},
+    {key:'test_gaps',label:'测试缺口',items:preview.test_gaps || []},
+  ];
+});
+const entityTitle = (entity:GraphEntity) => entity.name || entity.qualified_name || entity.source || entity.target || entity.file_path || entity.file || '未命名节点';
+const entityPath = (entity:GraphEntity) => entity.file_path || entity.file || (entity.source && entity.target ? `${entity.source} → ${entity.target}` : '');
+const durationText = (value?:number) => value ? (value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${value} ms`) : '—';
+const evidenceList = (value?:string|string[]) => Array.isArray(value) ? value.filter(Boolean) : (value ? [value] : []);
+const verificationLabel = (item:Finding) => ({supported:'反证通过',partially_supported:'部分支持',refuted:'已驳回',inconclusive:'证据不足',verification_failed:'核验失败'} as Record<string,string>)[item.verification_status || ''] || (item.disposition === 'confirmed' ? '反证通过' : (item.disposition === 'advisory' ? '改进建议' : '待确认'));
+const verificationColor = (item:Finding) => item.verification_status === 'refuted' ? 'gray' : (item.disposition === 'confirmed' ? 'green' : (item.verification_status === 'verification_failed' ? 'red' : 'orange'));
 const ocrStatusNotice = computed(() => {
   const status = selectedTask.value?.change_report?.ocr_status;
   if (!status) {
@@ -679,6 +731,8 @@ onBeforeUnmount(()=>{if(pollTimer)window.clearInterval(pollTimer)});
 </script>
 
 <style scoped>
+.verification-strip{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:11px;color:#718096;font-size:11px}.verification-evidence{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px;margin-top:10px;padding:10px 12px;border-left:3px solid #00b42a;background:#f4fbf7;color:#526273}.verification-evidence.counter{border-left-color:#ff7d00;background:#fff8ef}.verification-evidence b{color:#344054}.verification-evidence ul{margin:0;padding-left:18px}.verification-evidence li+li{margin-top:5px}
+.graph-alert{margin-bottom:12px}.graph-console{display:grid;grid-template-columns:132px minmax(0,1fr);gap:14px;align-items:start}.graph-console>aside{display:flex;flex-direction:column;gap:1px;overflow:hidden;border:1px solid #dbe5e9;border-radius:10px;background:#1d2939}.graph-console>aside span{padding:10px 12px;border-bottom:1px solid rgb(255 255 255 / 8%)}.graph-console>aside span:last-child{border-bottom:0}.graph-console>aside small,.graph-console>aside b{display:block}.graph-console>aside small{color:#9fb0bd;font-size:10px}.graph-console>aside b{margin-top:2px;color:#fff;font-size:19px}.graph-console>section{min-width:0}.graph-meta{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin-bottom:10px}.graph-meta span{padding:5px 8px;border:1px solid #dfe7ec;border-radius:6px;background:#f7f9fa;color:#667085;font-size:11px}.graph-meta code{color:#176b67}.impact-chains{border:1px solid #e2e8ec;border-radius:10px;background:#fff}.impact-chain-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.impact-chain-list article{position:relative;min-width:0;padding:10px 11px 10px 15px;border:1px solid #e5eaee;border-radius:7px;background:#fafcfc}.impact-chain-list article::before{position:absolute;top:11px;bottom:11px;left:6px;width:2px;border-radius:2px;background:#16827d;content:""}.impact-chain-list b,.impact-chain-list code,.impact-chain-list small{display:block;overflow:hidden;text-overflow:ellipsis}.impact-chain-list b{color:#344054;font-size:12px;white-space:nowrap}.impact-chain-list code{margin-top:4px;color:#667085;font-size:10px;white-space:nowrap}.impact-chain-list small{margin-top:4px;color:#16827d;font-size:10px}@media(max-width:900px){.graph-console{grid-template-columns:1fr}.graph-console>aside{display:grid;grid-template-columns:repeat(3,1fr)}.impact-chain-list{grid-template-columns:1fr}}
 .repository-settings{display:flex;flex-direction:column;gap:8px}.repository-settings-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:4px}.repository-settings-title small{color:#8792a2}.repository-setting-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 12px;border:1px solid #e5eaf0;border-radius:8px;background:#f9fbfc}.repository-setting-row>div:first-child{min-width:0}.repository-setting-row b,.repository-setting-row small{display:block}.repository-setting-row small{margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8792a2}.repository-setting-actions{display:flex;align-items:center;gap:8px;white-space:nowrap}.repository-setting-actions>span{color:#8792a2;font-size:12px}
 .repository-edit-fields{display:flex;gap:8px;margin-top:8px}.repository-edit-fields>:first-child{width:260px}.repository-edit-fields>:last-child{width:130px}
 .download-arrow{margin-left:7px;color:#718096;font-size:12px}

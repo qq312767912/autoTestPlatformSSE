@@ -166,6 +166,8 @@ urlpatterns = [
     path("api/", include("api_keys.urls")),
     # 挂载知识库路由。
     path("api/knowledge/", include("knowledge.urls")),
+    # 挂载知识数据飞轮与测评路由。
+    path("api/knowledge-evolution/", include("knowledge_evolution.urls")),
     # 挂载提示词管理路由。
     path("api/prompts/", include("prompts.urls")),
     # 挂载需求评审路由。

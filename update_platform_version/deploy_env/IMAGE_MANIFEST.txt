@@ -1,44 +1,48 @@
 WHartTest 内网增量升级镜像清单
-应用版本: upstream v2.8.0 + dev@ac65a6fbf0f0
-目标平台: linux/arm64，Alpine/musl，兼容麒麟 ARM64 64KB 页
+应用版本: upstream v2.8.0 + dev@b6613a398ece
+目标平台: linux/arm64；Backend 为 Alpine/musl，兼容麒麟 ARM64 64KB 页
 
-本次必须导入（分卷位于同级 images/ 目录）:
+本次必须导入（分卷位于 deploy_env 同级 images/ 目录）:
 
-1. wharttest-250-backend:update-ac65a6fb-v2.8-r3-kombu562-arm64
+1. wharttest-250-backend:update-b6613a39-v2.8-r5-code-review-backend-hostcfg1-arm64
    build: WHartTest_Django/Dockerfile.alpine
-   base/runtime: Alpine Linux + musl
-   required tools: @alibaba-group/open-code-review, ocr CLI
+   base/runtime: Alpine Linux + musl，完整构建，不叠加热修复
+   required tools: @alibaba-group/open-code-review、ocr CLI
    UI recorder: Node Playwright + Alpine system Chromium（内网运行时不下载）
-   Python: celery 5.4.0 + kombu 5.6.2 + redis-py 5.2.0（稳定兼容组合）
-   transfer: backend-ac65a6fb-v2.8-r3-kombu562-arm64.tar.gz.part000/001/002
+   transfer: backend-b6613a39-v2.8-r5-code-review-backend-hostcfg1-arm64.tar.gz.part*
 
-2. wharttest-250-frontend:update-ac65a6fb-v2.8-r1-arm64
+2. wharttest-250-frontend:update-b6613a39-v2.8-r5-code-review-arm64
    build: WHartTest_Vue/Dockerfile
-   transfer: frontend-ac65a6fb-v2.8-r1-arm64.tar.gz.part000
+   content: 代码审查核心问题聚焦、风险证据、相关 Diff、核验结论与修复建议报告
+   transfer: frontend-b6613a39-v2.8-r5-code-review-arm64.tar.gz.part*
 
-3. wharttest-250-actuator:update-ac65a6fb-v2.8-r3-auth-failfast-arm64
-   build: 基于已验证的 r2 Alpine/musl 完整镜像叠加 Dockerfile.auth-failfast
-   base/runtime: Alpine Linux + musl
-   transfer: actuator-ac65a6fb-v2.8-r3-auth-failfast-arm64.tar.gz.part000/001
-   auth fail-fast: Token/API 认证失败时立即回传失败并释放 slot，不再卡在执行中。
-   captcha OCR: 通过 VISION_MCP_URL 自动调用 Vision MCP/RapidOCR，识别后填入指定输入框。
-   shared path: /app/data/vision-mcp-captcha（Actuator 与 Vision MCP 共享挂载）
+3. wharttest-250-semgrep:update-b6613a39-v2.8-r5-code-review-semgrep-musl1-arm64
+   build: WHartTest_Semgrep/Dockerfile
+   base/runtime: Alpine Linux + musl，兼容麒麟 ARM64 64KB 页
+   role: 独立 Semgrep 规则扫描服务，仅通过 Docker 内网供 Backend 调用
+   persistence: 无数据库、无数据卷、无宿主机端口
+   transfer: semgrep-b6613a39-v2.8-r5-code-review-semgrep-musl1-arm64.tar.gz.part*
+
+4. wharttest-250-crg:update-b6613a39-v2.8-r5-code-review-crg1-arm64
+   build: WHartTest_CRG/Dockerfile
+   base/runtime: Alpine Linux + musl，linux/arm64，非 root UID/GID 10001
+   dependency: code-review-graph==2.3.9（不进入 Backend 镜像）
+   role: 只读分析审查任务浅仓库，图谱数据独立持久化
+   network: 无宿主机端口，仅 Backend 通过 Docker 内网访问
+   transfer: crg-b6613a39-v2.8-r5-code-review-crg1-arm64.tar.gz.part*
 
 可复用，本包不重复传输:
 
+- wharttest-250-actuator:update-ac65a6fb-v2.8-r3-auth-failfast-arm64（三个执行器继续使用）
 - postgres:16-alpine
 - redis:7-alpine
 - qdrant/qdrant:latest
 - mcr.microsoft.com/playwright/mcp:latest
 - wharttest-250-vision-mcp:update-01339484-arm64-r2
-- 内网现有 WHartTest MCP 镜像（WHartTest_MCP 源码无变化）
-- 内网现有微信插件宿主镜像（WHartTest_WeixinPluginHost 源码无变化）
-
-不可复用旧 Backend/Frontend/Actuator：与 d595a628 基线相比对应目录均有实质代码变更。
+- 内网现有 WHartTest MCP、Host Sync、微信插件宿主镜像
+- PostgreSQL、Redis、Qdrant 以及 /projects/ai-test-platform/offline-images/data 数据卷
 
 附加离线构建件（不是容器镜像）:
 
 - wheels/onnxruntime-1.29.0-cp312-cp312-musllinux_1_2_aarch64.whl
-  source: microsoft/onnxruntime v1.29.0 @ 2e2543fbe9fae542f921d47a72d21d5a4ef0b710
-  runtime: Python 3.12, ARM64, Alpine/musl, CPUExecutionProvider
-  telemetry: 编译时关闭
+  runtime: Python 3.12、ARM64、Alpine/musl、CPUExecutionProvider

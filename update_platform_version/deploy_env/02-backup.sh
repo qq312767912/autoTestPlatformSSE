@@ -8,6 +8,17 @@ BACKUP_ROOT="${BACKUP_ROOT:-$PACKAGE_DIR/backups}"
 BACKUP_DIR="$BACKUP_ROOT/$STAMP"
 mkdir -p "$BACKUP_DIR"
 
+# deploy_env 可能在升级时整体覆盖，提前保存执行器凭据与域名同步 Token。
+if [ -d "$UPDATE_DIR/secrets" ]; then
+  mkdir -p "$BACKUP_DIR/deploy-secrets"
+  for secret in actuator_api_password test_host_sync_token; do
+    if [ -s "$UPDATE_DIR/secrets/$secret" ]; then
+      cp "$UPDATE_DIR/secrets/$secret" "$BACKUP_DIR/deploy-secrets/$secret"
+      chmod 600 "$BACKUP_DIR/deploy-secrets/$secret"
+    fi
+  done
+fi
+
 echo "[备份] 保存当前容器及镜像基线"
 docker ps -a --filter 'name=wharttest' --no-trunc > "$BACKUP_DIR/containers.txt"
 for container in wharttest-backend wharttest-frontend wharttest-postgres wharttest-redis wharttest-qdrant wharttest-mcp wharttest-playwright-mcp wharttest-weixin-plugin-host; do

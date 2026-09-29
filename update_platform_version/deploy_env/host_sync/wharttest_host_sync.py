@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import hashlib
+import errno
 import json
 import os
 from pathlib import Path
@@ -113,12 +114,25 @@ class HostSyncAgent:
         if updated == original:
             return False
         self.backup_host_file()
+        # systemd 的 ReadWritePaths=/etc/hosts 会让该文件在服务的 mount namespace
+        # 中成为单独挂载点，os.replace() 对挂载点会返回 EBUSY。优先原子替换，
+        # 遇到挂载点限制时回退为原文件写入；写入前已经完成可恢复备份。
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.hosts_file.parent, delete=False) as handle:
             handle.write(updated)
+            handle.flush()
+            os.fsync(handle.fileno())
             temp_path = Path(handle.name)
         try:
             os.chmod(temp_path, self.hosts_file.stat().st_mode & 0o777)
-            os.replace(temp_path, self.hosts_file)
+            try:
+                os.replace(temp_path, self.hosts_file)
+            except OSError as exc:
+                if exc.errno not in {errno.EBUSY, errno.EXDEV, errno.EPERM}:
+                    raise
+                with self.hosts_file.open("w", encoding="utf-8") as target:
+                    target.write(updated)
+                    target.flush()
+                    os.fsync(target.fileno())
         finally:
             temp_path.unlink(missing_ok=True)
         return True

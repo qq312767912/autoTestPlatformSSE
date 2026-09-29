@@ -39,6 +39,9 @@ services:
     volumes:
       - __PLATFORM_DIR__/update_platform_version/deploy_env/supervisord.single-worker.conf:/app/supervisord.conf:ro
     environment:
+      RECORDER_DESKTOP_ENABLED: "true"
+      RECORDER_DESKTOP_DISPLAY: ":99"
+      RECORDER_DESKTOP_PUBLIC_URL: "/novnc/vnc.html?autoconnect=1&resize=scale&reconnect=1&show_dot=1"
       VISION_MCP_URL: http://vision-mcp:8010/mcp
       VISION_API_BASE_URL: ${VISION_API_BASE_URL:-}
       VISION_MCP_BASE_URL: ${VISION_MCP_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}

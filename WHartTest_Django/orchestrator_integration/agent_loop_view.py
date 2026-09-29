@@ -836,6 +836,55 @@ class AgentLoopStreamAPIView(View):
     # 最大步骤数（用于前端显示）
     MAX_STEPS = 500
 
+    async def _record_module_output(
+        self, *, request, project, session_id, user_message, all_messages,
+        model_name, prompt_id, total_tokens, step_count, use_knowledge_base,
+        knowledge_base_ids,
+    ):
+        """Best-effort recording for business-specific agent tasks."""
+        if getattr(request, "_flywheel_module_key", "") != "testcase_generation":
+            return None
+        content = ""
+        for message in reversed(all_messages or []):
+            if isinstance(message, AIMessage) and getattr(message, "content", None):
+                raw = message.content
+                if isinstance(raw, list):
+                    content = "".join(
+                        str(item.get("text") or "") for item in raw
+                        if isinstance(item, dict) and item.get("type") == "text"
+                    )
+                else:
+                    content = str(raw)
+                if content.strip():
+                    break
+        if not content.strip():
+            return None
+        try:
+            from knowledge_evolution.services import record_task_output
+            return await sync_to_async(record_task_output)(
+                project=project,
+                user=request.user,
+                task_type="testcase_generation",
+                task_id=session_id,
+                query=user_message,
+                content=content,
+                channels={
+                    "agent": {"enabled": True, "steps": step_count},
+                    "knowledge": {
+                        "enabled": bool(use_knowledge_base and knowledge_base_ids),
+                        "knowledge_base_ids": list(knowledge_base_ids or []),
+                    },
+                },
+                token_usage=total_tokens,
+                metadata={"session_id": session_id, "step_count": step_count},
+                policy_version="testcase-generation-agent-v1",
+                prompt_version=str(prompt_id or "default"),
+                model_version=model_name,
+            )
+        except Exception:
+            logger.exception("用例生成结果未能记录到数据飞轮")
+            return None
+
     def _update_session_token_usage(
         self, session_id: str, input_tokens: int, output_tokens: int,
         cache_read_tokens: int = 0, user_id=None, project_id=None,
@@ -1171,6 +1220,7 @@ class AgentLoopStreamAPIView(View):
                 current_tool_calls = []
                 interrupt_detected = False
                 user_stopped = False
+                evolution_ids = None
 
                 # 15. 流式执行
                 stream_modes = ["updates", "messages"]
@@ -1499,6 +1549,20 @@ class AgentLoopStreamAPIView(View):
                             user_id=request.user.id,
                             project_id=int(project_id) if project_id else None,
                         )
+                    if not user_stopped and not interrupt_detected:
+                        evolution_ids = await self._record_module_output(
+                            request=request,
+                            project=project,
+                            session_id=session_id,
+                            user_message=user_message,
+                            all_messages=all_messages,
+                            model_name=model_name,
+                            prompt_id=prompt_id,
+                            total_tokens=total_tokens,
+                            step_count=step_count,
+                            use_knowledge_base=use_knowledge_base,
+                            knowledge_base_ids=knowledge_base_ids,
+                        )
                 except Exception as e:
                     logger.warning(
                         f"AgentLoopStreamAPI: Failed to calculate token count: {e}"
@@ -1527,6 +1591,8 @@ class AgentLoopStreamAPIView(View):
                     )
                 else:
                     complete_data = {"type": "complete", "total_steps": step_count}
+                    if evolution_ids:
+                        complete_data["trace_id"], complete_data["output_id"] = evolution_ids
                     if generate_playwright_script:
                         complete_data["script_generation"] = {
                             "enabled": True,
@@ -1583,6 +1649,8 @@ class AgentLoopStreamAPIView(View):
             return api_error_response(f"Invalid JSON: {e}", 400)
 
         user_message = body_data.get("message")
+        module_key = str(body_data.get("module_key") or "")
+        request._flywheel_module_key = module_key if module_key == "testcase_generation" else ""
         session_id = body_data.get("session_id")
         project_id = body_data.get("project_id")
         knowledge_base_ids = _normalize_knowledge_base_ids(
@@ -1779,6 +1847,8 @@ class AgentLoopStreamAPIView(View):
         error_details = None
         interrupt_info = None
         script_generation = None
+        trace_id = None
+        output_id = None
 
         try:
             async for chunk in self._create_stream_generator(
@@ -1840,6 +1910,8 @@ class AgentLoopStreamAPIView(View):
                                 "action_requests": event.get("action_requests", []),
                             }
                         elif event_type == "complete":
+                            trace_id = event.get("trace_id") or trace_id
+                            output_id = event.get("output_id") or output_id
                             if event.get("script_generation"):
                                 script_generation = event.get("script_generation")
                     except json.JSONDecodeError:
@@ -1858,6 +1930,8 @@ class AgentLoopStreamAPIView(View):
                 "tool_results": tool_results,
                 "context_token_count": context_token_count,
                 "context_limit": context_limit,
+                "trace_id": trace_id,
+                "output_id": output_id,
             }
 
             if interrupt_info:

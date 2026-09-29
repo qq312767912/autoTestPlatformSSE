@@ -214,3 +214,5 @@ class KnowledgeQueryResponseSerializer(serializers.Serializer):
     retrieval_time = serializers.FloatField()
     generation_time = serializers.FloatField()
     total_time = serializers.FloatField()
+    trace_id = serializers.UUIDField(required=False, allow_null=True)
+    output_id = serializers.UUIDField(required=False, allow_null=True)

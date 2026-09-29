@@ -29,6 +29,7 @@ import TaskCenterView from '@/features/task-center/views/TaskCenterView.vue'; //
 import FileManagementView from '@/features/file-management/views/FileManagementView.vue'; // 导入文件管理页面组件。
 import DocumentAnonymizationView from '@/views/DocumentAnonymizationView.vue'; // 导入文档脱敏管理页面组件。
 import CodeAnalysisView from '@/features/code-analysis/CodeAnalysisView.vue';
+import KnowledgeGraphView from '@/features/knowledge-graph/KnowledgeGraphView.vue';
 import TestCaseReviewView from '@/features/testcase-review/TestCaseReviewView.vue';
 
 const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束为 RouteRecordRaw。
@@ -127,6 +128,11 @@ const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束�
         path: 'code-analysis',
         name: 'CodeAnalysis',
         component: CodeAnalysisView,
+      },
+      {
+        path: 'knowledge-graph',
+        name: 'KnowledgeGraph',
+        component: KnowledgeGraphView,
       },
       {
         path: 'requirements/:id', // 定义需求文档详情动态路径，:id 为文档主键参数。

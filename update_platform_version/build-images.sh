@@ -5,8 +5,12 @@
 # 用法：
 #   bash build-images.sh backend     # 只重建 Backend（Dockerfile.alpine，Alpine/musl 完整构建）
 #   bash build-images.sh frontend    # 只重建 Frontend
+#   bash build-images.sh semgrep     # 只重建独立 Semgrep 扫描器
+#   bash build-images.sh crg         # 只重建独立 Code Review Graph 服务
+#   bash build-images.sh pack-crg    # 只导出 CRG 分卷（用于向已有升级包增补）
 #   bash build-images.sh actuator    # 只重建 Actuator（Alpine/musl ARM64）
-#   bash build-images.sh pack        # 只做 docker save + gzip + 分卷 + SHA256SUMS
+#   bash build-images.sh pack-app    # 打包 Backend/Frontend/Semgrep/CRG（Actuator 复用）
+#   bash build-images.sh pack        # 打包 Backend/Frontend/Semgrep/CRG/Actuator
 #   bash build-images.sh all         # 全流程
 #
 # 约定：
@@ -40,9 +44,11 @@ done
 export PATH
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-REV="${REV:-$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)-v2.8-r3-kombu562}"
+REV="${REV:-$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)-v2.8-r5-code-review}"
 BACKEND_IMAGE="wharttest-250-backend:update-${REV}-arm64"
 FRONTEND_IMAGE="wharttest-250-frontend:update-${REV}-arm64"
+SEMGREP_IMAGE="wharttest-250-semgrep:update-${REV}-arm64"
+CRG_IMAGE="wharttest-250-crg:update-${REV}-arm64"
 ACTUATOR_IMAGE="wharttest-250-actuator:update-${REV}-arm64"
 IMAGES_DIR="$REPO_ROOT/update_platform_version/images"
 LOG_DIR="$REPO_ROOT/update_platform_version/build-logs"
@@ -72,6 +78,8 @@ build_backend() {
   docker buildx build \
     --platform "$PLATFORM" \
     --progress=plain \
+    --build-arg PYTHON_BASE_IMAGE="${DOCKER_PYTHON_BASE_IMAGE:-python:3.11-alpine}" \
+    --build-arg ALPINE_MIRROR="${DOCKER_ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}" \
     --build-arg OCI_REVISION="$REV" \
     -f "$REPO_ROOT/WHartTest_Django/Dockerfile.alpine" \
     -t "$BACKEND_IMAGE" \
@@ -88,6 +96,8 @@ build_frontend() {
   docker buildx build \
     --platform "$PLATFORM" \
     --progress=plain \
+    --build-arg NODE_BASE_IMAGE="${DOCKER_NODE_BASE_IMAGE:-node:20-alpine}" \
+    --build-arg NGINX_BASE_IMAGE="${DOCKER_NGINX_BASE_IMAGE:-nginx:alpine}" \
     --build-arg OCI_REVISION="$REV" \
     -f "$REPO_ROOT/WHartTest_Vue/Dockerfile" \
     -t "$FRONTEND_IMAGE" \
@@ -95,6 +105,42 @@ build_frontend() {
     "$REPO_ROOT/WHartTest_Vue" \
     2>&1 | tee "$LOG_DIR/frontend-full-${REV}-arm64.log"
   assert_frontend
+}
+
+build_semgrep() {
+  require_docker
+  mkdir -p "$LOG_DIR"
+  log "构建 Semgrep Scanner：$SEMGREP_IMAGE"
+  docker buildx build \
+    --platform "$PLATFORM" \
+    --progress=plain \
+    --build-arg PYTHON_BASE_IMAGE="${DOCKER_SEMGREP_PYTHON_BASE_IMAGE:-python:3.11-alpine}" \
+    --build-arg ALPINE_MIRROR="${DOCKER_ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}" \
+    --build-arg OCI_REVISION="$REV" \
+    -f "$REPO_ROOT/WHartTest_Semgrep/Dockerfile" \
+    -t "$SEMGREP_IMAGE" \
+    --load \
+    "$REPO_ROOT/WHartTest_Semgrep" \
+    2>&1 | tee "$LOG_DIR/semgrep-full-${REV}-arm64.log"
+  assert_semgrep
+}
+
+build_crg() {
+  require_docker
+  mkdir -p "$LOG_DIR"
+  log "构建 Code Review Graph：${CRG_IMAGE}（Alpine/musl）"
+  docker buildx build \
+    --platform "$PLATFORM" \
+    --progress=plain \
+    --build-arg PYTHON_BASE_IMAGE="${DOCKER_CRG_PYTHON_BASE_IMAGE:-python:3.11-alpine}" \
+    --build-arg ALPINE_MIRROR="${DOCKER_ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}" \
+    --build-arg OCI_REVISION="$REV" \
+    -f "$REPO_ROOT/WHartTest_CRG/Dockerfile" \
+    -t "$CRG_IMAGE" \
+    --load \
+    "$REPO_ROOT/WHartTest_CRG" \
+    2>&1 | tee "$LOG_DIR/crg-full-${REV}-arm64.log"
+  assert_crg
 }
 
 build_actuator() {
@@ -127,6 +173,10 @@ assert_backend() {
     cd /app/ui_automation/recorder
     node -e "require.resolve(\"playwright\")"
     [ -f /app/testcases/review_service.py ]
+    [ -f /app/test_host_config/models.py ]
+    [ -f /app/test_host_config/migrations/0001_initial.py ]
+    cd /app
+    python manage.py check
     [ -f /app/bundled_skills/test-case-clarity-review/references/review-rules.md ]
     python -c "import celery,kombu,redis; assert (celery.__version__,kombu.__version__,redis.__version__) == (\"5.4.0\",\"5.6.2\",\"5.2.0\")"
     echo "Alpine/musl + OpenCodeReview(ocr CLI) + UI 录制器 Chromium/Playwright + 用例审查 Skill 就绪"
@@ -148,6 +198,38 @@ assert_frontend() {
   revision="$(docker image inspect "$FRONTEND_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
   [ "$revision" = "$REV" ] || fail "镜像标签 revision=${revision}，期望 $REV"
   log "Frontend 校验通过（revision=${revision}）"
+}
+
+assert_semgrep() {
+  log "校验 Semgrep Scanner 镜像"
+  docker run --rm --entrypoint /bin/sh "$SEMGREP_IMAGE" -c '
+    set -e
+    grep -q "Alpine Linux" /etc/os-release
+    ldd --version 2>&1 | grep -qi musl
+    semgrep --version
+    python -c "import fastapi,uvicorn"
+    test -f /app/rules/semgrep.yml
+  '
+  local revision
+  revision="$(docker image inspect "$SEMGREP_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+  [ "$revision" = "$REV" ] || fail "Semgrep 镜像标签 revision=${revision}，期望 $REV"
+  log "Semgrep Scanner 校验通过（revision=${revision}）"
+}
+
+assert_crg() {
+  log "校验 Code Review Graph 镜像"
+  docker run --rm --entrypoint /bin/sh "$CRG_IMAGE" -c '
+    set -e
+    grep -q "Alpine Linux" /etc/os-release
+    ldd --version 2>&1 | grep -qi musl
+    test "$(id -u)" = "10001"
+    code-review-graph --version | grep -q "2.3.9"
+    python -c "import fastapi,uvicorn; import app"
+  '
+  local revision
+  revision="$(docker image inspect "$CRG_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+  [ "$revision" = "$REV" ] || fail "CRG 镜像标签 revision=${revision}，期望 $REV"
+  log "Code Review Graph 校验通过（revision=${revision}）"
 }
 
 assert_actuator() {
@@ -182,7 +264,7 @@ pack_image() {
 write_sha256sums() {
   log "生成 deploy_env/SHA256SUMS"
   local sums=""
-  for name in "backend-${REV}-arm64" "frontend-${REV}-arm64" "actuator-${REV}-arm64"; do
+  for name in "$@"; do
     sum_prefix="../images/${name}.tar.gz"
     for part in "$IMAGES_DIR/${name}.tar.gz.part"*; do
       [ -e "$part" ] || continue
@@ -196,6 +278,15 @@ write_sha256sums() {
       sums="${sums}${digest}  ${relative}"$'\n'
     done
   done
+  if [ -f "$DEPLOY_ENV_DIR/wheels/onnxruntime-1.29.0-cp312-cp312-musllinux_1_2_aarch64.whl" ]; then
+    local wheel_digest
+    if command -v sha256sum >/dev/null 2>&1; then
+      wheel_digest="$(sha256sum "$DEPLOY_ENV_DIR/wheels/onnxruntime-1.29.0-cp312-cp312-musllinux_1_2_aarch64.whl" | awk '{print $1}')"
+    else
+      wheel_digest="$(shasum -a 256 "$DEPLOY_ENV_DIR/wheels/onnxruntime-1.29.0-cp312-cp312-musllinux_1_2_aarch64.whl" | awk '{print $1}')"
+    fi
+    sums="${sums}${wheel_digest}  wheels/onnxruntime-1.29.0-cp312-cp312-musllinux_1_2_aarch64.whl"$'\n'
+  fi
   [ -n "$sums" ] || fail "没有可校验的分卷，请先执行 pack"
   printf '%s' "$sums" > "$DEPLOY_ENV_DIR/SHA256SUMS"
   cat "$DEPLOY_ENV_DIR/SHA256SUMS"
@@ -205,16 +296,38 @@ pack() {
   mkdir -p "$IMAGES_DIR"
   pack_image "$BACKEND_IMAGE"  "backend-${REV}-arm64"
   pack_image "$FRONTEND_IMAGE" "frontend-${REV}-arm64"
+  pack_image "$SEMGREP_IMAGE"  "semgrep-${REV}-arm64"
+  pack_image "$CRG_IMAGE"      "crg-${REV}-arm64"
   pack_image "$ACTUATOR_IMAGE" "actuator-${REV}-arm64"
-  write_sha256sums
+  write_sha256sums "backend-${REV}-arm64" "frontend-${REV}-arm64" "semgrep-${REV}-arm64" "crg-${REV}-arm64" "actuator-${REV}-arm64"
   log "打包完成"
+}
+
+pack_app() {
+  mkdir -p "$IMAGES_DIR"
+  pack_image "$BACKEND_IMAGE"  "backend-${REV}-arm64"
+  pack_image "$FRONTEND_IMAGE" "frontend-${REV}-arm64"
+  pack_image "$SEMGREP_IMAGE"  "semgrep-${REV}-arm64"
+  pack_image "$CRG_IMAGE"      "crg-${REV}-arm64"
+  write_sha256sums "backend-${REV}-arm64" "frontend-${REV}-arm64" "semgrep-${REV}-arm64" "crg-${REV}-arm64"
+  log "Backend/Frontend/Semgrep/CRG 打包完成，Actuator 复用内网已有镜像"
+}
+
+pack_crg() {
+  mkdir -p "$IMAGES_DIR"
+  pack_image "$CRG_IMAGE" "crg-${REV}-arm64"
+  log "CRG 分卷导出完成；发布前必须将分卷 SHA256 合并到 deploy_env/SHA256SUMS"
 }
 
 case "${1:-}" in
   backend)  build_backend ;;
   frontend) build_frontend ;;
+  semgrep)  build_semgrep ;;
+  crg)      build_crg ;;
+  pack-crg) pack_crg ;;
   actuator) build_actuator ;;
+  pack-app) pack_app ;;
   pack)     pack ;;
-  all)      build_backend; build_frontend; build_actuator; pack ;;
+  all)      build_backend; build_frontend; build_semgrep; build_crg; build_actuator; pack ;;
   *)        sed -n '2,29p' "$0"; exit 1 ;;
 esac

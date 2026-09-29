@@ -404,9 +404,40 @@ def _managed_gitlab_repository(task):
 
 
 @contextmanager
+def _managed_local_repository(task):
+    """将本地仓库也物化为任务独占的浅仓库。
+
+    CRG 容器只能看到受限的任务仓库挂载，不挂载平台整个
+    /workspace。这也让本地 Git 与 GitLab 审查共用相同的仓库身份约束。
+    """
+    source = LocalGitClient(task.repository.local_path).path
+    OCR_WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root = OCR_WORKSPACE_ROOT / str(task.pk)
+    root.mkdir(mode=0o700, exist_ok=True)
+    (root / ".repository-id").write_text(str(task.repository_id), encoding="utf-8")
+    env = os.environ.copy()
+    if not (root / ".git").exists():
+        _run_git(["git", "init", "--quiet"], cwd=root, env=env)
+        _run_git(["git", "remote", "add", "origin", str(source)], cwd=root, env=env)
+    else:
+        _run_git(["git", "remote", "set-url", "origin", str(source)], cwd=root, env=env)
+    _run_git(["git", "fetch", "--quiet", "--force", "--no-tags", "--depth=50", "origin", f"{task.base_sha}:refs/ocr/base"], cwd=root, env=env)
+    _ensure_not_cancelled(task)
+    _run_git(["git", "fetch", "--quiet", "--force", "--no-tags", "--depth=50", "origin", f"{task.head_sha}:refs/ocr/head"], cwd=root, env=env)
+    merge_base = _run_git(["git", "merge-base", "refs/ocr/base", "refs/ocr/head"], cwd=root, env=env).strip()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", merge_base or ""):
+        raise ValueError("浅仓库未能解析两个 Commit 的共同祖先")
+    if merge_base == task.head_sha:
+        raise ValueError("目标提交已是基准提交的祖先，两者之间没有可审查的差异")
+    _run_git(["git", "checkout", "--quiet", "--force", "--detach", "refs/ocr/head"], cwd=root, env=env)
+    yield root, merge_base, "refs/ocr/head"
+
+
+@contextmanager
 def _ocr_repository(task):
     if task.repository.source_type == "local_git":
-        yield LocalGitClient(task.repository.local_path).path, task.base_sha, task.head_sha
+        with _managed_local_repository(task) as prepared:
+            yield prepared
         return
     with _managed_gitlab_repository(task) as prepared:
         yield prepared
@@ -1350,6 +1381,70 @@ def _run_risk_test_design(task, findings):
         return points, 0, f"风险排查点生成未完成，已使用规则化兜底：{exc}"
 
 
+def _summarize_graph_context(context):
+    context = context if isinstance(context, dict) else {}
+    preview_limits = {
+        "changed_symbols": 30,
+        "affected_files": 50,
+        "callers": 30,
+        "related_tests": 30,
+        "affected_flows": 20,
+        "test_gaps": 30,
+    }
+    return {
+        "status": context.get("status", "unavailable"),
+        "graph_commit": context.get("graph_commit", ""),
+        "counts": {
+            key: len(context.get(key) or [])
+            for key in ("changed_symbols", "affected_files", "callers", "related_tests", "affected_flows", "test_gaps")
+        },
+        "preview": {
+            key: (context.get(key) or [])[:limit]
+            for key, limit in preview_limits.items()
+        },
+        "coverage": context.get("coverage") or {},
+        "truncation": context.get("truncation") or {},
+        "context_savings": context.get("context_savings") or {},
+        "duration_ms": context.get("duration_ms", 0),
+        "diagnostics": context.get("diagnostics") or {},
+        "crg_version": context.get("crg_version", ""),
+    }
+
+
+def _repository_context_for_prompt(context):
+    """Keep CRG evidence visible without letting it crowd the complete Diff."""
+    context = context if isinstance(context, dict) else {}
+    graph = context.get("graph_context") if isinstance(context.get("graph_context"), dict) else {}
+    graph_prompt = {
+        "status": graph.get("status", "unavailable"),
+        "affected_files": (graph.get("affected_files") or [])[:40],
+        "callers": (graph.get("callers") or [])[:30],
+        "related_tests": (graph.get("related_tests") or [])[:30],
+        "affected_flows": (graph.get("affected_flows") or [])[:10],
+        "test_gaps": (graph.get("test_gaps") or [])[:30],
+    }
+    items = []
+    for item in (context.get("items") or [])[:20]:
+        items.append({
+            "path": item.get("path"),
+            "declarations": (item.get("declarations") or [])[:12],
+            "related_code": (item.get("related_code") or [])[:12],
+            "ast_chunks": [
+                {
+                    "kind": chunk.get("kind"),
+                    "start_line": chunk.get("start_line"),
+                    "end_line": chunk.get("end_line"),
+                    "content": str(chunk.get("content") or "")[:2500],
+                }
+                for chunk in (item.get("ast_chunks") or [])[:8]
+            ],
+            "source": str(item.get("source") or "")[:3000],
+        })
+    # Put graph evidence first so the bounded prompt never truncates it behind
+    # large AST/source chunks. The complete Diff is still appended separately.
+    return {"graph_context": graph_prompt, "items": items, "parser": context.get("parser")}
+
+
 def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None):
     """只向模型发送受控的小批量Diff；任何失败均降级为机器结果。"""
     if task.mode == "quick" or not analyzable_diffs:
@@ -1414,8 +1509,16 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
     try:
         from .review_mcp import CodeReviewMCP
         repository_context = CodeReviewMCP(task, review_client).collect_context(analyzable_diffs)
+        task._graph_context_snapshot = _summarize_graph_context(
+            repository_context.get("graph_context") or {}
+        )
     except Exception:
         repository_context = []
+        task._graph_context_snapshot = {
+            "status": "unavailable",
+            "diagnostics": {"degraded_reason": "仓库上下文收集失败"},
+        }
+    prompt_repository_context = _repository_context_for_prompt(repository_context)
     prompt_head = (
         "你是面向开发人员的代码审查助手。机器规则命中必须保留，但可以根据源码证据将其归入确定缺陷、待确认风险或改进建议，不能把候选命中一律描述为已确认缺陷。只分析给出的局部 Diff，不推测未提供源码。"
         f"{AI_REVIEW_LANGUAGE_RULE}"
@@ -1433,7 +1536,7 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
         # 各线程使用独立模型客户端，避免共享 HTTP 会话和回调状态。
         llm = create_llm_instance(config, temperature=0.1)
         known = [x for x in machine_findings if x.get("file") in batch]
-        prompt = f"{prompt_head}\n业务上下文：\n{business_context}\n已读取的目标版本源码上下文（只读MCP）：\n{json.dumps(repository_context, ensure_ascii=False)[:18000]}\n机器已确认风险：{json.dumps(known, ensure_ascii=False)}\nDIFF:\n{batch}"
+        prompt = f"{prompt_head}\n业务上下文：\n{business_context}\n已读取的目标版本源码上下文（只读MCP）：\n{json.dumps(prompt_repository_context, ensure_ascii=False)[:18000]}\n机器已确认风险：{json.dumps(known, ensure_ascii=False)}\nDIFF:\n{batch}"
         response = llm.invoke(prompt)
         payload = _json_from_response(getattr(response, "content", response))
         usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
@@ -1517,6 +1620,16 @@ def _apply_verification_results(findings, verdicts):
         decision = verdict.get("verdict") or item.get("disposition") or "needs_confirmation"
         item["verification_reason"] = str(verdict.get("reason") or "")[:2000]
         item["counter_evidence"] = str(verdict.get("counter_evidence") or "")[:3000]
+        supporting = verdict.get("supporting_evidence") or []
+        if isinstance(supporting, str):
+            supporting = [supporting]
+        item["supporting_evidence"] = [str(value)[:1000] for value in supporting[:10] if value]
+        item["trigger_reachable"] = verdict.get("trigger_reachable") if isinstance(verdict.get("trigger_reachable"), bool) else None
+        item["target_commit_verified"] = bool(verdict)
+        item["verification_status"] = {
+            "confirmed": "supported", "needs_confirmation": "partially_supported",
+            "rejected": "refuted", "advisory": "inconclusive",
+        }.get(decision, "inconclusive") if verdict else "verification_failed"
         item["verdict"] = decision
         if verdict.get("severity") in {"high", "medium", "low"}:
             item["severity"] = verdict["severity"]
@@ -1618,7 +1731,8 @@ def _verify_findings_against_target(task, findings, review_client=None):
             "局部接口 500、可恢复的数据重复或功能局部失效通常为 medium；低概率且影响有限为 low。不得为了报告好看强行产生 high，也不得把已证明的高影响缺陷机械降级。"
             "每个 key 必须返回一项。"
             "仅输出严格 JSON：{\"items\":[{\"key\":\"\",\"verdict\":\"confirmed|needs_confirmation|rejected|advisory\","
-            "\"severity\":\"high|medium|low\",\"reason\":\"\",\"counter_evidence\":\"\"}]}\n"
+            "\"severity\":\"high|medium|low\",\"reason\":\"\",\"supporting_evidence\":[\"\"],"
+            "\"counter_evidence\":\"\",\"trigger_reachable\":true}]}\n"
             f"待核验候选：{json.dumps(batch, ensure_ascii=False)}"
         )
         response = create_llm_instance(config, temperature=0).invoke(prompt, response_format={"type": "json_object"})
@@ -1813,6 +1927,16 @@ def _reuse_cached_result(task, original_base_sha, original_head_sha):
         task=task, event=task.status, message="已复用相同 Commit 的分析缓存",
         detail={"cache_hit": True, "source_task_id": str(source.pk)},
     )
+    try:
+        from knowledge_evolution.services import record_code_review_task
+        evolution_ids = record_code_review_task(task)
+        if evolution_ids:
+            task.change_report["evolution"] = {
+                "trace_id": evolution_ids[0], "output_id": evolution_ids[1],
+            }
+            task.save(update_fields=["change_report", "updated_at"])
+    except Exception:
+        logger.exception("代码审查缓存结果未能记录到数据飞轮")
     return True
 
 
@@ -1873,6 +1997,16 @@ def retry_ocr_analysis(task: AnalysisTask):
         message="OCR 单独重试完成" if usable else "OCR 单独重试失败，已保留降级报告",
         detail={"ocr_coverage": coverage, **diagnostics},
     )
+    try:
+        from knowledge_evolution.services import record_code_review_task
+        evolution_ids = record_code_review_task(task)
+        if evolution_ids:
+            task.change_report["evolution"] = {
+                "trace_id": evolution_ids[0], "output_id": evolution_ids[1],
+            }
+            task.save(update_fields=["change_report", "updated_at"])
+    except Exception:
+        logger.exception("OCR 重试结果未能记录到数据飞轮")
 
 
 def run_analysis(task: AnalysisTask, force_refresh=False):
@@ -2115,6 +2249,10 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
             "files": files, "findings": findings, "impact_modules": impact_modules,
             "impact_summary": sorted({x["impact"] for x in findings}),
             "analysis_note": "；".join([*static_notes, ai_note]),
+            "graph_context": getattr(task, "_graph_context_snapshot", {
+                "status": "skipped",
+                "diagnostics": {"degraded_reason": "本次未执行 CRG 上下文增强"},
+            }),
             "ocr_status": ocr_status,
             "coverage": {"scope_files": len(files), "analyzed_files": len(analyzable_diffs), "excluded_files": sum(1 for x in files if x["excluded"]), "machine_percent": 100, "ai_percent": ai_coverage, "finding_screening": finding_screening},
         })
@@ -2161,8 +2299,23 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         AnalysisTaskExecutionLog.objects.create(
             task=task, event=final_status,
             message=("分析完成" if final_status == "completed" else "OCR 未完整，AI 降级分析已完成" if final_status == "degraded" else "分析部分完成，请查看覆盖缺口"),
-            detail={"machine_coverage": task.machine_coverage, "ai_coverage": task.ai_coverage, "risk_count": len(findings)},
+            detail={
+                "machine_coverage": task.machine_coverage,
+                "ai_coverage": task.ai_coverage,
+                "risk_count": len(findings),
+                "graph_context": (task.change_report or {}).get("graph_context", {}),
+            },
         )
+        try:
+            from knowledge_evolution.services import record_code_review_task
+            evolution_ids = record_code_review_task(task, rejected_findings)
+            if evolution_ids:
+                task.change_report["evolution"] = {
+                    "trace_id": evolution_ids[0], "output_id": evolution_ids[1],
+                }
+                task.save(update_fields=["change_report", "updated_at"])
+        except Exception:
+            logger.exception("代码审查结果未能记录到数据飞轮")
         return task
     except AnalysisCancelled:
         AnalysisTaskExecutionLog.objects.create(task=task, event="cancelled", message="后台任务响应取消请求")

@@ -56,6 +56,28 @@ services:
       - wharttest-network
     restart: unless-stopped
 
+  crg-service:
+    image: ${DOCKER_CRG_IMAGE:-wharttest-250-crg:latest}
+    build:
+      context: ./WHartTest_CRG
+      dockerfile: Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${DOCKER_CRG_PYTHON_BASE_IMAGE:-python:3.11-alpine}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        ALPINE_MIRROR: ${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}
+        OCI_REVISION: ${OCI_REVISION:-local}
+    container_name: wharttest-crg
+    volumes:
+      - ./data/code-analysis-repositories:/repositories:ro
+      - ./data/code-review-graphs:/graphs
+    environment:
+      - CRG_INTERNAL_TOKEN=${CRG_INTERNAL_TOKEN:-change-this-crg-token}
+      - CRG_BUILD_TIMEOUT=${CRG_BUILD_TIMEOUT:-600}
+      - CRG_QUERY_TIMEOUT=${CRG_QUERY_TIMEOUT:-120}
+    networks:
+      - wharttest-network
+    restart: unless-stopped
+
   # 后端 Django 服务（包含Celery Worker和Beat）
   backend:
     image: ${DOCKER_BACKEND_IMAGE:-ghcr.io/mgdaaslab/wharttest-backend:latest}
@@ -103,10 +125,16 @@ services:
       # Qdrant向量数据库
       - QDRANT_URL=http://qdrant:6333
       - SEMGREP_SCANNER_URL=http://semgrep-scanner:8080
+      - CODE_REVIEW_GRAPH_URL=${CODE_REVIEW_GRAPH_URL:-http://crg-service:8080}
+      - CODE_REVIEW_GRAPH_TOKEN=${CRG_INTERNAL_TOKEN:-change-this-crg-token}
+      - CODE_REVIEW_GRAPH_ENABLED=${CODE_REVIEW_GRAPH_ENABLED:-false}
       # 内部API基础URL - 使用localhost因为在同一容器
       - DJANGO_BASE_URL=http://localhost:8000
       - WEIXIN_PLUGIN_HOST_URL=http://weixin-plugin-host:3001
       - HF_ENDPOINT=${DOCKER_HF_ENDPOINT:-https://huggingface.co}
+      - RECORDER_DESKTOP_ENABLED=true
+      - RECORDER_DESKTOP_DISPLAY=:99
+      - RECORDER_DESKTOP_PUBLIC_URL=/novnc/vnc.html?autoconnect=1&resize=scale&reconnect=1&show_dot=1
     depends_on:
       postgres:
         condition: service_healthy

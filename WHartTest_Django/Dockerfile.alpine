@@ -122,6 +122,11 @@ RUN sed -i "s#https://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" /etc/apk
     nodejs \
     npm \
     chromium \
+    xvfb \
+    x11vnc \
+    openbox \
+    novnc \
+    py3-websockify \
     libgomp \
     libpq \
     libjpeg-turbo \
@@ -157,7 +162,9 @@ RUN mkdir -p /root/.cache/fastembed
 COPY THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
 COPY entrypoint.sh /app/entrypoint.sh
 COPY supervisord.conf /app/supervisord.conf
-RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+COPY docker/start-recorder-desktop.sh /app/docker/start-recorder-desktop.sh
+RUN sed -i 's/\r$//' /app/entrypoint.sh /app/docker/start-recorder-desktop.sh && \
+    chmod +x /app/entrypoint.sh /app/docker/start-recorder-desktop.sh
 
 # 复制 Django 代码
 COPY manage.py /app/
@@ -175,6 +182,7 @@ COPY code_analysis/ /app/code_analysis/
 COPY file_management/ /app/file_management/
 COPY httprunner/ /app/httprunner/
 COPY knowledge/ /app/knowledge/
+COPY knowledge_evolution/ /app/knowledge_evolution/
 COPY langgraph_integration/ /app/langgraph_integration/
 COPY mcp_tools/ /app/mcp_tools/
 COPY operation_logs/ /app/operation_logs/
@@ -184,6 +192,7 @@ COPY prompts/ /app/prompts/
 COPY requirements/ /app/requirements/
 COPY skills/ /app/skills/
 COPY task_center/ /app/task_center/
+COPY test_host_config/ /app/test_host_config/
 COPY ui_automation/ /app/ui_automation/
 COPY weixin_integration/ /app/weixin_integration/
 COPY testcase_templates/ /app/testcase_templates/
@@ -222,5 +231,5 @@ RUN mkdir -p media static nltk_data /app/data/logs /app/data/run
 
 LABEL org.opencontainers.image.revision="${OCI_REVISION}"
 
-EXPOSE 8000
+EXPOSE 8000 6080
 ENTRYPOINT ["/app/entrypoint.sh"]

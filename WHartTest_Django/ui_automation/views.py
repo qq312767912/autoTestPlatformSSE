@@ -1544,10 +1544,18 @@ def _start_recorder_session(env_config, page, base_url, skill_dir, request, meta
         recorder_manager, RecorderSessionError,
     )
 
+    recorder_env = None
+    if meta.kind == 'auth' and os.environ.get('RECORDER_DESKTOP_ENABLED', '').lower() in ('1', 'true', 'yes', 'on'):
+        recorder_env = {
+            'HEADLESS': 'false',
+            'DISPLAY': os.environ.get('RECORDER_DESKTOP_DISPLAY', ':99'),
+        }
+
     session = recorder_manager.create_session(
         user_id=request.user.username,
         project_id=env_config.project_id,
         skill_dir=skill_dir,
+        env=recorder_env,
     )
     recorder_manager.set_meta(session.session_id, meta)
     session_id = session.session_id
@@ -1838,6 +1846,12 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
         ).first()
         if env_config is None:
             return Response({'detail': '请选择有效的环境配置'}, status=status.HTTP_400_BAD_REQUEST)
+        desktop_enabled = os.environ.get('RECORDER_DESKTOP_ENABLED', '').lower() in ('1', 'true', 'yes', 'on')
+        if desktop_enabled and recorder_manager.has_active_kind('auth'):
+            return Response(
+                {'detail': '当前已有用户正在录制登录态，请关闭后再试'},
+                status=status.HTTP_409_CONFLICT,
+            )
         skill_dir = _resolve_recorder_skill_dir()
         if not skill_dir:
             return Response(
@@ -1867,11 +1881,17 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
             )
         except RecorderSessionError as exc:
             return Response({'detail': f'启动录制失败: {exc}'}, status=status.HTTP_400_BAD_REQUEST)
-        return Response({
+        response_data = {
             'session_id': session_id,
             'viewport': viewport,
             'base_url': env_config.base_url or '',
-        }, status=status.HTTP_201_CREATED)
+        }
+        if desktop_enabled:
+            response_data['desktop_url'] = os.environ.get(
+                'RECORDER_DESKTOP_PUBLIC_URL',
+                '/novnc/vnc.html?autoconnect=1&resize=scale&reconnect=1&show_dot=1',
+            )
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):

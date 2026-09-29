@@ -88,6 +88,12 @@ def execute_test_suite(self, execution_id):
         execution.status = 'completed' if execution.status != 'cancelled' else 'cancelled'
         execution.completed_at = timezone.now()
         execution.save(update_fields=['status', 'completed_at', 'updated_at'])
+
+        try:
+            from knowledge_evolution.services import record_test_execution
+            record_test_execution(execution)
+        except Exception:
+            logger.exception("测试执行结果未能记录到数据飞轮")
         
         logger.info(f"测试套件执行完成: {suite.name}, "
                    f"通过: {execution.passed_count}, "
@@ -123,6 +129,11 @@ def execute_test_suite(self, execution_id):
             execution.status = 'failed'
             execution.completed_at = timezone.now()
             execution.save(update_fields=['status', 'completed_at', 'updated_at'])
+            try:
+                from knowledge_evolution.services import record_test_execution
+                record_test_execution(execution)
+            except Exception:
+                logger.exception("失败测试执行未能记录到数据飞轮")
         except:
             pass
             

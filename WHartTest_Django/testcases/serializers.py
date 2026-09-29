@@ -649,6 +649,28 @@ class TestExecutionSerializer(serializers.ModelSerializer):
     results = TestCaseResultSerializer(many=True, read_only=True)
     duration = serializers.ReadOnlyField()
     pass_rate = serializers.ReadOnlyField()
+    trace_id = serializers.SerializerMethodField()
+    output_id = serializers.SerializerMethodField()
+
+    def _evolution_output(self, obj):
+        cache_name = "_evolution_output_cache"
+        if not hasattr(obj, cache_name):
+            from knowledge_evolution.models import GenerationOutput
+            setattr(
+                obj, cache_name,
+                GenerationOutput.objects.filter(
+                    task_type="test_execution", task_id=str(obj.pk)
+                ).order_by("-created_at").first(),
+            )
+        return getattr(obj, cache_name)
+
+    def get_trace_id(self, obj):
+        output = self._evolution_output(obj)
+        return str(output.trace_id) if output else None
+
+    def get_output_id(self, obj):
+        output = self._evolution_output(obj)
+        return str(output.id) if output else None
 
     class Meta:
         model = TestExecution
@@ -669,6 +691,8 @@ class TestExecutionSerializer(serializers.ModelSerializer):
             "celery_task_id",
             "duration",
             "pass_rate",
+            "trace_id",
+            "output_id",
             "results",
             "generate_playwright_script",
             "created_at",
@@ -687,6 +711,8 @@ class TestExecutionSerializer(serializers.ModelSerializer):
             "celery_task_id",
             "duration",
             "pass_rate",
+            "trace_id",
+            "output_id",
             "created_at",
             "updated_at",
         ]

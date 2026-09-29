@@ -186,6 +186,11 @@
             <a href="#" @click="checkProjectAndNavigate($event, '/file-management')">{{ fileManagementMenuLabel }}</a>
           </a-menu-item>
 
+          <a-menu-item key="knowledge-graph" v-if="hasKnowledgeGraphPermission">
+            <template #icon><icon-relation /></template>
+            <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-graph')">{{ knowledgeGraphMenuLabel }}</a>
+          </a-menu-item>
+
           <!-- 测试管理子菜单 -->
           <a-sub-menu key="test-management" v-if="hasTestManagementMenuItems">
             <template #icon><icon-experiment /></template>
@@ -399,6 +404,7 @@ const tasksMenuLabel = computed(() => (locale.value === 'en-US' ? 'Tasks' : tl('
 const fileManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Files' : tl('文件管理')));
 const knowledgeMenuLabel = computed(() => (locale.value === 'en-US' ? 'RAG' : tl('知识库管理')));
 const knowledgeListLabel = computed(() => (locale.value === 'en-US' ? 'Knowledge List' : tl('知识库列表')));
+const knowledgeGraphMenuLabel = computed(() => (locale.value === 'en-US' ? 'Knowledge Graph' : tl('知识图谱')));
 const apiKeysMenuLabel = computed(() => (locale.value === 'en-US' ? 'Keys' : tl('KEY管理')));
 const testManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Testing' : tl('测试管理')));
 const caseManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Cases' : tl('用例管理')));
@@ -475,6 +481,7 @@ const activeMenu = computed(() => {
   if (path.startsWith('/langgraph-chat')) return 'langgraph-chat';
   if (path.startsWith('/task-center')) return 'task-center';
   if (path.startsWith('/file-management')) return 'file-management';
+  if (path.startsWith('/knowledge-graph')) return 'knowledge-graph';
   if (path.startsWith('/knowledge-management')) return 'knowledge-list';
   if (path.startsWith('/document-anonymization')) return 'document-anonymization';
   if (path.startsWith('/api-keys')) return 'api-keys';
@@ -500,6 +507,7 @@ const hasRequirementsPermission = computed(() => {
 
 // 菜单权限与后端模型权限保持一致，后端还会按项目成员身份做二次隔离。
 const hasCodeAnalysisPermission = computed(() => authStore.hasPermission('code_analysis.view_analysistask'));
+const hasKnowledgeGraphPermission = computed(() => hasCodeAnalysisPermission.value);
 
 const hasTestcasesPermission = computed(() => {
   return authStore.hasPermission('testcases.view_testcase');

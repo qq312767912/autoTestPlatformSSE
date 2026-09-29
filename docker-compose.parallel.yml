@@ -109,6 +109,9 @@ services:
       - QDRANT_URL=http://qdrant:6333
       - SEMGREP_SCANNER_URL=http://semgrep-scanner:8080
       - HF_ENDPOINT=${DOCKER_HF_ENDPOINT:-https://huggingface.co}
+      - RECORDER_DESKTOP_ENABLED=true
+      - RECORDER_DESKTOP_DISPLAY=:99
+      - RECORDER_DESKTOP_PUBLIC_URL=/novnc/vnc.html?autoconnect=1&resize=scale&reconnect=1&show_dot=1
     depends_on:
       postgres:
         condition: service_healthy
