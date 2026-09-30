@@ -232,11 +232,13 @@
               <template #icon><icon-safe /></template>
               <a href="#" @click="checkProjectAndNavigate($event, '/document-anonymization')">{{ anonymizationMenuLabel }}</a>
             </a-menu-item>
-            <a-menu-item key="knowledge-evolution" v-if="hasKnowledgeEvolutionPermission">
-              <template #icon><icon-loop /></template>
-              <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-evolution')">{{ knowledgeEvolutionMenuLabel }}</a>
-            </a-menu-item>
           </a-sub-menu>
+
+          <!-- 反馈与测评（独立模块：知识数据飞轮工作台） -->
+          <a-menu-item key="knowledge-evolution" v-if="hasKnowledgeEvolutionPermission">
+            <template #icon><icon-loop /></template>
+            <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-evolution')">{{ knowledgeEvolutionMenuLabel }}</a>
+          </a-menu-item>
 
           <!-- 系统管理子菜单 -->
           <a-sub-menu key="settings" v-if="hasSystemMenuItems">
@@ -612,7 +614,7 @@ const hasKnowledgeEvolutionPermission = computed(() => {
 
 // 检查是否有知识库管理菜单项的权限
 const hasKnowledgeMenuItems = computed(() => {
-  return hasKnowledgePermission.value || hasAnonymizationPermission.value || hasKnowledgeEvolutionPermission.value;
+  return hasKnowledgePermission.value || hasAnonymizationPermission.value;
 });
 
 // 检查是否有测试管理菜单项的权限

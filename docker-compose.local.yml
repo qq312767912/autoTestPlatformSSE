@@ -134,6 +134,10 @@ services:
       - QDRANT_URL=http://qdrant:6333
       - SEMGREP_SCANNER_URL=http://semgrep-scanner:8080
       - HF_ENDPOINT=${DOCKER_HF_ENDPOINT:-https://huggingface.co}
+      # 代码审查图谱（CRG）服务配置
+      - CODE_REVIEW_GRAPH_URL=${CODE_REVIEW_GRAPH_URL:-http://crg-service:8080}
+      - CODE_REVIEW_GRAPH_TOKEN=${CRG_INTERNAL_TOKEN:-change-this-crg-token}
+      - CODE_REVIEW_GRAPH_ENABLED=${CODE_REVIEW_GRAPH_ENABLED:-false}
       # 本地开发同步服务仅修改容器 hosts，不修改 macOS 本机 hosts。
       - TEST_HOST_SYNC_TOKEN=${TEST_HOST_SYNC_TOKEN:-wharttest-local-container-host-sync}
     depends_on:

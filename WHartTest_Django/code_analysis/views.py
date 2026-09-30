@@ -425,6 +425,11 @@ class KnowledgeGraphSourceViewSet(viewsets.ViewSet):
         from .graph_client import CodeReviewGraphClient, GraphUnavailable
 
         task = self._task(request, pk)
+        if not CodeReviewGraphClient.enabled():
+            return Response(
+                {"detail": "代码审查图谱（CRG）未启用，请在环境变量中配置 CODE_REVIEW_GRAPH_ENABLED=true 并设置 CRG_INTERNAL_TOKEN。"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         def csv(name):
             return [value for value in request.query_params.get(name, "").split(",") if value]
         try:
