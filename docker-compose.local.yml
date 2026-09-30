@@ -88,8 +88,8 @@ services:
       - ./:/workspace:ro
       # 开发阶段挂载核心源码，避免每次改模型/配置都重建 backend 镜像。
       - ./WHartTest_Django/knowledge:/app/knowledge:ro
-      - ./WHartTest_Django/knowledge_evolution:/app/knowledge_evolution
-      - ./WHartTest_Django/code_analysis:/app/code_analysis
+      - ./WHartTest_Django/knowledge_evolution:/app/knowledge_evolution:ro
+      - ./WHartTest_Django/code_analysis:/app/code_analysis:ro
       - ./WHartTest_Django/orchestrator_integration:/app/orchestrator_integration:ro
       - ./WHartTest_Django/wharttest_django/settings.py:/app/wharttest_django/settings.py:ro
       - ./WHartTest_Django/wharttest_django/urls.py:/app/wharttest_django/urls.py:ro
