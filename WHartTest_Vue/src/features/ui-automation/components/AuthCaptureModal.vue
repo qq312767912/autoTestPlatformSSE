@@ -4,26 +4,17 @@
     :title="text.title"
     :footer="false"
     :mask-closable="true"
-    width="min(1500px, calc(100vw - 24px))"
+    width="min(1200px, calc(100vw - 24px))"
     @cancel="handleClose"
   >
     <div class="auth-capture-live">
       <div ref="canvasWrapRef" class="auth-capture-canvas-wrap">
-        <iframe
-          v-if="desktopUrl"
-          class="auth-capture-desktop"
-          :src="desktopUrl"
-          title="Login state desktop"
-          allow="clipboard-read; clipboard-write"
-        />
         <canvas
-          v-else
           ref="canvasRef"
           class="auth-capture-canvas"
           :style="canvasStyle"
           @pointerdown="onPointerDown"
           @pointerup="onPointerUp"
-          @pointercancel="onPointerCancel"
           @pointermove="onPointerMove"
           @wheel="onWheel"
         />
@@ -42,7 +33,7 @@
       <div class="auth-capture-side">
         <div class="auth-capture-env">{{ env?.name || '' }}</div>
         <div class="auth-capture-hint">{{ text.hint }}</div>
-        <a-button type="primary" :loading="saving" :disabled="!sessionId" @click="openNameDialog">
+        <a-button type="primary" :loading="saving" :disabled="!sessionId" @click="handleSaveClick">
           <template #icon><icon-safe /></template>
           {{ text.saveLoginState }}
         </a-button>
@@ -50,7 +41,7 @@
       </div>
     </div>
 
-    <!-- 保存登录态：自定义名称 -->
+    <!-- 保存登录态：自定义名称（更新模式不经过此弹窗，直接覆盖保存） -->
     <a-modal v-model:visible="nameVisible" :title="text.saveLoginState" :footer="false" width="420px">
       <a-form layout="vertical">
         <a-form-item :label="text.nameLabel">
@@ -77,13 +68,15 @@ import { Message } from '@arco-design/web-vue'
 import { IconSafe } from '@arco-design/web-vue/es/icon'
 import { useAppI18n } from '@/composables/useAppI18n'
 import { recorderApi } from '../api'
-import type { UiEnvironmentConfig } from '../types'
+import type { UiAuthState, UiEnvironmentConfig } from '../types'
 import { extractResponseData } from '../types'
 import { uiWebSocket, UiSocketEnum } from '../services/websocket'
 
 const props = defineProps<{
   visible: boolean
   env?: UiEnvironmentConfig | null
+  /** 更新模式：传入待覆盖的登录态，保存时刷新该记录的快照（名称保持不变） */
+  authState?: UiAuthState | null
 }>()
 
 const emit = defineEmits<{
@@ -92,11 +85,14 @@ const emit = defineEmits<{
 }>()
 
 const { isEnglish } = useAppI18n()
-const text = computed(() => (
-  isEnglish.value
+const text = computed(() => {
+  const updating = Boolean(props.authState?.id)
+  return isEnglish.value
     ? {
-        title: 'Record Login State',
-        hint: 'Log in to the system in the view. After logging in, click "Save Login State" to capture cookies/localStorage for this environment.',
+        title: updating ? 'Update Login State' : 'Record Login State',
+        hint: updating
+          ? 'Log in to the system in the view. After logging in, click "Save Login State" to overwrite the snapshot of this login state. Its name stays unchanged; change it via the Edit button.'
+          : 'Log in to the system in the view. After logging in, click "Save Login State" to capture cookies/localStorage/sessionStorage for this environment.',
         saveLoginState: 'Save Login State',
         waiting: 'Waiting for browser…',
         close: 'Close',
@@ -105,12 +101,15 @@ const text = computed(() => (
         nameLabel: 'Login state name',
         namePlaceholder: 'Enter a name (leave empty to auto-generate)',
         saveSuccess: 'Login state saved, and will be injected automatically on execution',
+        updateSuccess: 'Login state updated, bound steps will take effect automatically',
         saveFailed: 'Failed to save login state',
         startFailed: 'Failed to start recorder browser',
       }
     : {
-        title: '录制登录态',
-        hint: '在画面中完成目标系统登录，登录成功后点击「保存登录态」，捕获该环境的 cookies/localStorage 供执行时自动注入。',
+        title: updating ? '更新登录态' : '录制登录态',
+        hint: updating
+          ? '在画面中完成目标系统登录，登录成功后点击「保存登录态」，最新凭据将覆盖原登录态（名称保持不变，如需改名请用编辑按钮）。绑定该登录态的步骤执行时自动使用新凭据。'
+          : '在画面中完成目标系统登录，登录成功后点击「保存登录态」，捕获该环境的 cookies/localStorage/sessionStorage 供执行时自动注入。',
         saveLoginState: '保存登录态',
         waiting: '等待浏览器…',
         close: '关闭',
@@ -119,10 +118,11 @@ const text = computed(() => (
         nameLabel: '登录态名称',
         namePlaceholder: '填写登录态名称（留空自动生成）',
         saveSuccess: '登录态已保存，执行任务时将自动注入',
+        updateSuccess: '登录态已更新，绑定该登录态的步骤将自动生效',
         saveFailed: '保存登录态失败',
         startFailed: '录制浏览器启动失败',
       }
-))
+})
 
 // 画布（与录制画布同构）
 const viewport = reactive({ width: 1400, height: 900 })
@@ -135,7 +135,6 @@ const sessionId = ref('')
 const saving = ref(false)
 const nameVisible = ref(false)
 const authName = ref('')
-const desktopUrl = ref('')
 
 const canvasStyle = computed(() => ({
   aspectRatio: `${viewport.width} / ${viewport.height}`,
@@ -202,15 +201,9 @@ function canvasPoint(e: PointerEvent | WheelEvent) {
 }
 
 let lastMoveSent = 0
-let pointerDragging = false
-let activePointerId: number | null = null
 
 function onPointerDown(e: PointerEvent) {
   if (!sessionId.value) return
-  pointerDragging = true
-  activePointerId = e.pointerId
-  lastMoveSent = 0
-  canvasRef.value?.setPointerCapture?.(e.pointerId)
   keepImeFocused()
   const { x, y } = canvasPoint(e)
   uiWebSocket.recorderInput({
@@ -220,8 +213,6 @@ function onPointerDown(e: PointerEvent) {
     y,
     button: e.button === 2 ? 'right' : 'left',
     clickCount: e.detail || 1,
-    dragging: true,
-    clientTs: Date.now(),
   })
 }
 
@@ -235,36 +226,17 @@ function onPointerUp(e: PointerEvent) {
     y,
     button: e.button === 2 ? 'right' : 'left',
     clickCount: e.detail || 1,
-    dragging: pointerDragging,
-    clientTs: Date.now(),
   })
-  if (activePointerId === e.pointerId) {
-    canvasRef.value?.releasePointerCapture?.(e.pointerId)
-  }
-  pointerDragging = false
-  activePointerId = null
   e.preventDefault()
-}
-
-function onPointerCancel(e: PointerEvent) {
-  if (!pointerDragging) return
-  onPointerUp(e)
 }
 
 function onPointerMove(e: PointerEvent) {
   if (!sessionId.value) return
   const now = Date.now()
-  if (now - lastMoveSent < (pointerDragging ? 12 : 30)) return
+  if (now - lastMoveSent < 30) return
   lastMoveSent = now
   const { x, y } = canvasPoint(e)
-  uiWebSocket.recorderInput({
-    type: 'mouse',
-    event: 'move',
-    x,
-    y,
-    dragging: pointerDragging,
-    clientTs: now,
-  })
+  uiWebSocket.recorderInput({ type: 'mouse', event: 'move', x, y })
 }
 
 function onWheel(e: WheelEvent) {
@@ -327,29 +299,21 @@ function unbindCanvasListeners() {
 async function startCapture() {
   if (!props.env) return
   sessionId.value = ''
-  desktopUrl.value = ''
   hasFrame.value = false
   try {
     await uiWebSocket.connect()
-    const info = extractResponseData<{
-      session_id: string
-      viewport?: { width: number; height: number }
-      desktop_url?: string
-    } | null>(
+    const info = extractResponseData<{ session_id: string; viewport?: { width: number; height: number } } | null>(
       await recorderApi.authCapture(props.env.id),
     )
     if (!info) throw new Error(text.value.startFailed)
     sessionId.value = info.session_id
-    desktopUrl.value = info.desktop_url || ''
     if (info.viewport?.width && info.viewport?.height) {
       viewport.width = info.viewport.width
       viewport.height = info.viewport.height
     }
     uiWebSocket.recorderStart(info.session_id)
-    if (!desktopUrl.value) {
-      bindCanvasListeners()
-      nextTick(fitCanvas)
-    }
+    bindCanvasListeners()
+    nextTick(fitCanvas)
   } catch (e: any) {
     Message.error(e?.detail || e?.error || e?.message || text.value.startFailed)
     emit('update:visible', false)
@@ -366,7 +330,6 @@ async function handleClose() {
       // 忽略关闭失败（会话可能已结束）
     }
     sessionId.value = ''
-    desktopUrl.value = ''
   }
   emit('update:visible', false)
 }
@@ -376,13 +339,28 @@ function openNameDialog() {
   nameVisible.value = true
 }
 
+function handleSaveClick() {
+  if (props.authState?.id) {
+    // 更新模式：免填名称，直接覆盖原登录态
+    submitSave()
+    return
+  }
+  openNameDialog()
+}
+
 async function submitSave() {
   if (!sessionId.value) return
   saving.value = true
+  const targetId = props.authState?.id
   const name = authName.value.trim() || undefined
   try {
-    await recorderApi.saveLoginState(sessionId.value, name ? { name } : undefined)
-    Message.success(text.value.saveSuccess)
+    const body = targetId
+      ? { auth_state_id: targetId }
+      : name
+        ? { name }
+        : undefined
+    await recorderApi.saveLoginState(sessionId.value, body)
+    Message.success(targetId ? text.value.updateSuccess : text.value.saveSuccess)
     nameVisible.value = false
     // 保存成功：关闭会话并自动关闭录制画布
     unbindCanvasListeners()
@@ -431,13 +409,7 @@ onUnmounted(() => {
 .auth-capture-live {
   display: flex;
   gap: 12px;
-  width: 100%;
-  height: min(760px, calc(82vh - 44px));
-  min-width: 760px;
-  min-height: 420px;
-  max-width: 100%;
-  max-height: calc(85vh - 20px);
-  resize: both;
+  height: min(560px, calc(70vh - 44px));
   min-height: 0;
   overflow: hidden;
 }
@@ -461,14 +433,6 @@ onUnmounted(() => {
   max-width: 100%;
   max-height: 100%;
   cursor: crosshair;
-}
-
-.auth-capture-desktop {
-  display: block;
-  width: 100%;
-  height: 100%;
-  border: 0;
-  background: #111827;
 }
 
 .auth-capture-ime-input {
