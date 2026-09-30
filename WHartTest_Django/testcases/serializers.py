@@ -693,6 +693,9 @@ class TestExecutionSerializer(serializers.ModelSerializer):
             "pass_rate",
             "trace_id",
             "output_id",
+            "workflow_id",
+            "capability",
+            "source_output",
             "results",
             "generate_playwright_script",
             "created_at",
@@ -726,6 +729,15 @@ class TestExecutionCreateSerializer(serializers.Serializer):
     suite_id = serializers.IntegerField(required=True, help_text="测试套件ID")
     generate_playwright_script = serializers.BooleanField(
         required=False, default=False, help_text="是否为功能测试用例生成Playwright脚本"
+    )
+    workflow_id = serializers.CharField(
+        required=False, allow_blank=True, default='', help_text="能力自进化 workflow_id"
+    )
+    capability_id = serializers.UUIDField(
+        required=False, allow_null=True, help_text="能力定义 ID"
+    )
+    source_output_id = serializers.UUIDField(
+        required=False, allow_null=True, help_text="上游用例生成 GenerationOutput ID"
     )
 
     def validate_suite_id(self, value):

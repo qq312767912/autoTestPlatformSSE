@@ -6,8 +6,13 @@ import type {
   EvaluationResult,
   FeedbackEvent,
   KnowledgeCandidate,
+  RetrievalTrace,
+  CapabilityDefinition,
+  CapabilityRelease,
   CreateFeedbackRequest,
   CreateCandidateFromRunRequest,
+  RunEvolutionRequest,
+  RunEvolutionResponse,
 } from './types';
 
 const BASE = '/api/knowledge-evolution';
@@ -20,6 +25,15 @@ function getHeaders() {
     'Content-Type': 'application/json',
     Accept: 'application/json',
   };
+}
+
+export async function listRetrievalTraces(params?: {
+  project?: number;
+  task_type?: string;
+  status?: string;
+}): Promise<RetrievalTrace[]> {
+  const data = await get<RetrievalTrace[] | { results: RetrievalTrace[] }>('/retrieval-traces/', params);
+  return Array.isArray(data) ? data : (data?.results ?? []);
 }
 
 async function request<T>(method: string, path: string, data?: unknown, params?: Record<string, unknown>): Promise<T> {
@@ -110,4 +124,33 @@ export async function listKnowledgeCandidates(params?: {
 
 export async function updateCandidateState(id: string, state: string, reviewReason?: string): Promise<KnowledgeCandidate> {
   return patch<KnowledgeCandidate>(`/knowledge-candidates/${id}/`, { state, review_reason: reviewReason });
+}
+
+export async function listCapabilityDefinitions(projectId: number): Promise<CapabilityDefinition[]> {
+  const data = await get<CapabilityDefinition[] | { results: CapabilityDefinition[] }>('/capability-definitions/', { project: projectId });
+  return Array.isArray(data) ? data : (data?.results ?? []);
+}
+
+export async function createCapabilityDefinition(data: Partial<CapabilityDefinition>): Promise<CapabilityDefinition> {
+  return post<CapabilityDefinition>('/capability-definitions/', data);
+}
+
+export async function updateCapabilityDefinition(id: string, data: Partial<CapabilityDefinition>): Promise<CapabilityDefinition> {
+  return patch<CapabilityDefinition>(`/capability-definitions/${id}/`, data);
+}
+
+export async function runCapabilityEvolution(
+  id: string,
+  data: RunEvolutionRequest
+): Promise<RunEvolutionResponse> {
+  return post<RunEvolutionResponse>(`/capability-definitions/${id}/run-evolution/`, data);
+}
+
+export async function activateCapabilityRelease(definitionId: string, releaseId: string): Promise<CapabilityDefinition> {
+  return post<CapabilityDefinition>(`/capability-definitions/${definitionId}/activate-release/`, { release_id: releaseId });
+}
+
+export async function listCapabilityReleases(params?: { project?: number; kind?: string; state?: string }): Promise<CapabilityRelease[]> {
+  const data = await get<CapabilityRelease[] | { results: CapabilityRelease[] }>('/capability-releases/', params);
+  return Array.isArray(data) ? data : (data?.results ?? []);
 }

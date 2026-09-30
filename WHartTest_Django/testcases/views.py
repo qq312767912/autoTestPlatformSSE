@@ -1377,12 +1377,28 @@ class TestExecutionViewSet(viewsets.ModelViewSet):
                 {"error": "测试套件不属于当前项目"}, status=status.HTTP_400_BAD_REQUEST
             )
 
+        # 解析可选的飞轮关联字段
+        workflow_id = serializer.validated_data.get("workflow_id", "")
+        capability_id = serializer.validated_data.get("capability_id")
+        source_output_id = serializer.validated_data.get("source_output_id")
+        capability = None
+        source_output = None
+        if capability_id:
+            from knowledge_evolution.capability_models import CapabilityDefinition
+            capability = get_object_or_404(CapabilityDefinition, pk=capability_id)
+        if source_output_id:
+            from knowledge_evolution.models import GenerationOutput
+            source_output = get_object_or_404(GenerationOutput, pk=source_output_id)
+
         # 创建执行记录
         execution = TestExecution.objects.create(
             suite=suite,
             executor=request.user,
             status="pending",
             generate_playwright_script=generate_playwright_script,
+            workflow_id=workflow_id or "",
+            capability=capability,
+            source_output=source_output,
         )
 
         # 使用transaction.on_commit()确保数据库事务提交后再启动Celery任务

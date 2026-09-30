@@ -682,4 +682,41 @@ def run_testcase_review(review_id):
     review.completed_at = timezone.now()
     review.error_message = ""
     review.save()
+
+    # 记录到平台统一产出协议，进入数据飞轮
+    try:
+        from knowledge_evolution.protocol import ADAPTERS, publish_output
+        duration_ms = 0
+        if review.started_at and review.completed_at:
+            duration_ms = max(0, round((review.completed_at - review.started_at).total_seconds() * 1000))
+        envelope = ADAPTERS["case_review"].build(
+            project=review.project,
+            user=review.creator,
+            source_id=str(review.pk),
+            input_summary=review.business_context or f"测试用例审查：{review.source_name}",
+            output={"summary": review.summary or {}, "issues": issues, "pending": pending, "governance": governance},
+            findings=[{
+                "key": f"{item.get('sheet')}:{item.get('row')}:{item.get('case_id')}",
+                "file": str(review.source_name),
+                "line_start": int(item.get("row") or 0),
+                "severity": str(item.get("severity") or "中"),
+                "disposition": str(item.get("judgement") or "needs_confirmation"),
+                "reason": str(item.get("description") or "")[:500],
+                "suggestion": str(item.get("suggestion") or "")[:500],
+            } for item in issues],
+            evidence=[{"source_type": "testcase_review", "source_id": str(review.pk), "location": review.source_name}],
+            metrics={"latency_ms": duration_ms, "token_usage": 0, "chunks": len(chunks), "uncovered_chunks": len(uncovered)},
+            producer={
+                "policy_version": f"testcase-review-v1",
+                "prompt_version": review.skill_name,
+                "model_version": "",
+            },
+        )
+        evolution_ids = publish_output(envelope)
+        if evolution_ids:
+            review.summary = {**(review.summary or {}), "trace_id": evolution_ids[0], "output_id": evolution_ids[1]}
+            review.save(update_fields=["summary"])
+    except Exception:
+        logger.exception("用例审查结果未能记录到数据飞轮")
+
     return review.summary

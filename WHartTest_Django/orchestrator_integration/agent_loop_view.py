@@ -839,10 +839,11 @@ class AgentLoopStreamAPIView(View):
     async def _record_module_output(
         self, *, request, project, session_id, user_message, all_messages,
         model_name, prompt_id, total_tokens, step_count, use_knowledge_base,
-        knowledge_base_ids,
+        knowledge_base_ids, capability=None,
     ):
         """Best-effort recording for business-specific agent tasks."""
-        if getattr(request, "_flywheel_module_key", "") != "testcase_generation":
+        module_key = getattr(request, "_flywheel_module_key", "")
+        if not module_key:
             return None
         content = ""
         for message in reversed(all_messages or []):
@@ -860,14 +861,28 @@ class AgentLoopStreamAPIView(View):
         if not content.strip():
             return None
         try:
-            from knowledge_evolution.services import record_task_output
-            return await sync_to_async(record_task_output)(
+            from knowledge_evolution.protocol import ADAPTERS, publish_output
+            from knowledge_evolution.capability_models import CapabilityDefinition
+            if capability is None and getattr(request, "_flywheel_capability_id", ""):
+                try:
+                    capability = await sync_to_async(
+                        CapabilityDefinition.objects.filter(pk=request._flywheel_capability_id).first
+                    )()
+                except Exception:
+                    capability = None
+            adapter = ADAPTERS[module_key]
+            envelope = adapter.build(
                 project=project,
                 user=request.user,
-                task_type="testcase_generation",
-                task_id=session_id,
-                query=user_message,
-                content=content,
+                source_id=session_id,
+                input_summary=user_message,
+                output={"content": content},
+                workflow_id=(getattr(request, "_flywheel_workflow_id", "") or session_id)
+                if module_key in {"risk_identification", "test_plan_generation", "testcase_generation", "issue_tracking"}
+                else "",
+                parent_output_ids=getattr(request, "_flywheel_parent_output_ids", []),
+                capability=capability or getattr(request, "_flywheel_capability", None),
+                metrics={"token_usage": total_tokens, "step_count": step_count},
                 channels={
                     "agent": {"enabled": True, "steps": step_count},
                     "knowledge": {
@@ -875,12 +890,18 @@ class AgentLoopStreamAPIView(View):
                         "knowledge_base_ids": list(knowledge_base_ids or []),
                     },
                 },
-                token_usage=total_tokens,
-                metadata={"session_id": session_id, "step_count": step_count},
-                policy_version="testcase-generation-agent-v1",
-                prompt_version=str(prompt_id or "default"),
-                model_version=model_name,
+                producer={
+                    "policy_version": f"{module_key}-agent-v1",
+                    "prompt_version": str(prompt_id or "default"),
+                    "model_version": model_name,
+                },
+                extensions={
+                    "session_id": session_id,
+                    "knowledge_enabled": bool(use_knowledge_base and knowledge_base_ids),
+                    "knowledge_base_ids": list(knowledge_base_ids or []),
+                },
             )
+            return await sync_to_async(publish_output)(envelope)
         except Exception:
             logger.exception("用例生成结果未能记录到数据飞轮")
             return None
@@ -1562,6 +1583,7 @@ class AgentLoopStreamAPIView(View):
                             step_count=step_count,
                             use_knowledge_base=use_knowledge_base,
                             knowledge_base_ids=knowledge_base_ids,
+                            capability=getattr(request, "_flywheel_capability", None),
                         )
                 except Exception as e:
                     logger.warning(
@@ -1650,7 +1672,20 @@ class AgentLoopStreamAPIView(View):
 
         user_message = body_data.get("message")
         module_key = str(body_data.get("module_key") or "")
-        request._flywheel_module_key = module_key if module_key == "testcase_generation" else ""
+        flywheel_modules = {
+            "case_review", "knowledge_query", "risk_identification",
+            "test_plan_generation", "testcase_generation", "issue_tracking",
+        }
+        request._flywheel_module_key = module_key if module_key in flywheel_modules else ""
+        request._flywheel_workflow_id = str(body_data.get("workflow_id") or "")
+        if request._flywheel_module_key in {
+            "risk_identification", "test_plan_generation", "testcase_generation", "issue_tracking",
+        } and not request._flywheel_workflow_id:
+            request._flywheel_workflow_id = str(body_data.get("session_id") or "")
+        parent_ids = body_data.get("parent_output_ids") or []
+        request._flywheel_parent_output_ids = [str(item) for item in parent_ids if item]
+        request._flywheel_capability_id = str(body_data.get("capability_id") or "")
+        request._flywheel_capability = None
         session_id = body_data.get("session_id")
         project_id = body_data.get("project_id")
         knowledge_base_ids = _normalize_knowledge_base_ids(

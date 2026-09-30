@@ -414,6 +414,23 @@ class TestExecution(models.Model):
         help_text=_('执行功能测试用例时是否自动生成Playwright脚本')
     )
 
+    # 与能力自进化 workflow 的关联
+    workflow_id = models.CharField(_('工作流ID'), max_length=64, blank=True, default='')
+    capability = models.ForeignKey(
+        'knowledge_evolution.CapabilityDefinition',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='test_executions',
+        verbose_name=_('能力定义'),
+    )
+    source_output = models.ForeignKey(
+        'knowledge_evolution.GenerationOutput',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='test_executions',
+        verbose_name=_('来源产出'),
+    )
+
     created_at = models.DateTimeField(_('创建时间'), auto_now_add=True)
     updated_at = models.DateTimeField(_('更新时间'), auto_now=True)
 

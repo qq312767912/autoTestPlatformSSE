@@ -54,8 +54,12 @@ class GenerationOutput(models.Model):
     project = models.ForeignKey(
         "projects.Project", on_delete=models.CASCADE, related_name="generation_outputs"
     )
-    trace = models.OneToOneField(
-        RetrievalTrace, on_delete=models.PROTECT, related_name="generation_output"
+    trace = models.ForeignKey(
+        RetrievalTrace, on_delete=models.PROTECT, related_name="generation_outputs"
+    )
+    capability = models.ForeignKey(
+        "knowledge_evolution.CapabilityDefinition", null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="generation_outputs",
     )
     task_type = models.CharField(max_length=64, db_index=True)
     task_id = models.CharField(max_length=128, blank=True, db_index=True)
@@ -102,7 +106,11 @@ class FeedbackEvent(models.Model):
         RetrievalTrace, on_delete=models.PROTECT, null=True, blank=True,
         related_name="feedback_events",
     )
-    knowledge_version_ids = models.JSONField(default=list, blank=True)
+    knowledge_versions = models.ManyToManyField(
+        "knowledge_evolution.KnowledgeVersion",
+        blank=True,
+        related_name="feedback_events",
+    )
     signal = models.CharField(max_length=32, choices=SIGNAL_CHOICES, db_index=True)
     value = models.FloatField(default=1.0)
     reason_code = models.CharField(max_length=100, blank=True)
@@ -154,9 +162,13 @@ class EvaluationSuite(models.Model):
     ]
     TASK_TYPE_CHOICES = [
         ("knowledge_query", "知识库问答"),
+        ("case_review", "用例审查"),
         ("code_review", "代码审查"),
+        ("risk_identification", "风险识别"),
+        ("test_plan_generation", "测试方案生成"),
         ("test_execution", "测试执行"),
         ("testcase_generation", "用例生成"),
+        ("issue_tracking", "问题跟踪"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -275,3 +287,5 @@ from .retrieval_models import RetrievalPolicy  # noqa: E402,F401
 # 任务 11：评测运行与结果模型
 from .evaluation_models import EvaluationResult, EvaluationRun  # noqa: E402,F401
 
+# 任务 14–16：能力候选、影子门禁、发布与回滚
+from .capability_models import CapabilityDefinition, CapabilityRelease, PromotionDecision  # noqa: E402,F401

@@ -2,11 +2,13 @@
 
 export interface RetrievalTrace {
   id: string;
-  project_id: number;
+  project: number;
+  knowledge_base?: number | null;
+  user?: number | null;
   task_type: string;
   task_id: string;
   query: string;
-  query_vector_id?: string;
+  rewritten_query?: string;
   policy_version?: string;
   status: string;
   channels?: Record<string, unknown>;
@@ -14,6 +16,8 @@ export interface RetrievalTrace {
   citations?: unknown[];
   timings?: Record<string, unknown>;
   token_usage: number;
+  error_code?: string;
+  output_ids?: string[];
   created_at: string;
 }
 
@@ -137,4 +141,45 @@ export interface CreateFeedbackRequest {
 export interface CreateCandidateFromRunRequest {
   thresholds?: Record<string, number>;
   min_failure_count?: number;
+}
+
+export interface CapabilityDefinition {
+  id: string;
+  project: number;
+  kind: 'knowledge' | 'retrieval_policy' | 'prompt' | 'skill' | 'agent';
+  name: string;
+  description: string;
+  evaluation_mode: 'single' | 'workflow';
+  stages: string[];
+  default_suite?: string | null;
+  gate_rules: Record<string, unknown>;
+  active_release?: { id: string; name: string; version: string; state: string } | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CapabilityRelease {
+  id: string;
+  kind: CapabilityDefinition['kind'];
+  name: string;
+  version: string;
+  state: string;
+  created_at: string;
+}
+
+export interface RunEvolutionRequest {
+  name?: string;
+  baseline_release_id?: string;
+  candidate_config?: Record<string, unknown>;
+  version?: string;
+}
+
+export interface RunEvolutionResponse {
+  definition_id: string;
+  run_id: string;
+  suite_id: string;
+  case_count: number;
+  created_release_id: string | null;
+  gate_passed: boolean | null;
 }

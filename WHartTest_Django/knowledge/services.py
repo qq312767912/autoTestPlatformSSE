@@ -2183,6 +2183,62 @@ class KnowledgeBaseService:
         results = self._expand_context(results)
         return results
 
+    def _make_dense_search_fn(self, similarity_threshold: float):
+        """把现有 VectorManager.similarity_search 包装成编排器 DenseRetriever 的 search_fn。"""
+
+        def search_fn(query: str, project_id: int, k: int = 10) -> List[Dict[str, Any]]:
+            # orchestrator 按 project_id 隔离，这里复用本知识库对应的 project_id
+            if project_id != self.knowledge_base.project_id:
+                logger.warning(
+                    f"编排器请求 project_id={project_id} 与知识库 project_id={self.knowledge_base.project_id} 不一致，忽略"
+                )
+            results = self.vector_manager.similarity_search(
+                query, k=k, score_threshold=similarity_threshold, document_ids=None
+            )
+            # 统一输出字段，适配 orchestrator 的 RetrievalCandidate 转换
+            normalized = []
+            for r in results:
+                metadata = r.get("metadata") or {}
+                # 保留原始 metadata 并补全 orchestrator 需要的字段
+                metadata = {
+                    **metadata,
+                    "document_id": metadata.get("document_id") or metadata.get("doc_id"),
+                    "chunk_index": metadata.get("chunk_index"),
+                    "vector_id": metadata.get("vector_id"),
+                    "source": metadata.get("source", self.knowledge_base.name),
+                    "level": metadata.get("level", "L3"),
+                }
+                normalized.append({
+                    "content": r.get("content", ""),
+                    "metadata": metadata,
+                    "similarity_score": r.get("similarity_score", 0),
+                })
+            return normalized
+
+        return search_fn
+
+    @staticmethod
+    def _evidence_to_sources(evidence_package: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """把编排器 evidence_package 转回 record_knowledge_query 需要的 sources 格式。"""
+        sources = []
+        for ev in evidence_package:
+            metadata = ev.get("metadata") or {}
+            citation = ev.get("citation") or {}
+            sources.append({
+                "content": ev.get("content", ""),
+                "similarity_score": ev.get("score", 0),
+                "metadata": {
+                    "document_id": metadata.get("document_id") or citation.get("document_id") or metadata.get("source", ""),
+                    "chunk_index": metadata.get("chunk_index") or citation.get("chunk_index"),
+                    "vector_id": metadata.get("vector_id") or citation.get("citation_id") or ev.get("id", ""),
+                    "source": metadata.get("source") or citation.get("source", "knowledge"),
+                    "location": citation.get("location") or metadata.get("location", {}),
+                    "level": metadata.get("level", "L3"),
+                    "fusion_detail": {"sources": [ev.get("source_type", "dense")]},
+                },
+            })
+        return sources
+
     def query(
         self,
         query_text: str,
@@ -2203,12 +2259,47 @@ class KnowledgeBaseService:
             logger.info(f"   💾 向量存储: Qdrant")
 
             retrieval_start = time.time()
-            search_results = self.enhanced_search(
-                query_text,
-                top_k=top_k,
-                similarity_threshold=similarity_threshold,
-                enable_rewrite=enable_rewrite,
-            )
+
+            # 使用可版本化检索编排器（knowledge_evolution 任务 9）
+            try:
+                from knowledge_evolution.retrieval import (
+                    DenseRetriever,
+                    RetrievalOrchestrator,
+                    RetrievalRequest,
+                )
+
+                orchestrator = RetrievalOrchestrator()
+                orchestrator.retrievers["dense"] = DenseRetriever(
+                    search_fn=self._make_dense_search_fn(similarity_threshold)
+                )
+
+                query_rewrite = None
+                if enable_rewrite:
+                    query_rewrite = self._rewrite_query(query_text)
+
+                request = RetrievalRequest(
+                    project_id=self.knowledge_base.project_id,
+                    query=query_text,
+                    task_type="knowledge_query",
+                    principal=user,
+                    top_k=top_k,
+                    query_rewrite=query_rewrite,
+                )
+                orchestrator_result = orchestrator.retrieve(request)
+                search_results = self._evidence_to_sources(orchestrator_result.get("evidence_package", []))
+                candidates_count = orchestrator_result.get("candidates_count", {})
+                fusion_count = orchestrator_result.get("fusion_count", 0)
+            except Exception as exc:
+                logger.warning(f"检索编排器失败，降级为旧 enhanced_search: {exc}")
+                search_results = self.enhanced_search(
+                    query_text,
+                    top_k=top_k,
+                    similarity_threshold=similarity_threshold,
+                    enable_rewrite=enable_rewrite,
+                )
+                candidates_count = {}
+                fusion_count = len(search_results)
+
             retrieval_time = time.time() - retrieval_start
 
             # 生成回答（这里可以集成LLM）
@@ -2235,6 +2326,8 @@ class KnowledgeBaseService:
             logger.info(f"   🤖 生成耗时: {generation_time:.3f}s")
             logger.info(f"   🕐 总耗时: {total_time:.3f}s")
             logger.info(f"   📊 返回结果数: {len(search_results)}")
+            if candidates_count:
+                logger.info(f"   🔀 编排器各源候选数: {candidates_count}")
 
             evolution_ids = None
             try:
@@ -2260,6 +2353,9 @@ class KnowledgeBaseService:
                 "generation_time": generation_time,
                 "total_time": total_time,
             }
+            if candidates_count:
+                result["candidates_count"] = candidates_count
+                result["fusion_count"] = fusion_count
             if evolution_ids:
                 result["trace_id"], result["output_id"] = evolution_ids
             return result

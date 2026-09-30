@@ -57,7 +57,7 @@ class MultiKnowledgeBaseToolTests(SimpleTestCase):
         self.assertIn("联合检索结果", result)
         mock_search.assert_called_once_with(
             "查询入参", ["kb-1", "kb-2"], k=5, score_threshold=0.5,
-            candidate_k=10,
+            candidate_k=10, document_ids_by_kb={},
         )
 
     @patch("knowledge.langgraph_integration.KnowledgeBaseService.multi_kb_search")
@@ -76,7 +76,7 @@ class MultiKnowledgeBaseToolTests(SimpleTestCase):
         self.assertIn("结果19", result)
         mock_search.assert_called_once_with(
             "生成完整测试用例", ["kb-1", "kb-2"], k=20,
-            score_threshold=0.2, candidate_k=40,
+            score_threshold=0.2, candidate_k=40, document_ids_by_kb={},
         )
 
 

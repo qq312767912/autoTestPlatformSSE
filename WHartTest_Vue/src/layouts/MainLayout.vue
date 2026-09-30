@@ -234,7 +234,7 @@
             </a-menu-item>
           </a-sub-menu>
 
-          <!-- 反馈与测评（独立模块：知识数据飞轮工作台） -->
+          <!-- AI 质量进化（反馈、评测、改进候选与发布治理） -->
           <a-menu-item key="knowledge-evolution" v-if="hasKnowledgeEvolutionPermission">
             <template #icon><icon-loop /></template>
             <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-evolution')">{{ knowledgeEvolutionMenuLabel }}</a>
@@ -412,7 +412,7 @@ const fileManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'File
 const knowledgeMenuLabel = computed(() => (locale.value === 'en-US' ? 'RAG' : tl('知识库管理')));
 const knowledgeListLabel = computed(() => (locale.value === 'en-US' ? 'Knowledge List' : tl('知识库列表')));
 const knowledgeGraphMenuLabel = computed(() => (locale.value === 'en-US' ? 'Knowledge Graph' : tl('知识图谱')));
-const knowledgeEvolutionMenuLabel = computed(() => (locale.value === 'en-US' ? 'Feedback & Eval' : tl('反馈与测评')));
+const knowledgeEvolutionMenuLabel = computed(() => (locale.value === 'en-US' ? 'AI Quality Evolution' : tl('AI 质量进化')));
 const apiKeysMenuLabel = computed(() => (locale.value === 'en-US' ? 'Keys' : tl('KEY管理')));
 const testManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Testing' : tl('测试管理')));
 const caseManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Cases' : tl('用例管理')));

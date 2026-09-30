@@ -94,16 +94,23 @@ def record_task_output(*, project, user, task_type: str, task_id: str,
                        metadata: dict[str, Any] | None = None,
                        policy_version: str = "platform-v1",
                        prompt_version: str = "platform-v1",
-                       model_version: str = "", status: str = "completed") -> tuple[str, str] | None:
+                       model_version: str = "", status: str = "completed",
+                       capability=None) -> tuple[str, str] | None:
     """Record a platform task using the same trace contract as knowledge retrieval."""
     try:
         output_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        capability_id = None
+        if capability is not None:
+            capability_id = capability.pk if hasattr(capability, "pk") else capability
         with transaction.atomic():
             existing = GenerationOutput.objects.filter(
                 project=project, task_type=task_type, task_id=str(task_id),
                 output_hash=output_hash,
             ).select_related("trace").first()
             if existing:
+                if capability_id and existing.capability_id != capability_id:
+                    existing.capability_id = capability_id
+                    existing.save(update_fields=["capability", "updated_at"])
                 return str(existing.trace_id), str(existing.id)
             trace = RetrievalTrace.objects.create(
                 project=project,
@@ -122,6 +129,7 @@ def record_task_output(*, project, user, task_type: str, task_id: str,
             output = GenerationOutput.objects.create(
                 project=project,
                 trace=trace,
+                capability_id=capability_id,
                 task_type=task_type,
                 task_id=str(task_id),
                 model_version=model_version,
@@ -136,8 +144,20 @@ def record_task_output(*, project, user, task_type: str, task_id: str,
         return None
 
 
-def record_code_review_task(task, rejected_findings=None) -> tuple[str, str] | None:
+def record_code_review_task(task, rejected_findings=None, capability=None) -> tuple[str, str] | None:
     """Persist code-review classifications and counter-evidence without raw diff text."""
+    if capability is None:
+        from .capability_models import CapabilityDefinition
+        capability, _ = CapabilityDefinition.objects.get_or_create(
+            project=task.project,
+            name="代码审查",
+            defaults={
+                "kind": "skill",
+                "evaluation_mode": "single",
+                "stages": ["code_review"],
+                "gate_rules": {"min_mean_diff": 0.05, "min_pass_rate": 0.80},
+            },
+        )
     report = dict(task.change_report or {})
     report.pop("evolution", None)
     findings = report.get("findings") or []
@@ -199,6 +219,7 @@ def record_code_review_task(task, rejected_findings=None) -> tuple[str, str] | N
         policy_version=f"code-review-schema-v{schema_version}",
         prompt_version="code-review-current",
         status="completed" if task.status in {"completed", "degraded", "partial"} else "failed",
+        capability=capability,
     )
 
 
@@ -217,6 +238,12 @@ def record_test_execution(execution) -> tuple[str, str] | None:
         "pass_rate": execution.pass_rate,
     }
     content = json.dumps(summary, ensure_ascii=False, sort_keys=True)
+    workflow_id = getattr(execution, "workflow_id", "") or ""
+    capability = getattr(execution, "capability", None)
+    source_output = getattr(execution, "source_output", None)
+    protocol = {"workflow_id": workflow_id, "capability_id": str(capability.pk) if capability else ""}
+    if source_output:
+        protocol["parent_output_id"] = str(source_output.pk)
     ids = record_task_output(
         project=execution.suite.project,
         user=execution.executor,
@@ -226,10 +253,11 @@ def record_test_execution(execution) -> tuple[str, str] | None:
         content=content,
         channels={"test_runner": {"enabled": True}},
         timings={"total_ms": round((execution.duration or 0) * 1000)},
-        metadata=summary,
+        metadata={"protocol": protocol, **summary},
         policy_version="test-execution-v1",
         prompt_version="not-applicable",
         status="completed" if execution.status == "completed" else "failed",
+        capability=capability,
     )
     if not ids or execution.status not in {"completed", "failed"}:
         return ids

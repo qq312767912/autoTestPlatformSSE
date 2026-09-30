@@ -99,12 +99,18 @@ class FeedbackService:
         actor_key = self._actor_key()
         now = timezone.now()
         # 冷却期
-        recent = FeedbackEvent.objects.filter(
+        recent_events = FeedbackEvent.objects.filter(
             project_id=self.project_id,
             signal=signal,
             actor=self.context.actor,
+            actor_type=self.context.actor_type,
             created_at__gte=now - timezone.timedelta(seconds=self.SPAM_COOLDOWN_SECONDS),
-        ).exists()
+        )
+        if self.output:
+            recent_events = recent_events.filter(output=self.output)
+        elif self.trace:
+            recent_events = recent_events.filter(trace=self.trace)
+        recent = recent_events.exists()
         if recent:
             return True, f"同一用户 {self.SPAM_COOLDOWN_SECONDS}s 内已提交过 {signal} 反馈"
 
@@ -113,6 +119,7 @@ class FeedbackService:
             count = FeedbackEvent.objects.filter(
                 project_id=self.project_id,
                 actor=self.context.actor,
+                actor_type=self.context.actor_type,
                 signal__in=self.SUBJECTIVE_SIGNALS,
                 created_at__gte=now - timezone.timedelta(days=1),
             ).count()
@@ -139,11 +146,10 @@ class FeedbackService:
             except FeedbackEvent.DoesNotExist:
                 pass
 
-            return FeedbackEvent.objects.create(
+            event = FeedbackEvent.objects.create(
                 project_id=self.project_id,
                 output=output,
                 trace=self.context.trace,
-                knowledge_version_ids=self.context.knowledge_version_ids or [],
                 signal=signal,
                 value=value,
                 reason_code=reason_code,
@@ -153,6 +159,13 @@ class FeedbackService:
                 idempotency_key=idempotency_key,
                 detail=_json_safe(detail or {}),
             )
+            version_ids = self.context.knowledge_version_ids or []
+            if version_ids:
+                from .knowledge_models import KnowledgeVersion
+
+                versions = KnowledgeVersion.objects.filter(id__in=version_ids)
+                event.knowledge_versions.set(versions)
+            return event
 
     def record_accepted(self, reason: str = "") -> FeedbackEvent:
         """人工采纳生成结果。"""
