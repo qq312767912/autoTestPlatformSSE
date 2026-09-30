@@ -20,6 +20,15 @@ class EvaluationRun(models.Model):
         "knowledge_evolution.EvaluationSuite", on_delete=models.CASCADE,
         related_name="runs",
     )
+    gold_dataset_version = models.ForeignKey(
+        "knowledge_evolution.GoldDatasetVersion", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="evaluation_runs",
+    )
+    capability_release = models.ForeignKey(
+        "knowledge_evolution.CapabilityRelease", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="evaluation_runs_v2",
+    )
+    replay_hash = models.CharField(max_length=64, blank=True, db_index=True)
     name = models.CharField(max_length=255, blank=True)
     config = models.JSONField(
         default=dict, blank=True,

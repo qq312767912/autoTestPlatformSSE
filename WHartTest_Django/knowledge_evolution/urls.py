@@ -18,6 +18,17 @@ from .views import (
     CapabilityReleaseViewSet,
     CapabilityDefinitionViewSet,
     FlywheelOperationsViewSet,
+    AnnotationConflictViewSet,
+    GoldAnnotationViewSet,
+    GoldCaseViewSet,
+    GoldDatasetViewSet,
+    GoldDatasetVersionViewSet,
+    EvaluationRubricViewSet,
+    JudgeResultViewSet,
+    ExecutionSpanViewSet,
+    FailureAttributionViewSet,
+    OptimizationExperimentViewSet,
+    OptimizationProposalViewSet,
 )
 
 router = DefaultRouter()
@@ -37,5 +48,16 @@ router.register("knowledge-retrieval", KnowledgeRetrievalViewSet, basename="know
 router.register("capability-releases", CapabilityReleaseViewSet, basename="capability-release")
 router.register("capability-definitions", CapabilityDefinitionViewSet, basename="capability-definition")
 router.register("operations", FlywheelOperationsViewSet, basename="flywheel-operations")
+router.register("gold-datasets", GoldDatasetViewSet, basename="gold-dataset")
+router.register("gold-dataset-versions", GoldDatasetVersionViewSet, basename="gold-dataset-version")
+router.register("gold-cases", GoldCaseViewSet, basename="gold-case")
+router.register("gold-annotations", GoldAnnotationViewSet, basename="gold-annotation")
+router.register("annotation-conflicts", AnnotationConflictViewSet, basename="annotation-conflict")
+router.register("evaluation-rubrics", EvaluationRubricViewSet, basename="evaluation-rubric")
+router.register("judge-results", JudgeResultViewSet, basename="judge-result")
+router.register("execution-spans", ExecutionSpanViewSet, basename="execution-span")
+router.register("failure-attributions", FailureAttributionViewSet, basename="failure-attribution")
+router.register("optimization-proposals", OptimizationProposalViewSet, basename="optimization-proposal")
+router.register("optimization-experiments", OptimizationExperimentViewSet, basename="optimization-experiment")
 
 urlpatterns = [path("", include(router.urls))]

@@ -156,6 +156,7 @@ class EvaluationSuite(models.Model):
 
     SUITE_TYPE_CHOICES = [
         ("seed", "种子集"),
+        ("gold", "金标集"),
         ("regression", "回归集"),
         ("fresh", "新鲜集"),
         ("challenge", "挑战集"),
@@ -215,6 +216,7 @@ class EvaluationCase(models.Model):
         ("regression", "Regression"),
         ("fresh", "Fresh"),
         ("challenge", "Challenge"),
+        ("hidden", "Hidden"),
     ]
     TASK_TYPE_CHOICES = EvaluationSuite.TASK_TYPE_CHOICES
 
@@ -263,6 +265,16 @@ class EvaluationCase(models.Model):
         return f"{self.suite} #{self.case_number}"
 
 
+# 通过 models 模块导出，确保 Django 在应用加载时注册正式金标模型。
+from .gold_models import (  # noqa: E402,F401
+    AnnotationConflict,
+    GoldAnnotation,
+    GoldCase,
+    GoldDataset,
+    GoldDatasetVersion,
+)
+
+
 # 任务 4：知识资产化核心模型单独成文件，这里显式导入以便 Django 注册到本 app。
 from .knowledge_models import (  # noqa: E402,F401
     ACLMixin,
@@ -286,6 +298,15 @@ from .retrieval_models import RetrievalPolicy  # noqa: E402,F401
 
 # 任务 11：评测运行与结果模型
 from .evaluation_models import EvaluationResult, EvaluationRun  # noqa: E402,F401
+
+# V2分层测评量表和逐裁判结果
+from .evaluation_v2_models import EvaluationRubric, JudgeResult  # noqa: E402,F401
+
+# 节点级执行轨迹与失败归因
+from .trace_models import ExecutionSpan, FailureAttribution  # noqa: E402,F401
+
+# 受控优化候选与实验
+from .optimization_models import OptimizationExperiment, OptimizationProposal  # noqa: E402,F401
 
 # 任务 14–16：能力候选、影子门禁、发布与回滚
 from .capability_models import CapabilityDefinition, CapabilityRelease, PromotionDecision  # noqa: E402,F401

@@ -1,0 +1,117 @@
+import django.db.models.deletion
+import uuid
+from django.conf import settings
+from django.db import migrations, models
+
+
+class Migration(migrations.Migration):
+    dependencies = [
+        ("knowledge_evolution", "0014_alter_graphnode_node_type"),
+        ("projects", "0004_remove_project_password_remove_project_system_url_and_more"),
+        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
+    ]
+
+    operations = [
+        migrations.CreateModel(
+            name="GoldCase",
+            fields=[
+                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ("task_type", models.CharField(db_index=True, max_length=32)),
+                ("title", models.CharField(max_length=255)),
+                ("input_snapshot", models.JSONField(blank=True, default=dict)),
+                ("expected_output", models.JSONField(blank=True, default=dict)),
+                ("rubric", models.JSONField(blank=True, default=dict)),
+                ("required_items", models.JSONField(blank=True, default=list)),
+                ("forbidden_items", models.JSONField(blank=True, default=list)),
+                ("evidence", models.JSONField(blank=True, default=list)),
+                ("tags", models.JSONField(blank=True, default=list)),
+                ("split", models.CharField(choices=[("gold", "Gold"), ("regression", "Regression"), ("fresh", "Fresh"), ("challenge", "Challenge"), ("hidden", "Hidden")], db_index=True, default="fresh", max_length=20)),
+                ("state", models.CharField(choices=[("candidate", "候选"), ("labeling", "标注中"), ("conflict", "待仲裁"), ("confirmed", "已确认"), ("rejected", "已拒绝")], db_index=True, default="candidate", max_length=20)),
+                ("difficulty", models.CharField(blank=True, max_length=32)),
+                ("risk_level", models.CharField(blank=True, max_length=32)),
+                ("privacy_level", models.CharField(choices=[("internal", "内部"), ("restricted", "受限"), ("prohibited", "禁止用于优化")], db_index=True, default="internal", max_length=20)),
+                ("allow_optimization", models.BooleanField(default=True)),
+                ("source_hash", models.CharField(db_index=True, max_length=64)),
+                ("created_at", models.DateTimeField(auto_now_add=True, db_index=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                ("created_by", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="created_gold_cases", to=settings.AUTH_USER_MODEL)),
+                ("source_feedback", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name="gold_cases", to="knowledge_evolution.feedbackevent")),
+                ("source_output", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name="gold_cases", to="knowledge_evolution.generationoutput")),
+            ],
+            options={"ordering": ["version", "created_at"]},
+        ),
+        migrations.CreateModel(
+            name="GoldAnnotation",
+            fields=[
+                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ("round", models.CharField(choices=[("primary", "初标"), ("review", "复核"), ("arbitration", "仲裁")], max_length=16)),
+                ("answer", models.JSONField(blank=True, default=dict)),
+                ("rubric_scores", models.JSONField(blank=True, default=dict)),
+                ("evidence", models.JSONField(blank=True, default=list)),
+                ("conclusion", models.CharField(choices=[("accepted", "通过"), ("rejected", "拒绝"), ("needs_changes", "需修改")], max_length=20)),
+                ("comment", models.TextField(blank=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True, db_index=True)),
+                ("annotator", models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name="gold_annotations", to=settings.AUTH_USER_MODEL)),
+                ("case", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="annotations", to="knowledge_evolution.goldcase")),
+            ],
+            options={"ordering": ["created_at"]},
+        ),
+        migrations.CreateModel(
+            name="AnnotationConflict",
+            fields=[
+                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ("differing_fields", models.JSONField(blank=True, default=list)),
+                ("state", models.CharField(choices=[("open", "待仲裁"), ("resolved", "已解决")], db_index=True, default="open", max_length=16)),
+                ("resolution", models.JSONField(blank=True, default=dict)),
+                ("resolved_at", models.DateTimeField(blank=True, null=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True, db_index=True)),
+                ("resolved_by", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="resolved_gold_conflicts", to=settings.AUTH_USER_MODEL)),
+                ("primary_annotation", models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name="primary_conflicts", to="knowledge_evolution.goldannotation")),
+                ("review_annotation", models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name="review_conflicts", to="knowledge_evolution.goldannotation")),
+                ("case", models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, related_name="annotation_conflict", to="knowledge_evolution.goldcase")),
+            ],
+            options={"ordering": ["-created_at"]},
+        ),
+        migrations.CreateModel(
+            name="GoldDataset",
+            fields=[
+                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ("name", models.CharField(max_length=255)),
+                ("task_type", models.CharField(db_index=True, max_length=32)),
+                ("description", models.TextField(blank=True)),
+                ("status", models.CharField(choices=[("active", "启用"), ("archived", "归档")], db_index=True, default="active", max_length=16)),
+                ("created_at", models.DateTimeField(auto_now_add=True, db_index=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                ("created_by", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="created_gold_datasets", to=settings.AUTH_USER_MODEL)),
+                ("owner", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="owned_gold_datasets", to=settings.AUTH_USER_MODEL)),
+                ("project", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="gold_datasets", to="projects.project")),
+            ],
+            options={"ordering": ["-created_at"]},
+        ),
+        migrations.CreateModel(
+            name="GoldDatasetVersion",
+            fields=[
+                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ("version", models.CharField(max_length=64)),
+                ("state", models.CharField(choices=[("draft", "草稿"), ("labeling", "标注中"), ("review", "待复核"), ("frozen", "已冻结"), ("retired", "已退役")], db_index=True, default="draft", max_length=16)),
+                ("content_hash", models.CharField(blank=True, db_index=True, max_length=64)),
+                ("sample_stats", models.JSONField(blank=True, default=dict)),
+                ("frozen_at", models.DateTimeField(blank=True, null=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True, db_index=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                ("created_by", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="created_gold_dataset_versions", to=settings.AUTH_USER_MODEL)),
+                ("dataset", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="versions", to="knowledge_evolution.golddataset")),
+                ("frozen_by", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="frozen_gold_dataset_versions", to=settings.AUTH_USER_MODEL)),
+                ("parent_version", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="successors", to="knowledge_evolution.golddatasetversion")),
+            ],
+            options={"ordering": ["-created_at"]},
+        ),
+        migrations.AddField(model_name="goldcase", name="version", field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="cases", to="knowledge_evolution.golddatasetversion")),
+        migrations.AddConstraint(model_name="goldannotation", constraint=models.UniqueConstraint(fields=("case", "round"), name="uniq_gold_annotation_round")),
+        migrations.AddIndex(model_name="golddataset", index=models.Index(fields=["project", "task_type", "status"], name="knowledge_e_project_d6e5a4_idx")),
+        migrations.AddConstraint(model_name="golddataset", constraint=models.UniqueConstraint(fields=("project", "name", "task_type"), name="uniq_gold_dataset_project_name_task")),
+        migrations.AddConstraint(model_name="golddatasetversion", constraint=models.UniqueConstraint(fields=("dataset", "version"), name="uniq_gold_dataset_version")),
+        migrations.AddIndex(model_name="goldcase", index=models.Index(fields=["version", "split", "state"], name="knowledge_e_version_fc834e_idx")),
+        migrations.AddIndex(model_name="goldcase", index=models.Index(fields=["task_type", "state"], name="knowledge_e_task_ty_bf1038_idx")),
+        migrations.AddConstraint(model_name="goldcase", constraint=models.UniqueConstraint(fields=("version", "source_hash"), name="uniq_gold_case_version_source")),
+    ]

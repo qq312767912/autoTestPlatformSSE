@@ -11,6 +11,16 @@ from .models import (
     RetrievalTrace,
 )
 from .capability_models import CapabilityDefinition, CapabilityRelease, PromotionDecision
+from .gold_models import (
+    AnnotationConflict,
+    GoldAnnotation,
+    GoldCase,
+    GoldDataset,
+    GoldDatasetVersion,
+)
+from .evaluation_v2_models import EvaluationRubric, JudgeResult
+from .trace_models import ExecutionSpan, FailureAttribution
+from .optimization_models import OptimizationExperiment, OptimizationProposal
 from .knowledge_models import (
     KnowledgeAsset,
     KnowledgeAuditLog,
@@ -79,6 +89,132 @@ class CapabilityDefinitionSerializer(serializers.ModelSerializer):
         if mode == "workflow" and len(stages) < 2:
             raise serializers.ValidationError({"stages": "链路自进化模式至少需要 2 个阶段"})
         return attrs
+
+
+class GoldDatasetSerializer(serializers.ModelSerializer):
+    version_count = serializers.IntegerField(source="versions.count", read_only=True)
+
+    class Meta:
+        model = GoldDataset
+        fields = [
+            "id", "project", "name", "task_type", "description", "status",
+            "owner", "created_by", "version_count", "created_at", "updated_at",
+        ]
+        read_only_fields = ["created_by", "version_count", "created_at", "updated_at"]
+
+
+class GoldDatasetVersionSerializer(serializers.ModelSerializer):
+    case_count = serializers.IntegerField(source="cases.count", read_only=True)
+
+    class Meta:
+        model = GoldDatasetVersion
+        fields = [
+            "id", "dataset", "version", "state", "content_hash", "sample_stats",
+            "parent_version", "created_by", "frozen_by", "frozen_at", "case_count",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "state", "content_hash", "sample_stats", "created_by", "frozen_by",
+            "frozen_at", "case_count", "created_at", "updated_at",
+        ]
+
+
+class GoldAnnotationSerializer(serializers.ModelSerializer):
+    annotator_name = serializers.CharField(source="annotator.username", read_only=True)
+
+    class Meta:
+        model = GoldAnnotation
+        fields = [
+            "id", "case", "round", "answer", "rubric_scores", "evidence",
+            "conclusion", "comment", "annotator", "annotator_name", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class GoldCaseSerializer(serializers.ModelSerializer):
+    annotations = GoldAnnotationSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = GoldCase
+        fields = [
+            "id", "version", "source_output", "source_feedback", "task_type", "title",
+            "input_snapshot", "expected_output", "rubric", "required_items",
+            "forbidden_items", "evidence", "tags", "split", "state", "difficulty",
+            "risk_level", "privacy_level", "allow_optimization", "source_hash",
+            "created_by", "annotations", "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "source_hash", "created_by", "annotations", "created_at", "updated_at",
+        ]
+
+
+class AnnotationConflictSerializer(serializers.ModelSerializer):
+    primary_annotation = GoldAnnotationSerializer(read_only=True)
+    review_annotation = GoldAnnotationSerializer(read_only=True)
+
+    class Meta:
+        model = AnnotationConflict
+        fields = [
+            "id", "case", "primary_annotation", "review_annotation", "differing_fields",
+            "state", "resolution", "resolved_by", "resolved_at", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class EvaluationRubricSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EvaluationRubric
+        fields = [
+            "id", "project", "task_type", "name", "version", "dimensions",
+            "required_items", "forbidden_items", "jury_config", "is_active",
+            "created_by", "created_at", "updated_at",
+        ]
+        read_only_fields = ["created_by", "created_at", "updated_at"]
+
+
+class JudgeResultSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = JudgeResult
+        fields = "__all__"
+        read_only_fields = fields
+
+
+class ExecutionSpanSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ExecutionSpan
+        fields = "__all__"
+        read_only_fields = fields
+
+
+class FailureAttributionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FailureAttribution
+        fields = "__all__"
+        read_only_fields = fields
+
+
+class OptimizationProposalSerializer(serializers.ModelSerializer):
+    attribution_ids = serializers.SerializerMethodField()
+
+    class Meta:
+        model = OptimizationProposal
+        fields = [
+            "id", "project", "capability", "baseline_release", "attribution_ids",
+            "proposal_type", "title", "summary", "change_patch", "expected_benefit",
+            "impact_scope", "risk_notes", "rollback_plan", "state", "fingerprint",
+            "generated_by", "created_by", "created_at", "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_attribution_ids(self, obj):
+        return [str(value) for value in obj.attributions.values_list("id", flat=True)]
+
+
+class OptimizationExperimentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OptimizationExperiment
+        fields = "__all__"
+        read_only_fields = fields
 
 
 class RetrievalTraceSerializer(serializers.ModelSerializer):
@@ -196,14 +332,15 @@ class EvaluationRunSerializer(serializers.ModelSerializer):
     class Meta:
         model = EvaluationRun
         fields = [
-            "id", "suite", "suite_name", "name", "config", "status",
+            "id", "suite", "suite_name", "gold_dataset_version", "capability_release",
+            "replay_hash", "name", "config", "status",
             "metrics_summary", "cost_summary", "result_summary",
             "l0_score", "l1_score", "l2_score", "l3_score",
             "policy_version", "model_name", "cost_usd",
             "triggered_by", "started_at", "finished_at", "created_at", "updated_at",
         ]
         read_only_fields = [
-            "status", "metrics_summary", "cost_summary", "result_summary",
+            "status", "replay_hash", "metrics_summary", "cost_summary", "result_summary",
             "l0_score", "l1_score", "l2_score", "l3_score",
             "policy_version", "model_name", "cost_usd",
             "started_at", "finished_at", "created_at", "updated_at",

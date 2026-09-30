@@ -7,11 +7,16 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from .models import (
+    AnnotationConflict,
     EvaluationResult,
     EvaluationRun,
     EvaluationSuite,
     FeedbackEvent,
     GenerationOutput,
+    GoldAnnotation,
+    GoldCase,
+    GoldDataset,
+    GoldDatasetVersion,
     KnowledgeCandidate,
     RetrievalTrace,
 )
@@ -30,8 +35,22 @@ from .serializers import (
     RetrievalTraceSerializer,
     CapabilityReleaseSerializer,
     CapabilityDefinitionSerializer,
+    AnnotationConflictSerializer,
+    GoldAnnotationSerializer,
+    GoldCaseSerializer,
+    GoldDatasetSerializer,
+    GoldDatasetVersionSerializer,
+    EvaluationRubricSerializer,
+    JudgeResultSerializer,
+    ExecutionSpanSerializer,
+    FailureAttributionSerializer,
+    OptimizationExperimentSerializer,
+    OptimizationProposalSerializer,
 )
 from .capability_models import CapabilityDefinition, CapabilityRelease
+from .evaluation_v2_models import EvaluationRubric, JudgeResult
+from .trace_models import ExecutionSpan, FailureAttribution
+from .optimization_models import OptimizationExperiment, OptimizationProposal
 from .knowledge_models import (
     KnowledgeAsset,
     KnowledgeAuditLog,
@@ -46,6 +65,25 @@ def _project_ids(user):
     return ProjectMember.objects.filter(user=user).values_list("project_id", flat=True)
 
 
+def _ensure_project_member(user, project_id):
+    if user.is_superuser:
+        return
+    if not ProjectMember.objects.filter(user=user, project_id=project_id).exists():
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied("无权访问该项目")
+
+
+def _ensure_test_lead(user, project_id):
+    """现有 admin/owner 映射为测试负责人，member 映射为测试执行人员。"""
+    if user.is_superuser:
+        return
+    if not ProjectMember.objects.filter(
+        user=user, project_id=project_id, role__in=["admin", "owner"]
+    ).exists():
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied("该操作仅允许测试负责人执行")
+
+
 class ProjectScopedReadOnlyViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
 
@@ -53,6 +91,343 @@ class ProjectScopedReadOnlyViewSet(viewsets.ReadOnlyModelViewSet):
         if self.request.user.is_superuser:
             return queryset
         return queryset.filter(project_id__in=_project_ids(self.request.user))
+
+
+class GoldDatasetViewSet(viewsets.ModelViewSet):
+    serializer_class = GoldDatasetSerializer
+    permission_classes = [IsAuthenticated]
+    filterset_fields = ["project", "task_type", "status"]
+    search_fields = ["name", "description"]
+
+    def get_queryset(self):
+        queryset = GoldDataset.objects.select_related("project", "owner", "created_by")
+        return queryset if self.request.user.is_superuser else queryset.filter(
+            project_id__in=_project_ids(self.request.user)
+        )
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data["project"]
+        _ensure_test_lead(self.request.user, project.id)
+        serializer.save(created_by=self.request.user)
+
+    def perform_update(self, serializer):
+        _ensure_test_lead(self.request.user, serializer.instance.project_id)
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        _ensure_test_lead(self.request.user, instance.project_id)
+        if instance.versions.filter(state="frozen").exists():
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("包含冻结版本的数据集不能删除，请改为归档")
+        instance.delete()
+
+
+class GoldDatasetVersionViewSet(viewsets.ModelViewSet):
+    serializer_class = GoldDatasetVersionSerializer
+    permission_classes = [IsAuthenticated]
+    filterset_fields = ["dataset", "state"]
+
+    def get_queryset(self):
+        queryset = GoldDatasetVersion.objects.select_related(
+            "dataset__project", "created_by", "frozen_by", "parent_version"
+        )
+        return queryset if self.request.user.is_superuser else queryset.filter(
+            dataset__project_id__in=_project_ids(self.request.user)
+        )
+
+    def perform_create(self, serializer):
+        dataset = serializer.validated_data["dataset"]
+        _ensure_test_lead(self.request.user, dataset.project_id)
+        parent = serializer.validated_data.get("parent_version")
+        if parent and parent.dataset_id != dataset.id:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"parent_version": "后继版本必须属于同一数据集"})
+        serializer.save(created_by=self.request.user)
+
+    def perform_update(self, serializer):
+        _ensure_test_lead(self.request.user, serializer.instance.dataset.project_id)
+        serializer.save()
+
+    @action(detail=True, methods=["post"])
+    def freeze(self, request, pk=None):
+        version = self.get_object()
+        _ensure_test_lead(request.user, version.dataset.project_id)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+        from .gold import GoldVersionService
+        try:
+            version = GoldVersionService.freeze(version=version, actor=request.user)
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(self.get_serializer(version).data)
+
+    @action(detail=True, methods=["post"], url_path="materialize-evaluation-suite")
+    def materialize_evaluation_suite(self, request, pk=None):
+        version = self.get_object()
+        _ensure_test_lead(request.user, version.dataset.project_id)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+        from .gold_evaluation import GoldEvaluationBridge
+        try:
+            suite = GoldEvaluationBridge.materialize(version=version, actor=request.user)
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(EvaluationSuiteSerializer(suite).data)
+
+
+class GoldCaseViewSet(
+    mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
+    viewsets.GenericViewSet,
+):
+    serializer_class = GoldCaseSerializer
+    permission_classes = [IsAuthenticated]
+    filterset_fields = ["version", "task_type", "split", "state", "privacy_level"]
+    search_fields = ["title", "source_hash"]
+
+    def get_queryset(self):
+        queryset = GoldCase.objects.select_related(
+            "version__dataset__project", "source_output", "source_feedback", "created_by"
+        ).prefetch_related("annotations__annotator")
+        return queryset if self.request.user.is_superuser else queryset.filter(
+            version__dataset__project_id__in=_project_ids(self.request.user)
+        )
+
+    def perform_update(self, serializer):
+        case = serializer.instance
+        _ensure_test_lead(self.request.user, case.version.dataset.project_id)
+        serializer.save()
+
+    @action(detail=False, methods=["post"], url_path="from-feedback")
+    def from_feedback(self, request):
+        version = get_object_or_404(GoldDatasetVersion, pk=request.data.get("version"))
+        feedback = get_object_or_404(FeedbackEvent, pk=request.data.get("feedback"))
+        _ensure_project_member(request.user, version.dataset.project_id)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+        from .gold import GoldCandidateService
+        try:
+            case = GoldCandidateService.from_feedback(
+                version=version, feedback=feedback, actor=request.user,
+                split=request.data.get("split", "fresh"),
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(self.get_serializer(case).data, status=201)
+
+    @action(detail=True, methods=["post"])
+    def annotate(self, request, pk=None):
+        case = self.get_object()
+        project_id = case.version.dataset.project_id
+        _ensure_project_member(request.user, project_id)
+        round_name = request.data.get("round", "primary")
+        if round_name == "review":
+            _ensure_test_lead(request.user, project_id)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+        from .gold import GoldAnnotationService
+        try:
+            annotation = GoldAnnotationService.submit(
+                case=case, round_name=round_name, actor=request.user,
+                answer=request.data.get("answer", {}),
+                rubric_scores=request.data.get("rubric_scores", {}),
+                evidence=request.data.get("evidence", []),
+                conclusion=request.data.get("conclusion", "accepted"),
+                comment=request.data.get("comment", ""),
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(GoldAnnotationSerializer(annotation).data, status=201)
+
+
+class GoldAnnotationViewSet(ProjectScopedReadOnlyViewSet):
+    serializer_class = GoldAnnotationSerializer
+    filterset_fields = ["case", "round", "conclusion", "annotator"]
+
+    def get_queryset(self):
+        queryset = GoldAnnotation.objects.select_related(
+            "case__version__dataset__project", "annotator"
+        )
+        if self.request.user.is_superuser:
+            return queryset
+        return queryset.filter(case__version__dataset__project_id__in=_project_ids(self.request.user))
+
+
+class AnnotationConflictViewSet(ProjectScopedReadOnlyViewSet):
+    serializer_class = AnnotationConflictSerializer
+    filterset_fields = ["case", "state"]
+
+    def get_queryset(self):
+        queryset = AnnotationConflict.objects.select_related(
+            "case__version__dataset__project", "primary_annotation__annotator",
+            "review_annotation__annotator", "resolved_by",
+        )
+        if self.request.user.is_superuser:
+            return queryset
+        return queryset.filter(case__version__dataset__project_id__in=_project_ids(self.request.user))
+
+    @action(detail=True, methods=["post"])
+    def resolve(self, request, pk=None):
+        conflict = self.get_object()
+        _ensure_test_lead(request.user, conflict.case.version.dataset.project_id)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+        from .gold import GoldAnnotationService
+        try:
+            annotation = GoldAnnotationService.resolve(
+                conflict=conflict, actor=request.user,
+                answer=request.data.get("answer", {}),
+                rubric_scores=request.data.get("rubric_scores", {}),
+                evidence=request.data.get("evidence", []),
+                conclusion=request.data.get("conclusion", "accepted"),
+                comment=request.data.get("comment", ""),
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(GoldAnnotationSerializer(annotation).data)
+
+
+class EvaluationRubricViewSet(viewsets.ModelViewSet):
+    serializer_class = EvaluationRubricSerializer
+    permission_classes = [IsAuthenticated]
+    filterset_fields = ["project", "task_type", "is_active"]
+    search_fields = ["name", "version"]
+
+    def get_queryset(self):
+        queryset = EvaluationRubric.objects.select_related("project", "created_by")
+        return queryset if self.request.user.is_superuser else queryset.filter(
+            project_id__in=_project_ids(self.request.user)
+        )
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data["project"]
+        _ensure_test_lead(self.request.user, project.id)
+        serializer.save(created_by=self.request.user)
+
+    def perform_update(self, serializer):
+        _ensure_test_lead(self.request.user, serializer.instance.project_id)
+        serializer.save()
+
+
+class JudgeResultViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = JudgeResultSerializer
+    permission_classes = [IsAuthenticated]
+    filterset_fields = ["evaluation_result", "level", "evaluator_type", "status"]
+
+    def get_queryset(self):
+        queryset = JudgeResult.objects.select_related(
+            "evaluation_result__run__suite__project", "rubric"
+        )
+        return queryset if self.request.user.is_superuser else queryset.filter(
+            evaluation_result__run__suite__project_id__in=_project_ids(self.request.user)
+        )
+
+
+class ExecutionSpanViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = ExecutionSpanSerializer
+    permission_classes = [IsAuthenticated]
+    filterset_fields = ["trace", "workflow_id", "stage", "step_type", "status"]
+
+    def get_queryset(self):
+        queryset = ExecutionSpan.objects.select_related("trace__project", "parent_span")
+        return queryset if self.request.user.is_superuser else queryset.filter(
+            trace__project_id__in=_project_ids(self.request.user)
+        )
+
+
+class FailureAttributionViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = FailureAttributionSerializer
+    permission_classes = [IsAuthenticated]
+    filterset_fields = ["project", "output", "workflow_id", "category", "source", "state"]
+
+    def get_queryset(self):
+        queryset = FailureAttribution.objects.select_related(
+            "project", "output", "span", "confirmed_by"
+        )
+        return queryset if self.request.user.is_superuser else queryset.filter(
+            project_id__in=_project_ids(self.request.user)
+        )
+
+    @action(detail=False, methods=["post"], url_path="run")
+    def run_attribution(self, request):
+        output = get_object_or_404(GenerationOutput, pk=request.data.get("output"))
+        _ensure_project_member(request.user, output.project_id)
+        from .attribution import AttributionService
+        results = AttributionService.run_for_output(output)
+        return Response(self.get_serializer(results, many=True).data)
+
+    @action(detail=True, methods=["post"])
+    def confirm(self, request, pk=None):
+        attribution = self.get_object()
+        _ensure_project_member(request.user, attribution.project_id)
+        from .attribution import AttributionService
+        return Response(self.get_serializer(AttributionService.decide(
+            attribution=attribution, actor=request.user, accepted=True,
+        )).data)
+
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+        attribution = self.get_object()
+        _ensure_project_member(request.user, attribution.project_id)
+        from .attribution import AttributionService
+        return Response(self.get_serializer(AttributionService.decide(
+            attribution=attribution, actor=request.user, accepted=False,
+        )).data)
+
+
+class OptimizationProposalViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = OptimizationProposalSerializer
+    permission_classes = [IsAuthenticated]
+    filterset_fields = ["project", "capability", "proposal_type", "state"]
+
+    def get_queryset(self):
+        queryset = OptimizationProposal.objects.select_related(
+            "project", "capability", "baseline_release", "created_by"
+        ).prefetch_related("attributions")
+        return queryset if self.request.user.is_superuser else queryset.filter(
+            project_id__in=_project_ids(self.request.user)
+        )
+
+    @action(detail=False, methods=["post"], url_path="generate")
+    def generate(self, request):
+        attribution_ids = request.data.get("attribution_ids") or []
+        attributions = list(FailureAttribution.objects.filter(id__in=attribution_ids))
+        if len(attributions) != len(set(str(value) for value in attribution_ids)):
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"attribution_ids": "包含不存在的归因记录"})
+        if attributions:
+            _ensure_project_member(request.user, attributions[0].project_id)
+        capability = None
+        if request.data.get("capability"):
+            capability = get_object_or_404(CapabilityDefinition, pk=request.data["capability"])
+        baseline = None
+        if request.data.get("baseline_release"):
+            baseline = get_object_or_404(CapabilityRelease, pk=request.data["baseline_release"])
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+        from .optimization import OptimizationProposalService
+        try:
+            proposals = OptimizationProposalService.generate(
+                attributions=attributions, actor=request.user,
+                capability=capability, baseline_release=baseline,
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(self.get_serializer(proposals, many=True).data, status=201)
+
+
+class OptimizationExperimentViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = OptimizationExperimentSerializer
+    permission_classes = [IsAuthenticated]
+    filterset_fields = ["proposal", "gold_dataset_version", "status"]
+
+    def get_queryset(self):
+        queryset = OptimizationExperiment.objects.select_related(
+            "proposal__project", "gold_dataset_version", "baseline_run",
+            "candidate_run", "candidate_release", "created_by",
+        )
+        return queryset if self.request.user.is_superuser else queryset.filter(
+            proposal__project_id__in=_project_ids(self.request.user)
+        )
 
 
 class RetrievalTraceViewSet(ProjectScopedReadOnlyViewSet):
