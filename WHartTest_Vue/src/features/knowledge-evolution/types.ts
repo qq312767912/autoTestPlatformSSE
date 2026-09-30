@@ -32,25 +32,27 @@ export interface GenerationOutput {
 
 export interface FeedbackEvent {
   id: string;
-  project_id: number;
-  output?: string;
-  trace?: string;
+  project: number;
+  output?: string | null;
+  trace?: string | null;
   signal: 'accepted' | 'rejected' | 'edited' | 'test_passed' | 'test_failed' | 'defect_confirmed' | 'false_positive' | 'missed' | 'merged' | 'reverted';
   value?: number;
   reason_code?: string;
   comment?: string;
   detail: Record<string, unknown>;
+  actor?: { id: number; username: string } | null;
   actor_type: 'user' | 'system' | 'integration';
-  actor?: { id: number; username: string };
+  occurred_at?: string;
   created_at: string;
 }
 
 export interface EvaluationSuite {
   id: string;
-  project_id: number;
+  project: number;
   name: string;
-  description: string;
+  suite_type: 'seed' | 'regression' | 'fresh' | 'challenge';
   task_type: string;
+  description: string;
   split_ratio: Record<string, number>;
   case_count: number;
   is_active: boolean;
@@ -59,9 +61,9 @@ export interface EvaluationSuite {
 
 export interface EvaluationCase {
   id: string;
-  suite_id: string;
-  trace_id?: string;
-  output_id?: string;
+  suite: string;
+  case_number: number;
+  task_type: string;
   split: 'gold' | 'regression' | 'fresh' | 'challenge';
   golden_labels: Record<string, unknown>;
   annotator?: string;
@@ -69,17 +71,21 @@ export interface EvaluationCase {
 
 export interface EvaluationRun {
   id: string;
-  suite_id: string;
+  suite: string;
   suite_name?: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  name: string;
+  config: Record<string, unknown>;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  metrics_summary: Record<string, unknown>;
+  cost_summary: Record<string, unknown>;
+  result_summary?: { total: number; completed: number; failed: number };
   policy_version: string;
   model_name: string;
-  l0_score?: number;
-  l1_score?: number;
-  l2_score?: number;
-  l3_score?: number;
-  metrics: Record<string, unknown>;
-  cost_usd?: number;
+  l0_score?: number | null;
+  l1_score?: number | null;
+  l2_score?: number | null;
+  l3_score?: number | null;
+  cost_usd?: number | null;
   started_at?: string;
   finished_at?: string;
   created_at: string;
@@ -87,28 +93,38 @@ export interface EvaluationRun {
 
 export interface EvaluationResult {
   id: string;
-  run_id: string;
-  case_id: string;
-  status: 'passed' | 'failed' | 'error';
-  l0_score: number;
-  l1_score: number;
-  l2_score: number;
-  l3_score: number;
-  output?: Record<string, unknown>;
-  error_log?: string;
+  run: string;
+  case: string;
+  case_number: number;
+  split: 'gold' | 'regression' | 'fresh' | 'challenge';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+  predicted_payload?: Record<string, unknown>;
+  latency_ms?: number;
+  token_usage?: number;
+  estimated_cost_usd?: number;
+  l0_score: number | null;
+  l1_score: number | null;
+  l2_score: number | null;
+  l3_score: number | null;
+  raw_scores?: Record<string, unknown>;
+  error_message?: string;
+  created_at?: string;
 }
 
 export interface KnowledgeCandidate {
   id: string;
-  project_id: number;
-  source_snapshot_id?: string;
+  project: number;
+  source_snapshot?: string | null;
   kind: 'concept' | 'rule' | 'relation' | 'summary' | 'knowledge_atom' | 'experience';
   origin: 'extraction' | 'distillation' | 'manual' | 'evaluation_failure';
   payload: Record<string, unknown>;
   level?: string;
   confidence: number;
+  evidence?: unknown[];
+  review_reason?: string;
   state: 'pending' | 'conflicted' | 'evaluating' | 'awaiting_approval' | 'accepted' | 'rejected' | 'merged';
   created_at: string;
+  updated_at?: string;
 }
 
 export interface CreateFeedbackRequest {

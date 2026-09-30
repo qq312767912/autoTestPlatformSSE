@@ -59,10 +59,20 @@ export async function listEvaluationRuns(suiteId?: string): Promise<EvaluationRu
 
 export async function createEvaluationRun(data: {
   suite: string;
-  policy_version: string;
-  model_name: string;
+  name?: string;
+  policy_version?: string;
+  model_name?: string;
 }): Promise<EvaluationRun> {
-  return post<EvaluationRun>('/evaluation-runs/', data);
+  // 后端的 policy_version / model_name 是只读的 SerializerMethodField，
+  // 真值来自 run.config，必须放进 config 才不会被丢弃。
+  return post<EvaluationRun>('/evaluation-runs/', {
+    suite: data.suite,
+    name: data.name || '',
+    config: {
+      policy_version: data.policy_version || 'default-policy@v3',
+      model_version: data.model_name || 'qwen3-coder-plus',
+    },
+  });
 }
 
 export async function listEvaluationResults(runId?: string): Promise<EvaluationResult[]> {

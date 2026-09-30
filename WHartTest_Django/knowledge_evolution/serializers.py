@@ -37,6 +37,9 @@ class GenerationOutputSerializer(serializers.ModelSerializer):
 
 
 class FeedbackEventSerializer(serializers.ModelSerializer):
+    # actor 默认会被渲染成主键 id，前端需要 {id, username} 才能显示操作人
+    actor = serializers.SerializerMethodField()
+
     class Meta:
         model = FeedbackEvent
         fields = [
@@ -45,6 +48,11 @@ class FeedbackEventSerializer(serializers.ModelSerializer):
             "idempotency_key", "occurred_at", "created_at",
         ]
         read_only_fields = ["id", "project", "actor", "actor_type", "created_at"]
+
+    def get_actor(self, obj):
+        if not obj.actor_id:
+            return None
+        return {"id": obj.actor_id, "username": obj.actor.username}
 
     def validate(self, attrs):
         output = attrs.get("output")

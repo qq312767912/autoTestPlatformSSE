@@ -64,7 +64,7 @@
               type="button"
               class="ke-suite"
               :class="{ 'is-active': selectedSuiteId === s.id }"
-              @click="selectSuite(s)"
+              @click="selectSuite(s, { jump: false })"
             >
               <span class="ke-suite-name">{{ s.name }}</span>
               <span class="ke-suite-meta">{{ s.case_count }} 用例 · {{ s.is_active ? '启用' : '停用' }}</span>
@@ -93,7 +93,7 @@
             <div class="ke-card-body">
               <div class="ke-pane">
                 <div class="ke-pane-title">
-                  <a-tag color="purple" size="small">AI 生成内容</a-tag>
+                  <a-tag color="arcoblue" size="small">AI 生成内容</a-tag>
                   <a-select
                     v-model="feedbackSignal"
                     size="small"
@@ -108,7 +108,7 @@
                   <li v-for="f in feedbackEvents.slice(0, 6)" :key="f.id">
                     <a-tag :color="signalTagColor(f.signal)" size="small">{{ signalText(f.signal) }}</a-tag>
                     <span class="ke-list-text">{{ feedbackSummary(f) }}</span>
-                    <em class="ke-list-meta">{{ f.actor?.username || f.actor_type }}</em>
+                    <em class="ke-list-meta">{{ feedbackActor(f) }}</em>
                   </li>
                 </ul>
                 <p v-if="!feedbackEvents.length" class="ke-empty">暂无反馈信号</p>
@@ -151,7 +151,7 @@
             <div class="ke-card-body">
               <div class="ke-pane">
                 <div class="ke-pane-title">
-                  <a-tag color="purple" size="small">AI 生成内容</a-tag>
+                  <a-tag color="arcoblue" size="small">AI 生成内容</a-tag>
                   <span class="ke-pane-sub">{{ runs.length }} 次评测运行</span>
                 </div>
                 <ul class="ke-list ke-list-clickable">
@@ -185,7 +185,7 @@
                   size="small"
                   class="ke-select-block"
                   placeholder="选择评测集"
-                  @change="loadRuns"
+                  @change="onSuiteSelectChange"
                 >
                   <a-option v-for="s in suites" :key="s.id" :value="s.id">{{ s.name }}</a-option>
                 </a-select>
@@ -226,7 +226,7 @@
             <div class="ke-card-body">
               <div class="ke-pane">
                 <div class="ke-pane-title">
-                  <a-tag color="purple" size="small">AI 分析内容</a-tag>
+                  <a-tag color="arcoblue" size="small">AI 分析内容</a-tag>
                   <span class="ke-pane-sub">{{ failedResults.length }} 个失败样本</span>
                 </div>
                 <div class="ke-progress">
@@ -245,8 +245,8 @@
                 <ul class="ke-list">
                   <li v-for="r in failedResults.slice(0, 4)" :key="r.id">
                     <a-tag color="red" size="small">失败</a-tag>
-                    <span class="ke-list-text">{{ (r.error_log || r.id).slice(0, 56) }}</span>
-                    <em class="ke-list-meta">L0 {{ fmt(r.l0_score) }}</em>
+                    <span class="ke-list-text">{{ failureSummary(r) }}</span>
+                    <em class="ke-list-meta">#{{ r.case_number }}</em>
                   </li>
                 </ul>
                 <p v-if="!failedResults.length" class="ke-empty">暂无失败样本</p>
@@ -297,7 +297,7 @@
             <div class="ke-card-body">
               <div class="ke-pane">
                 <div class="ke-pane-title">
-                  <a-tag color="purple" size="small">AI 生成内容</a-tag>
+                  <a-tag color="arcoblue" size="small">AI 生成内容</a-tag>
                   <a-select
                     v-model="candidateState"
                     size="small"
@@ -438,11 +438,18 @@
         <a-form-item label="名称" required>
           <a-input v-model="suiteForm.name" placeholder="例如：代码审查评测集" />
         </a-form-item>
+        <a-form-item label="评测集类型">
+          <a-select v-model="suiteForm.suite_type">
+            <a-option v-for="(t, k) in suiteTypeLabels" :key="k" :value="k">{{ t }}</a-option>
+          </a-select>
+        </a-form-item>
         <a-form-item label="描述">
           <a-textarea v-model="suiteForm.description" placeholder="评测目标与范围" />
         </a-form-item>
         <a-form-item label="任务类型">
-          <a-input v-model="suiteForm.task_type" placeholder="例如：code_review" />
+          <a-select v-model="suiteForm.task_type">
+            <a-option v-for="(t, k) in taskTypeLabels" :key="k" :value="k">{{ t }}</a-option>
+          </a-select>
         </a-form-item>
       </a-form>
     </a-modal>
@@ -507,12 +514,20 @@ const projectName = computed(() => projectStore.currentProject?.name || '未选�
 
 const currentStage = ref(1);
 const showOverview = ref(false);
+const SUITE_STORAGE_KEY = 'ke.selected_suite';
 
 /* ---------------------------------- 数据 ---------------------------------- */
 const suites = ref<EvaluationSuite[]>([]);
 const suitesLoading = ref(false);
 const showSuiteModal = ref(false);
-const suiteForm = ref({ name: '', description: '', task_type: 'code_review' });
+const suiteTypeLabels: Record<string, string> = {
+  regression: '回归集', fresh: '新鲜集', challenge: '挑战集', seed: '种子集',
+};
+const taskTypeLabels: Record<string, string> = {
+  code_review: '代码审查', knowledge_query: '知识库问答',
+  test_execution: '测试执行', testcase_generation: '用例生成',
+};
+const suiteForm = ref({ name: '', description: '', suite_type: 'regression', task_type: 'code_review' });
 const selectedSuiteId = ref<string | undefined>();
 const selectedSuite = computed(() => suites.value.find((s) => s.id === selectedSuiteId.value) || null);
 
@@ -523,7 +538,10 @@ const totalCost = computed(() => runs.value.reduce((sum, r) => sum + (r.cost_usd
 const results = ref<EvaluationResult[]>([]);
 const selectedRunId = ref<string>('');
 const selectedRun = computed(() => runs.value.find((r) => r.id === selectedRunId.value) || null);
-const failedResults = computed(() => results.value.filter((r) => r.status !== 'passed'));
+// 失败样本判据必须与后端 EvaluationReviewBridge.find_failures 完全一致：
+//   status='completed' 且存在某一层级得分 < FAILURE_THRESHOLD
+// 只有保持一致，「失败样本数」才等于点「生成知识候选」实际能产出的候选数。
+const failedResults = computed(() => results.value.filter(isFailureSample));
 const failureRate = computed(() =>
   results.value.length ? Math.round((failedResults.value.length / results.value.length) * 100) : 0
 );
@@ -585,7 +603,7 @@ const stageTime = computed(() => ({
 
 const humanRoles = [
   { name: '测试负责人', initial: '测', tone: 'blue', desc: '掌握评测准入与阶段流转决策' },
-  { name: '知识管理员', initial: '知', tone: 'purple', desc: '掌握知识候选入库审核决策' },
+  { name: '知识管理员', initial: '知', tone: 'cyan', desc: '掌握知识候选入库审核决策' },
 ];
 
 const agents = ref([
@@ -609,8 +627,12 @@ async function loadSuites() {
 }
 
 async function loadRuns() {
+  if (!selectedSuiteId.value) {
+    runs.value = [];
+    return;
+  }
   try {
-    runs.value = (await listEvaluationRuns(selectedSuiteId.value || undefined)) || [];
+    runs.value = (await listEvaluationRuns(selectedSuiteId.value)) || [];
   } catch (e) {
     Message.error('加载评测运行失败');
   }
@@ -651,22 +673,60 @@ async function loadCandidates() {
   }
 }
 
-async function refreshAll() {
-  await Promise.all([loadSuites(), loadRuns(), loadResults(), loadFeedback(), loadCandidates()]);
-  Message.success('状态已刷新');
+/** 默认选中的评测集：优先沿用上次选择，其次优先种子集（工作台基线锚点）。
+ *  不能直接取列表第一项——接口按 created_at 倒序，新建的评测集通常还没有运行记录，
+ *  会导致「评测运行」之后的阶段全是空的。 */
+function pickDefaultSuite(list: EvaluationSuite[]): EvaluationSuite | undefined {
+  if (!list.length) return undefined;
+  const remembered = localStorage.getItem(SUITE_STORAGE_KEY);
+  const hit = remembered ? list.find((s) => s.id === remembered) : undefined;
+  return hit || list.find((s) => s.suite_type === 'seed') || list[0];
 }
 
-async function selectSuite(suite: EvaluationSuite) {
+async function selectSuite(suite: EvaluationSuite, options: { jump?: boolean } = {}) {
   selectedSuiteId.value = suite.id;
+  localStorage.setItem(SUITE_STORAGE_KEY, suite.id);
   await loadRuns();
-  if (runs.value.length) await selectRun(runs.value[0]);
+  if (runs.value.length) {
+    await selectRun(runs.value[0], options);
+  } else {
+    selectedRunId.value = '';
+    results.value = [];
+  }
 }
 
-async function selectRun(run?: EvaluationRun) {
+async function selectRun(run?: EvaluationRun, options: { jump?: boolean } = {}) {
   if (!run) return;
   selectedRunId.value = run.id;
   await loadResults();
-  if (run.status === 'completed') currentStage.value = 3;
+  if (options.jump !== false && run.status === 'completed') currentStage.value = 3;
+}
+
+/** 首屏 / 刷新：评测集 → 默认选中 → 运行 → 结果 → 反馈 → 候选（必须按序，不能并发） */
+async function bootstrap() {
+  await loadSuites();
+  const target = pickDefaultSuite(suites.value);
+  if (target) {
+    // 初次进入不自动跳阶段，停在「反馈采集」以呈现完整流程
+    await selectSuite(target, { jump: false });
+  } else {
+    selectedSuiteId.value = undefined;
+    runs.value = [];
+    results.value = [];
+    selectedRunId.value = '';
+  }
+  await Promise.all([loadFeedback(), loadCandidates()]);
+}
+
+async function refreshAll() {
+  await bootstrap();
+  Message.success('状态已刷新');
+}
+
+/** 「人工采纳」下拉切换评测集：走 selectSuite 以便同步刷新运行与结果 */
+async function onSuiteSelectChange(value: unknown) {
+  const suite = suites.value.find((s) => s.id === value);
+  if (suite) await selectSuite(suite, { jump: false });
 }
 
 /* --------------------------------- 操作 ---------------------------------- */
@@ -675,11 +735,25 @@ async function confirmCreateSuite() {
     Message.warning('请填写评测集名称');
     return;
   }
+  const projectId = projectStore.currentProjectId;
+  if (!projectId) {
+    Message.warning('请先在顶部选择项目');
+    return;
+  }
   try {
-    await createEvaluationSuite({ ...suiteForm.value, project_id: projectStore.currentProjectId } as Partial<EvaluationSuite>);
+    // 后端 EvaluationSuiteSerializer 的 FK 字段名是 project（不是 project_id），
+    // 且 suite_type 为必填，缺任一项都会 400。
+    await createEvaluationSuite({
+      project: projectId,
+      name: suiteForm.value.name,
+      description: suiteForm.value.description,
+      suite_type: suiteForm.value.suite_type,
+      task_type: suiteForm.value.task_type,
+      is_active: true,
+    } as Partial<EvaluationSuite>);
     Message.success('评测集创建成功');
     showSuiteModal.value = false;
-    suiteForm.value = { name: '', description: '', task_type: 'code_review' };
+    suiteForm.value = { name: '', description: '', suite_type: 'regression', task_type: 'code_review' };
     await loadSuites();
   } catch (e) {
     Message.error('创建评测集失败');
@@ -689,7 +763,12 @@ async function confirmCreateSuite() {
 async function createRun() {
   if (!selectedSuiteId.value) return;
   try {
-    await createEvaluationRun({ suite: selectedSuiteId.value, policy_version: 'default', model_name: 'default' });
+    await createEvaluationRun({
+      suite: selectedSuiteId.value,
+      name: `工作台发起运行 · ${new Date().toLocaleString('zh-CN')}`,
+      policy_version: 'default-policy@v3',
+      model_name: 'qwen3-coder-plus',
+    });
     Message.success('评测运行已启动');
     await loadRuns();
     currentStage.value = 2;
@@ -708,8 +787,11 @@ function openCandidateModal() {
 
 async function confirmCreateCandidates() {
   try {
+    const t = candidateForm.value.threshold;
+    // 四个层级都要传：后端 thresholds 是整体替换而非与默认值合并，
+    // 只传 l0/l1 会让 l2/l3 完全不参与判失败。
     const res = await generateCandidatesFromRun(selectedRunId.value, {
-      thresholds: { l0: candidateForm.value.threshold, l1: candidateForm.value.threshold },
+      thresholds: { l0: t, l1: t, l2: t, l3: t },
       min_failure_count: candidateForm.value.minFailureCount,
     });
     Message.success(`已生成 ${res.created_count} 个知识候选`);
@@ -778,6 +860,15 @@ function feedbackSummary(f: FeedbackEvent) {
   return text && text !== '{}' ? text.slice(0, 60) : '无附加说明';
 }
 
+const actorTypeLabels: Record<string, string> = {
+  user: '人工', system: '系统', integration: '集成',
+};
+
+/** 操作人：优先显示用户名，系统/集成信号显示来源类型 */
+function feedbackActor(f: FeedbackEvent) {
+  return f.actor?.username || actorTypeLabels[f.actor_type] || f.actor_type;
+}
+
 function statusText(s: string) {
   return ({ pending: '待执行', running: '运行中', completed: '已完成', failed: '失败' } as Record<string, string>)[s] || s;
 }
@@ -796,7 +887,7 @@ function scoreTagColor(v?: number) {
 function candidateTagColor(s: string) {
   return ({
     awaiting_approval: 'blue', pending: 'orange', accepted: 'green',
-    rejected: 'red', conflicted: 'red', merged: 'purple',
+    rejected: 'red', conflicted: 'red', merged: 'arcoblue',
   } as Record<string, string>)[s] || 'gray';
 }
 
@@ -816,6 +907,35 @@ function fmt(v?: number) {
   return v === undefined || v === null ? '-' : v.toFixed(2);
 }
 
+/* --------------------------- 失败样本判据（对齐后端） --------------------------- */
+// 与 knowledge_evolution/eval_review_bridge.py 的 DEFAULT_THRESHOLDS 保持一致
+const FAILURE_THRESHOLD = 0.5;
+const SCORE_LEVELS = ['l0', 'l1', 'l2', 'l3'] as const;
+
+type LevelName = (typeof SCORE_LEVELS)[number];
+
+function levelScores(r: EvaluationResult): [LevelName, number][] {
+  return SCORE_LEVELS
+    .map((l) => [l, r[`${l}_score`]] as [LevelName, number | null | undefined])
+    .filter((pair): pair is [LevelName, number] => pair[1] !== undefined && pair[1] !== null);
+}
+
+/** status='failed'（执行异常）或 completed 但存在层级得分低于阈值 → 失败样本 */
+function isFailureSample(r: EvaluationResult): boolean {
+  if (r.status === 'failed') return true;
+  const scores = levelScores(r);
+  return scores.length > 0 && scores.some(([, v]) => v < FAILURE_THRESHOLD);
+}
+
+/** 失败原因：优先用后端 error_message，否则按最差层级生成可读说明 */
+function failureSummary(r: EvaluationResult): string {
+  if (r.error_message) return r.error_message.slice(0, 56);
+  const scores = levelScores(r);
+  if (!scores.length) return `用例 #${r.case_number ?? '-'} 执行失败`;
+  const [level, score] = scores.reduce((a, b) => (b[1] < a[1] ? b : a));
+  return `用例 #${r.case_number ?? '-'} ${level.toUpperCase()} 得分 ${score.toFixed(2)} 低于阈值 ${FAILURE_THRESHOLD.toFixed(2)}`;
+}
+
 function fmtTime(v?: string) {
   return v ? new Date(v).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '--:--';
 }
@@ -825,9 +945,7 @@ watch(
   () => projectStore.currentProjectId,
   async (projectId) => {
     if (!projectId) return;
-    await loadSuites();
-    if (suites.value.length) await selectSuite(suites.value[0]);
-    await Promise.all([loadFeedback(), loadCandidates()]);
+    await bootstrap();
   },
   { immediate: true }
 );
@@ -1340,8 +1458,8 @@ watch(
 .ke-avatar.is-blue {
   background: rgb(var(--arcoblue-6));
 }
-.ke-avatar.is-purple {
-  background: rgb(var(--purple-6));
+.ke-avatar.is-cyan {
+  background: rgb(var(--cyan-6));
 }
 .ke-person-main {
   min-width: 0;
