@@ -31,6 +31,12 @@ class GraphNode(models.Model):
         ("version", "知识版本"),
         ("candidate", "知识候选"),
         ("source", "来源快照"),
+        ("workflow_output", "流程产出"),
+        ("requirement_document", "需求文档"),
+        ("requirement_module", "需求模块"),
+        ("test_case", "测试用例"),
+        ("test_step", "测试步骤"),
+        ("test_module", "测试模块"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -110,6 +116,7 @@ class GraphEdge(models.Model):
         ("DERIVED_FROM", "派生自"),
         ("ACCEPTED_BY", "被…采纳"),
         ("REFUTED_BY", "被…反驳"),
+        ("FEEDS_INTO", "流转到"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

@@ -38,6 +38,7 @@ export interface GraphNode {
     risk_score?: number;
     caller_count?: number;
     test_coverage?: string;
+    [key: string]: any;
   };
   provenance: GraphProvenance;
 }

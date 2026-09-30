@@ -12,6 +12,10 @@ from django.db import transaction
 from django.db.models import Count
 from projects.models import ProjectMember
 from wharttest_django.permissions import HasModelPermission, permission_required
+from knowledge_evolution.graph_client import KnowledgeDocumentGraphClient, RequirementGraphClient, TestCaseGraphClient
+from knowledge_evolution.knowledge_models import SourceSnapshot
+from projects.models import Project
+
 from .models import AnalysisTask, AnalysisTaskExecutionLog, CodeAnalysisLLMConfig, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
 from .serializers import AnalysisTaskExecutionLogSerializer, AnalysisTaskSerializer, CodeAnalysisLLMConfigSerializer, CredentialSerializer, GitLabConnectionSerializer, ProjectRepositorySerializer, TestRequirementDraftSerializer
 from .services import GitLabClient, LocalGitClient, generate_suggested_patch, normalize_test_point_for_display, remove_ocr_repositories_for_repository, remove_ocr_repository, terminate_ocr_processes
@@ -346,7 +350,7 @@ class CredentialViewSet(viewsets.ModelViewSet):
 
 
 class KnowledgeGraphSourceViewSet(viewsets.ViewSet):
-    """Unified graph-source boundary. Code repositories are the first adapter."""
+    """Unified graph-source boundary. Code repositories + documents + requirements + test cases."""
     permission_classes = [IsAuthenticated]
 
     @staticmethod
@@ -384,6 +388,15 @@ class KnowledgeGraphSourceViewSet(viewsets.ViewSet):
             },
         }
 
+    def _document_client(self):
+        return KnowledgeDocumentGraphClient()
+
+    def _requirement_client(self):
+        return RequirementGraphClient()
+
+    def _test_case_client(self):
+        return TestCaseGraphClient()
+
     def list(self, request):
         _require_graph_permission(request.user)
         project_id = request.query_params.get("project")
@@ -398,13 +411,24 @@ class KnowledgeGraphSourceViewSet(viewsets.ViewSet):
                 continue
             seen_repositories.add(task.repository_id)
             sources.append(self._source(task))
-        return Response({
-            "results": sources,
-            "source_types": [
-                {"value": "code_repository", "label": "代码仓库", "enabled": True},
-                {"value": "knowledge_document", "label": "知识库文档", "enabled": False},
-            ],
-        })
+
+        doc_sources = []
+        req_sources = []
+        tc_sources = []
+        if project_id and str(project_id).isdigit():
+            pid = int(project_id)
+            doc_sources = self._document_client().list_sources(pid)
+            req_sources = self._requirement_client().list_sources(pid)
+            tc_sources = self._test_case_client().list_sources(pid)
+
+        all_sources = sources + doc_sources + req_sources + tc_sources
+        source_types = [
+            {"value": "code_repository", "label": "代码仓库", "enabled": bool(sources)},
+            {"value": "knowledge_document", "label": "知识库文档", "enabled": bool(doc_sources)},
+            {"value": "requirement", "label": "需求", "enabled": bool(req_sources)},
+            {"value": "test_case", "label": "测试用例", "enabled": bool(tc_sources)},
+        ]
+        return Response({"results": all_sources, "source_types": source_types})
 
     def _task(self, request, pk):
         _require_graph_permission(request.user)
@@ -416,12 +440,78 @@ class KnowledgeGraphSourceViewSet(viewsets.ViewSet):
         except (AnalysisTask.DoesNotExist, ValueError):
             raise PermissionDenied("图谱数据源不存在或无权访问")
 
+    def _snapshot(self, request, pk):
+        _require_graph_permission(request.user)
+        prefix, separator, snapshot_id = str(pk or "").partition(":")
+        if prefix != "document" or not separator:
+            raise PermissionDenied("不支持的图谱数据源")
+        try:
+            snapshot = SourceSnapshot.objects.get(pk=snapshot_id)
+        except (SourceSnapshot.DoesNotExist, ValueError):
+            raise PermissionDenied("图谱数据源不存在或无权访问")
+        if not _can_access(request.user, snapshot.project_id):
+            raise PermissionDenied("无权访问该文档图谱")
+        return snapshot
+
+    def _requirement(self, request, pk):
+        from requirements.models import RequirementDocument
+
+        _require_graph_permission(request.user)
+        prefix, separator, doc_id = str(pk or "").partition(":")
+        if prefix != "requirement" or not separator:
+            raise PermissionDenied("不支持的图谱数据源")
+        try:
+            document = RequirementDocument.objects.get(pk=doc_id)
+        except (RequirementDocument.DoesNotExist, ValueError):
+            raise PermissionDenied("图谱数据源不存在或无权访问")
+        if not _can_access(request.user, document.project_id):
+            raise PermissionDenied("无权访问该需求图谱")
+        return document
+
+    def _test_case(self, request, pk):
+        _require_graph_permission(request.user)
+        prefix, separator, project_id = str(pk or "").partition(":")
+        if prefix != "test_case" or not separator:
+            raise PermissionDenied("不支持的图谱数据源")
+        if not str(project_id).isdigit():
+            raise PermissionDenied("图谱数据源不存在或无权访问")
+        try:
+            project = Project.objects.get(pk=int(project_id))
+        except Project.DoesNotExist:
+            raise PermissionDenied("图谱数据源不存在或无权访问")
+        if not _can_access(request.user, project.pk):
+            raise PermissionDenied("无权访问该测试用例图谱")
+        return project
+
     def retrieve(self, request, pk=None):
+        prefix = str(pk or "").partition(":")[0]
+        if prefix == "document":
+            snapshot = self._snapshot(request, pk)
+            return Response(self._document_client().source(snapshot))
+        if prefix == "requirement":
+            document = self._requirement(request, pk)
+            return Response(self._requirement_client().source(document))
+        if prefix == "test_case":
+            project = self._test_case(request, pk)
+            return Response(self._test_case_client().source(project))
         task = self._task(request, pk)
         return Response(self._source(task))
 
     @action(detail=True, methods=["get"], url_path="graph")
     def graph(self, request, pk=None):
+        prefix = str(pk or "").partition(":")[0]
+        if prefix == "document":
+            return self._document_graph(request, pk)
+        if prefix == "requirement":
+            return self._requirement_graph(request, pk)
+        if prefix == "test_case":
+            return self._test_case_graph(request, pk)
+        return self._code_graph(request, pk)
+
+    def _csv(self, request, name):
+        return [value for value in request.query_params.get(name, "").split(",") if value]
+
+    def _code_graph(self, request, pk):
         from .graph_client import CodeReviewGraphClient, GraphUnavailable
 
         task = self._task(request, pk)
@@ -430,14 +520,12 @@ class KnowledgeGraphSourceViewSet(viewsets.ViewSet):
                 {"detail": "代码审查图谱（CRG）未启用，请在环境变量中配置 CODE_REVIEW_GRAPH_ENABLED=true 并设置 CRG_INTERNAL_TOKEN。"},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        def csv(name):
-            return [value for value in request.query_params.get(name, "").split(",") if value]
         try:
             payload = CodeReviewGraphClient().browse(
                 task,
                 search=request.query_params.get("search", ""),
-                node_kinds=csv("node_kinds"),
-                edge_kinds=csv("edge_kinds"),
+                node_kinds=self._csv(request, "node_kinds"),
+                edge_kinds=self._csv(request, "edge_kinds"),
                 center=request.query_params.get("center", ""),
                 depth=request.query_params.get("depth", 1),
                 limit=request.query_params.get("limit", 120),
@@ -445,6 +533,45 @@ class KnowledgeGraphSourceViewSet(viewsets.ViewSet):
         except (GraphUnavailable, ValueError) as exc:
             return Response({"detail": f"图谱查询失败：{exc}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         payload["source"] = self._source(task)
+        return Response(payload)
+
+    def _document_graph(self, request, pk):
+        snapshot = self._snapshot(request, pk)
+        payload = self._document_client().browse(
+            snapshot=snapshot,
+            search=request.query_params.get("search", ""),
+            node_kinds=self._csv(request, "node_kinds"),
+            edge_kinds=self._csv(request, "edge_kinds"),
+            center=request.query_params.get("center", ""),
+            depth=request.query_params.get("depth", 1),
+            limit=request.query_params.get("limit", 120),
+        )
+        return Response(payload)
+
+    def _requirement_graph(self, request, pk):
+        document = self._requirement(request, pk)
+        payload = self._requirement_client().browse(
+            document=document,
+            search=request.query_params.get("search", ""),
+            node_kinds=self._csv(request, "node_kinds"),
+            edge_kinds=self._csv(request, "edge_kinds"),
+            center=request.query_params.get("center", ""),
+            depth=request.query_params.get("depth", 1),
+            limit=request.query_params.get("limit", 120),
+        )
+        return Response(payload)
+
+    def _test_case_graph(self, request, pk):
+        project = self._test_case(request, pk)
+        payload = self._test_case_client().browse(
+            project=project,
+            search=request.query_params.get("search", ""),
+            node_kinds=self._csv(request, "node_kinds"),
+            edge_kinds=self._csv(request, "edge_kinds"),
+            center=request.query_params.get("center", ""),
+            depth=request.query_params.get("depth", 1),
+            limit=request.query_params.get("limit", 120),
+        )
         return Response(payload)
 
 

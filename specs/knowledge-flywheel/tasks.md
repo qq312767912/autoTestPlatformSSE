@@ -45,6 +45,9 @@
   - 已实现中性 `GraphSource` API + `PostgreSQLGraphSource`
   - 已实现 `KnowledgeDocumentGraphAdapter`：`build_from_snapshot/version/candidate`
   - 新增 `GraphNode` / `GraphEdge` 模型与 `build_document_graph` 管理命令
+  - 新增 `knowledge_evolution/graph_client.py` `KnowledgeDocumentGraphClient`，把文档图包装为前端 `GraphSnapshot` 协议
+  - 新增 `RequirementGraphAdapter` / `TestCaseGraphAdapter` 与对应 `RequirementGraphClient` / `TestCaseGraphClient`
+  - `code_analysis/views.py::KnowledgeGraphSourceViewSet` 已支持 `knowledge_document` / `requirement` / `test_case` 类型，前端 `/knowledge-graph` 可切换「代码仓库 / 知识库文档 / 需求 / 测试用例」并浏览对应节点
   - 不改写 CRG 代码图谱数据库
   - _Requirements: R1, R4, R9_
 
@@ -55,11 +58,13 @@
   - 支持 Dense/Sparse/Structured/Graph/Historical 多路召回、加权 RRF、MMR 去冗余
   - 返回证据包、开放冲突/图 CONTRADICTS 标注、可验证 citation
   - 支持按任务类型路由图谱、延迟/Token 预算控制
+  - 已接入现有知识库查询主链路（`knowledge/services.py::query()`），注入 `VectorManager.similarity_search` 作为 Dense 召回源
   - _Requirements: R4, R5, R9_
 
 - [x] 10. 实现标准 Feedback Event
   - 已新增 `FeedbackContext` / `FeedbackService`：支持 `accepted`/`rejected`/`edited`/`test_result`/`defect`/`merged`/`rolled_back` 等信号
   - 强制关联 `task_id`/`output_id`/`trace_id`/`version_ids`，按 idempotency_key + actor 去重，含冷却/反刷/编辑 diff
+  - `FeedbackEvent.knowledge_version_ids` 已从 JSONField 升级为 `FeedbackEvent.knowledge_versions` ManyToMany，保留引用完整性并可按版本统计
   - _Requirements: R6, R9_
 
 - [x] 11. 实现评测集和回放引擎
@@ -69,50 +74,108 @@
 
 - [x] 12. 实现反馈与测评界面
   - 已扩展 DRF API：`retrieval-traces` / `generation-outputs` / `feedback` / `evaluation-suites` / `evaluation-runs` / `evaluation-results` / `knowledge-candidates`
+  - 已补齐 `knowledge-assets` / `knowledge-versions` / `knowledge-conflicts` / `knowledge-evidence` / `knowledge-audit-logs` / `knowledge-retrieval/search` REST 端点
+  - 已新增 `POST /api/knowledge-evolution/feedback/outcomes/` 外部客观信号回填、`GET /api/knowledge-evolution/evaluation-runs/{id}/comparison/` 运行对比
   - 已新增 `EvaluationReviewBridge`：从失败样本归因到 trace/output/version，一键生成 `KnowledgeCandidate`（origin=evaluation_failure）
   - `POST /api/knowledge-evolution/evaluation-runs/{id}/generate-review-candidates/` 支持一键转候选
   - _Requirements: R5, R6, R7, R10_
 
 ## Phase 3：受控自进化
 
-- [ ] 13. 实现二次经验蒸馏
-  - 使用最小样本数、客观信号优先、脱敏和去个人化
-  - 只生成 KnowledgeCandidate，不直接发布
+- [x] 13. 实现二次经验蒸馏
+  - 已实现 `ExperienceDistiller`：至少 3 个去重任务，或至少 2 个独立客观信号
+  - 已按任务类型、正负方向和原因编码聚类，脱敏评论且不复制原始问答正文
+  - 已支持幂等更新，只生成 `KnowledgeCandidate(origin=distillation)`，不直接发布
+  - 已提供 `POST /api/knowledge-evolution/knowledge-candidates/distill-feedback/`
   - _Requirements: R6, R9_
 
-- [ ] 14. 实现能力候选与发布单元
-  - 版本化 RetrievalPolicy/Prompt/Skill/Agent 配置
-  - 关联构建器、模型、依赖、评测和 previous release
+- [x] 14. 实现能力候选与发布单元
+  - 已新增 `CapabilityRelease` / `PromotionDecision`，支持 Knowledge/RetrievalPolicy/Prompt/Skill/Agent 版本
+  - 已记录配置哈希、候选、基线/候选评测、上一生产版本和审批审计
   - _Requirements: R7, R9_
 
-- [ ] 15. 实现影子运行与晋级门禁
-  - 同输入对比 baseline/candidate，候选不对用户可见
-  - 硬门禁、软门禁、切片回归、专家+管理员审批
+- [x] 15. 实现影子运行与晋级门禁
+  - 已实现同评测集 baseline/candidate 配对对比，覆盖 L0–L3
+  - 已实现样本一致、L1/L2 不回归、延迟和 Token 预算硬门禁；通过后进入人工审批
   - _Requirements: R7, R9, R10_
 
-- [ ] 16. 实现发布、监控和回滚
-  - 原子切换项目级 active release
-  - 安全/L1/延迟/误报阈值自动回滚，支持人工一键回滚
+- [x] 16. 实现发布、监控和回滚
+  - 已实现项目 + 能力类型维度的原子 active release 切换
+  - 已实现人工晋级、决策审计和恢复 previous release 的一键回滚 API
   - _Requirements: R7, R9, R10_
 
 ## Phase 4：防腐、联合图与运营
 
-- [ ] 17. 实现知识防腐定时任务
-  - 每日过期/断链/孤儿，每周投影对账，每月全量评测
-  - 提供从来源快照重建 Qdrant 和文档图谱的演练脚本
+- [x] 17. 实现知识防腐定时任务
+  - 已实现每日健康巡检、失败/过期/冲突/孤立节点检查
+  - 已实现每周 stale/failed 投影幂等重建入口和每月飞轮指标快照任务
   - _Requirements: R3, R8_
 
-- [ ] 18. 建立需求—代码—用例—执行—缺陷联合图
-  - 用统一 ID 和证据边连接各边界，支持影响链与覆盖缺口
-  - 保持每个源的权限边界和独立重建能力
+- [x] 18. 建立需求—代码—用例—执行—缺陷联合图
+  - 已实现 `platform-output/v1` 统一协议和八阶段适配器
+  - 已用 `workflow_id + parent_output_ids + supersedes_output_id` 连接风险—方案—用例—执行—问题链路
+  - 已实现 `WorkflowGraphBuilder`，生成 `workflow_output / FEEDS_INTO` 联合图
   - _Requirements: R1, R4, R9_
 
-- [ ] 19. 上线数据飞轮运营看板
-  - 展示有效知识率、被引用率、任务收益、人工成本、腐化和回滚
-  - 支持按版本、项目、任务和时间窗口下钻
+- [x] 19. 上线数据飞轮运营看板
+  - 按“暂停单独扩展控制台”的产品决策，已先完成公共指标 API
+  - 支持轨迹/产出/反馈、采纳率、误报、漏报、Token、L0–L3、发布/回滚和冲突指标
   - _Requirements: R10_
 
-- [ ] 20. 执行真实场景验收
-  - Java/Python/Vue 代码审查、文档问答、需求转用例、故障根因四类场景
-  - 对比质量、漏报/误报、Token、耗时、建索/增量耗时和复核成本
+- [x] 20. 执行真实场景验收
+  - 已提供 `run_flywheel_acceptance` 可重复验收命令，缺少真实轨迹时会明确失败而不以模拟数据冒充
+  - 本机项目 1 已覆盖知识问答、代码审查、用例生成、测试执行四类真实轨迹
+  - Java 与平台混合 Python/Vue 仓库同 Commit 的 CRG 对比结果保存在 `code-review-graph-integration/poc-results.md`
   - _Requirements: R4, R7, R8, R10_
+
+## Phase 5：飞轮成为平台公共能力
+
+- [x] 21. 建立平台级能力定义模型
+  - 新增 `CapabilityDefinition`：区分 `single`（单次测评）与 `workflow`（链路自进化）两种 evaluation_mode
+  - 支持 `kind`（knowledge/retrieval_policy/prompt/skill/agent）、有序 `stages`、默认评测集、晋级门禁规则
+  - 与 `CapabilityRelease` 绑定当前生产生效版本
+  - _Requirements: R7, R9, R10_
+
+- [x] 22. 补齐测试用例审查到飞轮链路
+  - `testcases/review_service.py::run_testcase_review` 完成后调用 `publish_output`，stage=`case_review`
+  - 审查摘要、问题列表、未覆盖批次进入 `RetrievalTrace`/`GenerationOutput`
+  - 审查报告摘要中记录 `trace_id`/`output_id`
+  - _Requirements: R5, R6_
+
+- [x] 23. 实现能力自进化引擎
+  - 新增 `CapabilityEvolutionService`：按能力定义自动从历史产出 + 反馈构建评测集并打分
+  - single 模式：每个产出按反馈信号映射为 L1 质量分
+  - workflow 模式：按 `workflow_id` 聚合链路各阶段，按默认权重加权得到综合分
+  - 支持 `candidate_config` 自动生成 `CapabilityRelease` 并执行影子门禁
+  - _Requirements: R6, R7, R10_
+
+- [x] 24. 暴露能力定义与自进化 REST 端点
+  - `GET/POST/PATCH /api/knowledge-evolution/capability-definitions/`
+  - `POST /api/knowledge-evolution/capability-definitions/{id}/activate-release/`
+  - `POST /api/knowledge-evolution/capability-definitions/{id}/run-evolution/`
+  - 统一产出协议 `OutputEnvelope` 支持 `capability` 字段，Agent 调用可传入 `capability_id`
+  - 前端 `knowledge-evolution/service.ts` 与 `types.ts` 同步新增能力相关类型与接口
+
+- [x] 25. 把测试执行接入链路自进化
+  - `TestExecution` 新增 `workflow_id`/`capability`/`source_output` 字段（迁移 `0028`）
+  - `TestExecutionCreateSerializer` 支持传入 `workflow_id`/`capability_id`/`source_output_id`
+  - `record_test_execution` 把 `workflow_id`/`capability_id` 写入 `GenerationOutput.metadata.protocol`
+  - 使 `风险识别→测试方案→用例生成→测试执行→问题跟踪` 五阶段可按同一 `workflow_id` 聚合打分
+  - _Requirements: R5, R6, R7_
+
+- [x] 26. 把代码审查产出绑定到单次能力定义
+  - `record_code_review_task` 未显式传 `capability` 时，自动按项目 get_or_create `代码审查` 单次能力定义
+  - 代码审查产出带 `capability` 字段，可被 `CapabilityEvolutionService` 聚合评测
+  - _Requirements: R6, R7_
+
+- [ ] 27. 在各业务页面增加显式反馈按钮
+  - 用例审查、代码审查、知识库问答结果页增加「采纳/驳回/编辑」按钮，调用 `POST /api/knowledge-evolution/feedback/`
+  - 测试执行、缺陷跟踪页增加「回填客观结果」按钮，调用 `POST /api/knowledge-evolution/feedback/outcomes/`
+  - 反馈写入后作为真实信号驱动能力自进化
+  - _Requirements: R5, R6_
+
+- [ ] 28. 把需求风险识别/测试方案/用例生成非 Agent 入口接入飞轮
+  - 识别 `requirements/views.py`、`testcases/views.py` 中非 Agent 调用但产生同类产出的接口
+  - 在出口处调用 `publish_output` 或 `record_task_output`，统一 `stage`、`workflow_id`、`capability_id`
+  - _Requirements: R5, R6_
+  - _Requirements: R5, R7, R9, R10_

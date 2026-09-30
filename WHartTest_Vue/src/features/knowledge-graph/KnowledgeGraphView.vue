@@ -8,7 +8,10 @@
       </div>
       <div class="header-actions">
         <a-button @click="loadSources"><template #icon><icon-refresh /></template>刷新数据源</a-button>
-        <a-button type="primary" @click="$router.push('/code-analysis')"><template #icon><icon-code-block /></template>进入代码审查</a-button>
+        <a-button v-if="selectedSource?.type === 'code_repository'" type="primary" @click="$router.push('/code-analysis')"><template #icon><icon-code-block /></template>进入代码审查</a-button>
+        <a-button v-if="selectedSource?.type === 'knowledge_document'" type="primary" @click="$router.push('/knowledge-management')"><template #icon><icon-file /></template>进入知识库</a-button>
+        <a-button v-if="selectedSource?.type === 'requirement'" type="primary" @click="$router.push('/requirements')"><template #icon><icon-book /></template>进入需求</a-button>
+        <a-button v-if="selectedSource?.type === 'test_case'" type="primary" @click="$router.push('/testcases')"><template #icon><icon-bug /></template>进入用例</a-button>
       </div>
     </header>
 
@@ -18,8 +21,7 @@
         :class="{ active: activeSourceType === type.value, disabled: !type.enabled }"
         :disabled="!type.enabled" @click="activeSourceType = type.value"
       >
-        <icon-code-block v-if="type.value === 'code_repository'" />
-        <icon-file v-else />
+        <component :is="sourceTypeIcon(type.value)" />
         <span>{{ type.label }}</span><small>{{ type.enabled ? '已接入' : '扩展位' }}</small>
       </button>
       <div class="flywheel-note"><icon-loop />来源 → 实体/关系 → 审查与检索 → 人工反馈 → 知识沉淀</div>
@@ -27,27 +29,28 @@
 
     <main class="graph-workbench">
       <aside class="source-panel">
-        <div class="panel-heading"><div><span>GRAPH SOURCES</span><b>代码仓库</b></div><a-tag>{{ sources.length }}</a-tag></div>
-        <a-input v-model="sourceSearch" allow-clear placeholder="搜索仓库或 Commit"><template #prefix><icon-search /></template></a-input>
+        <div class="panel-heading"><div><span>GRAPH SOURCES</span><b>{{ sourcePanelTitle(activeSourceType) }}</b></div><a-tag>{{ sources.length }}</a-tag></div>
+        <a-input v-model="sourceSearch" allow-clear :placeholder="sourceSearchPlaceholder(activeSourceType)"><template #prefix><icon-search /></template></a-input>
         <div v-if="sourcesLoading" class="panel-state"><a-spin />正在发现图谱...</div>
         <div v-else-if="!filteredSources.length" class="panel-state empty"><icon-relation />当前项目暂无可用图谱</div>
         <button
           v-for="source in filteredSources" :key="source.id" class="source-item"
           :class="{ selected: selectedSource?.id === source.id }" @click="selectSource(source)"
         >
-          <span class="source-icon"><icon-branch /></span>
+          <span class="source-icon"><component :is="sourceTypeIcon(source.type)" /></span>
           <span class="source-copy"><b>{{ source.name }}</b><small>{{ source.project.name }}</small><code>{{ shortCommit(source.snapshot.commit) }}</code></span>
           <span class="status-dot"></span>
         </button>
         <div class="source-footer">
-          <span>后续可接入</span>
-          <a-tag color="gray">知识库文档</a-tag><a-tag color="gray">需求</a-tag><a-tag color="gray">测试用例</a-tag>
+          <span>数据来源</span>
+          <a-tag v-for="type in sourceTypes.filter(t => t.enabled)" :key="type.value" color="gray">{{ type.label }}</a-tag>
+          <span v-if="!sourceTypes.some(t => t.enabled)" class="empty-note">暂无数据源</span>
         </div>
       </aside>
 
       <section class="canvas-panel">
         <div class="canvas-toolbar">
-          <a-input-search v-model="search" placeholder="搜索文件、类、函数..." search-button @search="applyQuery" @press-enter="applyQuery" />
+          <a-input-search v-model="search" placeholder="搜索节点名称或描述..." search-button @search="applyQuery" @press-enter="applyQuery" />
           <a-select v-model="selectedNodeKinds" multiple allow-clear :max-tag-count="1" placeholder="节点类型">
             <a-option v-for="item in nodeKindOptions" :key="item.value" :value="item.value">{{ item.label }} ({{ item.count }})</a-option>
           </a-select>
@@ -116,15 +119,17 @@
           <h2>{{ selectedNode.label }}</h2>
           <code>{{ selectedNode.qualified_name }}</code>
           <dl>
-            <div><dt>文件</dt><dd>{{ selectedNode.path || '—' }}</dd></div>
-            <div><dt>位置</dt><dd>{{ lineRange(selectedNode) }}</dd></div>
-            <div><dt>语言</dt><dd>{{ selectedNode.language || '—' }}</dd></div>
-            <div><dt>调用方</dt><dd>{{ selectedNode.properties.caller_count || 0 }}</dd></div>
-            <div><dt>测试覆盖</dt><dd>{{ selectedNode.properties.test_coverage || 'unknown' }}</dd></div>
+            <div v-for="field in nodeDetailFields" :key="field.label">
+              <dt>{{ field.label }}</dt>
+              <dd :title="typeof field.value === 'string' ? field.value : ''">{{ field.value || '—' }}</dd>
+            </div>
           </dl>
           <div v-if="selectedNode.properties.signature" class="signature"><span>SIGNATURE</span><code>{{ selectedNode.properties.signature }}</code></div>
           <a-button long type="primary" @click="expandNode"><template #icon><icon-relation /></template>展开一层关系</a-button>
-          <a-button v-if="selectedSource?.provenance.analysis_task_id" long @click="openReview"><template #icon><icon-code-block /></template>查看来源审查</a-button>
+          <a-button v-if="selectedSource?.type === 'code_repository' && selectedSource?.provenance.analysis_task_id" long @click="openReview"><template #icon><icon-code-block /></template>查看来源审查</a-button>
+          <a-button v-if="selectedSource?.type === 'knowledge_document'" long @click="$router.push('/knowledge-management')"><template #icon><icon-file /></template>查看来源文档</a-button>
+          <a-button v-if="selectedSource?.type === 'requirement'" long @click="$router.push('/requirements')"><template #icon><icon-book /></template>查看需求文档</a-button>
+          <a-button v-if="selectedSource?.type === 'test_case'" long @click="$router.push('/testcases')"><template #icon><icon-bug /></template>查看测试用例</a-button>
           <section class="relation-list">
             <div class="section-label">CURRENT RELATIONS</div>
             <div v-for="edge in selectedRelations" :key="edge.id" class="relation-item">
@@ -154,7 +159,7 @@ import { computed, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
 import {
-  IconBranch, IconClose, IconCodeBlock, IconExclamationCircle, IconFile,
+  IconBranch, IconBook, IconBug, IconClose, IconCodeBlock, IconExclamationCircle, IconFile,
   IconFilter, IconFullscreen, IconInfoCircle, IconLink, IconLoop, IconMinus, IconPlus,
   IconRefresh, IconRelation, IconSearch,
 } from '@arco-design/web-vue/es/icon';
@@ -193,6 +198,82 @@ const edgeKindOptions = computed(() => Object.entries(snapshot.value?.facets.edg
 const displayedKinds = computed(() => [...new Set((snapshot.value?.nodes || []).map(node => node.kind))]);
 const visibleEdges = computed(() => snapshot.value?.edges || []);
 const selectedRelations = computed(() => selectedNode.value ? visibleEdges.value.filter(edge => edge.source === selectedNode.value?.id || edge.target === selectedNode.value?.id) : []);
+function sourcePanelTitle(type: GraphSourceType) {
+  return ({ code_repository: '代码仓库', knowledge_document: '知识库文档', requirement: '需求文档', test_case: '测试用例' } as Record<GraphSourceType, string>)[type];
+}
+function sourceSearchPlaceholder(type: GraphSourceType) {
+  return ({ code_repository: '搜索仓库或 Commit', knowledge_document: '搜索文档标题', requirement: '搜索需求标题', test_case: '搜索用例或模块' } as Record<GraphSourceType, string>)[type];
+}
+function sourceTypeIcon(type: GraphSourceType) {
+  return ({ code_repository: IconBranch, knowledge_document: IconFile, requirement: IconBook, test_case: IconBug } as Record<GraphSourceType, any>)[type];
+}
+const nodeDetailFields = computed(() => {
+  if (!selectedNode.value) return [];
+  const kind = selectedNode.value.kind;
+  const props = selectedNode.value.properties || {};
+  const common = [];
+  if (props.source_type || props.source_id) {
+    common.push({ label: '来源', value: `${props.source_type || ''}:${props.source_id || ''}`.replace(/^:$/, '—') });
+  }
+  if (props.external_id) {
+    common.push({ label: '外部 ID', value: props.external_id });
+  }
+  if (['document', 'section', 'chunk', 'fact', 'procedure'].includes(kind)) {
+    const fields = [
+      { label: '节点类型', value: nodeLabel(kind) },
+      { label: '块类型', value: props.block_type || '—' },
+      { label: '章节', value: props.section || '—' },
+    ];
+    if (props.chunk_index !== undefined) fields.push({ label: '分块索引', value: String(props.chunk_index) });
+    if (props.content_preview) fields.push({ label: '内容预览', value: props.content_preview });
+    return [...fields, ...common];
+  }
+  if (['asset', 'version', 'candidate', 'rule', 'concept', 'evidence'].includes(kind)) {
+    const fields = [{ label: '节点类型', value: nodeLabel(kind) }];
+    if (props.level) fields.push({ label: '级别', value: props.level });
+    if (props.asset_type) fields.push({ label: '资产类型', value: props.asset_type });
+    if (props.version !== undefined) fields.push({ label: '版本', value: String(props.version) });
+    if (props.confidence !== undefined) fields.push({ label: '置信度', value: String(props.confidence) });
+    if (props.state) fields.push({ label: '状态', value: props.state });
+    if (props.content_hash) fields.push({ label: '内容哈希', value: props.content_hash });
+    return [...fields, ...common];
+  }
+  if (kind === 'requirement_document') {
+    const fields = [{ label: '节点类型', value: nodeLabel(kind) }];
+    if (props.category) fields.push({ label: '文档分类', value: props.category });
+    if (props.status) fields.push({ label: '状态', value: props.status });
+    if (props.version) fields.push({ label: '版本', value: props.version });
+    if (props.description) fields.push({ label: '描述', value: props.description });
+    return [...fields, ...common];
+  }
+  if (kind === 'requirement_module') {
+    const fields = [{ label: '节点类型', value: nodeLabel(kind) }];
+    if (props.order !== undefined) fields.push({ label: '排序', value: String(props.order) });
+    if (props.is_auto_generated !== undefined) fields.push({ label: 'AI生成', value: props.is_auto_generated ? '是' : '否' });
+    if (props.confidence !== undefined) fields.push({ label: '置信度', value: String(props.confidence) });
+    if (props.content_preview) fields.push({ label: '内容预览', value: props.content_preview });
+    return [...fields, ...common];
+  }
+  if (['test_module', 'test_case', 'test_step'].includes(kind)) {
+    const fields = [{ label: '节点类型', value: nodeLabel(kind) }];
+    if (props.level) fields.push({ label: '优先级', value: props.level });
+    if (props.test_type) fields.push({ label: '测试类型', value: props.test_type });
+    if (props.review_status) fields.push({ label: '审核状态', value: props.review_status });
+    if (props.execution_mode) fields.push({ label: '执行模式', value: props.execution_mode });
+    if (props.step_number !== undefined) fields.push({ label: '步骤编号', value: String(props.step_number) });
+    if (props.description) fields.push({ label: '描述', value: props.description });
+    if (props.expected_result) fields.push({ label: '预期结果', value: props.expected_result });
+    if (props.precondition) fields.push({ label: '前置条件', value: props.precondition });
+    return [...fields, ...common];
+  }
+  return [
+    { label: '文件', value: selectedNode.value.path || '—' },
+    { label: '位置', value: lineRange(selectedNode.value) },
+    { label: '语言', value: selectedNode.value.language || '—' },
+    { label: '调用方', value: props.caller_count || 0 },
+    { label: '测试覆盖', value: props.test_coverage || 'unknown' },
+  ];
+});
 
 const positions = computed(() => {
   const result = new Map<string, { x: number; y: number }>();
@@ -216,9 +297,34 @@ const positions = computed(() => {
 });
 
 function position(id: string) { return positions.value.get(id) || { x: 500, y: 340 }; }
-function nodeColor(kind: string) { return ({ File: '#165DFF', Class: '#0FC6C2', Function: '#FF7D00', Method: '#FF9A2E', Test: '#00B42A', Type: '#F53F3F' } as Record<string, string>)[kind] || '#86909C'; }
-function nodeLabel(kind: string) { return ({ File: '文件', Class: '类', Function: '函数', Method: '方法', Test: '测试', Type: '类型' } as Record<string, string>)[kind] || kind; }
-function edgeLabel(kind: string) { return ({ CALLS: '调用', IMPORTS_FROM: '导入', INHERITS: '继承', REFERENCES: '引用', CONTAINS: '包含' } as Record<string, string>)[kind] || kind; }
+function nodeColor(kind: string) {
+  return ({
+    File: '#165DFF', Class: '#0FC6C2', Function: '#FF7D00', Method: '#FF9A2E', Test: '#00B42A', Type: '#F53F3F',
+    document: '#165DFF', section: '#0FC6C2', chunk: '#FF7D00', fact: '#FF9A2E', procedure: '#F7BA1E',
+    concept: '#7B61FF', rule: '#F53F3F', asset: '#00B42A', version: '#14C9C9', candidate: '#FF7D00',
+    evidence: '#86909C', source: '#5F5E5A', workflow_output: '#F53F3F',
+    requirement_document: '#165DFF', requirement_module: '#0FC6C2',
+    test_module: '#7B61FF', test_case: '#00B42A', test_step: '#FF9A2E',
+  } as Record<string, string>)[kind] || '#86909C';
+}
+function nodeLabel(kind: string) {
+  return ({
+    File: '文件', Class: '类', Function: '函数', Method: '方法', Test: '测试', Type: '类型',
+    document: '文档', section: '章节', chunk: '分块', fact: '事实', procedure: '步骤',
+    concept: '概念', rule: '规则', asset: '知识资产', version: '知识版本', candidate: '候选',
+    evidence: '证据', source: '来源快照', workflow_output: '流程产出',
+    requirement_document: '需求文档', requirement_module: '需求模块',
+    test_module: '测试模块', test_case: '测试用例', test_step: '测试步骤',
+  } as Record<string, string>)[kind] || kind;
+}
+function edgeLabel(kind: string) {
+  return ({
+    CALLS: '调用', IMPORTS_FROM: '导入', INHERITS: '继承', REFERENCES: '引用',
+    CONTAINS: '包含', PART_OF: '属于', NEXT: '下一项', MENTIONS: '提及', DEFINES: '定义',
+    REFINES: '细化', CONTRADICTS: '矛盾', SUPERSEDES: '取代', SUPPORTED_BY: '由…支持',
+    DERIVED_FROM: '派生自', ACCEPTED_BY: '被…采纳', REFUTED_BY: '被…反驳', FEEDS_INTO: '流转到',
+  } as Record<string, string>)[kind] || kind;
+}
 function nodeRadius(node: GraphNode) { return selectedNode.value?.id === node.id ? 12 : node.kind === 'File' ? 9 : node.is_test ? 8 : 7; }
 function truncate(value: string, length: number) { return value.length > length ? `${value.slice(0, length - 1)}…` : value; }
 function shortCommit(value: string) { return String(value || '').slice(0, 10); }
