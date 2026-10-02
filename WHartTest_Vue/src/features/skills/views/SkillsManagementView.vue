@@ -51,6 +51,13 @@ const pageText = computed(() => (
 <style scoped>
 .skills-management-view {
   padding: 24px;
+  /* 2026-10-03：父级 .content 的约定是「固定高度 + overflow: hidden，让子组件自行控制滚动」，
+     但本页此前只设了 padding、既没撑满也没滚动 → 内容一高就被直接裁掉且滚不动
+     （用户反馈「skillhub 没有滚轮」，页面放大时立刻暴露）。
+     补上「撑满容器 + 自己滚」即可，别再往父级加滚动（会影响所有页面）。 */
+  height: 100%;
+  box-sizing: border-box;
+  overflow-y: auto;
 }
 
 .page-header {

@@ -1162,7 +1162,32 @@ onMounted(async () => {
   border-radius: 8px;
   box-shadow: 0 0 12px rgba(0, 0, 0, 0.25), 0 0 4px rgba(0, 0, 0, 0.15);
   height: auto; /* 让 flex 自动撑开 */
+  /* 2026-10-03：改成纵向 flex，让菜单区自己算「剩余高度」再滚动。
+     此前是 .menu 用 max-height: calc(100% - 50px) 给 footer 硬留 50px，而 footer 是
+     absolute 不占位 —— 页面一放大 footer 实际高度就超过 50px，菜单最后一项被永久遮住，
+     滚到底也看不见（用户反馈「放大后左侧栏滚不到底」）。 */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
+
+/* Arco 的内部包裹层必须一起拉成 flex 列，否则上面的 flex 只作用在 sider 自身，
+   .arco-layout-sider-children 仍是普通块级、被内容撑高，菜单照样溢出。
+   overflow: hidden —— Arco 默认给这层也挂了 overflow:auto，留着会形成
+   「外层能滚、内层也在滚」的双层滚动容器，滚轮落在哪层不好预判。 */
+.sider :deep(.arco-layout-sider-children) {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ⚠️ 真正滚动的是这一层，不是 .menu：Arco 给 .arco-menu-inner 默认挂了
+   `height:100%` + `overflow:auto`，菜单项全在它里面，所以它自己就会滚。
+   不要在这里加 flex —— .menu 是 display:block，flex 属性对它无效，写了等于没写。
+   也别拿 .menu 的 scrollHeight 判断能不能滚（它恒等于 clientHeight，
+   验收脚本盯错这层会误判成"滚不动"）。 */
 
 .menu {
   background: #ffffff;
@@ -1172,7 +1197,11 @@ onMounted(async () => {
   overflow-y: auto;
   overflow-x: hidden;
   text-align: left;
-  max-height: calc(100% - 50px);
+  /* 占满 footer 之外的全部高度；min-height:0 防止被内容撑高（一旦被撑高，
+     footer 就被顶出容器）。overflow-y 这里只作兜底 —— 实际滚动发生在 .arco-menu-inner。 */
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
 }
 
 :deep(.arco-menu-light) {
@@ -1327,8 +1356,12 @@ onMounted(async () => {
 }
 
 .sider-footer {
-  position: absolute;
-  bottom: 0;
+  /* 2026-10-03：由 absolute 改为正常流（.sider 纵向 flex 的最后一个子项）。
+     absolute 时不占位、浮在菜单最后一项上面，且要靠 .menu 硬算 max-height 预留空间 ——
+     页面放大后 footer 变高就会盖住菜单底部。回到流内后，菜单区拿到的是真实剩余高度，
+     不再依赖任何硬编码像素。 */
+  position: static;
+  flex: 0 0 auto;
   width: 100%;
   padding: 10px 0;
   display: flex;
