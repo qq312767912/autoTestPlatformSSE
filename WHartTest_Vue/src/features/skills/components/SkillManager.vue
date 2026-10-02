@@ -96,11 +96,16 @@
         >
           <div class="skill-header">
             <div class="skill-name">{{ skill.name }}</div>
-            <a-switch
-              v-model="skill.is_active"
-              size="small"
-              @change="(val) => handleToggle(skill, val as boolean)"
-            />
+            <!-- 启停是治理动作（后端 = 超管或任一项目测试负责人）。没这个角色的人
+                 不给可点的开关 —— 点了必然 403，比"看不到"更让人困惑。 -->
+            <a-tooltip :content="text.manageOnly" :disabled="canManage">
+              <a-switch
+                v-model="skill.is_active"
+                size="small"
+                :disabled="!canManage"
+                @change="(val) => handleToggle(skill, val as boolean)"
+              />
+            </a-tooltip>
           </div>
           <div class="skill-tags">
             <a-tag v-if="skill.source_type_label" size="small" :color="sourceTagColor(skill.source_type)">
@@ -160,7 +165,9 @@
               <a-button type="text" size="mini" @click="handleViewContent(skill)">
                 <icon-eye />
               </a-button>
+              <!-- 删除同样是治理动作：没权限的人不显示，而不是点了报错。 -->
               <a-popconfirm
+                v-if="canManage"
                 :content="text.deleteConfirm"
                 @ok="handleDelete(skill)"
               >
@@ -353,11 +360,14 @@ const text = computed(() => (
         copiesTip: 'Skill Hub is a shared catalogue: the same Skill exists once per project in the database, and they are merged into a single row here.',
         bindStageTitle: 'Declare capability stage',
         bindStageIntro: 'The manifest of this Skill does not declare a capability stage. Pick the stage it is meant to serve.',
+        bindStageIntroEdit: 'The stage of this Skill was filled in by hand (it is not in the version package manifest). Pick another stage, or clear it to revoke the declaration.',
         bindStagePlaceholder: 'Select a capability stage',
         bindStageNote: 'This only records a declaration on the Skill. Version packages are immutable and are never rewritten.',
         bindStageSuccess: 'Capability stage declared',
         revokeStageSuccess: 'Stage declaration cleared',
         bindStageFailed: 'Failed to update the stage declaration',
+        stageFromManifest: 'Declared by the version package manifest. Version packages are immutable — change it by releasing a new version.',
+        manageOnly: 'Only a platform admin or a project test lead can enable/disable or delete a Skill.',
       }
     : {
         skillStore: 'Skill 商店',
@@ -384,6 +394,7 @@ const text = computed(() => (
         revokeStageSuccess: '已撤销阶段声明',
         bindStageFailed: '更新阶段声明失败',
         stageFromManifest: '由版本包 manifest 声明。版本包是不可变产物，改它只能发新版本；这里不提供修改入口。',
+        manageOnly: '只有平台管理员或项目测试负责人可以启停 / 删除 Skill。',
         importFromGit: '从 Git 导入',
         uploadSkill: '上传 Skill',
         emptyState: '暂无 Skills，点击上方按钮上传',
@@ -523,6 +534,9 @@ const clearFilter = (key: 'source' | 'stage') => {
 // 是否给出入口**完全看后端返回的 can_bind_stage**，前端不按"我是当前项目的什么
 // 角色"去推：Skill 是公共的，同名的正本可能落在别的项目名下，那样推会推错。
 const canBindStage = ref(false)
+//: 能不能治理公共目录的条目（启停 / 删除 / 补填阶段）。与 canBindStage 同一门槛，
+//: 分开存只是因为两处调用点读的是不同的业务动作。
+const canManage = ref(false)
 const stageOptionList = ref<Array<{ value: string; label: string }>>([])
 const showStageModal = ref(false)
 const stageTarget = ref<SkillListItem | null>(null)
@@ -595,6 +609,9 @@ const fetchSkills = async () => {
     // 能力声明来自后端信封，不自己推断：Skill 是公共的，同名的正本可能落在别的
     // 项目名下，按"我是当前项目的什么角色"判会判错（该给的入口没给 / 给了却 403）。
     canBindStage.value = Boolean(meta?.can_bind_stage)
+    // can_manage 与 can_bind_stage 是同一个门槛（补填阶段也属治理动作），但分开存：
+    // 启停/删除/补填三处调用点各自读得懂自己在判什么。
+    canManage.value = Boolean(meta?.can_manage)
     stageOptionList.value = meta?.stage_options ?? []
   } catch (e: any) {
     Message.error(e.message || text.value.fetchSkillsFailed)
