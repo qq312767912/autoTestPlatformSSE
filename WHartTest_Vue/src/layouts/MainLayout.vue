@@ -235,7 +235,7 @@
             <template #title>{{ knowledgeEvolutionMenuLabel }}</template>
             <a-menu-item key="quality-agents" v-if="hasKnowledgeEvolutionPermission">
               <template #icon><icon-dashboard /></template>
-              <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-evolution?view=agents')">智能体总览</a>
+              <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-evolution?view=agents')">Agent总览</a>
             </a-menu-item>
             <a-menu-item key="quality-data" v-if="hasKnowledgeEvolutionPermission">
               <template #icon><icon-experiment /></template>

@@ -22,26 +22,42 @@
           <span>{{ tabs.find(item=>item.key===workspace)?.label }}</span>
         </div>
         <template v-if="primaryView === 'agents'">
-          <section class="metrics">
-            <article><span>金标与反馈资产</span><b>{{ goldDatasets.length + feedbackEvents.length }}</b><small>{{ goldDatasets.length }} 个金标集 · {{ pendingFeedback }} 条待复核</small><i class="spark"><u v-for="n in 14" :key="n" :style="{height:`${18 + ((n * 7) % 16)}%`}"/></i></article>
-            <article><span>评测运行</span><b>{{ runs.length }}</b><small>已完成 {{ completedRuns.length }}</small><i class="spark"><u v-for="n in 14" :key="n" :style="{height:`${24 + ((n * 11) % 22)}%`}"/></i></article>
-            <article class="warn"><span>失败样本</span><b>{{ failedResults.length }}</b><small>失败率 {{ failureRate }}%</small><i class="spark"><u v-for="n in 14" :key="n" :style="{height:`${16 + ((n * 5) % 26)}%`}"/></i></article>
-            <article class="blue"><span>改进候选</span><b>{{ pendingCandidates.length }}</b><small>等待负责人审批</small><i class="spark"><u v-for="n in 14" :key="n" :style="{height:`${20 + ((n * 9) % 20)}%`}"/></i></article>
+          <section class="board-kpis">
+            <article v-for="kpi in agentKpis" :key="kpi.key" :class="kpi.tone">
+              <span>{{ kpi.label }}</span>
+              <div class="kpi-value"><b>{{ kpi.value }}</b><em v-if="kpi.delta!==null" :class="kpi.invert?(kpi.delta>=0?'down':'up'):(kpi.delta>=0?'up':'down')">{{ kpi.delta>=0?'+':'' }}{{ kpi.delta }}%</em></div>
+              <small>{{ kpi.hint }}</small>
+              <div class="kpi-spark" aria-hidden="true"><i v-for="(height,index) in kpi.spark" :key="index" :style="{height:`${height}%`}"/></div>
+            </article>
           </section>
-          <section class="panel loop-panel">
-            <div class="section-head"><div><span>当前进度</span><h2>四环闭环</h2></div><small>点击阶段进入工作区</small></div>
-            <div class="loop">
-              <button v-for="(step,index) in loopSteps" :key="step.title" type="button" @click="openData(step.target)">
-                <em>0{{ index + 1 }}</em><div><b>{{ step.title }}</b><small>{{ step.desc }}</small></div><a-tag :color="step.color" size="small">{{ step.state }}</a-tag>
-              </button>
+          <section class="panel board-chart">
+            <div class="section-head"><div><span>调用趋势</span><h2>会话数与 Token 消耗</h2></div><small>近 14 天 · 共 {{ allTraces.length }} 次会话</small></div>
+            <div v-if="hasTrendData" class="chart-body">
+              <div class="chart-legend"><span><i class="dot session"/>会话数</span><span><i class="dot token"/>Token 消耗</span></div>
+              <div class="chart-bars">
+                <div v-for="point in agentTrend" :key="point.date" class="bar-col">
+                  <div class="bar-stack">
+                    <i class="bar session" :style="{height:`${point.sessionPct}%`}" :title="`${point.date} · ${point.sessions} 次会话`"/>
+                    <i class="bar token" :style="{height:`${point.tokenPct}%`}" :title="`${point.date} · ${point.tokens} tokens`"/>
+                  </div>
+                  <small>{{ point.date }}</small>
+                </div>
+              </div>
             </div>
+            <a-empty v-else description="近 14 天暂无会话数据"/>
           </section>
-          <section class="panel source-panel">
-            <div class="section-head"><div><span>业务覆盖</span><h2>全流程产出进入飞轮的接入状态</h2></div><small>轨迹总数 {{ allTraces.length }}</small></div>
-            <div class="source-grid">
-              <article v-for="source in businessSources" :key="source.key" :class="{ pending: !source.connected }">
-                <div><b>{{ source.label }}</b><small>{{ source.connected ? `${source.count} 条轨迹` : '尚未建立轨迹回流' }}</small></div>
-                <a-tag :color="source.connected ? 'green' : 'gray'">{{ source.connected ? '已接入' : '待接入' }}</a-tag>
+
+          <section class="panel board-table">
+            <div class="section-head"><div><span>Agent 台账</span><h2>按能力聚合的运行指标</h2></div><small>{{ agentRows.length }} 个 Agent · 不含代码审查与知识库问答</small></div>
+            <div class="agent-head"><span>Agent</span><span>会话数</span><span>用户数</span><span>Token 用量</span><span>平均耗时</span><span>失败率</span></div>
+            <div class="agent-rows">
+              <article v-for="row in agentRows" :key="row.stage" :class="{ idle: !row.sessions }">
+                <div class="agent-name"><b>{{ row.label }}</b><small>{{ row.stage }}</small></div>
+                <span class="cell"><b>{{ row.sessions }}</b><i class="meter"><u :style="{width:`${row.sessionPct}%`}"/></i></span>
+                <span class="cell"><b>{{ row.users }}</b><i class="meter"><u :style="{width:`${row.userPct}%`}"/></i></span>
+                <span class="cell"><b>{{ row.tokens.toLocaleString() }}</b><i class="meter"><u :style="{width:`${row.tokenPct}%`}"/></i></span>
+                <span class="cell"><b>{{ row.latencyText }}</b><i class="meter"><u :style="{width:`${row.latencyPct}%`}"/></i></span>
+                <span class="cell"><a-tag :color="row.failed?'red':'green'" size="small">{{ row.failedRate }}%</a-tag></span>
               </article>
             </div>
           </section>
@@ -72,7 +88,7 @@
             <a-tag color="arcoblue">{{ projectName }}</a-tag>
           </div>
           <div class="launch-grid">
-            <button type="button" @click="workspace='single'"><i><icon-experiment/></i><div><b>独立能力评测</b><small>用例审查、代码审查和知识库问答的单次质量检查</small></div><em>约 5 分钟</em><icon-right/></button>
+            <button type="button" @click="workspace='single'"><i><icon-experiment/></i><div><b>独立能力评测</b><small>用例审查的单次质量检查</small></div><em>约 5 分钟</em><icon-right/></button>
             <button type="button" @click="workspace='workflow'"><i><icon-branch/></i><div><b>全链路测试</b><small>测试方案 → 测试用例 → 测试执行 → 报告生成</small></div><em>{{ cockpit.workflows.length }} 条流程</em><icon-right/></button>
             <button type="button" @click="workspace='gold'"><i><icon-message/></i><div><b>建设评测数据</b><small>整理反馈、Badcase 与金标数据</small></div><em>{{ pendingFeedback }} 条待复核</em><icon-right/></button>
             <button type="button" @click="workspace='evaluation'"><i><icon-dashboard/></i><div><b>运行自动评测</b><small>选择数据集，执行分层质量扫描</small></div><em>{{ runs.length }} 次运行</em><icon-right/></button>
@@ -82,13 +98,108 @@
         </section>
 
         <section v-else-if="workspace === 'single'" class="panel content-panel">
-          <div class="section-head toolbar"><div><span>单次评测</span><h2>独立能力质量面板</h2><p>用例审查、代码审查和知识库问答可以独立反馈、测评和进入飞轮。</p></div></div>
+          <div class="section-head toolbar"><div><span>单次评测</span><h2>独立能力质量面板</h2><p>用例审查是当前唯一的单次能力 Agent；代码审查与知识库问答属平台基础能力，只做质量观测、不进自进化。</p></div></div>
           <div class="single-grid"><article v-for="item in cockpit.single_capabilities" :key="item.stage"><header><div><span>{{ capabilityCode(item.stage) }}</span><h3>{{ taskTypeLabels[item.stage] || item.stage }}</h3></div><a-tag :color="item.failed ? 'red' : item.outputs ? 'green' : 'gray'">{{ item.failed ? '存在失败' : item.outputs ? '正常' : '暂无产出' }}</a-tag></header><div class="single-stats"><span><b>{{ item.outputs }}</b><small>产出</small></span><span><b>{{ item.feedback }}</b><small>反馈</small></span><span><b>{{ item.failed }}</b><small>失败</small></span></div><footer>最近产出 {{ formatDate(item.latest_at || undefined) }}</footer></article></div>
         </section>
 
-        <section v-else-if="workspace === 'workflow'" class="panel content-panel">
-          <div class="section-head toolbar"><div><span>全链路测试</span><h2>四阶段质量门禁</h2><p>测试方案 → 测试用例 → 测试执行 → 报告生成。每阶段评测通过后进入下一阶段，失败样本用于改进对应 Skill。</p></div><a-tag color="arcoblue">{{ cockpit.workflows.length }} 条流程</a-tag></div>
-          <div class="workflow-list"><article v-for="flow in cockpit.workflows" :key="flow.workflow_id"><header><div><b>流程 {{ flow.workflow_id }}</b><small>{{ flow.stages.filter(v=>v.output_id).length }} / {{ flow.stages.length }} 个阶段已产出</small></div><a-tag :color="workflowColor(flow)">{{ workflowSummary(flow) }}</a-tag></header><div class="workflow-track"><section v-for="(stage,index) in flow.stages" :key="stage.stage" :class="['workflow-stage',stage.status]"><div class="stage-index">{{ index + 1 }}</div><h3>{{ taskTypeLabels[stage.stage] || stage.stage }}</h3><a-tag :color="gateColor(stage.status)">{{ gateText(stage.status) }}</a-tag><small v-if="stage.skill_name">Skill {{ stage.skill_name }}<template v-if="stage.skill_version"> · {{ stage.skill_version }}</template></small><small v-else-if="stage.task_id">任务 {{ stage.task_id }} · 待关联 Skill</small><small v-else>{{ stage.reason || '等待上一阶段' }}</small><p v-if="Object.keys(stage.scores || {}).length">{{ scoreSummary(stage.scores) }}</p><a-tag v-if="stage.self_evolution" class="evolution-tag" color="arcoblue" size="small">可自进化</a-tag><div class="stage-actions"><a-button v-if="stage.output_id && ['pending','failed'].includes(stage.status)" size="mini" type="primary" :loading="gateBusy===`${flow.workflow_id}:${stage.stage}`" @click="runGate(flow.workflow_id,stage.stage)">运行门禁</a-button><a-button v-if="stage.status==='failed'" size="mini" status="warning" @click="openOverride(flow.workflow_id,stage.stage)">负责人放行</a-button></div></section></div></article><a-empty v-if="!cockpit.workflows.length" description="暂无全链路测试；从测试方案阶段发起后将自动创建四阶段流程"/></div>
+        <section v-else-if="workspace === 'workflow'" class="panel content-panel workflow-panel">
+          <div class="section-head toolbar"><div><span>全链路测试</span><h2>四阶段质量门禁</h2><p>{{ workflowChainText }}。每阶段评测通过后进入下一阶段，失败样本用于改进对应 Skill。</p></div><div class="actions"><a-tag color="arcoblue">{{ cockpit.workflows.length }} 条流程</a-tag><a-button type="primary" @click="openWorkflowStart"><template #icon><icon-plus/></template>发起流程</a-button></div></div>
+          <div v-if="workflowStartResult" class="start-result">
+            <div class="start-result-head"><div><b>已发起流程 {{ workflowStartResult.workflow_id }}</b><small>四阶段 Skill 版本已在入口一次性锁定</small></div><a-button size="mini" @click="workflowStartResult=null">收起</a-button></div>
+            <div class="binding-row">
+              <article v-for="stage in workflowStartResult.stage_order" :key="stage" :class="['binding',workflowStartResult.bindings[stage]?.managed?'locked':'unmanaged']">
+                <b>{{ taskTypeLabels[stage] || stage }}</b>
+                <template v-if="workflowStartResult.bindings[stage]?.managed"><small>{{ workflowStartResult.bindings[stage].skill_name }} · {{ workflowStartResult.bindings[stage].version }}</small><small class="sha">sha {{ (workflowStartResult.bindings[stage].package_sha256||'').slice(0,12) }}</small></template>
+                <template v-else><small>未锁定 · 无版本溯源</small><small class="sha">{{ workflowStartResult.bindings[stage]?.detail || '项目未登记该阶段可用的 Skill 版本' }}</small></template>
+              </article>
+            </div>
+            <p v-if="workflowStartResult.unmanaged_stages.length" class="warn-line">⚠ 有 {{ workflowStartResult.unmanaged_stages.length }} 个阶段没有锁定 Skill 版本，这些阶段的产出无法归属到具体版本，后续也谈不上按版本回滚。</p>
+            <!-- 跨声明选用不是错误，但必须说出来：主链路刚换过阶段名，现存包声明的还是旧阶段，
+                 不显示的话事后没人知道"这条链路用的是不是本来为它准备的包"。 -->
+            <p v-if="workflowStartResult.mismatched_stages?.length" class="warn-line">跨声明选用 {{ workflowStartResult.mismatched_stages.length }} 个阶段（{{ workflowStartResult.mismatched_stages.map(v=>taskTypeLabels[v]||v).join('、') }}）：所选包在其 manifest 里声明的不是本阶段。已连同声明阶段写进流程锁留痕。</p>
+          </div>
+
+          <div class="wf-shell">
+            <!-- 左栏：已发起的流程版本。用户发起完流程第一件事是"我在哪条流程里"，
+                 所以列表必须常驻，而不是藏在某个下拉里。 -->
+            <aside class="wf-flows" aria-label="已发起的流程版本">
+              <div class="wf-flows-head"><b>流程版本</b><span>{{ cockpit.workflows.length }}</span></div>
+              <!-- 高亮跟随 `activeFlow`（含"没点过时默认取第一条"），
+                   不能只比 activeFlowId：那样首次进入会"中栏显示第一条、左栏一条都不亮"。 -->
+              <button v-for="flow in cockpit.workflows" :key="flow.workflow_id" type="button" class="wf-flow" :class="{active: activeFlow?.workflow_id===flow.workflow_id}" @click="activeFlowId=flow.workflow_id">
+                <div class="wf-flow-top"><b>{{ flow.workflow_id }}</b><a-tag :color="workflowColor(flow)" size="small">{{ workflowSummary(flow) }}</a-tag></div>
+                <div class="wf-flow-meta"><span>{{ stageProgressText(flow) }}</span><span>锁定 {{ flow.locked_version_count ?? 0 }}/{{ flow.stages.length }}</span></div>
+                <i class="wf-flow-bar"><u :style="{width:`${flowProgressPct(flow)}%`}"/></i>
+                <small>{{ flowTemplateText(flow) }} · 发起 {{ formatDate(flow.created_at || undefined) }}</small>
+              </button>
+              <a-empty v-if="!cockpit.workflows.length" description="暂无全链路测试；点右上角「发起流程」创建第一条"/>
+            </aside>
+
+            <div class="wf-timeline">
+              <template v-if="activeFlow">
+                <!-- 阶段状态条：01–04 一屏看完整条链路走到哪一步 -->
+                <div class="wf-stage-bar">
+                  <button v-for="(step,index) in activeFlow.stages" :key="step.stage" type="button" :class="['wf-step',stageTone(activeFlow,step),{selected:activeStage(activeFlow)?.stage===step.stage}]" @click="stageSelection[activeFlow!.workflow_id]=step.stage">
+                    <i>{{ String(index+1).padStart(2,'0') }}</i>
+                    <b>{{ taskTypeLabels[step.stage] || step.stage }}</b>
+                    <small>{{ gateText(step.status) }}</small>
+                  </button>
+                </div>
+                <div class="wf-cards">
+                  <article v-for="(step,index) in activeFlow.stages" :key="step.stage" :class="['wf-card',stageTone(activeFlow,step),{active:activeStage(activeFlow)?.stage===step.stage}]">
+                    <header class="wf-card-head">
+                      <i>{{ String(index+1).padStart(2,'0') }}</i>
+                      <div><b>{{ taskTypeLabels[step.stage] || step.stage }}</b><small>{{ step.skill_name ? `${step.skill_name} · ${step.skill_version}` : '未锁定 Skill 版本' }}</small></div>
+                      <a-tag :color="gateColor(step.status)">{{ gateText(step.status) }}</a-tag>
+                    </header>
+                    <div class="wf-card-body">
+                      <section class="wf-side ai">
+                        <h4><icon-robot/> AI 生成 / 处理</h4>
+                        <p v-if="step.output_id" class="wf-line">产出 <code>{{ step.task_id }}</code></p>
+                        <p v-else class="wf-line">{{ step.status==='running' ? '已派发，等待产出回写' : '本阶段尚无产出' }}</p>
+                        <p class="wf-line">{{ gateEvidenceText(step) }}</p>
+                      </section>
+                      <section class="wf-side human">
+                        <h4><icon-user/> 人工确认 / 复核</h4>
+                        <p class="wf-line">{{ step.manual_score ? `人工评分 ${step.manual_score.value}/100` : '尚无人工评分' }}</p>
+                        <p class="wf-line">{{ step.decided_by ? `决策人 ${step.decided_by}` : '尚无人工决策' }}</p>
+                        <p class="wf-line">{{ step.human_decided ? '已由人拍板，自动评测不会推翻该结论' : '尚未拍板' }}</p>
+                      </section>
+                    </div>
+                    <!-- 派发参数必须"常驻"在阶段卡片里，而不是只在 toast 里闪一下：
+                         用户拿到参数后要去另一个页面（agent / 测试执行）把它填进去，
+                         弹窗一关就找不到 module_key / workflow_id 了。 -->
+                    <p v-if="planFor(activeFlow.workflow_id,step.stage)" class="dispatch-note">
+                      <b>已派发</b>·通道 {{ planFor(activeFlow.workflow_id,step.stage)!.entry }}
+                      <template v-if="planFor(activeFlow.workflow_id,step.stage)!.module_key"> · module_key <code>{{ planFor(activeFlow.workflow_id,step.stage)!.module_key }}</code></template>
+                      · workflow_id <code>{{ activeFlow.workflow_id }}</code>
+                      <template v-if="planFor(activeFlow.workflow_id,step.stage)!.parent_output_ids.length"> · 上游产出 <code>{{ planFor(activeFlow.workflow_id,step.stage)!.parent_output_ids.join('、') }}</code></template>
+                      <template v-if="planFor(activeFlow.workflow_id,step.stage)!.managed"> · 已锁定 {{ planFor(activeFlow.workflow_id,step.stage)!.skill_name }} {{ planFor(activeFlow.workflow_id,step.stage)!.skill_version }}</template>
+                      <br/>{{ planFor(activeFlow.workflow_id,step.stage)!.hint }}
+                    </p>
+                    <!-- 平台没有"打回上一阶段"这个动作，就不能摆一个按了没反应的按钮。
+                         不通过时人真正该做的是重跑门禁或请负责人放行，这里把出路写清楚。 -->
+                    <p v-if="step.status==='failed'" class="wf-return-note">本阶段结论为不通过。平台不含「打回上一阶段」动作：请修改产出后重跑门禁测评，或由负责人填写原因强制放行。</p>
+                    <footer class="wf-card-actions">
+                      <a-button v-if="step.output_id" size="small" @click="openStageOutput(activeFlow.workflow_id,step.stage)">
+                        <template #icon><icon-file/></template>查看结果
+                      </a-button>
+                      <a-button v-if="!step.output_id" size="small" type="primary" :disabled="!['ready','running'].includes(step.status)" :loading="executeBusy===`${activeFlow.workflow_id}:${step.stage}`" @click="executeStage(activeFlow.workflow_id,step.stage)">
+                        <template #icon><icon-play-arrow/></template>执行本阶段
+                      </a-button>
+                      <a-button v-if="step.output_id && ['pending','unscored','failed'].includes(step.status)" size="small" :loading="gateBusy===`${activeFlow.workflow_id}:${step.stage}`" @click="runGate(activeFlow.workflow_id,step.stage)">运行门禁测评</a-button>
+                      <a-button v-if="step.output_id && step.scorable" size="small" @click="openStageScore(activeFlow.workflow_id,step.stage)">
+                        <template #icon><icon-edit/></template>人工评分
+                      </a-button>
+                      <a-button v-if="step.output_id && step.confirmable" size="small" type="primary" status="success" :loading="gateBusy===`${activeFlow.workflow_id}:${step.stage}`" @click="confirmStage(activeFlow.workflow_id,step.stage)">确认进入下一阶段</a-button>
+                      <a-button v-if="step.status==='failed'" size="small" status="warning" @click="openOverride(activeFlow.workflow_id,step.stage)">负责人放行</a-button>
+                    </footer>
+                  </article>
+                </div>
+              </template>
+              <a-empty v-else description="左侧选中一条流程后，这里显示它的四阶段时间线"/>
+            </div>
+          </div>
         </section>
 
         <section v-else-if="workspace === 'gold'" class="panel content-panel">
@@ -145,6 +256,15 @@
             </article>
             <a-empty v-if="!cockpit.people.executors.length" description="未配置测试执行人员"/>
           </div>
+          <!-- AI 专家团队：与"测试团队"并列，说明这条链路每个阶段由哪个 Skill 在干、
+               用的是哪一版。人和 AI 各自负责什么，在这一屏里就能对上，不用来回切页。 -->
+          <div v-if="workspace==='workflow'&&activeFlow" class="people-group expert-group">
+            <div class="group-title"><b>AI 专家团队</b><span>{{ activeFlow.locked_version_count ?? 0 }}/{{ activeFlow.stages.length }} 已锁定</span></div>
+            <article v-for="step in activeFlow.stages" :key="`expert-${step.stage}`" class="person-card">
+              <div class="person-main"><i>{{ (taskTypeLabels[step.stage] || step.stage).slice(0,1) }}</i><div><b>{{ taskTypeLabels[step.stage] || step.stage }}</b><small>{{ step.skill_name || '未锁定 Skill 版本' }}<template v-if="step.skill_version"> · {{ step.skill_version }}</template></small></div><em>AI</em></div>
+              <footer><span>产出生成与自评</span><small :class="['expert-state',step.passed?'ok':step.status==='failed'?'bad':'']">{{ gateText(step.status) }}</small></footer>
+            </article>
+          </div>
         </aside>
       </div>
     </template>
@@ -152,6 +272,94 @@
     <a-modal v-model:visible="showSuiteModal" title="新建评测集" ok-text="创建" @ok="confirmCreateSuite"><a-form :model="suiteForm" layout="vertical"><a-form-item label="名称" required><a-input v-model="suiteForm.name" placeholder="例如：代码审查回归集"/></a-form-item><a-form-item label="评测集类型"><a-select v-model="suiteForm.suite_type"><a-option v-for="(label,key) in suiteTypeLabels" :key="key" :value="key">{{ label }}</a-option></a-select></a-form-item><a-form-item label="任务类型"><a-select v-model="suiteForm.task_type"><a-option v-for="(label,key) in taskTypeLabels" :key="key" :value="key">{{ label }}</a-option></a-select></a-form-item><a-form-item label="描述"><a-textarea v-model="suiteForm.description"/></a-form-item></a-form></a-modal>
     <a-modal v-model:visible="showCandidateModal" title="从失败样本生成改进候选" ok-text="生成候选" @ok="confirmCreateCandidates"><a-form :model="candidateForm" layout="vertical"><a-form-item label="失败阈值"><a-slider v-model="candidateForm.threshold" :min="0" :max="1" :step="0.05"/></a-form-item><a-form-item label="最小失败样本数"><a-input-number v-model="candidateForm.minFailureCount" :min="1" :max="100"/></a-form-item></a-form></a-modal>
     <a-modal v-model:visible="showGateOverrideModal" title="负责人强制放行" ok-text="确认放行" @ok="confirmGateOverride"><a-alert type="warning">放行会允许进入下一阶段，操作人和原因将被永久记录。</a-alert><a-form layout="vertical" style="margin-top:16px"><a-form-item label="放行原因" required><a-textarea v-model="gateOverride.reason" :max-length="500" show-word-limit placeholder="请说明风险、业务依据与后续补救措施"/></a-form-item></a-form></a-modal>
+    <a-modal
+      v-model:visible="showWorkflowStartModal"
+      :title="workflowStep===1?'发起全链路测试 · 1/2 选择 Skill 包':'发起全链路测试 · 2/2 确认流程标识'"
+      :ok-text="workflowStep===1?'下一步：填写流程标识':'发起并锁定版本'"
+      :ok-loading="workflowStarting"
+      :ok-button-props="{disabled: workflowStep===1 && !pinsComplete}"
+      :on-before-ok="onWorkflowModalOk"
+      :mask-closable="false"
+      width="760px"
+    >
+      <a-alert type="info">发起时会把四个阶段的 Skill 版本<strong>一次性</strong>锁定。链路跑起来之后再有人激活新版本，也不会改变本次流程已锁定的版本——否则「这条链路的产出对应哪个版本」就无法回答，回滚也界定不了影响范围。</a-alert>
+
+      <!-- 第一步就是"逐阶段选包"：发起这个动作的实质就是选版本。
+           把它放在第二步之后等于让人先承诺再挑，顺序反了；
+           而且没选完就不给「下一步」——否则"没锁上版本"会一路拖到最后才暴露。 -->
+      <template v-if="workflowStep===1">
+        <a-spin :loading="catalogLoading" style="width:100%">
+          <div class="pin-grid">
+            <section v-for="item in catalog.stages" :key="item.stage" class="pin-block">
+              <header>
+                <b>{{ item.label }}</b>
+                <small v-if="pinnedSkill(item.stage)">{{ pinnedSkill(item.stage)!.skill_name }} · {{ pinnedSkill(item.stage)!.version }}</small>
+                <small v-else class="missing">未选定</small>
+              </header>
+              <a-input v-model="pinSearch[item.stage]" size="small" allow-clear placeholder="搜索 Skill 包名或说明"/>
+              <div class="pin-list">
+                <button v-for="skill in pinCandidates(item.stage)" :key="skill.skill_id" type="button" :class="['pin-item',{selected:pins[item.stage]===skill.skill_id,blocked:!skill.runnable}]" @click="pins[item.stage]=skill.skill_id">
+                  <div>
+                    <b>{{ skill.skill_name }}</b>
+                    <a-tag v-if="skill.declared_stage && skill.declared_stage!==item.stage" size="small" color="orange">声明 {{ skill.declared_stage_label }}</a-tag>
+                    <a-tag v-if="!skill.runnable" size="small" color="gray">不可运行</a-tag>
+                  </div>
+                  <small>{{ skill.version || '无活跃版本' }}<template v-if="skill.package_sha256"> · sha {{ skill.package_sha256.slice(0,10) }}</template></small>
+                </button>
+                <p v-if="!pinCandidates(item.stage).length" class="pin-empty">没有匹配的 Skill 包</p>
+              </div>
+            </section>
+          </div>
+          <p v-if="!pinsComplete" class="pin-warn">四个阶段都要选定一个<strong>可运行</strong>的 Skill 包才能进入下一步。没有合适的包时，请先到 Skill Hub 上传并激活该阶段的版本。</p>
+        </a-spin>
+      </template>
+
+      <template v-else>
+        <div class="pin-summary">
+          <article v-for="stage in catalog.stage_order" :key="stage">
+            <b>{{ taskTypeLabels[stage] || stage }}</b>
+            <small>{{ pinnedSkill(stage)?.skill_name || '—' }} · {{ pinnedSkill(stage)?.version || '—' }}</small>
+          </article>
+        </div>
+        <a-form layout="vertical" style="margin-top:16px">
+          <a-form-item label="流程标识 workflow_id" required extra="建议用可读标识，例如「交易网关-回归-20261002-01」。它会出现在流程列表、门禁留痕与链路图节点名上，UUID 不便人工核对。">
+            <a-input v-model="workflowForm.workflowId" placeholder="交易网关-回归-20261002-01" allow-clear/>
+          </a-form-item>
+        </a-form>
+      </template>
+    </a-modal>
+    <a-modal v-model:visible="showStageScoreModal" title="人工评分" ok-text="提交评分" :ok-loading="stageScoreBusy" @ok="confirmStageScore">
+      <a-alert type="info">评分是<strong>百分制</strong>：达到阈值判通过并放行下一阶段，低于阈值判未通过。分数、评分人与备注都会被永久记录——「谁认为这一阶段合格」在事后必须能查。</a-alert>
+      <a-form layout="vertical" style="margin-top:16px">
+        <a-form-item :label="`评分（0–100，阈值 ${stageScore.threshold}）`">
+          <a-slider v-model="stageScore.value" :min="0" :max="100" :step="1"/>
+          <a-input-number v-model="stageScore.value" :min="0" :max="100" :step="1" style="width:140px;margin-top:8px"/>
+          <span :class="['score-preview',stageScore.value>=stageScore.threshold?'ok':'bad']" style="margin-left:12px">{{ stageScore.value }} 分 · {{ stageScore.value>=stageScore.threshold?'判通过':'判未通过' }}</span>
+        </a-form-item>
+        <a-form-item label="评分说明">
+          <a-textarea v-model="stageScore.reason" :max-length="500" show-word-limit placeholder="可选。例如：方案覆盖完整，但缺少回滚演练条目"/>
+        </a-form-item>
+      </a-form>
+    </a-modal>
+    <a-modal v-model:visible="showStageOutputModal" title="阶段结果" :footer="false" width="760px">
+      <a-spin :loading="stageOutputLoading" style="width:100%">
+        <template v-if="stageOutput">
+          <div class="output-meta">
+            <span><b>{{ stageOutput.stage_label }}</b> · 任务 {{ stageOutput.task_id }}</span>
+            <span v-if="stageOutput.skill_name">{{ stageOutput.skill_name }}<template v-if="stageOutput.skill_version"> · {{ stageOutput.skill_version }}</template></span>
+            <span v-if="stageOutput.package_sha256" class="sha">sha {{ stageOutput.package_sha256.slice(0,12) }}</span>
+            <span>{{ formatDate(stageOutput.created_at) }}</span>
+          </div>
+          <div v-if="stageOutput.gate" class="output-gate">
+            <a-tag :color="gateColor(stageOutput.gate.status)">{{ gateText(stageOutput.gate.status) }}</a-tag>
+            <span>{{ stageOutput.gate.reason || '门禁暂无说明' }}</span>
+            <span v-if="stageOutput.gate.decided_by">操作人 {{ stageOutput.gate.decided_by }}</span>
+          </div>
+          <pre class="output-content">{{ stageOutput.content || '（本阶段产出正文为空）' }}</pre>
+          <p v-if="stageOutput.truncated" class="detail-note">正文共 {{ stageOutput.content_length }} 字，此处只展示前 4000 字。</p>
+        </template>
+      </a-spin>
+    </a-modal>
   </div>
 </template>
 
@@ -159,12 +367,12 @@
 import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
-import { IconBranch, IconDashboard, IconExperiment, IconMessage, IconPlayArrow, IconPlus, IconRefresh, IconRight, IconSafe, IconStorage } from '@arco-design/web-vue/es/icon';
+import { IconBranch, IconDashboard, IconEdit, IconExperiment, IconFile, IconMessage, IconPlayArrow, IconPlus, IconRefresh, IconRight, IconRobot, IconSafe, IconStorage, IconUser } from '@arco-design/web-vue/es/icon';
 import { useProjectStore } from '@/store/projectStore';
 import { SkillHubConsole } from '@/features/skills';
 import KnowledgeGraphView from '@/features/knowledge-graph/KnowledgeGraphView.vue';
-import { createEvaluationRun, createEvaluationSuite, evaluateWorkflowStage, generateCandidatesFromRun, getProjectQualityCockpit, listCapabilityReleases, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, overrideWorkflowStage, updateCandidateState } from './service';
-import type { CapabilityRelease, EvaluationResult, EvaluationRun, EvaluationSuite, ExecutionSpan, FailureAttribution, FeedbackEvent, GoldDataset, KnowledgeCandidate, OptimizationProposal, ProjectQualityCockpit, ProjectQualityPerson, ProjectWorkflowView, RetrievalTrace } from './types';
+import { confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, evaluateWorkflowStage, executeWorkflowStage, generateCandidatesFromRun, getProjectQualityCockpit, getStageOutput, getWorkflowStageCatalog, getWorkflowStatus, listCapabilityReleases, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, overrideWorkflowStage, scoreWorkflowStage, startWorkflow, updateCandidateState } from './service';
+import type { CapabilityRelease, EvaluationResult, EvaluationRun, EvaluationSuite, ExecutionSpan, FailureAttribution, FeedbackEvent, GoldDataset, KnowledgeCandidate, OptimizationProposal, ProjectQualityCockpit, ProjectQualityPerson, ProjectWorkflowView, RetrievalTrace, StageExecutionPlan, StageOutputView, StartWorkflowResult, WorkflowCatalogSkill, WorkflowStageCatalog, WorkflowStageGateView } from './types';
 
 type Workspace='overview'|'single'|'workflow'|'gold'|'evaluation'|'attribution'|'optimization';
 type PrimaryView='agents'|'data'|'graph';
@@ -174,7 +382,7 @@ const route=useRoute(),router=useRouter();
 const routeView=():PrimaryView=>['agents','data','graph'].includes(String(route.query.view))?String(route.query.view) as PrimaryView:'agents';
 const primaryView=ref<PrimaryView>(routeView()),quickMode=ref<QuickMode>('console');
 const pageHeader=computed(()=>({
-  agents:{title:'智能体总览',description:'查看运行、评测、失败样本与待处理改进。'},
+  agents:{title:'Agent总览',description:'查看运行、评测、失败样本与待处理改进。'},
   data:{title:'数据飞轮',description:'沉淀反馈、评测、归因与优化数据。'},
   graph:{title:'知识图谱',description:'连接代码、文档与质量经验。'},
 }[primaryView.value]));
@@ -186,6 +394,211 @@ const emptyCockpit=():ProjectQualityCockpit=>({people:{leads:[],executors:[]},go
 const cockpit=ref<ProjectQualityCockpit>(emptyCockpit());
 const suitesLoading=ref(false),selectedSuiteId=ref<string>(),selectedRunId=ref(''),selectedTraceId=ref(''),feedbackSignal=ref(''),candidateState=ref(''),traceTaskType=ref(''),traceStatus=ref(''),goldTaskType=ref(''),showSuiteModal=ref(false),showCandidateModal=ref(false),showGateOverrideModal=ref(false),gateBusy=ref('');
 const gateOverride=ref({workflowId:'',stage:'',reason:''});
+// ---- 全链路测试：逐阶段推进（步骤条 + 单阶段展开 + 查看结果/人工评分/人工确认）
+//: 用户点开的阶段。没点过就跟随后端给的 current_stage——「当前该看哪一步」
+//: 由后端算，前端只负责记住"用户临时切到哪一步看了一眼"。
+const stageSelection=ref<Record<string,string>>({});
+const executeBusy=ref('');
+/** 已派发的执行参数，按 `workflowId:stage` 存：派发结果必须留在页面上，不能弹一下就没了。 */
+const executionPlans=ref<Record<string,StageExecutionPlan>>({});
+const showStageScoreModal=ref(false),stageScoreBusy=ref(false);
+const stageScore=ref({workflowId:'',stage:'',value:80,reason:'',threshold:70});
+const showStageOutputModal=ref(false),stageOutputLoading=ref(false),stageOutput=ref<StageOutputView|null>(null);
+/** 放行状态：与后端 `GATE_PASSING_STATES` 一一对应，多一个少一个都会出现"页面说能走、接口 400"。 */
+const PASSING_STATES=['passed','confirmed','overridden'];
+const isPassedStatus=(v:string)=>PASSING_STATES.includes(v);
+const currentStageOf=(flow:ProjectWorkflowView):WorkflowStageGateView|undefined=>flow.stages.find(v=>v.stage===flow.current_stage)||flow.stages[0];
+const activeStage=(flow:ProjectWorkflowView):WorkflowStageGateView|undefined=>flow.stages.find(v=>v.stage===stageSelection.value[flow.workflow_id])||currentStageOf(flow);
+/** 步骤条三档配色：done=已放行、active/failed/running=当前步、todo=未轮到的灰步。 */
+const stageTone=(flow:ProjectWorkflowView,step:WorkflowStageGateView)=>{
+  if(isPassedStatus(step.status))return 'done';
+  if(currentStageOf(flow)?.stage!==step.stage)return 'todo';
+  if(step.status==='failed')return 'failed';
+  if(step.status==='running')return 'running';
+  return 'active';
+};
+const stageProgressText=(flow:ProjectWorkflowView)=>{
+  const passed=flow.stages.filter(v=>isPassedStatus(v.status)).length;
+  return `${passed} / ${flow.stages.length} 个阶段已放行`;
+};
+// ---- 左栏：已发起流程版本列表
+/** 当前选中的流程。默认取左栏第一条（后端已按发起时间倒序），用户点其它条目才切换。 */
+const activeFlowId=ref('');
+const activeFlow=computed<ProjectWorkflowView|undefined>(()=>{
+  const flows=cockpit.value.workflows;
+  return flows.find(v=>v.workflow_id===activeFlowId.value)||flows[0];
+});
+/** 进度条百分比按"已放行阶段数"算。刻意不用门禁通过率之类的合成分：
+ *  那种分数算出来没人能解释"为什么是 62%"，而阶段计数一眼能对上。 */
+const flowProgressPct=(flow:ProjectWorkflowView)=>{
+  if(!flow.stages.length)return 0;
+  return Math.round(flow.stages.filter(v=>isPassedStatus(v.status)).length/flow.stages.length*100);
+};
+/** 存量流程用的是旧阶段序列，必须标出来：不标的话用户会以为它"少了两个阶段"。 */
+const flowTemplateText=(flow:ProjectWorkflowView)=>flow.stage_template==='legacy'?'历史链路四阶段':'当前链路四阶段';
+/** 标题里的链路说明取自后端给的默认序列，不在前端抄一份阶段名。 */
+const workflowChainText=computed(()=>{
+  const order=cockpit.value.stage_order?.length?cockpit.value.stage_order:['risk_identification','testcase_generation','test_execution','issue_tracking'];
+  return order.map(v=>taskTypeLabels[v]||v).join(' → ');
+});
+/** 门禁证据一句话：分数/评语/操作人放一行，避免页面里三处各说一段。 */
+const gateEvidenceText=(step:WorkflowStageGateView)=>{
+  const parts:string[]=[];
+  if(step.manual_score)parts.push(`人工评分 ${step.manual_score.value}/100`);
+  const auto=Object.entries(step.scores||{}).filter(([k])=>k!=='manual');
+  if(auto.length)parts.push(auto.map(([k,n])=>`${k.toUpperCase()} ${Number(n).toFixed(2)}`).join(' · '));
+  if(step.reason)parts.push(step.reason);
+  if(step.decided_by)parts.push(`操作人 ${step.decided_by}`);
+  return parts.length?parts.join(' · '):'门禁尚无结论；可运行门禁测评、人工评分，或直接确认进入下一步。';
+};
+const planFor=(workflowId:string,stage:string)=>executionPlans.value[`${workflowId}:${stage}`];
+function openStageScore(workflowId:string,stage:string){
+  const flow=cockpit.value.workflows.find(v=>v.workflow_id===workflowId);
+  const step=flow?.stages.find(v=>v.stage===stage);
+  // 阈值取自后端门禁，不在前端写死：两处各写一个 0.7，改一处就会对不上。
+  stageScore.value={workflowId,stage,value:step?.manual_score?.value??80,reason:'',threshold:Math.round((step?.threshold??0.7)*100)};
+  showStageScoreModal.value=true;
+}
+async function confirmStageScore(){
+  if(!projectStore.currentProjectId)return;
+  stageScoreBusy.value=true;
+  try{
+    await scoreWorkflowStage(projectStore.currentProjectId,stageScore.value.workflowId,stageScore.value.stage,stageScore.value.value,stageScore.value.reason);
+    showStageScoreModal.value=false;
+    await loadCockpit();
+    const passed=stageScore.value.value>=stageScore.value.threshold;
+    if(passed)Message.success('已提交人工评分：判通过，可进入下一步');
+    else Message.warning('已提交人工评分：低于阈值，判未通过；可修改评分或由负责人强制放行');
+  }catch{Message.error('提交人工评分失败')}
+  finally{stageScoreBusy.value=false}
+}
+async function confirmStage(workflowId:string,stage:string){
+  if(!projectStore.currentProjectId)return;
+  gateBusy.value=`${workflowId}:${stage}`;
+  try{
+    await confirmWorkflowStage(projectStore.currentProjectId,workflowId,stage);
+    await loadCockpit();
+    Message.success('已人工确认，可进入下一阶段');
+  }catch{Message.error('人工确认失败')}
+  finally{gateBusy.value=''}
+}
+async function executeStage(workflowId:string,stage:string){
+  if(!projectStore.currentProjectId)return;
+  executeBusy.value=`${workflowId}:${stage}`;
+  try{
+    const plan=await executeWorkflowStage(projectStore.currentProjectId,workflowId,stage);
+    executionPlans.value={...executionPlans.value,[`${workflowId}:${stage}`]:plan};
+    // 必须说清"这不等于已经跑完"：平台只有测试执行有内部执行器，
+    // 另外三个阶段的产出由 agent 提交。含糊其辞会让人一直等一个不会来的结果。
+    if(plan.channel==='platform')Message.info(`已校验前置阶段并下发执行参数：请到「${plan.entry}」选用例套件执行，workflow_id 填 ${plan.workflow_id}`);
+    else Message.info(`已校验前置阶段并下发执行参数：请到「${plan.entry}」以 module_key = ${plan.module_key} 执行，产出回写后本阶段自动亮起`);
+    await loadCockpit();
+  }catch{Message.error('执行本阶段失败：请确认上一阶段已放行')}
+  finally{executeBusy.value=''}
+}
+async function openStageOutput(workflowId:string,stage:string){
+  if(!projectStore.currentProjectId)return;
+  showStageOutputModal.value=true;stageOutputLoading.value=true;stageOutput.value=null;
+  try{stageOutput.value=await getStageOutput(projectStore.currentProjectId,workflowId,stage)}
+  catch{Message.error('读取阶段结果失败')}
+  finally{stageOutputLoading.value=false}
+}
+// ---- 全链路测试：发起流程（入口固定在 数据飞轮 → 控制台 → 全链路测试）
+// 两步向导：① 逐阶段选 Skill 包（选完才能下一步）② 填 workflow_id 并发起。
+const showWorkflowStartModal=ref(false),workflowStarting=ref(false),workflowStartResult=ref<StartWorkflowResult|null>(null);
+const workflowForm=ref({workflowId:''});
+const workflowStep=ref<1|2>(1),catalogLoading=ref(false);
+const emptyCatalog=():WorkflowStageCatalog=>({stage_order:[],all_stage_order:[],stages:[],skills:[]});
+const catalog=ref<WorkflowStageCatalog>(emptyCatalog());
+/** 阶段 → 选定的 Skill ID。这是发起动作的实质内容，会被原样送进 `pins`。 */
+const pins=ref<Record<string,string>>({});
+/** 阶段 → 搜索关键词。逐阶段独立，避免在"风险识别"里输入的词把"问题跟踪"的候选也筛掉。 */
+const pinSearch=ref<Record<string,string>>({});
+const skillById=(skillId:string):WorkflowCatalogSkill|undefined=>catalog.value.skills.find(v=>v.skill_id===skillId);
+const pinnedSkill=(stage:string):WorkflowCatalogSkill|undefined=>skillById(pins.value[stage]||'');
+/**
+ * 阶段候选：**不做声明阶段硬筛**，只把声明了本阶段的排前面。
+ *
+ * 硬筛会在主链路刚换阶段名时让向导一个候选都给不出来——现存包声明的还是旧阶段。
+ * 「人选了它」本来就比「包里写了什么」更强（后端会把跨声明写进流程锁留痕）。
+ * 不可运行的包也列出来并标注，让人看见"它在、但还不能用"，比它凭空消失好排查。
+ */
+function pinCandidates(stage:string):WorkflowCatalogSkill[]{
+  const keyword=(pinSearch.value[stage]||'').trim().toLowerCase();
+  return catalog.value.skills
+    .filter(v=>!keyword||v.skill_name.toLowerCase().includes(keyword)||v.description.toLowerCase().includes(keyword))
+    .slice()
+    .sort((a,b)=>{
+      // 排序键必须显式标成元组：推断成 (string|number)[] 后 `da-db` 会被 TS 判为非法算术。
+      const rank=(item:WorkflowCatalogSkill):[number,number,string]=>[item.declared_stage===stage?0:1,item.runnable?0:1,item.skill_name];
+      const [da,ra,na]=rank(a),[db,rb,nb]=rank(b);
+      return da-db||ra-rb||na.localeCompare(nb);
+    });
+}
+/** 四阶段都选到了**可运行**的包才算选完。选了个锁不上的包等于没选——必须在这里拦住。 */
+const pinsComplete=computed(()=>{
+  const stages=catalog.value.stage_order;
+  return stages.length>0&&stages.every(stage=>pinnedSkill(stage)?.runnable===true);
+});
+function suggestWorkflowId(){const d=new Date();return `回归-${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}-01`}
+async function loadStageCatalog(){
+  if(!projectStore.currentProjectId)return;
+  catalogLoading.value=true;
+  try{
+    catalog.value=await getWorkflowStageCatalog(projectStore.currentProjectId);
+    // 默认项取后端按 manifest 解析的包，不在前端自己挑一个"看起来最像"的：
+    // 两处各写一套"哪个包管哪个阶段"，改一处就会出现默认项与实际锁定项不一致。
+    const nextPins:Record<string,string>={},nextSearch:Record<string,string>={};
+    catalog.value.stages.forEach(item=>{
+      nextPins[item.stage]=item.default?.skill_id||'';
+      nextSearch[item.stage]='';
+    });
+    pins.value=nextPins;pinSearch.value=nextSearch;
+  }catch{Message.error('加载阶段候选 Skill 失败')}
+  finally{catalogLoading.value=false}
+}
+async function openWorkflowStart(){
+  workflowForm.value={workflowId:suggestWorkflowId()};
+  workflowStep.value=1;
+  showWorkflowStartModal.value=true;
+  await loadStageCatalog();
+}
+/**
+ * 向导主按钮。第一步只负责"选完了没有"，第二步才真正提交。
+ *
+ * 返回 `false` 阻止弹窗关闭——第一步结束后要停在同一个弹窗里换内容，
+ * 关掉再开一次会让刚选好的包全部重置。
+ */
+async function onWorkflowModalOk():Promise<boolean>{
+  if(workflowStep.value===1){
+    if(catalogLoading.value){Message.warning('候选 Skill 还在加载，请稍候');return false}
+    if(!pinsComplete.value){Message.warning('请为四个阶段都选定一个可运行的 Skill 包');return false}
+    workflowStep.value=2;
+    return false;
+  }
+  return confirmWorkflowStart();
+}
+async function confirmWorkflowStart():Promise<boolean>{
+  const workflowId=workflowForm.value.workflowId.trim();
+  if(!workflowId){Message.warning('请填写流程标识');return false}
+  if(!projectStore.currentProjectId)return false;
+  workflowStarting.value=true;
+  try{
+    workflowStartResult.value=await startWorkflow(projectStore.currentProjectId,workflowId,{...pins.value});
+    showWorkflowStartModal.value=false;
+    workflowStep.value=1;
+    await loadCockpit();
+    // 发起后自动选中新流程：用户点「发起」的下一秒就是想看这条流程的四个阶段，
+    // 让他去左栏里再找一遍是多余的。
+    activeFlowId.value=workflowId;
+    const unmanaged=workflowStartResult.value.unmanaged_stages.length;
+    // 未锁定的阶段要立刻提醒：等跑到问题跟踪阶段才暴露，前面阶段的算力与人工就白费了。
+    if(unmanaged)Message.warning(`流程已发起，但 ${unmanaged} 个阶段未锁定 Skill 版本，产出将没有版本溯源`);
+    else Message.success('流程已发起，四个阶段的 Skill 版本已一次性锁定');
+    return true;
+  }catch{Message.error('发起流程失败：该操作仅限测试负责人');return false}
+  finally{workflowStarting.value=false}
+}
 const suiteForm=ref({name:'',description:'',suite_type:'regression',task_type:'code_review'}),candidateForm=ref({threshold:.5,minFailureCount:1});
 const suiteTypeLabels:Record<string,string>={seed:'种子集',gold:'金标集',regression:'回归集',fresh:'新鲜集',challenge:'挑战集'};
 const taskTypeLabels:Record<string,string>={case_review:'用例审查',code_review:'代码审查',knowledge_query:'知识库问答',risk_identification:'风险识别',test_plan_generation:'测试方案',test_execution:'测试执行',testcase_generation:'测试用例',report_generation:'报告生成',issue_tracking:'问题跟踪'};
@@ -202,6 +615,74 @@ const tabs=computed(()=>[{key:'overview' as const,label:'飞轮总览',desc:'指
 const loopSteps=computed(()=>[{title:'建设金标集',desc:`${goldDatasets.value.length} 个金标集 · ${feedbackEvents.value.length} 条反馈`,state:pendingFeedback.value?'待复核':'可用',color:pendingFeedback.value?'orange':'green',target:'gold' as const},{title:'自动化评测',desc:`${completedRuns.value.length} 次完成 · ${failedResults.value.length} 个失败`,state:runs.value.length?'可运行':'待建集',color:runs.value.length?'blue':'gray',target:'evaluation' as const},{title:'轨迹回流归因',desc:`${traces.value.length} 条轨迹 · ${attributions.value.length} 条归因`,state:failedTraces.value.length?'待定位':'正常',color:failedTraces.value.length?'red':'green',target:'attribution' as const},{title:'自主优化验证',desc:`${pendingOptimizationCount.value} 项待处理`,state:pendingOptimizationCount.value?'待审批':'受控',color:pendingOptimizationCount.value?'orange':'green',target:'optimization' as const}]);
 const sourceDefinitions=Object.entries(taskTypeLabels).map(([key,label])=>({key,label,traceType:key}));
 const businessSources=computed(()=>sourceDefinitions.map(source=>({...source,connected:true,count:allTraces.value.filter(v=>v.task_type===source.traceType).length})));
+
+// ---------------------------------------------------------------- Agent 大盘
+// 只统计「能力能被 Skill 直接迭代升级」的 5 个阶段：代码审查与知识库问答属
+// 平台基础能力，不进 Agent 台账（口径见 specs/agent-ledger/requirements.md §2、§3）。
+// 全部指标由 RetrievalTrace 现场聚合，不新增接口；评分按已定口径暂不纳入。
+const AGENT_STAGE_ORDER:string[]=['case_review','test_plan_generation','testcase_generation','test_execution','report_generation'];
+const DAY_MS=86400000,TREND_DAYS=14;
+function traceLatencyMs(v:RetrievalTrace):number{const values=Object.entries(v.timings||{}).filter(([,n])=>typeof n==='number') as [string,number][];return values.reduce((sum,[,n])=>sum+n,0)}
+function dayLabel(v:Date):string{return `${String(v.getMonth()+1).padStart(2,'0')}-${String(v.getDate()).padStart(2,'0')}`}
+function formatLatency(ms:number):string{if(ms<=0)return'-';return ms>=1000?`${(ms/1000).toFixed(2)}s`:`${Math.round(ms)}ms`}
+function sparkHeights(values:number[]):number[]{const max=Math.max(...values,1);return values.map(v=>v>0?Math.max(14,Math.round(v/max*100)):3)}
+interface DailyBucket{sessions:number;tokens:number;users:Set<number>;latencySum:number;latencyCount:number;failed:number}
+const agentDaily=computed(()=>{
+  const days:string[]=[];const now=new Date();
+  for(let i=TREND_DAYS-1;i>=0;i-=1){const d=new Date(now);d.setDate(now.getDate()-i);days.push(dayLabel(d))}
+  const buckets=new Map<string,DailyBucket>();
+  days.forEach(day=>buckets.set(day,{sessions:0,tokens:0,users:new Set<number>(),latencySum:0,latencyCount:0,failed:0}));
+  allTraces.value.forEach(trace=>{
+    const slot=buckets.get(dayLabel(new Date(trace.created_at)));if(!slot)return;
+    slot.sessions+=1;slot.tokens+=trace.token_usage||0;
+    if(trace.status!=='completed')slot.failed+=1;
+    if(trace.user!=null)slot.users.add(trace.user);
+    const latency=traceLatencyMs(trace);if(latency>0){slot.latencySum+=latency;slot.latencyCount+=1}
+  });
+  return days.map(day=>({date:day,...buckets.get(day)!}));
+});
+const agentTrend=computed(()=>{
+  const sessions=agentDaily.value.map(d=>d.sessions),tokens=agentDaily.value.map(d=>d.tokens);
+  const maxSessions=Math.max(...sessions,1),maxTokens=Math.max(...tokens,1);
+  return agentDaily.value.map((d,index)=>({date:d.date,sessions:d.sessions,tokens:d.tokens,sessionPct:Math.round(sessions[index]/maxSessions*100),tokenPct:Math.round(tokens[index]/maxTokens*100)}));
+});
+const hasTrendData=computed(()=>agentDaily.value.some(d=>d.sessions>0||d.tokens>0));
+/** 环比取「近 7 天 vs 前 7 天」。前一周没有数据时返回 null——不编一个 0%。 */
+function weekDelta(pick:(list:RetrievalTrace[])=>number):number|null{
+  const now=Date.now();
+  const recent=allTraces.value.filter(v=>now-new Date(v.created_at).getTime()<=7*DAY_MS);
+  const previous=allTraces.value.filter(v=>{const age=now-new Date(v.created_at).getTime();return age>7*DAY_MS&&age<=14*DAY_MS});
+  const base=pick(previous);if(!base)return null;
+  return Math.round((pick(recent)-base)/base*1000)/10;
+}
+const agentKpis=computed(()=>{
+  const list=allTraces.value;
+  const sessionsOf=(items:RetrievalTrace[])=>items.length;
+  const usersOf=(items:RetrievalTrace[])=>new Set(items.map(v=>v.user).filter((v):v is number=>v!=null)).size;
+  const tokensOf=(items:RetrievalTrace[])=>items.reduce((sum,v)=>sum+(v.token_usage||0),0);
+  const avgLatencyOf=(items:RetrievalTrace[])=>{const valid=items.map(traceLatencyMs).filter(v=>v>0);return valid.length?valid.reduce((a,b)=>a+b,0)/valid.length:0};
+  const failRateOf=(items:RetrievalTrace[])=>items.length?items.filter(v=>v.status!=='completed').length/items.length*100:0;
+  const tokens=tokensOf(list);
+  return [
+    {key:'sessions',label:'会话数',value:sessionsOf(list).toLocaleString(),hint:`${new Set(list.map(v=>v.task_id)).size} 个任务`  ,delta:weekDelta(sessionsOf),spark:sparkHeights(agentDaily.value.map(d=>d.sessions)),tone:''},
+    {key:'users',label:'活跃用户',value:usersOf(list).toLocaleString(),hint:'按轨迹去重',delta:weekDelta(usersOf),spark:sparkHeights(agentDaily.value.map(d=>d.users.size)),tone:''},
+    {key:'tokens',label:'Token 消耗',value:tokens.toLocaleString(),hint:tokens?'已回传用量':'调用未回传用量',delta:weekDelta(tokensOf),spark:sparkHeights(agentDaily.value.map(d=>d.tokens)),tone:'blue'},
+    {key:'latency',label:'平均耗时',value:formatLatency(avgLatencyOf(list)),hint:`${list.filter(v=>traceLatencyMs(v)>0).length} 条有时长`,delta:weekDelta(avgLatencyOf),spark:sparkHeights(agentDaily.value.map(d=>d.latencyCount?d.latencySum/d.latencyCount:0)),tone:''},
+    {key:'failed',label:'失败率',value:`${failRateOf(list).toFixed(1)}%`,hint:`${list.filter(v=>v.status!=='completed').length} 条未完成`,delta:weekDelta(failRateOf),spark:sparkHeights(agentDaily.value.map(d=>d.sessions?d.failed/d.sessions*100:0)),tone:'warn',invert:true},
+  ];
+});
+/** Agent 台账：5 个阶段各一行，按会话数 / 用户数 / Token / 耗时 / 失败率聚合。 */
+const agentRows=computed(()=>{
+  const rows=AGENT_STAGE_ORDER.map(stage=>{
+    const items=allTraces.value.filter(v=>v.task_type===stage);
+    const valid=items.map(traceLatencyMs).filter(v=>v>0);
+    const latency=valid.length?valid.reduce((a,b)=>a+b,0)/valid.length:0;
+    const failed=items.filter(v=>v.status!=='completed').length;
+    return {stage,label:taskTypeLabels[stage]||stage,sessions:items.length,users:new Set(items.map(v=>v.user).filter((v):v is number=>v!=null)).size,tokens:items.reduce((sum,v)=>sum+(v.token_usage||0),0),latency,latencyText:formatLatency(latency),failed,failedRate:items.length?Math.round(failed/items.length*100):0};
+  });
+  const maxSessions=Math.max(...rows.map(r=>r.sessions),1),maxUsers=Math.max(...rows.map(r=>r.users),1),maxTokens=Math.max(...rows.map(r=>r.tokens),1),maxLatency=Math.max(...rows.map(r=>r.latency),1);
+  return rows.map(r=>({...r,sessionPct:Math.round(r.sessions/maxSessions*100),userPct:Math.round(r.users/maxUsers*100),tokenPct:Math.round(r.tokens/maxTokens*100),latencyPct:Math.round(r.latency/maxLatency*100)}));
+});
 async function loadSuites(){if(!projectStore.currentProjectId)return;suitesLoading.value=true;try{suites.value=await listEvaluationSuites(projectStore.currentProjectId)}catch{Message.error('加载评测集失败')}finally{suitesLoading.value=false}}
 async function loadRuns(){runs.value=selectedSuiteId.value?await listEvaluationRuns(selectedSuiteId.value):[]}
 async function loadResults(){results.value=selectedRunId.value?await listEvaluationResults(selectedRunId.value):[]}
@@ -226,11 +707,25 @@ async function confirmGateOverride(){if(!projectStore.currentProjectId||!gateOve
 const reviewable=(v:KnowledgeCandidate)=>['pending','awaiting_approval'].includes(v.state),signalText=(v:string)=>signalLabels[v]||v;
 const personInitial=(v:ProjectQualityPerson)=>(v.display_name||v.username||'?').trim().slice(0,1).toUpperCase();
 const capabilityCode=(v:string)=>({case_review:'CR',code_review:'CODE',knowledge_query:'KB'} as Record<string,string>)[v]||'AI';
-const gateText=(v:string)=>({pending:'待测评',passed:'已通过',failed:'未通过',overridden:'负责人放行',ready:'可进入',blocked:'已阻断'} as Record<string,string>)[v]||v;
-const gateColor=(v:string)=>({pending:'orange',passed:'green',failed:'red',overridden:'purple',ready:'arcoblue',blocked:'gray'} as Record<string,string>)[v]||'gray';
-const scoreSummary=(v:Record<string,number>)=>Object.entries(v).map(([k,n])=>`${k.toUpperCase()} ${Number(n).toFixed(2)}`).join(' · ');
-const workflowSummary=(v:ProjectWorkflowView)=>v.stages.some(s=>s.status==='failed')?'有门禁未通过':v.stages.every(s=>['passed','overridden'].includes(s.status))?'全流程通过':v.stages.some(s=>s.status==='pending')?'待测评':'进行中';
-const workflowColor=(v:ProjectWorkflowView)=>v.stages.some(s=>s.status==='failed')?'red':v.stages.every(s=>['passed','overridden'].includes(s.status))?'green':'blue';
+//: 状态文案/配色唯一真值。`unscored`（无评分）与 `failed`（结论为负）必须分开显示：
+//: 两者在页面上的含义完全不同——前者是"还没评上"，后者是"评了没过"，
+//: 都写成"未通过"会让人以为链路被一个负面结论挡住了。
+const gateText=(v:string)=>({pending:'待测评',unscored:'无评分',passed:'已通过',failed:'未通过',confirmed:'人工确认',overridden:'负责人放行',ready:'可执行',blocked:'待前置',running:'执行中'} as Record<string,string>)[v]||v;
+const gateColor=(v:string)=>({pending:'orange',unscored:'gold',passed:'green',failed:'red',confirmed:'cyan',overridden:'purple',ready:'arcoblue',blocked:'gray',running:'blue'} as Record<string,string>)[v]||'gray';
+const workflowSummary=(v:ProjectWorkflowView)=>{
+  if(v.stages.some(s=>s.status==='failed'))return '有门禁未通过';
+  if(v.stages.every(s=>isPassedStatus(s.status)))return '全流程通过';
+  if(v.stages.some(s=>s.status==='running'))return '执行中';
+  if(v.stages.some(s=>s.status==='unscored'))return '存在无评分阶段';
+  if(v.stages.some(s=>s.status==='pending'))return '待测评';
+  return '进行中';
+};
+const workflowColor=(v:ProjectWorkflowView)=>{
+  if(v.stages.some(s=>s.status==='failed'))return 'red';
+  if(v.stages.every(s=>isPassedStatus(s.status)))return 'green';
+  if(v.stages.some(s=>s.status==='running'))return 'blue';
+  return 'arcoblue';
+};
 function signalColor(v:string){if(['accepted','test_passed','merged'].includes(v))return'green';if(['rejected','test_failed','defect_confirmed'].includes(v))return'red';if(['false_positive','missed'].includes(v))return'orange';return'blue'}
 const feedbackSummary=(v:FeedbackEvent)=>v.comment||(JSON.stringify(v.detail||{})==='{}'?'无附加说明':JSON.stringify(v.detail).slice(0,100)),feedbackActor=(v:FeedbackEvent)=>v.actor?.username||({user:'测试人员',system:'系统',integration:'集成服务'}[v.actor_type]);
 const statusText=(v:string)=>({pending:'待执行',running:'运行中',completed:'已完成',failed:'失败',cancelled:'已取消'} as Record<string,string>)[v]||v,statusColor=(v:string)=>({completed:'green',running:'blue',failed:'red',pending:'orange'} as Record<string,string>)[v]||'gray';
@@ -258,10 +753,50 @@ watch(()=>projectStore.currentProjectId,async id=>{if(id)await bootstrap()},{imm
 .subheading{margin:18px 0 10px;font-size:15px}.asset-strip{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-bottom:14px}.asset-strip>article{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px;border:1px solid var(--color-border-2);border-radius:8px;background:var(--color-fill-1)}.asset-strip b,.asset-strip small{display:block}.asset-strip small{margin-top:4px;color:var(--color-text-3)}.trace-rows article{cursor:pointer}.trace-rows article:hover,.trace-rows article.selected{background:rgb(var(--arcoblue-1))}.trace-detail{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(310px,.65fr);gap:14px;margin-top:18px;padding-top:16px;border-top:1px solid var(--color-border-2)}.trace-detail h3{margin:0 0 10px;font-size:15px}.span-line{display:grid;gap:7px}.span-line article{display:grid;grid-template-columns:10px 1fr auto;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--color-border-2);border-radius:8px;background:var(--color-fill-1)}.span-line i{width:8px;height:8px;border-radius:50%;background:var(--color-fill-4)}.span-line i.completed{background:#16a34a}.span-line i.failed{background:#ef4444}.span-line i.running{background:#1677ff}.span-line b,.span-line small{display:block}.span-line small{margin-top:3px;color:var(--color-text-3)}.trace-detail aside>article{margin-bottom:8px;padding:12px;border:1px solid var(--color-border-2);border-radius:8px}.trace-detail aside header{display:flex;justify-content:space-between;margin-bottom:8px}.trace-detail aside p{margin:6px 0;color:var(--color-text-2)}.trace-detail aside small{color:var(--color-text-3)}.governance-board{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}.governance-board>section{padding:14px;border:1px solid var(--color-border-2);border-radius:9px;background:var(--color-fill-1)}.mini-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}.mini-head span{display:grid;min-width:22px;height:22px;place-items:center;border-radius:11px;color:var(--blue);background:rgb(var(--arcoblue-1))}.governance-board section>article{margin-top:8px;padding:11px;border:1px solid var(--color-border-2);border-radius:7px;background:var(--color-bg-2)}.governance-board article>div{display:flex;justify-content:space-between}.governance-board article>b,.governance-board article>small{display:block;margin-top:8px}.governance-board article>p{margin:5px 0;color:var(--color-text-3)}.governance-board article>small{color:var(--color-text-3)}
 .rail-roles{margin-top:18px;padding-top:14px;border-top:1px solid var(--color-border-2)}.team-head,.team-head>div,.team-head button,.group-title,.person-main,.person-card footer,.person-card footer small{display:flex;align-items:center}.team-head{justify-content:space-between}.team-head>div{gap:8px}.team-head>div>i{width:4px;height:18px;border-radius:3px;background:var(--blue)}.team-head span{font-size:15px;font-weight:700;color:var(--color-text-1)}.team-head button{gap:4px;padding:4px;border:0;color:var(--blue);background:transparent;cursor:pointer}.team-head button:hover{color:rgb(var(--arcoblue-7))}.people-group{margin-top:16px}.people-group+.people-group{margin-top:20px;padding-top:18px;border-top:1px solid var(--color-border-2)}.group-title{justify-content:space-between;margin-bottom:9px}.group-title b{font-size:13px}.group-title span{padding:2px 7px;border-radius:10px;color:var(--color-text-3);background:var(--color-fill-2);font-size:11px}.person-card{margin-top:8px;padding:12px;border:1px solid var(--color-border-2);border-radius:9px;background:var(--color-fill-1);transition:border-color .16s ease,box-shadow .16s ease,transform .16s ease}.person-card:hover{border-color:rgb(var(--arcoblue-4));box-shadow:0 7px 18px rgb(22 93 255/8%);transform:translateY(-1px)}.person-main{gap:10px}.person-main>i{display:grid;width:38px;height:38px;flex:none;place-items:center;border-radius:50%;color:#fff;background:linear-gradient(145deg,#4080ff,#165dff);font-size:15px;font-style:normal;font-weight:700;box-shadow:0 4px 10px rgb(22 93 255/20%)}.executor-group .person-main>i{background:linear-gradient(145deg,#14c9c9,#0e8a98);box-shadow:0 4px 10px rgb(20 201 201/18%)}.person-main>div{min-width:0;flex:1}.person-main b,.person-main small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.person-main b{font-size:14px}.person-main small{margin-top:2px;color:var(--color-text-3);font-size:11px}.person-main em{flex:none;padding:3px 7px;border:1px solid rgb(var(--arcoblue-3));border-radius:5px;color:var(--blue);background:rgb(var(--arcoblue-1));font-size:10px;font-style:normal}.executor-group .person-main em{border-color:rgb(var(--cyan-3));color:rgb(var(--cyan-7));background:rgb(var(--cyan-1))}.person-card footer{justify-content:space-between;gap:7px;margin-top:10px;padding-top:9px;border-top:1px solid var(--color-border-1)}.person-card footer>span{min-width:0;color:var(--color-text-3);font-size:11px}.person-card footer small{flex:none;gap:4px;color:var(--color-text-3);font-size:10px}.person-card footer small i{width:6px;height:6px;border-radius:50%;background:#00b42a;box-shadow:0 0 0 3px rgb(var(--green-1))}.people-group :deep(.arco-empty){padding:10px 0}.people-group :deep(.arco-empty-image){display:none}.people-group :deep(.arco-empty-description){font-size:11px}
 .single-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.single-grid>article{padding:18px;border:1px solid var(--color-border-2);border-radius:9px;background:var(--color-fill-1)}.single-grid header{display:flex;align-items:flex-start;justify-content:space-between}.single-grid header>div{display:flex;align-items:center;gap:10px}.single-grid header span{display:grid;width:42px;height:42px;place-items:center;border-radius:8px;color:#fff;background:var(--blue);font-size:11px;font-weight:700}.single-grid h3{margin:0;font-size:16px}.single-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:20px 0}.single-stats span{padding:10px;border-radius:7px;text-align:center;background:var(--color-bg-2)}.single-stats b,.single-stats small{display:block}.single-stats b{font-size:21px}.single-stats small,.single-grid footer{color:var(--color-text-3)}
-.workflow-list{display:grid;gap:14px}.workflow-list>article{padding:16px;border:1px solid var(--color-border-2);border-radius:9px;background:var(--color-fill-1)}.workflow-list>article>header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}.workflow-list header b,.workflow-list header small{display:block}.workflow-list header small{margin-top:3px;color:var(--color-text-3)}.workflow-track{display:grid;grid-template-columns:repeat(5,minmax(145px,1fr));gap:10px}.workflow-stage{position:relative;min-height:160px;padding:14px 12px 12px;border:1px solid var(--color-border-2);border-top:3px solid var(--color-border-3);border-radius:8px;background:var(--color-bg-2)}.workflow-stage:after{content:"";position:absolute;top:48px;right:-11px;width:11px;border-top:2px solid var(--color-border-3)}.workflow-stage:last-child:after{display:none}.workflow-stage.passed{border-top-color:#16a34a}.workflow-stage.failed{border-top-color:#ef4444}.workflow-stage.pending{border-top-color:#f59e0b}.workflow-stage.overridden{border-top-color:#722ed1}.workflow-stage.ready{border-top-color:#1677ff}.workflow-stage.blocked{opacity:.66}.stage-index{display:grid;width:24px;height:24px;place-items:center;margin-bottom:10px;border-radius:50%;color:var(--color-text-2);background:var(--color-fill-3);font-size:11px;font-weight:700}.workflow-stage h3{margin:0 0 8px;font-size:14px}.workflow-stage>small{display:block;margin-top:9px;overflow:hidden;color:var(--color-text-3);text-overflow:ellipsis;white-space:nowrap}.workflow-stage>p{margin:8px 0 0;color:var(--color-text-2);font-size:11px}.stage-actions{position:absolute;right:10px;bottom:10px;left:10px;display:flex;gap:5px}
+.workflow-list{display:grid;gap:14px}.workflow-list>article{padding:16px;border:1px solid var(--color-border-2);border-radius:9px;background:var(--color-fill-1)}.workflow-list>article>header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}.workflow-list header b,.workflow-list header small{display:block}.workflow-list header small{margin-top:3px;color:var(--color-text-3)}/* 逐阶段步骤条：done=已放行、active/running/failed=当前步、todo=未轮到的灰步。
+   todo 明确降透明度而不是"淡化颜色"——灰步必须一眼看出"还没轮到"，不是"待办事项"。 */
+/* 用 flex 而不是 grid：步骤之间还有连接线 `.step-link` 这种"非步骤"元素，
+   放在 grid 里会被当成格子占位，4 步 + 3 线 = 7 个格子必然折行成 2×2。
+   flex 下步骤 flex:1 等分、连接线固定 20px，一行排完。 */
+.stage-stepper{display:flex;align-items:stretch}
+.step{display:grid;flex:1 1 0;min-width:0;gap:5px;justify-items:start;padding:12px;border:1px solid var(--color-border-2);border-top:3px solid var(--color-border-3);border-radius:8px;background:var(--color-bg-2);font-family:inherit;text-align:left;cursor:pointer;transition:border-color .16s ease,box-shadow .16s ease}
+.step:hover{border-color:rgb(var(--arcoblue-4))}
+.step.done{border-top-color:#16a34a}
+.step.active,.step.running{border-top-color:#1677ff}
+.step.active{box-shadow:0 4px 14px rgb(22 93 255/12%)}
+.step.failed{border-top-color:#ef4444}
+.step.todo{opacity:.5}
+.step.selected{outline:2px solid rgb(var(--arcoblue-5));outline-offset:1px}
+.step .step-dot{display:grid;width:24px;height:24px;place-items:center;border-radius:50%;color:var(--color-text-2);background:var(--color-fill-3);font-size:11px;font-style:normal;font-weight:700}
+.step.done .step-dot{color:#fff;background:#16a34a}
+.step.active .step-dot,.step.running .step-dot{color:#fff;background:#1677ff}
+.step.failed .step-dot{color:#fff;background:#ef4444}
+.step b{font-size:14px}
+.step small{color:var(--color-text-3);font-size:11px}
+.step-link{align-self:center;flex:0 0 20px;height:2px;background:var(--color-border-3)}
+.step-link.done{background:#16a34a}
+.stage-detail{margin-top:14px;padding:14px;border:1px solid var(--color-border-2);border-left:3px solid var(--color-border-3);border-radius:8px;background:var(--color-bg-2)}
+.stage-detail.done{border-left-color:#16a34a}
+.stage-detail.active,.stage-detail.running{border-left-color:#1677ff}
+.stage-detail.failed{border-left-color:#ef4444}
+.stage-detail.todo{opacity:.55}
+.detail-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.detail-head>div{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.detail-head b{font-size:15px}
+.detail-head small{color:var(--color-text-3)}
+.detail-note{margin:10px 0 0;color:var(--color-text-2);font-size:12px;line-height:1.75}
+.dispatch-note{margin:10px 0 0;padding:10px;border-radius:7px;background:rgb(var(--arcoblue-1));color:var(--color-text-1);font-size:12px;line-height:1.85}
+.dispatch-note code{padding:1px 5px;border-radius:4px;background:var(--color-fill-2);font-size:11px}
+.stage-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.score-preview{font-size:12px;font-weight:700}
+.score-preview.ok{color:#16a34a}
+.score-preview.bad{color:#ef4444}
+.output-meta{display:flex;flex-wrap:wrap;gap:14px;padding-bottom:10px;color:var(--color-text-3);font-size:12px;border-bottom:1px solid var(--color-border-2)}
+.output-meta .sha{font-family:ui-monospace,MENLO,monospace}
+.output-gate{display:flex;align-items:center;gap:10px;padding:10px 0;color:var(--color-text-2);font-size:12px}
+.output-content{margin:0;padding:12px;max-height:420px;overflow:auto;border-radius:7px;background:var(--color-fill-1);color:var(--color-text-1);font-size:12px;line-height:1.75;white-space:pre-wrap;word-break:break-word}
 .gold-type-nav{display:flex;gap:7px;margin-bottom:14px;padding-bottom:12px;overflow:auto;border-bottom:1px solid var(--color-border-2)}.gold-type-nav button{flex:none;padding:7px 10px;border:1px solid var(--color-border-2);border-radius:7px;color:var(--color-text-2);background:var(--color-bg-2);cursor:pointer}.gold-type-nav button.active{border-color:var(--blue);color:var(--blue);background:rgb(var(--arcoblue-1))}.gold-type-nav b{margin-left:5px}
-.workflow-track{grid-template-columns:repeat(4,minmax(165px,1fr))}
-@media(max-width:1200px){.metrics{grid-template-columns:repeat(2,1fr)}.source-grid{grid-template-columns:repeat(2,1fr)}.workflow-track{overflow:auto}.single-grid{grid-template-columns:1fr}}
+@media(max-width:1200px){.metrics{grid-template-columns:repeat(2,1fr)}.source-grid{grid-template-columns:repeat(2,1fr)}.stage-stepper{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.step-link{display:none}.single-grid{grid-template-columns:1fr}}
 @media(max-width:900px){.workspace-shell{grid-template-columns:1fr}.stage-rail{position:static;min-height:auto}.stage-rail .tabs{grid-template-columns:repeat(7,minmax(145px,1fr));overflow:auto}.rail-roles{display:none}.metrics,.source-grid,.asset-strip,.trace-detail,.governance-board{grid-template-columns:1fr}.trace-head{display:none}.trace-rows article{grid-template-columns:90px 1fr}.trace-rows article span,.trace-rows article strong{grid-column:2}}
 
 /* AgentLoop-inspired information architecture: quiet shell, horizontal workspaces, dense data canvas. */
@@ -272,7 +807,7 @@ watch(()=>projectStore.currentProjectId,async id=>{if(id)await bootstrap()},{imm
 .workspace-tabs button{display:flex;height:38px;flex:none;align-items:center;gap:7px;padding:0 13px;border:0;border-radius:7px;color:#4e5969;background:transparent;cursor:pointer;font-size:13px;transition:background .16s ease,color .16s ease,box-shadow .16s ease}
 .workspace-tabs button:hover{color:#165dff;background:#f2f3f5}.workspace-tabs button.active{color:#1d2129;background:#f2f3f5;box-shadow:inset 0 0 0 1px #c9cdd4}.workspace-tabs button svg{font-size:15px}.workspace-tabs em{min-width:19px;padding:1px 5px;border-radius:9px;color:#86909c;background:#e5e6eb;font-size:10px;font-style:normal;text-align:center}.workspace-tabs button.active em{color:#165dff;background:#e8f3ff}
 .workspace-shell{grid-template-columns:minmax(0,1fr) 282px;gap:14px;margin-top:0}.workspace-content{order:1}.team-panel{position:sticky;top:14px;order:2;padding:17px;background:#fff}.team-note{margin:8px 0 0;color:#86909c;font-size:11px;line-height:1.55}
-.metrics{gap:0;margin-bottom:14px;overflow:hidden;border:1px solid #e5e6eb;border-radius:10px;background:#fff}.metrics article{min-height:126px;padding:17px 20px 37px;border:0;border-right:1px solid #f0f1f2;border-radius:0;background:#fff}.metrics article:last-child{border-right:0}.metrics article:before{display:none}.metrics span{font-size:12px}.metrics b{margin:7px 0 2px;font-size:27px;letter-spacing:-.02em}.metrics small{font-size:11px}.metrics .spark{position:absolute;right:18px;bottom:14px;left:18px;display:flex;height:20px;align-items:flex-end;gap:3px}.metrics .spark u{min-width:2px;flex:1;border-radius:2px 2px 0 0;background:#c9cdd4;text-decoration:none}.metrics article:nth-child(1) .spark u{background:#9fded9}.metrics article:nth-child(2) .spark u{background:#a9c7ff}.metrics article.warn .spark u{background:#fbd59a}.metrics article.blue .spark u{background:#c8b6ff}
+.metrics{gap:0;margin-bottom:14px;overflow:hidden;border:1px solid #e5e6eb;border-radius:10px;background:#fff}.metrics article{min-height:126px;padding:17px 20px;border:0;border-right:1px solid #f0f1f2;border-radius:0;background:#fff}.metrics article:last-child{border-right:0}.metrics article:before{display:none}.metrics span{font-size:12px}.metrics b{margin:7px 0 2px;font-size:27px;letter-spacing:-.02em}.metrics small{font-size:11px}
 .panel{border-color:#e5e6eb;border-radius:10px;background:#fff}.loop-panel,.source-panel,.overview-grid .panel{padding:20px}.section-head h2{font-size:16px}.section-head span{color:#86909c}.loop{gap:0;border:1px solid #e5e6eb;border-radius:9px}.loop button{min-height:124px;padding:17px 14px 43px;border:0;border-right:1px solid #e5e6eb;border-radius:0;background:#fff}.loop button:first-child{border-radius:8px 0 0 8px}.loop button:last-child{border-right:0;border-radius:0 8px 8px 0}.loop button:after{right:-1px;width:1px;border:0}.loop button:hover{background:#f7f8fa}.loop em{display:grid;width:24px;height:24px;flex:none;place-items:center;border-radius:50%;color:#165dff;background:#e8f3ff}.source-grid article{border-color:#e5e6eb!important;background:#fff!important}.source-grid article:hover{background:#f7f8fa!important}.task-list button{background:#fff}.task-list button:hover{background:#f7f8fa}
 .team-head{padding-bottom:13px;border-bottom:1px solid #f0f1f2}.team-head>div>i{width:3px;height:16px}.team-head span{font-size:15px}.people-group{margin-top:17px}.person-card{padding:13px;background:#f7f8fa}.person-card:hover{background:#fff}.person-main>i{width:42px;height:42px;box-shadow:none}.person-main b{font-size:14px}.person-card footer>span{font-size:10px}.group-title b{font-size:12px}
 .content-panel,.suite-panel,.eval-panel{background:#fff}.toolbar{padding-bottom:16px}.workflow-list>article,.single-grid>article,.asset-strip>article,.governance-board>section{background:#fafafa}
@@ -285,4 +820,66 @@ watch(()=>projectStore.currentProjectId,async id=>{if(id)await bootstrap()},{imm
 .console-context{display:flex;align-items:center;gap:12px;margin-bottom:10px}.console-context button{display:flex;align-items:center;gap:4px;padding:6px 0;border:0;color:#165dff;background:transparent;cursor:pointer}.console-context button svg{transform:rotate(180deg)}.console-context span{color:#86909c;font-size:12px}.skill-hub-embed{min-height:680px;overflow:hidden;border:1px solid #e5e6eb;border-radius:10px;background:#fff}.knowledge-graph-embed{min-width:0}.graph-layout{grid-template-columns:minmax(0,1fr)}.knowledge-graph-embed :deep(.knowledge-graph-page){padding:0}.skill-hub-embed :deep(.skill-hub-console){border:0}
 @media(max-width:1320px){.launch-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:720px){.primary-tabs{gap:16px;margin-right:-10px;margin-left:-10px;padding:0 12px}.quick-tabs{width:100%}.quick-tabs button{flex:1}.launch-grid{grid-template-columns:1fr}.launch-console{padding:16px}}
+.board-kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:12px}.board-kpis article{position:relative;padding:16px 18px 34px;overflow:hidden;border:1px solid var(--color-border-2);border-radius:10px;background:var(--color-bg-2)}.board-kpis article:before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--teal)}.board-kpis .warn:before{background:var(--orange)}.board-kpis .blue:before{background:var(--blue)}.board-kpis span{display:block;font-size:12px;color:var(--color-text-3)}.kpi-value{display:flex;align-items:baseline;gap:8px;margin:6px 0 2px}.kpi-value b{font-size:22px;line-height:1.1}.kpi-value em{font-size:12px;font-style:normal}.kpi-value em.up{color:rgb(var(--green-6))}.kpi-value em.down{color:rgb(var(--red-6))}.board-kpis small{display:block;font-size:12px;color:var(--color-text-3)}.kpi-spark{position:absolute;left:18px;right:18px;bottom:12px;display:flex;align-items:flex-end;gap:2px;height:18px}.kpi-spark i{flex:1;min-height:2px;border-radius:1px;background:rgb(var(--arcoblue-3));opacity:.6}.board-kpis .warn .kpi-spark i{background:rgb(var(--orange-3))}.chart-body{margin-top:6px}.chart-legend{display:flex;gap:16px;font-size:12px;color:var(--color-text-3)}.chart-legend span{display:flex;align-items:center;gap:6px}.chart-legend .dot{display:inline-block;width:8px;height:8px;border-radius:2px}.chart-legend .dot.session{background:rgb(var(--arcoblue-5))}.chart-legend .dot.token{background:var(--teal)}.chart-bars{display:flex;align-items:flex-end;gap:6px;height:180px;margin-top:12px}.bar-col{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;height:100%}.bar-stack{display:flex;align-items:flex-end;gap:2px;width:100%;height:100%}.bar{flex:1;min-height:2px;border-radius:2px 2px 0 0}.bar.session{background:rgb(var(--arcoblue-5))}.bar.token{background:var(--teal)}.bar-col small{font-size:10px;color:var(--color-text-3)}.board-table .agent-head,.board-table .agent-rows article{display:grid;grid-template-columns:1.6fr .8fr .8fr 1fr .9fr .7fr;gap:12px;align-items:center}.agent-head{padding:8px 14px;border-bottom:1px solid var(--color-border-2);font-size:12px;color:var(--color-text-3)}.agent-rows article{padding:12px 14px;border-bottom:1px solid var(--color-border-1)}.agent-rows article:last-child{border-bottom:0}.agent-rows article.idle{opacity:.55}.agent-name b{display:block;font-size:14px}.agent-name small{display:block;font-size:12px;color:var(--color-text-3)}.cell{display:flex;flex-direction:column;gap:5px}.cell b{font-size:13px}.meter{display:block;height:4px;overflow:hidden;border-radius:2px;background:var(--color-fill-2)}.meter u{display:block;height:100%;border-radius:2px;background:rgb(var(--arcoblue-6));text-decoration:none}.start-result{margin-bottom:12px;padding:14px 16px;border:1px solid var(--color-border-2);border-radius:10px;background:var(--color-bg-2)}.start-result-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.start-result-head b{font-size:14px}.start-result-head small{display:block;font-size:12px;color:var(--color-text-3)}.binding-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.binding{padding:10px 12px;border:1px solid var(--color-border-2);border-radius:8px;background:var(--color-fill-1)}.binding.locked{border-color:rgb(var(--green-6));background:rgb(var(--green-1))}.binding.unmanaged{border-color:rgb(var(--orange-6));background:rgb(var(--orange-1))}.binding b{display:block;margin-bottom:4px;font-size:13px}.binding small{display:block;font-size:12px;color:var(--color-text-2);word-break:break-all}.binding .sha{color:var(--color-text-3)}.warn-line{margin:10px 0 0;font-size:12px;color:rgb(var(--orange-6))}
+/* ---- 全链路测试：流程版本列表 + 四阶段时间线；右侧团队栏另有「AI 专家团队」 */
+.wf-shell{display:grid;grid-template-columns:236px minmax(0,1fr);gap:14px;align-items:start}
+.wf-flows{display:grid;gap:8px;align-content:start;max-height:680px;overflow:auto;padding:12px;border:1px solid #e5e6eb;border-radius:9px;background:#fafafa}
+.wf-flows-head{display:flex;align-items:center;justify-content:space-between;padding-bottom:9px;border-bottom:1px solid #e5e6eb}.wf-flows-head b{font-size:13px}.wf-flows-head span{padding:2px 7px;border-radius:10px;color:#86909c;background:#e5e6eb;font-size:11px}
+.wf-flow{display:grid;gap:7px;padding:11px;border:1px solid #e5e6eb;border-radius:8px;color:inherit;background:#fff;font-family:inherit;text-align:left;cursor:pointer;transition:border-color .16s ease,box-shadow .16s ease}
+.wf-flow:hover{border-color:#94bfff}.wf-flow.active{border-color:#165dff;box-shadow:0 4px 14px rgb(22 93 255/12%)}
+.wf-flow-top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}.wf-flow-top b{overflow:hidden;font-size:13px;text-overflow:ellipsis;white-space:nowrap}
+.wf-flow-meta{display:flex;justify-content:space-between;color:#86909c;font-size:11px}
+.wf-flow-bar{display:block;height:4px;overflow:hidden;border-radius:2px;background:#f0f1f2}.wf-flow-bar u{display:block;height:100%;background:#165dff}
+.wf-flow>small{color:#86909c;font-size:10px}
+.wf-timeline{display:grid;gap:12px;align-content:start;min-width:0}
+/* 阶段状态条：01–04 一屏看完整条链路走到哪一步 */
+.wf-stage-bar{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.wf-step{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;padding:10px 12px;border:1px solid #e5e6eb;border-top:3px solid #e5e6eb;border-radius:8px;color:inherit;background:#fff;font-family:inherit;text-align:left;cursor:pointer}
+.wf-step i{grid-row:span 2;display:grid;width:26px;height:26px;place-items:center;border-radius:50%;color:#4e5969;background:#f2f3f5;font-size:11px;font-style:normal;font-weight:700}
+.wf-step b{overflow:hidden;font-size:13px;text-overflow:ellipsis;white-space:nowrap}.wf-step small{color:#86909c;font-size:11px}
+.wf-step.done{border-top-color:#16a34a}.wf-step.done i{color:#fff;background:#16a34a}
+.wf-step.active,.wf-step.running{border-top-color:#1677ff}.wf-step.active i,.wf-step.running i{color:#fff;background:#1677ff}
+.wf-step.failed{border-top-color:#ef4444}.wf-step.failed i{color:#fff;background:#ef4444}
+.wf-step.todo{opacity:.55}.wf-step.selected{outline:2px solid rgb(var(--arcoblue-5));outline-offset:1px}
+/* 时间线卡片：左半边 AI 产出、右半边人工结论，底部是流转控制 */
+.wf-cards{display:grid;gap:10px}
+.wf-card{padding:14px;border:1px solid #e5e6eb;border-left:3px solid #e5e6eb;border-radius:9px;background:#fff}
+.wf-card.done{border-left-color:#16a34a}.wf-card.active,.wf-card.running{border-left-color:#1677ff}
+.wf-card.failed{border-left-color:#ef4444}.wf-card.todo{opacity:.6}
+.wf-card.active{box-shadow:0 4px 16px rgb(22 93 255/8%)}
+.wf-card-head{display:flex;align-items:center;gap:10px}
+.wf-card-head>i{display:grid;width:28px;height:28px;flex:none;place-items:center;border-radius:7px;color:#165dff;background:#e8f3ff;font-size:12px;font-style:normal;font-weight:700}
+.wf-card-head>div{min-width:0;flex:1}.wf-card-head b,.wf-card-head small{display:block}.wf-card-head b{font-size:14px}
+.wf-card-head small{margin-top:2px;overflow:hidden;color:#86909c;font-size:11px;text-overflow:ellipsis;white-space:nowrap}
+.wf-card-body{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}
+.wf-side{padding:11px 12px;border:1px solid #f0f1f2;border-radius:8px;background:#fafafa}
+.wf-side h4{display:flex;align-items:center;gap:6px;margin:0 0 8px;color:#4e5969;font-size:12px}
+.wf-side.ai{border-color:#e8f3ff;background:#f7faff}
+.wf-side.human{border-color:#d9f2e6;background:#f6fffb}
+.wf-line{margin:5px 0 0;color:#4e5969;font-size:12px;line-height:1.6;word-break:break-word}
+.wf-line code{padding:1px 5px;border-radius:4px;background:#f2f3f5;font-size:11px}
+.wf-return-note{margin:10px 0 0;padding:8px 10px;border-radius:7px;color:#4e5969;background:#fff7e8;font-size:12px;line-height:1.7}
+.wf-card-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.expert-group .person-main>i{background:linear-gradient(145deg,#7d5cff,#4e3bd6);box-shadow:none}
+.expert-state{color:#86909c}.expert-state.ok{color:#16a34a}.expert-state.bad{color:#ef4444}
+/* 发起向导第一步：四个阶段各一个搜索框，选完才给「下一步」 */
+.pin-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:16px}
+.pin-block{display:grid;gap:8px;padding:12px;border:1px solid #e5e6eb;border-radius:9px;background:#fafafa}
+.pin-block header{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.pin-block header b{font-size:13px}
+.pin-block header small{overflow:hidden;color:#86909c;font-size:11px;text-overflow:ellipsis;white-space:nowrap}
+.pin-block header small.missing{color:#ff7d00}
+.pin-list{display:grid;gap:6px;max-height:190px;overflow:auto}
+.pin-item{display:grid;gap:3px;padding:8px 10px;border:1px solid #e5e6eb;border-radius:7px;color:inherit;background:#fff;font-family:inherit;text-align:left;cursor:pointer}
+.pin-item:hover{border-color:#94bfff}.pin-item.selected{border-color:#165dff;background:#f7faff}.pin-item.blocked{opacity:.6}
+.pin-item>div{display:flex;align-items:center;gap:6px}
+.pin-item b{overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}
+.pin-item>small{color:#86909c;font-size:10px}
+.pin-empty{margin:0;padding:8px 0;color:#86909c;font-size:11px;text-align:center}
+.pin-warn{margin:12px 0 0;padding:9px 11px;border:1px dashed #ff7d00;border-radius:8px;color:#4e5969;background:#fff7e8;font-size:12px;line-height:1.7}
+.pin-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:16px}
+.pin-summary article{padding:10px;border:1px solid #e5e6eb;border-radius:8px;background:#fafafa}
+.pin-summary b,.pin-summary small{display:block}.pin-summary b{font-size:12px}
+.pin-summary small{margin-top:4px;overflow:hidden;color:#86909c;font-size:11px;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:1080px){.wf-shell{grid-template-columns:1fr}.wf-flows{max-height:240px}.wf-stage-bar{grid-template-columns:repeat(2,minmax(0,1fr))}.wf-card-body,.pin-grid,.pin-summary{grid-template-columns:1fr}}
 </style>

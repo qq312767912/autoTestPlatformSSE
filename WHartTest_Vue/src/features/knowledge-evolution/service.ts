@@ -19,6 +19,11 @@ import type {
   OptimizationProposal,
   GenerationOutput,
   ProjectQualityCockpit,
+  StartWorkflowResult,
+  StageExecutionPlan,
+  StageOutputView,
+  WorkflowStageCatalog,
+  WorkflowStatusView,
 } from './types';
 
 const BASE = '/api/knowledge-evolution';
@@ -216,4 +221,100 @@ export async function evaluateWorkflowStage(projectId: number, workflowId: strin
 
 export async function overrideWorkflowStage(projectId: number, workflowId: string, stage: string, reason: string): Promise<unknown> {
   return post('/operations/override-workflow-stage/', { project: projectId, workflow_id: workflowId, stage, reason });
+}
+
+/**
+ * 人工确认放行：**不要求先有评分**，确认后该阶段即可进入下一阶段。
+ *
+ * 与 `overrideWorkflowStage` 的区别是语义强度，不是接口：确认处理"尚无结论"
+ * （待测评 / 无评分），放行处理"已有负面结论"（评测失败，必须填原因）。
+ * `reason` 可空——但留痕照写，事后能分清"有人确认过"和"没人管"。
+ */
+export async function confirmWorkflowStage(projectId: number, workflowId: string, stage: string, reason = ''): Promise<unknown> {
+  return post('/operations/confirm-workflow-stage/', { project: projectId, workflow_id: workflowId, stage, reason });
+}
+
+/**
+ * 人工评分（**百分制**输入，后端按 0-1 存储）。
+ *
+ * >= 阈值判通过，< 阈值判未通过——人工评分同样会有"不达标"，不会因为是人打的
+ * 就一律放行；不打分直接放行是 `confirmWorkflowStage` 的事。
+ * 刻度对外百分制、对内 0-1，是为了让 `threshold`（默认 0.7）只有一种解释。
+ */
+export async function scoreWorkflowStage(projectId: number, workflowId: string, stage: string, score: number, reason = ''): Promise<unknown> {
+  return post('/operations/score-workflow-stage/', { project: projectId, workflow_id: workflowId, stage, score, reason });
+}
+
+/**
+ * 「执行本阶段」：前置门禁校验 + 执行参数下发。
+ *
+ * 它**不会**替你把阶段跑起来——平台只有测试执行有真正的执行器，另外三个阶段的
+ * 产出由 agent 经 agent-loop 提交。返回里的 `channel` / `entry` / `hint` /
+ * `module_key` / `parent_output_ids` 就是"这一阶段该由谁、带什么参数去跑"，
+ * 界面必须如实呈现，不能做成一个跑没跑都不知道的按钮。
+ */
+export async function executeWorkflowStage(projectId: number, workflowId: string, stage: string): Promise<StageExecutionPlan> {
+  return post<StageExecutionPlan>('/operations/execute-workflow-stage/', { project: projectId, workflow_id: workflowId, stage });
+}
+
+/** 「查看结果」：按 project + workflow_id + stage 三元定位读取产出正文与门禁证据。 */
+export async function getStageOutput(projectId: number, workflowId: string, stage: string): Promise<StageOutputView> {
+  return get<StageOutputView>('/operations/workflow-stage-output/', { project: projectId, workflow_id: workflowId, stage });
+}
+
+/**
+ * 启动四阶段流水线：后端会**一次性锁定四个阶段的 Skill 版本**。
+ *
+ * `pins` 是「阶段 → Skill ID」：向导里人逐个阶段显式选包时传进来。
+ * 不传则沿用后端按 manifest 声明的默认解析（保持老调用方的行为不变）。
+ *
+ * 为什么允许人选到"声明的是别的阶段"的包：主链路刚换过阶段名，现存包声明的还是旧阶段，
+ * 按声明硬筛会让向导一个候选都给不出来。人选它比包里写了什么更强，但后端会把
+ * `pinned` / `declared_stage` / `stage_mismatch` 写进流程锁留痕——见 `mismatched_stages`。
+ *
+ * 返回值里的 `unmanaged_stages` 必须展示给发起人——它列出项目尚未登记
+ * 可用 Skill 版本、因而没有版本溯源的阶段。等跑到报告阶段才暴露这个问题，
+ * 前面阶段的算力与人工就白费了。
+ */
+export async function startWorkflow(projectId: number, workflowId: string, pins?: Record<string, string>): Promise<StartWorkflowResult> {
+  return post<StartWorkflowResult>('/operations/start-workflow/', {
+    project: projectId,
+    workflow_id: workflowId,
+    ...(pins && Object.keys(pins).length ? { pins } : {}),
+  });
+}
+
+/**
+ * 发起向导第一步的数据源：按阶段给出候选包与默认包。
+ *
+ * 前端**不自己算默认包**。两处各写一套"哪个包管哪个阶段"的判断，
+ * 改一处就会出现"页面显示的默认项和你实际锁定的项不是一个"。
+ */
+export async function getWorkflowStageCatalog(projectId: number): Promise<WorkflowStageCatalog> {
+  return get<WorkflowStageCatalog>('/operations/workflow-stage-catalog/', { project: projectId });
+}
+
+/**
+ * 单条流程的四阶段状态**唯一真值入口**。
+ *
+ * 刻意不读"当前活跃版本"：链路中途有人激活新版本时，读活跃版本会让历史
+ * 流水线显示成用了新包，而它实际跑的是旧包。这里返回的是当时锁定的那一份。
+ */
+export async function getWorkflowStatus(projectId: number, workflowId: string): Promise<WorkflowStatusView> {
+  return get<WorkflowStatusView>('/operations/workflow-status/', { project: projectId, workflow_id: workflowId });
+}
+
+/**
+ * 端到端评测：产出「阶段独立评测 + 四阶段端到端评测」。
+ *
+ * 与 `evaluateWorkflowStage` **不是同一件事**：那个改门禁状态（是放行凭据），
+ * 这个只产证据（结论落门禁 detail，不改状态）。界面必须分开呈现。
+ */
+export async function evaluateWorkflow(projectId: number, workflowId: string, stage: string): Promise<unknown> {
+  return post('/operations/evaluate-workflow/', { project: projectId, workflow_id: workflowId, stage });
+}
+
+/** 按产出的 `protocol.parent_output_ids` 建联合链路图，幂等 upsert。 */
+export async function buildWorkflowGraph(projectId: number, workflowId: string): Promise<{ workflow_id: string; node_count: number; edge_count: number }> {
+  return post<{ workflow_id: string; node_count: number; edge_count: number }>('/operations/build-workflow-graph/', { project: projectId, workflow_id: workflowId });
 }
