@@ -4,11 +4,27 @@
 每次部署时自动将 bundled_skills 目录中的 Skill 同步到系统。
 - 新 Skill：创建数据库记录并复制文件
 - 已有 Skill：更新内容和文件（保留用户的 is_active 设置）
+- 已激活到版本包的 Skill：**整体跳过**，见 ``_is_immutable_package_target``
+
+为什么必须跳过第三类：Skill 激活后 ``skill_path`` 会被指向**当前活跃版本的
+不可变目录**（``MEDIA_ROOT/skills/{project}/versions/{skill}/…``）。那个目录的内容
+就是该版本入库时登记的 ``package_sha256``，是该版本唯一的内容权威。若预置同步
+仍然按 ``get_full_path()`` 往里写，就会在每次容器启动时把镜像自带的同名技能
+覆盖进版本包，导致两个后果：
+
+1. 版本包哈希漂移，``verify_package_integrity`` 永久报 ``package_tampered``，
+   该版本再也无法被派生/回滚链路信任；
+2. skill 自进化（派生候选会以活跃版本为基线并校验基线未被改动）从第二次起
+   一律被"基线包被篡改"中止——不是并发问题，而是每次重启都在重新制造它。
+
+正确行为是：版本化 Skill 的内容更新只能走**版本发布通道**（上传/派生新版本），
+预置同步不得旁路覆盖。机器重启不该具有"悄悄改动活跃版本包"的副作用。
 """
 
 import os
 import shutil
 import logging
+from pathlib import Path
 
 from django.conf import settings
 from django.core.management.base import BaseCommand
@@ -21,6 +37,21 @@ EXCLUDE_PATTERNS = {
     '.venv', 'venv', '__pycache__', 'node_modules', '.git',
     '.mypy_cache', '.pytest_cache', '.DS_Store', 'Thumbs.db',
 }
+
+
+def _is_immutable_package_target(full_path: str) -> bool:
+    """判断同步目标是否落在不可变的版本包目录里。
+
+    判定复用 ``skills.models._is_version_package_path`` 的结构规则（纯字符串比较、
+    不查库），保证"哪些目录不可写"这件事只有一处定义，不会两处漂移。
+    """
+    if not full_path:
+        return False
+    from skills.models import _is_version_package_path
+
+    media_root = Path(settings.MEDIA_ROOT).resolve(strict=False)
+    target = Path(full_path).resolve(strict=False)
+    return _is_version_package_path(target, media_root)
 
 
 def _sync_files(src_dir: str, dst_dir: str):
@@ -105,12 +136,25 @@ class Command(BaseCommand):
                 existing = Skill.objects.filter(name=skill_name).first()
 
                 if existing:
+                    # 条件：Skill 已激活到不可变版本包；动作：整体跳过（连描述都不改）；
+                    # 结果：版本包哈希与库内记录保持一致，派生链路不会凭空失败。
+                    full_path = existing.get_full_path()
+                    if _is_immutable_package_target(full_path):
+                        self.stdout.write(self.style.WARNING(
+                            f'  跳过 {skill_name}（已激活到版本包目录，'
+                            f'内容更新请走版本发布通道）'
+                        ))
+                        logger.info(
+                            "预置同步跳过版本化 Skill：name=%s skill_id=%s target=%s",
+                            skill_name, existing.id, full_path,
+                        )
+                        continue
+
                     # 条件：Skill 已存在；动作：更新内容和文件；结果：保留 is_active 等用户运行态配置。
                     existing.description = parsed['description']
                     existing.skill_content = skill_content
                     existing.save(update_fields=['description', 'skill_content', 'updated_at'])
 
-                    full_path = existing.get_full_path()
                     if full_path:
                         _sync_files(entry_path, full_path)
 
