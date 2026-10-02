@@ -11,6 +11,23 @@ from rest_framework import serializers
 from .models import Skill, SkillVersion
 
 
+class SkillCategoryMixin:
+    """导入类接口的展示分类。
+
+    这个值记在 Skill.declared_stage，不改写不可变版本包。
+    """
+    category = serializers.CharField(max_length=64, required=True, allow_blank=False)
+    description = serializers.CharField(max_length=200, required=True, allow_blank=False)
+
+    def validate_category(self, value):
+        from knowledge_evolution.capability_registry import BUSINESS_CAPABILITY_STAGES
+
+        value = (value or '').strip()
+        if value not in BUSINESS_CAPABILITY_STAGES:
+            raise serializers.ValidationError('请选择有效的所属分类')
+        return value
+
+
 class SkillSerializer(serializers.ModelSerializer):
     """Skill 序列化器"""
     creator_name = serializers.CharField(source='creator.username', read_only=True, allow_null=True)
@@ -47,7 +64,7 @@ class SkillSerializer(serializers.ModelSerializer):
             return None
 
 
-class SkillUploadSerializer(serializers.Serializer):
+class SkillUploadSerializer(SkillCategoryMixin, serializers.Serializer):
     """Skill 上传序列化器"""
     file = serializers.FileField(
         help_text='包含一个或多个 SKILL.md 的 zip 文件'
@@ -70,7 +87,7 @@ class SkillUploadSerializer(serializers.Serializer):
         return value
 
 
-class SkillGitImportSerializer(serializers.Serializer):
+class SkillGitImportSerializer(SkillCategoryMixin, serializers.Serializer):
     """从 Git 仓库导入 Skill 的序列化器"""
     git_url = serializers.URLField(
         help_text='Git 仓库 HTTPS URL'
@@ -114,7 +131,7 @@ class SkillGitImportSerializer(serializers.Serializer):
         return value
 
 
-class SkillZipUrlImportSerializer(serializers.Serializer):
+class SkillZipUrlImportSerializer(SkillCategoryMixin, serializers.Serializer):
     """从远程 zip URL 导入 Skill 的序列化器（用于 Skill 商店）"""
     zip_url = serializers.URLField(
         help_text='zip 包的 HTTPS URL'
@@ -170,6 +187,7 @@ class SkillListSerializer(serializers.ModelSerializer):
     """
 
     creator_name = serializers.CharField(source='creator.username', read_only=True, allow_null=True)
+    description = serializers.SerializerMethodField()
     source_type = serializers.SerializerMethodField()
     source_type_label = serializers.SerializerMethodField()
     stage = serializers.SerializerMethodField()
@@ -177,6 +195,8 @@ class SkillListSerializer(serializers.ModelSerializer):
     stage_source = serializers.SerializerMethodField()
     version = serializers.SerializerMethodField()
     copies = serializers.SerializerMethodField()
+    version_count = serializers.SerializerMethodField()
+    has_evolution = serializers.SerializerMethodField()
 
     class Meta:
         model = Skill
@@ -188,7 +208,7 @@ class SkillListSerializer(serializers.ModelSerializer):
             'stage', 'stage_label', 'stage_source', 'version',
             # 同名副本数（Skill Hub 是公共目录，同名归并成一条展示后，
             # 要把"库里其实有几份"显式告诉使用者，而不是把多重性藏起来）。
-            'copies',
+            'copies', 'version_count', 'has_evolution',
         ]
 
     # -- 展示版本（元数据来源，不是可用性判据） ---------------------------
@@ -197,16 +217,30 @@ class SkillListSerializer(serializers.ModelSerializer):
         versions = self.context.get('versions') or {}
         return versions.get(obj.pk)
 
+    def get_description(self, obj):
+        """平台自动生成用于商店卡片的短简介，不要求上传者额外填写。"""
+        import re
+
+        raw = re.sub(r'\s+', ' ', str(obj.description or '')).strip()
+        first = re.split(r'(?<=[。！？.!?])\s*', raw, maxsplit=1)[0] if raw else ''
+        summary = first or f'提供 {obj.name} 相关的自动化能力。'
+        return summary if len(summary) <= 64 else f'{summary[:61].rstrip()}…'
+
     def get_source_type(self, obj):
         version = self._version(obj)
-        return version.source_type if version is not None else ''
+        if version is None:
+            return ''
+        # Hub 只展示三种用户可理解的来源；Git/商店都是人工导入通道。
+        return version.source_type if version.source_type in ('migration', 'evolution') else 'upload'
 
     def get_source_type_label(self, obj):
         version = self._version(obj)
         if version is None:
             return ''
-        # 直接复用模型 choices 的中文标签，避免前端再抄一份来源映射。
-        return dict(SkillVersion.SOURCE_TYPE_CHOICES).get(version.source_type, version.source_type)
+        return {
+            'migration': '存量迁移',
+            'evolution': '自进化生成',
+        }.get(version.source_type, '本地上传')
 
     def get_stage(self, obj):
         """展示阶段：版本 manifest 声明的优先，缺失时回落到管理员补填的声明。
@@ -219,13 +253,13 @@ class SkillListSerializer(serializers.ModelSerializer):
 
     def _stage_of(self, obj):
         """返回 ``(阶段标识符, 来源)``；来源取值 ``manifest`` / ``declared`` / ``''``。"""
+        declared = str(getattr(obj, 'declared_stage', '') or '')
+        if declared:
+            return declared, 'declared'
         version = self._version(obj)
         declared_in_manifest = str(((version.manifest if version is not None else None) or {}).get('stage') or '')
         if declared_in_manifest:
             return declared_in_manifest, 'manifest'
-        declared = str(getattr(obj, 'declared_stage', '') or '')
-        if declared:
-            return declared, 'declared'
         return '', ''
 
     def get_stage_source(self, obj):
@@ -251,6 +285,12 @@ class SkillListSerializer(serializers.ModelSerializer):
         copies = self.context.get('copies') or {}
         return int(copies.get(obj.name, 1))
 
+    def get_version_count(self, obj):
+        return int((self.context.get('version_counts') or {}).get(obj.pk, 0))
+
+    def get_has_evolution(self, obj):
+        return bool((self.context.get('evolved_skill_ids') or set()).__contains__(obj.pk))
+
 
 class SkillToggleSerializer(serializers.ModelSerializer):
     """Skill 启用/禁用切换序列化器"""
@@ -273,6 +313,7 @@ class SkillStageBindingSerializer(serializers.Serializer):
     不参与业务能力口径，也不该被绑成某个阶段的实现。
     空串表示撤销声明（允许，否则填错了退不回去）。
     """
+    description = serializers.CharField(required=False, allow_blank=False, max_length=200)
 
     stage = serializers.CharField(required=True, allow_blank=True, max_length=64)
 
@@ -401,4 +442,3 @@ class SkillVersionValidateSerializer(serializers.Serializer):
         required=False, allow_blank=True, max_length=500,
         help_text='可选：提交校验的说明',
     )
-

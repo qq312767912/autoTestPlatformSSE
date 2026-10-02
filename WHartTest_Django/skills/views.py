@@ -115,6 +115,7 @@ class SkillViewSet(BaseModelViewSet):
     #: 会改变目录状态的：补填阶段、启停、删除、隔离版本。权限收敛到负责人。
     GLOBAL_LEAD_ACTIONS = frozenset({
         'bind_stage', 'partial_update', 'destroy', 'quarantine_version',
+        'generate_metadata',
     })
 
     #: 需要跨项目取对象的动作：作用于**公共池里的一条 Skill**，而不是"URL 那个项目
@@ -238,10 +239,19 @@ class SkillViewSet(BaseModelViewSet):
         供筛选器与卡片标签使用；版本一次批量取齐，不按 Skill 逐个查。
         """
         skills, copies = canonical_skills(self.get_queryset())
+        from django.db.models import Count, Q
+        version_stats = {
+            row['skill_id']: row
+            for row in SkillVersion.objects.filter(skill_id__in=[skill.pk for skill in skills])
+            .values('skill_id')
+            .annotate(total=Count('id'), evolved=Count('id', filter=Q(source_type='evolution')))
+        }
         serializer = self.get_serializer(
             skills, many=True, context={
                 'versions': self._display_versions(skills),
                 'copies': copies,
+                'version_counts': {key: value['total'] for key, value in version_stats.items()},
+                'evolved_skill_ids': {key for key, value in version_stats.items() if value['evolved']},
             },
         )
         # 随信封带回"调用者能不能管这个公共目录"和可绑定的阶段清单：
@@ -335,8 +345,13 @@ class SkillViewSet(BaseModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         stage = serializer.validated_data['stage']
+        description = serializer.validated_data.get('description')
         skill.declared_stage = stage
-        skill.save(update_fields=['declared_stage', 'updated_at'])
+        update_fields = ['declared_stage', 'updated_at']
+        if description is not None:
+            skill.description = description.strip()
+            update_fields.append('description')
+        skill.save(update_fields=update_fields)
         logger.info(
             "Skill 阶段声明已更新：skill=%s name=%s stage=%r by=%s",
             skill.pk, skill.name, stage, getattr(request.user, 'username', None),
@@ -346,6 +361,66 @@ class SkillViewSet(BaseModelViewSet):
             'message': '已更新阶段声明' if stage else '已撤销阶段声明',
             'data': {'id': skill.pk, 'name': skill.name, 'declared_stage': skill.declared_stage},
         })
+
+    @action(detail=False, methods=['post'], url_path='suggest-metadata')
+    def suggest_metadata(self, request, *args, **kwargs):
+        """导入前生成分类与短简介；只预览，不入库。"""
+        import tempfile
+        from pathlib import Path
+        from .metadata_generation import generate_skill_metadata
+        from .validation import safe_extract_zip
+
+        name = str(request.data.get('name') or '').strip()
+        content = str(request.data.get('content') or '').strip()
+        git_url = str(request.data.get('git_url') or '').strip()
+        branch = str(request.data.get('branch') or 'main').strip() or 'main'
+        upload = request.FILES.get('file')
+
+        try:
+            if upload is not None:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    safe_extract_zip(upload, temp_dir)
+                    skill_files = list(Path(temp_dir).rglob('SKILL.md'))
+                    if not skill_files:
+                        raise ValidationError('zip 文件中未找到 SKILL.md')
+                    content = '\n\n'.join(path.read_text(encoding='utf-8') for path in skill_files[:5])
+                    name = name or upload.name
+            elif git_url:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    Skill._clone_repo(git_url, branch, temp_dir)
+                    skill_dirs = Skill._find_skill_dirs(temp_dir)
+                    if not skill_dirs:
+                        raise ValidationError('仓库中未找到 SKILL.md')
+                    files = [Path(path) / 'SKILL.md' for path in skill_dirs[:5]]
+                    content = '\n\n'.join(path.read_text(encoding='utf-8') for path in files)
+                    name = name or git_url.rsplit('/', 1)[-1]
+            if not content:
+                raise ValidationError('缺少可用于生成元数据的 Skill 内容')
+            suggestion = generate_skill_metadata(name=name or 'Skill', content=content)
+            return Response({'code': 200, 'message': '已生成，请人工确认', 'data': suggestion})
+        except ValidationError as exc:
+            return Response(
+                {'code': 400, 'message': _validation_message(exc), 'data': None},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    @action(detail=True, methods=['post'], url_path='generate-metadata')
+    def generate_metadata(self, request, *args, **kwargs):
+        """为存量 Skill 生成建议；人工确认前不修改记录。"""
+        from .metadata_generation import generate_skill_metadata
+
+        skill = self.get_object()
+        try:
+            suggestion = generate_skill_metadata(
+                name=skill.name,
+                content=skill.skill_content or skill.description,
+            )
+            return Response({'code': 200, 'message': '已生成，请人工确认', 'data': suggestion})
+        except ValidationError as exc:
+            return Response(
+                {'code': 400, 'message': _validation_message(exc), 'data': None},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
     @action(detail=False, methods=['get'], url_path='hub-access')
     def hub_access(self, request, *args, **kwargs):
@@ -420,6 +495,8 @@ class SkillViewSet(BaseModelViewSet):
 
         zip_file = serializer.validated_data['file']
         api_key = (serializer.validated_data.get('api_key') or '').strip() or None
+        category = serializer.validated_data['category']
+        description = serializer.validated_data['description'].strip()
         project = self.get_project()
 
         try:
@@ -430,6 +507,13 @@ class SkillViewSet(BaseModelViewSet):
                 creator=request.user,
                 api_key=api_key,
             )
+            for skill in skills:
+                if skill.declared_stage != category:
+                    skill.declared_stage = category
+                    skill.save(update_fields=['declared_stage', 'updated_at'])
+                if skill.description != description:
+                    skill.description = description
+                    skill.save(update_fields=['description', 'updated_at'])
             names = ', '.join(s.name for s in skills)
             return Response({
                 'code': 201,
@@ -466,6 +550,8 @@ class SkillViewSet(BaseModelViewSet):
         git_url = serializer.validated_data['git_url']
         branch = serializer.validated_data.get('branch', 'main')
         api_key = (serializer.validated_data.get('api_key') or '').strip() or None
+        category = serializer.validated_data['category']
+        description = serializer.validated_data['description'].strip()
         project = self.get_project()
 
         try:
@@ -476,6 +562,13 @@ class SkillViewSet(BaseModelViewSet):
                 creator=request.user,
                 api_key=api_key,
             )
+            for skill in skills:
+                if skill.declared_stage != category:
+                    skill.declared_stage = category
+                    skill.save(update_fields=['declared_stage', 'updated_at'])
+                if skill.description != description:
+                    skill.description = description
+                    skill.save(update_fields=['description', 'updated_at'])
             names = ', '.join(s.name for s in skills)
             return Response({
                 'code': 201,
@@ -524,6 +617,8 @@ class SkillViewSet(BaseModelViewSet):
         zip_url = serializer.validated_data['zip_url']
         sha256 = serializer.validated_data.get('sha256') or None
         api_key = (serializer.validated_data.get('api_key') or '').strip() or None
+        category = serializer.validated_data['category']
+        description = serializer.validated_data['description'].strip()
         project = self.get_project()
 
         try:
@@ -534,6 +629,13 @@ class SkillViewSet(BaseModelViewSet):
                 expected_sha256=sha256,
                 api_key=api_key,
             )
+            for skill in skills:
+                if skill.declared_stage != category:
+                    skill.declared_stage = category
+                    skill.save(update_fields=['declared_stage', 'updated_at'])
+                if skill.description != description:
+                    skill.description = description
+                    skill.save(update_fields=['description', 'updated_at'])
             names = ', '.join(s.name for s in skills)
             return Response({
                 'code': 201,
