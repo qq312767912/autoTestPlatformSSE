@@ -89,7 +89,7 @@
           </div>
           <div class="launch-grid">
             <button type="button" @click="workspace='single'"><i><icon-experiment/></i><div><b>独立能力评测</b><small>用例审查的单次质量检查</small></div><em>约 5 分钟</em><icon-right/></button>
-            <button type="button" @click="workspace='workflow'"><i><icon-branch/></i><div><b>全链路测试</b><small>测试方案 → 测试用例 → 测试执行 → 报告生成</small></div><em>{{ cockpit.workflows.length }} 条流程</em><icon-right/></button>
+            <button type="button" @click="workspace='workflow'"><i><icon-branch/></i><div><b>全链路测试</b><small>{{ workflowChainText }}</small></div><em>{{ cockpit.workflows.length }} 条流程</em><icon-right/></button>
             <button type="button" @click="workspace='gold'"><i><icon-message/></i><div><b>建设评测数据</b><small>整理反馈、Badcase 与金标数据</small></div><em>{{ pendingFeedback }} 条待复核</em><icon-right/></button>
             <button type="button" @click="workspace='evaluation'"><i><icon-dashboard/></i><div><b>运行自动评测</b><small>选择数据集，执行分层质量扫描</small></div><em>{{ runs.length }} 次运行</em><icon-right/></button>
             <button type="button" @click="workspace='attribution'"><i><icon-branch/></i><div><b>分析失败轨迹</b><small>识别意图、规划、检索、模型或工具调用问题</small></div><em>{{ failedTraces.length }} 条待分析</em><icon-right/></button>
@@ -292,7 +292,7 @@
           <div class="pin-grid">
             <section v-for="item in catalog.stages" :key="item.stage" class="pin-block">
               <header>
-                <b>{{ item.label }}</b>
+                <b>{{ taskTypeLabels[item.stage] || item.label }}</b>
                 <small v-if="pinnedSkill(item.stage)">{{ pinnedSkill(item.stage)!.skill_name }} · {{ pinnedSkill(item.stage)!.version }}</small>
                 <small v-else class="missing">未选定</small>
               </header>
@@ -371,6 +371,7 @@ import { IconBranch, IconDashboard, IconEdit, IconExperiment, IconFile, IconMess
 import { useProjectStore } from '@/store/projectStore';
 import { SkillHubConsole } from '@/features/skills';
 import KnowledgeGraphView from '@/features/knowledge-graph/KnowledgeGraphView.vue';
+import { WORKFLOW_STAGES as DEFAULT_WORKFLOW_STAGES } from '@/features/skills/utils/stages';
 import { confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, evaluateWorkflowStage, executeWorkflowStage, generateCandidatesFromRun, getProjectQualityCockpit, getStageOutput, getWorkflowStageCatalog, getWorkflowStatus, listCapabilityReleases, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, overrideWorkflowStage, scoreWorkflowStage, startWorkflow, updateCandidateState } from './service';
 import type { CapabilityRelease, EvaluationResult, EvaluationRun, EvaluationSuite, ExecutionSpan, FailureAttribution, FeedbackEvent, GoldDataset, KnowledgeCandidate, OptimizationProposal, ProjectQualityCockpit, ProjectQualityPerson, ProjectWorkflowView, RetrievalTrace, StageExecutionPlan, StageOutputView, StartWorkflowResult, WorkflowCatalogSkill, WorkflowStageCatalog, WorkflowStageGateView } from './types';
 
@@ -436,9 +437,10 @@ const flowProgressPct=(flow:ProjectWorkflowView)=>{
 };
 /** 存量流程用的是旧阶段序列，必须标出来：不标的话用户会以为它"少了两个阶段"。 */
 const flowTemplateText=(flow:ProjectWorkflowView)=>flow.stage_template==='legacy'?'历史链路四阶段':'当前链路四阶段';
-/** 标题里的链路说明取自后端给的默认序列，不在前端抄一份阶段名。 */
+/** 标题里的链路说明取自后端给的默认序列；后端没给时才回落到展示层那份同名副本，
+ *  不在本文件里再抄第三份阶段名——抄出来的那份会在口径变更后静默变成错的。 */
 const workflowChainText=computed(()=>{
-  const order=cockpit.value.stage_order?.length?cockpit.value.stage_order:['risk_identification','testcase_generation','test_execution','issue_tracking'];
+  const order=cockpit.value.stage_order?.length?cockpit.value.stage_order:DEFAULT_WORKFLOW_STAGES;
   return order.map(v=>taskTypeLabels[v]||v).join(' → ');
 });
 /** 门禁证据一句话：分数/评语/操作人放一行，避免页面里三处各说一段。 */
@@ -601,7 +603,12 @@ async function confirmWorkflowStart():Promise<boolean>{
 }
 const suiteForm=ref({name:'',description:'',suite_type:'regression',task_type:'code_review'}),candidateForm=ref({threshold:.5,minFailureCount:1});
 const suiteTypeLabels:Record<string,string>={seed:'种子集',gold:'金标集',regression:'回归集',fresh:'新鲜集',challenge:'挑战集'};
-const taskTypeLabels:Record<string,string>={case_review:'用例审查',code_review:'代码审查',knowledge_query:'知识库问答',risk_identification:'风险识别',test_plan_generation:'测试方案',test_execution:'测试执行',testcase_generation:'测试用例',report_generation:'报告生成',issue_tracking:'问题跟踪'};
+/** 阶段中文名的**短标签**（质量飞轮页面专用）。四阶段的叫法按用户口径：
+ *  方案生成 → 用例生成 → 测试执行 → 报告产出。
+ *  Skill Hub 那边用同名的**完整**标签（`features/skills/utils/stages.ts`：
+ *  测试方案生成 / 测试用例生成 / …），两边只是繁简不同，指的都是同一个 stage。
+ *  ⚠️ 这里只负责"显示成什么"，不负责"哪四个阶段是链路"——那是后端 stage_order 的事。 */
+const taskTypeLabels:Record<string,string>={case_review:'用例审查',code_review:'代码审查',knowledge_query:'知识库问答',risk_identification:'风险识别',test_plan_generation:'方案生成',testcase_generation:'用例生成',test_execution:'测试执行',report_generation:'报告产出',issue_tracking:'问题跟踪'};
 const signalLabels:Record<string,string>={accepted:'采纳',rejected:'驳回',edited:'编辑',test_passed:'测试通过',test_failed:'测试失败',defect_confirmed:'缺陷确认',false_positive:'误报',missed:'漏报',merged:'已合并',reverted:'已回退'};
 const selectedSuite=computed(()=>suites.value.find(v=>v.id===selectedSuiteId.value)),selectedRun=computed(()=>runs.value.find(v=>v.id===selectedRunId.value));
 const completedRuns=computed(()=>runs.value.filter(v=>v.status==='completed')),failedResults=computed(()=>results.value.filter(isFailure)),failureRate=computed(()=>results.value.length?Math.round(failedResults.value.length/results.value.length*100):0);

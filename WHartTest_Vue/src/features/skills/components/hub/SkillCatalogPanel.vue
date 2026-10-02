@@ -98,7 +98,7 @@ import {
 } from '@arco-design/web-vue/es/icon'
 
 import type { SkillCatalogEntry } from '../../types/hub'
-import { STAGE_LABELS, UNSTAGED_KEY, stageLabel } from '../../utils/stages'
+import { STAGE_LABELS, UNSTAGED_KEY, WORKFLOW_STAGES, stageLabel } from '../../utils/stages'
 
 const props = defineProps<{
   entries: SkillCatalogEntry[]
@@ -133,7 +133,8 @@ const groups = computed(() => {
     buckets.get(key)!.push(entry)
   }
 
-  const order = ['test_plan_generation', 'testcase_generation', 'test_execution', 'report_generation']
+  // 链路阶段顺序从展示层那份唯一副本取，不在本文件另抄一份字面量。
+  const order = WORKFLOW_STAGES
   const keys = [...buckets.keys()].sort((a, b) => {
     const ai = order.indexOf(a)
     const bi = order.indexOf(b)
