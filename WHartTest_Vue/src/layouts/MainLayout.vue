@@ -1169,6 +1169,9 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* 同上：不给 min-height:0 的话，sider 会被展开后的菜单撑高，
+     stretch 失效、高度失控（实测展开 4 个分组后被撑到 1025px，视口才 900）。 */
+  min-height: 0;
 }
 
 /* Arco 的内部包裹层必须一起拉成 flex 列，否则上面的 flex 只作用在 sider 自身，
@@ -1339,10 +1342,22 @@ onMounted(async () => {
   height: 100vh;
   background-color: var(--theme-page-bg);
   overflow: hidden;
+  /* 2026-10-03：#app 是 flex 容器，这里是它的 flex item，而我们同时又给了 flex:1 1 0%
+     （Arco 的 .arco-layout{flex:auto}）—— flex-basis 非 auto 时 height 会被忽略，
+     高度改由 flex 分配；若不写 min-height:0，默认的 min-height:auto 会让它
+     不能被压到小于内容高度，于是被展开后的左侧栏反向撑高。 */
+  min-height: 0;
 }
 
 .inner-layout {
   height: calc(100vh - 71px); /* Header(56px) + header-margin-top(10px) + header-margin-bottom(5px) = 71px */
+  /* 2026-10-03：min-height:0 必须给！flex item 默认 min-height:auto = 高度不能小于内容高度，
+     于是左侧栏一展开子菜单（内容从 765px 涨到 976px），这条链
+     .menu → .arco-layout-sider-children → .sider → .inner-layout 会被**内容反向撑高**，
+     全部突破容器约束，再被 .main-layout 的 overflow:hidden 裁掉 —— 表现为"展开多了就看不到最低"，
+     而且每层都滚不动（内容高度 = 元素高度，scrollHeight 等于 clientHeight）。 */
+  min-height: 0;
+  overflow: hidden;
 }
 
 .content {

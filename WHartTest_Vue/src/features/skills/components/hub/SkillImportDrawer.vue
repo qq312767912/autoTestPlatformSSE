@@ -15,6 +15,14 @@
       </a-alert>
 
       <a-tabs v-model:active-key="tab" size="small">
+        <a-form-item label="所属分类（展示阶段）" required>
+          <a-select v-model="category" placeholder="请选择分类">
+            <a-option v-for="opt in categoryOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</a-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item label="功能简介（平台生成）" required>
+          <a-textarea v-model="description" :max-length="60" show-word-limit />
+        </a-form-item>
         <a-tab-pane key="git" title="Git 仓库">
           <a-form :model="gitForm" layout="vertical">
             <a-form-item label="仓库地址（HTTPS）" required>
@@ -84,15 +92,25 @@ const error = ref('')
 const imported = ref<Skill[]>([])
 const gitForm = ref({ git_url: '', branch: 'main' })
 const storeForm = ref({ zip_url: '', sha256: '' })
+const category = ref('')
+const description = ref('')
+const suggested = ref(false)
+const categoryOptions = ref<Array<{ value: string; label: string }>>([])
 
 watch(
   () => props.visible,
   (visible) => {
+    if (visible) {
+      SkillService.getSkills(props.projectId).then(({ meta }) => { categoryOptions.value = meta.stage_options || [] })
+    }
     if (!visible) {
       error.value = ''
       imported.value = []
       gitForm.value = { git_url: '', branch: 'main' }
       storeForm.value = { zip_url: '', sha256: '' }
+      category.value = ''
+      description.value = ''
+      suggested.value = false
     }
   },
 )
@@ -101,6 +119,17 @@ async function submit() {
   error.value = ''
   loading.value = true
   try {
+    if (!suggested.value) {
+      const suggestion = tab.value === 'git'
+        ? await SkillService.suggestMetadata(props.projectId, { git_url: gitForm.value.git_url, branch: gitForm.value.branch })
+        : await SkillService.suggestMetadata(props.projectId, { name: storeForm.value.zip_url, content: storeForm.value.zip_url })
+      category.value = suggestion.category
+      description.value = suggestion.description
+      suggested.value = true
+      Message.info('已生成建议，请确认后再次点击导入')
+      return
+    }
+    if (!category.value || !description.value.trim()) { error.value = '请确认所属分类与功能简介'; return }
     if (tab.value === 'git') {
       if (!gitForm.value.git_url) {
         error.value = '请填写仓库地址'
@@ -109,6 +138,8 @@ async function submit() {
       imported.value = await SkillService.importFromGit(
         props.projectId,
         gitForm.value.git_url,
+        category.value,
+        description.value.trim(),
         gitForm.value.branch || 'main',
       )
     } else {
@@ -119,6 +150,8 @@ async function submit() {
       imported.value = await SkillService.importFromZipUrl(
         props.projectId,
         storeForm.value.zip_url,
+        category.value,
+        description.value.trim(),
         storeForm.value.sha256 || undefined,
       )
     }

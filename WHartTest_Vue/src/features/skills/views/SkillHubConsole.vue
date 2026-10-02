@@ -1,8 +1,11 @@
 <template>
   <div class="console" :class="{ 'console--compact': compact }">
     <!-- 页面抬头只回答三个问题：这里是什么、当前有多少能力、下一步能做什么。 -->
+    <!-- 2026-10-03：嵌入到数据飞轮「Skill 进化工坊」页签时隐去左侧抬头（图标 + 标题 +
+         角色标签 + 描述）—— 页签已表明位置，hero 与本页再各写一遍就是重复。
+         右侧动作组（能力目录 / 版本治理 / 导入 / 上传候选）是操作，必须保留。 -->
     <header class="console__bar">
-      <div class="console__bar-left">
+      <div v-if="!embedded" class="console__bar-left">
         <div class="console__brand-mark">E</div>
         <div class="console__heading">
           <div class="console__heading-line">
@@ -250,7 +253,7 @@ import type {
 } from '../types/hub'
 import { RELEASE_STATE_LABEL, canReachReleaseState, type ReleaseState } from '../types/hub'
 
-const props = defineProps<{ projectId: number }>()
+const props = defineProps<{ projectId: number; embedded?: boolean }>()
 
 // --------------------------------------------------------------------- 角色
 

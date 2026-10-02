@@ -1,8 +1,22 @@
 <template>
   <div class="skill-manager">
+    <!-- 2026-10-03：嵌入到数据飞轮「Skill Hub」页签时不再展示这条抬头 —— 页签已经表明
+         位置，hero 与本卡片再各写一遍「Skill Hub」就是三层重复。数量在列表右上角
+         「显示 N / N」里也有。`/skills` 独立页（未传 embedded）保持原样。 -->
+    <section v-if="!embedded" class="market-hero">
+      <div>
+        <span class="market-hero__eyebrow">CAPABILITY GOVERNANCE</span>
+        <h2>Skill Hub</h2>
+        <p>统一管理平台 Skill 的导入、分类、版本迭代与使用状态，为各测试阶段提供可追溯的标准化能力。</p>
+      </div>
+      <div class="market-hero__stat"><strong>{{ skills.length }}</strong><span>可用能力</span></div>
+    </section>
     <!-- 头部操作栏：标题由页面抬头统一给，这里只放动作，避免同一句话出现两次 -->
     <div class="header-bar">
-      <a-space>
+      <a-input v-model="searchKeyword" allow-clear class="market-search" placeholder="搜索 Skill 名称或功能">
+        <template #prefix><icon-search /></template>
+      </a-input>
+      <a-space class="header-actions">
         <a-button type="primary" status="success" @click="showStoreModal = true">
           <template #icon><icon-storage /></template>
           {{ text.skillStore }}
@@ -54,6 +68,13 @@
           </a-select>
         </div>
         <span class="filter-summary">{{ text.filterSummary(filteredSkills.length, skills.length) }}</span>
+        <a-button
+          v-if="stageFilter === UNDECLARED_STAGE && filteredSkills.length && canBindStage"
+          size="small"
+          type="primary"
+          :loading="generatingExisting"
+          @click="generateForUndeclared"
+        >自动生成分类</a-button>
       </div>
 
       <!-- 已选条件回显：不用再展开下拉才知道自己筛了什么，每个条件都能单独撤掉。 -->
@@ -143,13 +164,12 @@
             </a-tag>
             <a-tag v-if="skill.version" size="small">{{ skill.version }}</a-tag>
             <!-- 同名副本数：列表按名字归并成一条展示，得让使用者知道库里不止一份。 -->
-            <a-tooltip v-if="skill.copies > 1" :content="text.copiesTip">
-              <a-tag size="small" color="purple">{{ text.copiesTag(skill.copies) }}</a-tag>
-            </a-tooltip>
+            <a-tag size="small" color="green">{{ skill.version_count || 1 }} 个版本</a-tag>
+            <a-tag v-if="skill.has_evolution" size="small" color="orangered">已自进化</a-tag>
           </div>
           <!-- 功能简介：卡片里最多两行，超出省略；悬浮看完整简介。 -->
           <div class="skill-summary">
-            <span class="skill-summary__label">{{ text.summaryLabel }}</span>
+            <span class="skill-summary__label">平台自动简介</span>
             <a-tooltip :content="skill.description" position="top" :disabled="!isSummaryClipped(skill.description)">
               <div class="skill-description">{{ skill.description }}</div>
             </a-tooltip>
@@ -192,6 +212,15 @@
       :confirm-loading="uploading"
     >
       <div class="upload-container">
+        <a-form-item :label="text.category" required>
+          <a-select v-model="uploadCategory" :placeholder="text.categoryPlaceholder">
+            <a-option v-for="opt in stageOptionList" :key="`upload-${opt.value}`" :value="opt.value">{{ opt.label }}</a-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item label="功能简介（平台生成）" required>
+          <a-textarea v-model="uploadDescription" :max-length="60" show-word-limit placeholder="选择文件后自动生成，请人工确认" />
+        </a-form-item>
+        <a-alert v-if="uploadGenerating" type="info">正在识别 Skill 类型并生成简介…</a-alert>
         <input
           ref="fileInputRef"
           type="file"
@@ -241,6 +270,15 @@
       :confirm-loading="importing"
     >
       <a-form :model="{ gitUrl, gitBranch }" layout="vertical">
+        <a-form-item :label="text.category" required>
+          <a-select v-model="gitCategory" :placeholder="text.categoryPlaceholder">
+            <a-option v-for="opt in stageOptionList" :key="`git-${opt.value}`" :value="opt.value">{{ opt.label }}</a-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item label="功能简介（平台生成）" required>
+          <a-textarea v-model="gitDescription" :max-length="60" show-word-limit placeholder="点击导入后平台先生成，确认后再次点击导入" />
+        </a-form-item>
+        <a-alert v-if="gitSuggested" type="success">已生成建议，请确认分类和简介，再次点击“确定”完成导入。</a-alert>
         <a-form-item :label="text.gitRepoUrl" required>
           <a-input
             v-model="gitUrl"
@@ -264,6 +302,7 @@
       v-model:visible="showStoreModal"
       :project-id="props.projectId"
       :installed-skills="skills"
+      :category-options="stageOptionList"
       @skills-changed="fetchSkills"
     />
 
@@ -302,6 +341,17 @@
       </div>
       <p class="stage-modal__note">{{ text.bindStageNote }}</p>
     </a-modal>
+
+    <a-modal v-model:visible="showGeneratedModal" title="确认自动生成结果" :width="760" :confirm-loading="savingGenerated" @ok="confirmGeneratedMetadata">
+      <a-alert type="info">以下内容由平台模型生成。请逐项确认，确认后才会写入 Skill Hub。</a-alert>
+      <div v-for="item in generatedExisting" :key="item.skill.id" class="generated-row">
+        <strong>{{ item.skill.name }}</strong>
+        <a-select v-model="item.category">
+          <a-option v-for="opt in stageOptionList" :key="opt.value" :value="opt.value">{{ opt.label }}</a-option>
+        </a-select>
+        <a-textarea v-model="item.description" :max-length="60" show-word-limit />
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -317,6 +367,8 @@ import { zipNameSuggestsInternalSkill } from '../utils/internalSkills'
 
 const props = defineProps<{
   projectId: number
+  /** 嵌入到数据飞轮页签时为 true：隐去本组件自带的抬头，避免与页签/hero 重复。 */
+  embedded?: boolean
 }>()
 const { isEnglish } = useAppI18n()
 const text = computed(() => (
@@ -368,6 +420,7 @@ const text = computed(() => (
         bindStageFailed: 'Failed to update the stage declaration',
         stageFromManifest: 'Declared by the version package manifest. Version packages are immutable — change it by releasing a new version.',
         manageOnly: 'Only a platform admin or a project test lead can enable/disable or delete a Skill.',
+        category: 'Category', categoryPlaceholder: 'Select a category', categoryRequired: 'Select a category',
       }
     : {
         skillStore: 'Skill 商店',
@@ -395,6 +448,7 @@ const text = computed(() => (
         bindStageFailed: '更新阶段声明失败',
         stageFromManifest: '由版本包 manifest 声明。版本包是不可变产物，改它只能发新版本；这里不提供修改入口。',
         manageOnly: '只有平台管理员或项目测试负责人可以启停 / 删除 Skill。',
+        category: '所属分类', categoryPlaceholder: '请选择展示分类', categoryRequired: '请先选择所属分类',
         importFromGit: '从 Git 导入',
         uploadSkill: '上传 Skill',
         emptyState: '暂无 Skills，点击上方按钮上传',
@@ -442,6 +496,13 @@ const importing = ref(false)
 const showApiKeyConfirm = ref(false)
 const pendingApiKeySkillNames = ref<string[]>([])
 const pendingApiKeyAction = ref<'upload' | 'git' | null>(null)
+const uploadCategory = ref<string>()
+const gitCategory = ref<string>()
+const uploadDescription = ref('')
+const gitDescription = ref('')
+const uploadGenerating = ref(false)
+const gitSuggested = ref(false)
+const searchKeyword = ref('')
 
 // ---------------- 类型筛选（来源 / 能力阶段） ----------------
 // 纯前端过滤：列表拿到的是本项目全量（量级十几条），不必为此加后端参数。
@@ -490,6 +551,8 @@ const stageOptions = computed(() => {
 })
 
 const filteredSkills = computed(() => skills.value.filter((skill) => {
+  const keyword = searchKeyword.value.trim().toLocaleLowerCase()
+  if (keyword && !`${skill.name} ${skill.description}`.toLocaleLowerCase().includes(keyword)) return false
   if (sourceFilter.value && skill.source_type !== sourceFilter.value) return false
   if (stageFilter.value && (skill.stage || UNDECLARED_STAGE) !== stageFilter.value) return false
   return true
@@ -542,6 +605,37 @@ const showStageModal = ref(false)
 const stageTarget = ref<SkillListItem | null>(null)
 const pendingStage = ref<string | undefined>(undefined)
 const bindingStage = ref(false)
+const generatingExisting = ref(false)
+const savingGenerated = ref(false)
+const showGeneratedModal = ref(false)
+const generatedExisting = ref<Array<{ skill: SkillListItem; category: string; description: string }>>([])
+
+const generateForUndeclared = async () => {
+  generatingExisting.value = true
+  const generated: Array<{ skill: SkillListItem; category: string; description: string }> = []
+  try {
+    for (const skill of filteredSkills.value) {
+      const suggestion = await SkillService.generateMetadata(props.projectId, skill.id)
+      generated.push({ skill, category: suggestion.category, description: suggestion.description })
+    }
+    generatedExisting.value = generated
+    showGeneratedModal.value = true
+  } catch (e: any) { Message.error(e.message || '自动生成失败') }
+  finally { generatingExisting.value = false }
+}
+
+const confirmGeneratedMetadata = async () => {
+  savingGenerated.value = true
+  try {
+    for (const item of generatedExisting.value) {
+      await SkillService.bindSkillStage(props.projectId, item.skill.id, item.category, item.description)
+    }
+    Message.success('已更新分类与功能简介')
+    showGeneratedModal.value = false
+    await fetchSkills()
+  } catch (e: any) { Message.error(e.message || '保存失败') }
+  finally { savingGenerated.value = false }
+}
 
 /** 弹窗说明分两种：从"没声明"进来（补填）与从"我补的"进来（改 / 撤）。 */
 const stageModalIntro = computed(() =>
@@ -624,10 +718,19 @@ const triggerFileInput = () => {
   fileInputRef.value?.click()
 }
 
-const handleFileChange = (e: Event) => {
+const handleFileChange = async (e: Event) => {
   const target = e.target as HTMLInputElement
   if (target.files && target.files[0]) {
     selectedFile.value = target.files[0]
+    uploadGenerating.value = true
+    uploadDescription.value = ''
+    try {
+      const suggestion = await SkillService.suggestMetadata(props.projectId, { file: selectedFile.value })
+      uploadCategory.value = suggestion.category
+      uploadDescription.value = suggestion.description
+      Message.success('已生成分类与简介，请确认')
+    } catch (e: any) { Message.error(e.message || '自动生成失败') }
+    finally { uploadGenerating.value = false }
   }
 }
 
@@ -639,12 +742,16 @@ const doUpload = async (apiKey?: string) => {
 
   uploading.value = true
   try {
-    const skills = await SkillService.uploadSkill(props.projectId, selectedFile.value, apiKey)
+    if (!uploadCategory.value) { Message.warning(text.value.categoryRequired); return }
+    if (!uploadDescription.value.trim()) { Message.warning('请先生成并确认功能简介'); return }
+    const skills = await SkillService.uploadSkill(props.projectId, selectedFile.value, uploadCategory.value, uploadDescription.value.trim(), apiKey)
     const count = skills.length
     const names = skills.map(s => s.name).join(', ')
     Message.success(text.value.uploadSuccess(count, names))
     showUploadModal.value = false
     selectedFile.value = null
+    uploadCategory.value = undefined
+    uploadDescription.value = ''
     await fetchSkills()
   } catch (e: any) {
     Message.error(e.message || text.value.uploadFailed)
@@ -658,6 +765,8 @@ const handleUpload = async () => {
     Message.warning(text.value.selectFile)
     return
   }
+  if (!uploadCategory.value) { Message.warning(text.value.categoryRequired); return }
+  if (!uploadDescription.value.trim()) { Message.warning('请先生成并确认功能简介'); return }
   // 内部 Skill 包（文件名粗判）安装前必须确认 API Key；后端会按 SKILL.md name 再校验
   if (zipNameSuggestsInternalSkill(selectedFile.value.name)) {
     pendingApiKeyAction.value = 'upload'
@@ -706,14 +815,29 @@ const doGitImport = async (apiKey?: string) => {
     Message.warning(text.value.gitRepoRequired)
     return
   }
+  if (!gitSuggested.value) {
+    importing.value = true
+    try {
+      const suggestion = await SkillService.suggestMetadata(props.projectId, { git_url: gitUrl.value.trim(), branch: gitBranch.value.trim() || 'main' })
+      gitCategory.value = suggestion.category
+      gitDescription.value = suggestion.description
+      gitSuggested.value = true
+      Message.info('已生成建议，请确认后再次点击确定')
+    } catch (e: any) { Message.error(e.message || '自动生成失败') }
+    finally { importing.value = false }
+    return
+  }
+  if (!gitCategory.value || !gitDescription.value.trim()) { Message.warning('请确认分类与功能简介'); return }
 
   importing.value = true
   try {
     const skills = await SkillService.importFromGit(
       props.projectId,
       gitUrl.value.trim(),
+      gitCategory.value,
+      gitDescription.value.trim(),
       gitBranch.value.trim() || undefined,
-      apiKey
+      apiKey,
     )
     const count = skills.length
     const names = skills.map(s => s.name).join(', ')
@@ -721,6 +845,9 @@ const doGitImport = async (apiKey?: string) => {
     showGitImportModal.value = false
     gitUrl.value = ''
     gitBranch.value = ''
+    gitCategory.value = undefined
+    gitDescription.value = ''
+    gitSuggested.value = false
     await fetchSkills()
   } catch (e: any) {
     Message.error(e.message || text.value.importFailed)
@@ -775,17 +902,53 @@ onMounted(() => {
 
 <style scoped>
 .skill-manager {
+  --market-ink: #172033;
+  --market-blue: #246bfd;
+  --market-mint: #d9f7ed;
+}
+
+.market-hero {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+  padding: 28px 30px;
+  overflow: hidden;
+  color: #fff;
+  border-radius: 18px;
+  background: linear-gradient(125deg, #102a43 0%, #176b87 62%, #1b8f8a 100%);
+  box-shadow: 0 14px 40px rgb(16 42 67 / 18%);
+}
+.market-hero::after { content: ''; position: absolute; width: 220px; height: 220px; right: 10%; top: -140px; border: 42px solid rgb(255 255 255 / 6%); border-radius: 50%; }
+.market-hero h2 { margin: 5px 0 7px; font-size: 26px; letter-spacing: -.5px; }
+.market-hero p { max-width: 650px; margin: 0; color: #d8edf0; line-height: 1.7; }
+.market-hero__eyebrow { color: #9fe1dd; font-size: 11px; font-weight: 700; letter-spacing: 1.8px; }
+.market-hero__stat { z-index: 1; display: flex; flex-direction: column; min-width: 94px; padding: 15px 18px; border: 1px solid rgb(255 255 255 / 14%); border-radius: 14px; background: rgb(255 255 255 / 10%); backdrop-filter: blur(8px); }
+.market-hero__stat strong { font-size: 30px; line-height: 1; }
+.market-hero__stat span { margin-top: 6px; color: #c3dcdf; font-size: 12px; }
+.market-search { width: min(420px, 42vw); }
+.generated-row { display: grid; grid-template-columns: 180px 180px minmax(260px, 1fr); gap: 12px; align-items: start; padding: 14px 0; border-bottom: 1px solid var(--color-border-2); }
+.generated-row strong { padding-top: 7px; color: var(--market-ink); overflow: hidden; text-overflow: ellipsis; }
+.skill-manager {
   padding: 16px;
   overflow-x: hidden;
 }
 
 .header-bar {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
   align-items: center;
   margin-bottom: 16px;
   flex-wrap: wrap;
   gap: 12px;
+}
+.header-actions { margin-left: auto; }
+
+@media (max-width: 760px) {
+  .market-search { width: 100%; }
+  .header-actions { margin-left: 0; }
 }
 
 /* 类型筛选条：第一行放完（标题 + 两个定宽下拉 + 计数），已选条件另起一行以 tag 回显。
@@ -952,15 +1115,17 @@ onMounted(() => {
 .skill-card {
   background: var(--color-bg-2);
   border: 1px solid var(--color-border);
-  border-radius: 8px;
-  padding: 16px;
+  border-radius: 14px;
+  padding: 18px;
   transition: all 0.2s;
   overflow: hidden;
   min-width: 0;
 }
 
 .skill-card:hover {
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+  transform: translateY(-3px);
+  border-color: rgba(36,107,253,.35);
+  box-shadow: 0 14px 34px rgba(22, 39, 70, .12);
 }
 
 .skill-card.inactive {
@@ -977,7 +1142,7 @@ onMounted(() => {
 
 .skill-name {
   font-weight: 600;
-  font-size: 16px;
+  font-size: 17px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

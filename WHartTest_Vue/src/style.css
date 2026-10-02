@@ -178,7 +178,15 @@ button:focus-visible {
   /* padding: 2rem; */ /* 移除以允许组件控制自己的内边距 */
   /* text-align: center; */ /* 移除以允许组件控制文本对齐 */
   width: 100%; /* 确保 app 占据全部可用宽度 */
-  min-height: 100vh; /* 确保 app 占据全部可用高度 */
+  /* 2026-10-03：原本是 min-height:100vh —— 那只是"下限"，内容一长（左侧栏展开子菜单、
+     列表变多）就会把 #app 顶到 1111px，连带 .main-layout → .inner-layout → .sider
+     整条链一起被撑高（它们都是 flex item，默认 min-height:auto 不许小于内容），
+     超出部分再被 body 的 overflow:hidden 裁掉 —— 表现为"展开多了就看不到最低，而且滚不动"。
+     改成固定高度 + overflow:hidden：高度由视口说了算，内部交给各页面自己滚
+     （这正是本项目既有的约定：父容器固定高度 + overflow:hidden，子组件自行控制滚动）。 */
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
   display: flex; /* 允许子路由视图填充 */
   flex-direction: column; /* 允许子路由视图填充 */
 }

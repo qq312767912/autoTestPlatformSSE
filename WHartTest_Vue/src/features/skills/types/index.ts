@@ -45,6 +45,10 @@ export interface SkillListItem {
    * `1` 表示只有一条，`>1` 表示这条是归并展示的结果。
    */
   copies: number
+  /** 同一 Skill 身份下的不可变版本数（原始版 + 后续迭代）。 */
+  version_count: number
+  /** 是否已有自进化派生版本。 */
+  has_evolution: boolean
 }
 
 export interface SkillUploadResponse {

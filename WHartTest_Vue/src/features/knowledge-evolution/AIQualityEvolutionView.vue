@@ -5,6 +5,11 @@
     </div>
     <template v-else>
       <header class="hero">
+        <!-- ⚠️ 横幅是**页面级**的，不是页签级的：数据飞轮的三个页签（控制台 / Skill 进化工坊 /
+             Skill Hub）共用同一条横幅、统一显示「数据飞轮」；知识图谱页显示「知识图谱」。
+             它回答的是"现在在哪个页面"，不能随页签切换而消失。真正重复的是**内容区**里
+             各子组件再写一遍「Skill Hub / Skill 进化工坊 / 知识图谱」，那部分由子组件按
+             `embedded` 隐去（见 SkillManager / SkillHubConsole / KnowledgeGraphView）。 -->
         <div class="hero-copy"><h1>{{ pageHeader.title }}</h1><p>{{ pageHeader.description }}</p></div>
         <div class="hero-actions"><a-tag color="green">人工门禁开启</a-tag><a-tag><icon-storage /> {{ projectName }}</a-tag><a-button @click="refreshAll"><template #icon><icon-refresh /></template>刷新数据</a-button></div>
       </header>
@@ -76,21 +81,17 @@
         </template>
 
         <section v-else-if="primaryView === 'graph'" class="knowledge-graph-embed">
-          <KnowledgeGraphView />
+          <KnowledgeGraphView embedded />
         </section>
 
         <section v-else-if="quickMode === 'skills'" class="skill-hub-embed">
-          <SkillHubConsole :project-id="projectStore.currentProjectId!" :key="`quality-skill-hub-${projectStore.currentProjectId}`" />
+          <SkillHubConsole embedded :project-id="projectStore.currentProjectId!" :key="`quality-skill-hub-${projectStore.currentProjectId}`" />
         </section>
 
         <!-- Skill Hub：与左侧菜单的 Skill Hub 页是同一份实现（SkillManager）。
              两处入口都指向同一个组件，避免"同一套列表两处各写一遍"随后漂移。 -->
         <section v-else-if="quickMode === 'hub'" class="skill-hub-embed">
-          <div class="embed-heading">
-            <h2>Skill Hub</h2>
-            <p>上传、从 Git 导入、从 Skill 商店发现并安装公开 Skill；按来源与能力阶段筛选。</p>
-          </div>
-          <SkillManager :project-id="projectStore.currentProjectId!" :key="`quality-skill-list-${projectStore.currentProjectId}`" />
+          <SkillManager embedded :project-id="projectStore.currentProjectId!" :key="`quality-skill-list-${projectStore.currentProjectId}`" />
         </section>
 
         <section v-else-if="workspace === 'overview'" class="panel launch-console">
@@ -605,11 +606,20 @@ const projectStore=useProjectStore(); const projectName=computed(()=>projectStor
 const route=useRoute(),router=useRouter();
 const routeView=():PrimaryView=>['agents','data','graph'].includes(String(route.query.view))?String(route.query.view) as PrimaryView:'agents';
 const primaryView=ref<PrimaryView>(routeView()),quickMode=ref<QuickMode>('console');
-const pageHeader=computed(()=>({
-  agents:{title:'Agent总览',description:'查看运行、评测、失败样本与待处理改进。'},
-  data:{title:'数据飞轮',description:'沉淀反馈、评测、归因与优化数据。'},
-  graph:{title:'知识图谱',description:'连接代码、文档与质量经验。'},
-}[primaryView.value]));
+/** 横幅抬头（h1 + 描述）。
+ *  ⚠️ 数据飞轮下**按页签分别展示**，不是三个页签共用一句「数据飞轮」——
+ *     用户 2026-10-03 明确：共用的横幅看不出当前切到了哪个页签。
+ *  描述沿用各子组件原本的抬头文案（它们的 header 已按 `embedded` 隐去），
+ *  信息既不丢、也不再出现"横幅写一遍 + 内容区再写一遍"的重复。 */
+const pageHeader=computed(()=>{
+  if(primaryView.value==='graph')return {title:'知识图谱',description:'统一沉淀代码、文档与测试知识，为影响分析和 LLM 检索提供可追踪语义关系。'};
+  if(primaryView.value==='data'){
+    if(quickMode.value==='skills')return {title:'Skill 进化工坊',description:'让 Skill 进化：候选版本、评测门禁与发布治理。'};
+    if(quickMode.value==='hub')return {title:'Skill Hub',description:'统一管理平台 Skill 的导入、分类、版本迭代与使用状态，为各测试阶段提供可追溯的标准化能力。'};
+    return {title:'数据飞轮',description:'沉淀反馈、评测、归因与优化数据。'};
+  }
+  return {title:'Agent总览',description:'查看运行、评测、失败样本与待处理改进。'};
+});
 watch(()=>route.query.view,()=>{primaryView.value=routeView();workspace.value='overview'});
 async function openData(target:Workspace){primaryView.value='data';quickMode.value='console';await router.replace({path:'/knowledge-evolution',query:{view:'data'}});workspace.value=target}
 const suites=ref<EvaluationSuite[]>([]),runs=ref<EvaluationRun[]>([]),results=ref<EvaluationResult[]>([]),feedbackEvents=ref<FeedbackEvent[]>([]),candidates=ref<KnowledgeCandidate[]>([]),allTraces=ref<RetrievalTrace[]>([]);
@@ -1166,9 +1176,11 @@ watch(()=>projectStore.currentProjectId,async id=>{if(id)await bootstrap()},{imm
 @media(max-width:900px){.workspace-shell{grid-template-columns:1fr}.stage-rail{position:static;min-height:auto}.stage-rail .tabs{grid-template-columns:repeat(7,minmax(145px,1fr));overflow:auto}.rail-roles{display:none}.metrics,.source-grid,.asset-strip,.trace-detail,.governance-board{grid-template-columns:1fr}.trace-head{display:none}.trace-rows article{grid-template-columns:90px 1fr}.trace-rows article span,.trace-rows article strong{grid-column:2}}
 
 /* AgentLoop-inspired information architecture: quiet shell, horizontal workspaces, dense data canvas. */
-.qe-page{min-height:100%;padding:0 18px 24px;background:#f7f8fa;color:#1d2129}
-.hero{display:flex;margin:0 -18px;padding:17px 22px;border:0;border-bottom:1px solid #e5e6eb;border-radius:0;background:#fff}
-.hero:before{display:none}.hero-copy{min-width:0}.hero h1{display:inline;margin:0;font-size:20px}.hero p{display:inline;margin-left:14px;font-size:12px}.hero-actions{margin-left:auto}.hero-actions :deep(.arco-btn){border-color:#e5e6eb;background:#fff}
+.qe-page{min-height:100%;padding:18px 18px 24px;background:#f7f8fa;color:#1d2129}
+.hero{display:flex;margin:0 0 14px;padding:24px 28px;border:0;border-radius:18px;color:#fff;background:linear-gradient(125deg,#102a43 0%,#176b87 62%,#1b8f8a 100%);box-shadow:0 14px 40px rgb(16 42 67/18%)}
+/* （2026-10-03 曾短暂加过 .hero--compact：横幅只留右侧动作时收窄。
+   最终改为横幅始终完整展示、标题按页签切换，该样式不再需要，已移除。） */
+.hero:before{display:none}.hero-copy{min-width:0}.hero h1{display:block;margin:5px 0 4px;font-size:26px}.hero p{display:block;margin:0;color:#d8edf0;font-size:13px}.hero-actions{margin-left:auto}.hero-actions :deep(.arco-btn){color:#526273;border-color:rgb(255 255 255/50%);background:rgb(255 255 255/94%)}
 .workspace-tabs{display:flex;gap:3px;margin:14px 0;padding:4px;overflow-x:auto;border:1px solid #e5e6eb;border-radius:10px;background:#fff}
 .workspace-tabs button{display:flex;height:38px;flex:none;align-items:center;gap:7px;padding:0 13px;border:0;border-radius:7px;color:#4e5969;background:transparent;cursor:pointer;font-size:13px;transition:background .16s ease,color .16s ease,box-shadow .16s ease}
 .workspace-tabs button:hover{color:#165dff;background:#f2f3f5}.workspace-tabs button.active{color:#1d2129;background:#f2f3f5;box-shadow:inset 0 0 0 1px #c9cdd4}.workspace-tabs button svg{font-size:15px}.workspace-tabs em{min-width:19px;padding:1px 5px;border-radius:9px;color:#86909c;background:#e5e6eb;font-size:10px;font-style:normal;text-align:center}.workspace-tabs button.active em{color:#165dff;background:#e8f3ff}
@@ -1179,13 +1191,9 @@ watch(()=>projectStore.currentProjectId,async id=>{if(id)await bootstrap()},{imm
 .content-panel,.suite-panel,.eval-panel{background:#fff}.toolbar{padding-bottom:16px}.workflow-list>article,.single-grid>article,.asset-strip>article,.governance-board>section{background:#fafafa}
 @media(max-width:1320px){.workspace-shell{grid-template-columns:minmax(0,1fr) 250px}.metrics article{padding-right:14px;padding-left:14px}.workspace-tabs button{padding:0 10px}}
 @media(max-width:1080px){.workspace-shell{grid-template-columns:1fr}.team-panel{position:static;order:2}.workspace-content{order:1}.team-panel .people-group{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.team-panel .group-title,.team-panel :deep(.arco-empty){grid-column:1/-1}.people-group+.people-group{margin-top:16px}.metrics{grid-template-columns:repeat(2,1fr)}.metrics article:nth-child(2){border-right:0}.metrics article:nth-child(-n+2){border-bottom:1px solid #f0f1f2}}
-@media(max-width:720px){.qe-page{padding-right:10px;padding-left:10px}.hero{margin-right:-10px;margin-left:-10px;align-items:flex-start}.hero p{display:block;margin:5px 0 0}.hero-actions{width:100%;margin:10px 0 0}.workspace-tabs{border-radius:8px}.metrics{grid-template-columns:1fr}.metrics article{border-right:0;border-bottom:1px solid #f0f1f2!important}.loop{display:grid;grid-template-columns:1fr}.loop button{border-right:0;border-bottom:1px solid #e5e6eb}.team-panel .people-group{display:block}}
+@media(max-width:720px){.qe-page{padding-right:10px;padding-left:10px}.hero{margin-right:0;margin-left:0;padding:20px;align-items:flex-start}.hero p{display:block;margin:5px 0 0}.hero-actions{width:100%;margin:10px 0 0}.workspace-tabs{border-radius:8px}.metrics{grid-template-columns:1fr}.metrics article{border-right:0;border-bottom:1px solid #f0f1f2!important}.loop{display:grid;grid-template-columns:1fr}.loop button{border-right:0;border-bottom:1px solid #e5e6eb}.team-panel .people-group{display:block}}
 .primary-tabs{display:flex;gap:24px;margin:0 -18px 14px;padding:0 22px;border-bottom:1px solid #e5e6eb;background:#fff}.primary-tabs button{position:relative;display:flex;height:48px;align-items:center;gap:7px;padding:0 2px;border:0;color:#4e5969;background:transparent;cursor:pointer;font-size:14px}.primary-tabs button:hover{color:#165dff}.primary-tabs button.active{color:#1d2129;font-weight:600}.primary-tabs button.active:after{content:"";position:absolute;right:0;bottom:-1px;left:0;height:2px;border-radius:2px;background:#165dff}.primary-tabs svg{font-size:16px}
 .quick-tabs{display:flex;width:max-content;gap:3px;margin:0 0 14px;padding:3px;border-radius:8px;background:#e5e6eb}.quick-tabs button{min-width:88px;padding:7px 16px;border:0;border-radius:6px;color:#4e5969;background:transparent;cursor:pointer}.quick-tabs button.active{color:#1d2129;background:#fff;box-shadow:0 1px 4px rgb(29 33 41/10%);font-weight:600}
-/* 数据飞轮里嵌页面的抬头（Skill Hub / 进化工坊各自带一层小标题，与外层 hero 区分） */
-.embed-heading{margin-bottom:12px}
-.embed-heading h2{margin:0;font-size:18px;color:#1d2129}
-.embed-heading p{margin:4px 0 0;font-size:13px;color:#86909c}
 .skill-hub-embed{display:flex;flex-direction:column}
 .launch-console{min-height:560px;padding:24px}.launch-heading{display:flex;align-items:flex-start;justify-content:space-between;padding-bottom:20px;border-bottom:1px solid #e5e6eb}.launch-heading span{font-size:10px;font-weight:700;letter-spacing:.14em;color:#165dff}.launch-heading h2{margin:5px 0 4px;font-size:20px}.launch-heading p{margin:0;color:#86909c}.launch-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:20px}.launch-grid button{display:grid;grid-template-columns:42px minmax(0,1fr) auto 14px;align-items:center;gap:12px;min-height:116px;padding:18px;text-align:left;border:1px solid #e5e6eb;border-radius:9px;background:#fff;cursor:pointer}.launch-grid button:hover{border-color:#94bfff;background:#f7faff;box-shadow:0 8px 20px rgb(22 93 255/7%)}.launch-grid button>i{display:grid;width:40px;height:40px;place-items:center;border-radius:8px;color:#165dff;background:#e8f3ff;font-size:18px;font-style:normal}.launch-grid b,.launch-grid small{display:block}.launch-grid b{font-size:14px}.launch-grid small{margin-top:5px;color:#86909c;line-height:1.45}.launch-grid em{align-self:start;padding:3px 7px;border-radius:10px;color:#86909c;background:#f2f3f5;font-size:10px;font-style:normal;white-space:nowrap}.launch-grid>button>svg{color:#86909c}
 .console-context{display:flex;align-items:center;gap:12px;margin-bottom:10px}.console-context button{display:flex;align-items:center;gap:4px;padding:6px 0;border:0;color:#165dff;background:transparent;cursor:pointer}.console-context button svg{transform:rotate(180deg)}.console-context span{color:#86909c;font-size:12px}.skill-hub-embed{min-height:680px;overflow:hidden;border:1px solid #e5e6eb;border-radius:10px;background:#fff}.knowledge-graph-embed{min-width:0}.graph-layout{grid-template-columns:minmax(0,1fr)}.knowledge-graph-embed :deep(.knowledge-graph-page){padding:0}.skill-hub-embed :deep(.skill-hub-console){border:0}

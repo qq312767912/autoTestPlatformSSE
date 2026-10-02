@@ -1,6 +1,6 @@
 <template>
   <div class="graph-page">
-    <header class="graph-header">
+    <header v-if="!props.embedded" class="graph-header">
       <div>
         <span class="eyebrow">KNOWLEDGE FABRIC</span>
         <h1>知识图谱</h1>
@@ -166,6 +166,8 @@ import {
 import { useProjectStore } from '@/store/projectStore';
 import { getGraphSnapshot, getGraphSources } from './service';
 import type { GraphEdge, GraphNode, GraphSnapshot, GraphSource, GraphSourceType } from './types';
+
+const props = withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false });
 
 const router = useRouter();
 const projectStore = useProjectStore();

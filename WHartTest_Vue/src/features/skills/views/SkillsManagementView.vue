@@ -1,12 +1,5 @@
 <template>
   <div class="skills-management-view">
-    <div class="page-header">
-      <div class="page-header__main">
-        <h2>{{ pageText.pageTitle }}</h2>
-        <p class="page-description">{{ pageText.pageDescription }}</p>
-      </div>
-    </div>
-
     <div v-if="currentProjectId" class="skills-container">
       <!--
         Skill Hub（本页）负责"上传和发现公开 Skill"：上传、Git 导入、从 Skill 商店安装、
@@ -36,13 +29,9 @@ const currentProjectId = computed(() => projectStore.currentProjectId)
 const pageText = computed(() => (
   isEnglish.value
     ? {
-        pageTitle: 'Skill Hub',
-        pageDescription: 'Upload, import and discover public Skills, then filter by source and capability stage; manage the general Skills available to this project (enable, disable, delete).',
         selectProjectFirst: 'Select a project from the navigation first',
       }
     : {
-        pageTitle: 'Skill Hub',
-        pageDescription: '上传、从 Git 导入、从 Skill 商店发现并安装公开 Skill；按来源与能力阶段筛选，管理本项目可用的通用 Skill（启停与删除）。',
         selectProjectFirst: '请先在导航栏选择一个项目',
       }
 ))

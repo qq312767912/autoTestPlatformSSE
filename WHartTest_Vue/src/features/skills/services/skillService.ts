@@ -50,12 +50,13 @@ export class SkillService {
   static async bindSkillStage(
     projectId: number,
     skillId: number,
-    stage: string
+    stage: string,
+    description?: string
   ): Promise<{ id: number; name: string; declared_stage: string }> {
     const response = await request<{ code: number; message: string; data: any }>({
       url: `/projects/${projectId}/skills/${skillId}/stage/`,
       method: 'POST',
-      data: { stage }
+      data: { stage, ...(description ? { description } : {}) }
     })
 
     const api = response.data as any
@@ -84,9 +85,11 @@ export class SkillService {
   /**
    * 上传 Skill zip 文件
    */
-  static async uploadSkill(projectId: number, file: File, apiKey?: string): Promise<Skill[]> {
+  static async uploadSkill(projectId: number, file: File, category: string, description: string, apiKey?: string): Promise<Skill[]> {
     const formData = new FormData()
     formData.append('file', file)
+    formData.append('category', category)
+    formData.append('description', description)
     if (apiKey) {
       formData.append('api_key', apiKey)
     }
@@ -110,10 +113,12 @@ export class SkillService {
   static async importFromGit(
     projectId: number,
     gitUrl: string,
+    category: string,
+    description: string,
     branch?: string,
     apiKey?: string
   ): Promise<Skill[]> {
-    const payload: { git_url: string; branch?: string; api_key?: string } = { git_url: gitUrl }
+    const payload: { git_url: string; category: string; description: string; branch?: string; api_key?: string } = { git_url: gitUrl, category, description }
     if (branch) {
       payload.branch = branch
     }
@@ -140,10 +145,12 @@ export class SkillService {
   static async importFromZipUrl(
     projectId: number,
     zipUrl: string,
+    category: string,
+    description: string,
     sha256?: string,
     apiKey?: string
   ): Promise<Skill[]> {
-    const payload: { zip_url: string; sha256?: string; api_key?: string } = { zip_url: zipUrl }
+    const payload: { zip_url: string; category: string; description: string; sha256?: string; api_key?: string } = { zip_url: zipUrl, category, description }
     if (sha256) {
       payload.sha256 = sha256
     }
@@ -162,6 +169,28 @@ export class SkillService {
       return Array.isArray(api.data) ? api.data : [api.data]
     }
     throw new Error(api?.message || response.error || '从 zip URL 导入 Skill 失败')
+  }
+
+  static async suggestMetadata(projectId: number, input: { file?: File; git_url?: string; branch?: string; name?: string; content?: string }) {
+    let data: FormData | Record<string, string>
+    if (input.file) {
+      const form = new FormData()
+      form.append('file', input.file)
+      data = form
+    } else {
+      data = Object.fromEntries(Object.entries(input).filter(([, value]) => Boolean(value))) as Record<string, string>
+    }
+    const response = await request<any>({ url: `/projects/${projectId}/skills/suggest-metadata/`, method: 'POST', data })
+    const api = response.data as any
+    if (response.success && api?.data) return api.data as { category: string; category_label: string; description: string }
+    throw new Error(api?.message || response.error || '自动生成失败')
+  }
+
+  static async generateMetadata(projectId: number, skillId: number) {
+    const response = await request<any>({ url: `/projects/${projectId}/skills/${skillId}/generate-metadata/`, method: 'POST' })
+    const api = response.data as any
+    if (response.success && api?.data) return api.data as { category: string; category_label: string; description: string }
+    throw new Error(api?.message || response.error || '自动生成失败')
   }
 
   /**

@@ -146,6 +146,10 @@
       <!-- 底部操作 -->
       <div class="store-footer" v-if="manifestStates.length > 0">
         <div class="footer-left">
+          <a-select v-model="installCategory" :placeholder="text.categoryPlaceholder" style="width: 190px">
+            <a-option v-for="opt in categoryOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</a-option>
+          </a-select>
+          <a-input v-model="installDescription" placeholder="平台生成的简介，请确认" style="width: 260px" />
           <a-progress
             v-if="batchRunning || batchCompletedAt"
             :percent="batchProgressRatio"
@@ -229,6 +233,7 @@ const props = defineProps<{
   visible: boolean
   projectId: number
   installedSkills: SkillListItem[]
+  categoryOptions: Array<{ value: string; label: string }>
 }>()
 
 const emit = defineEmits<{
@@ -269,6 +274,7 @@ const text = computed(() => (
         batchUninstallDone: (ok: number, fail: number) =>
           `Uninstallation complete: ${ok} succeeded, ${fail} failed`,
         loadConfigFailed: 'Failed to load store config',
+        categoryPlaceholder: 'Category (required)', categoryRequired: 'Select a category before installing',
       }
     : {
         title: 'Skill 商店',
@@ -299,6 +305,7 @@ const text = computed(() => (
         batchUninstallDone: (ok: number, fail: number) =>
           `卸载完成：成功 ${ok}，失败 ${fail}`,
         loadConfigFailed: '获取商店配置失败',
+        categoryPlaceholder: '所属分类（必填）', categoryRequired: '请先选择所属分类',
       }
 ))
 
@@ -320,6 +327,9 @@ const manifest = ref<SkillStoreManifest | null>(null)
 const manifestError = ref('')
 const searchKeyword = ref('')
 const manifestStates = ref<StoreItemState[]>([])
+const installCategory = ref<string>()
+const installDescription = ref('')
+const installSuggested = ref(false)
 const showSourceManager = ref(false)
 
 const batchRunning = ref(false)
@@ -466,11 +476,15 @@ function toggleSelect(state: StoreItemState) {
   if (batchRunning.value) return
   if (state.status === 'installing' || state.status === 'uninstalling') return
   state.selected = !state.selected
+  installSuggested.value = false
+  installDescription.value = ''
 }
 
 function onCheckboxChange(state: StoreItemState, v: boolean) {
   if (batchRunning.value) return
   state.selected = v
+  installSuggested.value = false
+  installDescription.value = ''
 }
 
 function toggleSelectAll(v: boolean | (string | number | boolean)[]) {
@@ -480,6 +494,8 @@ function toggleSelectAll(v: boolean | (string | number | boolean)[]) {
     if (s.status === 'installing' || s.status === 'uninstalling') return
     s.selected = flag
   })
+  installSuggested.value = false
+  installDescription.value = ''
 }
 
 async function openReadme(item: ManifestSkill) {
@@ -518,6 +534,8 @@ async function runBatchInstall(targets: StoreItemState[], apiKey?: string) {
       const skills = await SkillService.importFromZipUrl(
         props.projectId,
         zipUrl,
+        installCategory.value!,
+        installDescription.value,
         state.item.sha256,
         needKey ? apiKey : undefined
       )
@@ -543,6 +561,20 @@ async function handleBatchInstall() {
   if (batchRunning.value) return
   const targets = manifestStates.value.filter(s => s.selected && !s.installed)
   if (targets.length === 0) return
+  if (!installSuggested.value) {
+    try {
+      const suggestion = await SkillService.suggestMetadata(props.projectId, {
+        name: targets.map(item => item.item.name).join(', '),
+        content: targets.map(item => `${item.item.name}: ${item.item.description}`).join('\n'),
+      })
+      installCategory.value = suggestion.category
+      installDescription.value = suggestion.description
+      installSuggested.value = true
+      Message.info('已生成分类与简介，请确认后再次点击安装')
+    } catch (e: any) { Message.error(e?.message || '自动生成失败') }
+    return
+  }
+  if (!installCategory.value || !installDescription.value.trim()) { Message.warning(text.value.categoryRequired); return }
 
   const internal = targets.filter(s => isInternalPlatformSkill(s.item.name))
   if (internal.length > 0) {
