@@ -77,6 +77,22 @@ def business_role(user, project_id) -> str | None:
     return None
 
 
+def is_test_lead_anywhere(user) -> bool:
+    """是否在**任一**项目里是测试负责人（超级用户恒真）。
+
+    Skill Hub 是公共目录，不再等同于"某个项目的资源"：一份 Skill 可能由 A 项目
+    上传、却被 B 项目的人使用。若管理权仍只认 URL 里那个项目，A 项目的负责人就
+    管不了自己上传的那份——所以公共目录的管理权按"是否在某个项目里是负责人"判定。
+
+    刻意不放宽到"所有登录用户"：公共**可见**不等于公共**可改**。
+    """
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    if user.is_superuser:
+        return True
+    return ProjectMember.objects.filter(user=user, role__in=TEST_LEAD_ROLES).exists()
+
+
 def visible_project_ids(user):
     """返回用户可访问的项目 ID 集合；超级用户返回 None 表示不限制。"""
     if not user or not getattr(user, "is_authenticated", False):
@@ -145,3 +161,17 @@ class IsTestLead(IsProjectScoped):
 
     def has_permission(self, request, view):
         return is_test_lead(request.user, extract_project_id(view))
+
+
+class IsTestLeadAnywhere(permissions.BasePermission):
+    """公共目录（Skill Hub）的管理权：超管，或在任一项目里是测试负责人。
+
+    与 ``IsTestLead`` 的区别：后者把管理权锚定在 URL 里的那个项目，用于"作用于
+    该项目自己的资源"的动作；本类用于**公共、不归属任何单一项目**的资源
+    （例如给 Skill 补填能力阶段）。
+    """
+
+    message = "该操作仅允许平台管理员或项目测试负责人执行"
+
+    def has_permission(self, request, view):
+        return is_test_lead_anywhere(request.user)

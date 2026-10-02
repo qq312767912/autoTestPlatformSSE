@@ -157,8 +157,12 @@ class SkillZipUrlImportSerializer(serializers.Serializer):
 class SkillListSerializer(serializers.ModelSerializer):
     """Skill 列表序列化器（轻量）。
 
-    除基本信息外，额外给出四个**描述性元数据**字段，供 Skill Hub 的筛选器与
-    卡片标签使用：``source_type``(+label) / ``stage``(+label) / ``version``。
+    除基本信息外，额外给出**描述性元数据**字段，供 Skill Hub 的筛选器与卡片标签
+    使用：``source_type``(+label) / ``stage``(+label, +``stage_source``) / ``version``
+    / ``copies``。
+
+    ``stage`` 取「版本 manifest 声明优先，缺失回落管理员补填的 ``declared_stage``」，
+    ``stage_source`` 告诉前端这个阶段是包自己声明的还是管理员补的。
 
     它们取自"展示版本"（``context["versions"]``：活跃版本优先，否则最新一版），
     由视图**一次性批量取好**注入 context —— 列表页不许按 Skill 逐个查版本（N+1）。
@@ -170,7 +174,9 @@ class SkillListSerializer(serializers.ModelSerializer):
     source_type_label = serializers.SerializerMethodField()
     stage = serializers.SerializerMethodField()
     stage_label = serializers.SerializerMethodField()
+    stage_source = serializers.SerializerMethodField()
     version = serializers.SerializerMethodField()
+    copies = serializers.SerializerMethodField()
 
     class Meta:
         model = Skill
@@ -179,7 +185,10 @@ class SkillListSerializer(serializers.ModelSerializer):
             'creator_name', 'created_at',
             # 描述性元数据：筛选器与卡片标签用，不参与任何可用性判定。
             'source_type', 'source_type_label',
-            'stage', 'stage_label', 'version',
+            'stage', 'stage_label', 'stage_source', 'version',
+            # 同名副本数（Skill Hub 是公共目录，同名归并成一条展示后，
+            # 要把"库里其实有几份"显式告诉使用者，而不是把多重性藏起来）。
+            'copies',
         ]
 
     # -- 展示版本（元数据来源，不是可用性判据） ---------------------------
@@ -200,10 +209,28 @@ class SkillListSerializer(serializers.ModelSerializer):
         return dict(SkillVersion.SOURCE_TYPE_CHOICES).get(version.source_type, version.source_type)
 
     def get_stage(self, obj):
+        """展示阶段：版本 manifest 声明的优先，缺失时回落到管理员补填的声明。
+
+        存量迁移来的包 manifest 里没有 stage（`needs_manual_stage_binding`），
+        而版本包不可改写，所以只能在 Skill 上补一个声明位（`declared_stage`）。
+        """
+        stage, _ = self._stage_of(obj)
+        return stage
+
+    def _stage_of(self, obj):
+        """返回 ``(阶段标识符, 来源)``；来源取值 ``manifest`` / ``declared`` / ``''``。"""
         version = self._version(obj)
-        if version is None:
-            return ''
-        return str((version.manifest or {}).get('stage') or '')
+        declared_in_manifest = str(((version.manifest if version is not None else None) or {}).get('stage') or '')
+        if declared_in_manifest:
+            return declared_in_manifest, 'manifest'
+        declared = str(getattr(obj, 'declared_stage', '') or '')
+        if declared:
+            return declared, 'declared'
+        return '', ''
+
+    def get_stage_source(self, obj):
+        """阶段是从哪来的，供前端区分「包自己声明的」和「管理员补的」。"""
+        return self._stage_of(obj)[1]
 
     def get_stage_label(self, obj):
         stage = self.get_stage(obj)
@@ -219,6 +246,11 @@ class SkillListSerializer(serializers.ModelSerializer):
         version = self._version(obj)
         return version.version if version is not None else ''
 
+    def get_copies(self, obj):
+        """该名字在库里的副本数（1 表示只有一条，>1 说明是归并展示）。"""
+        copies = self.context.get('copies') or {}
+        return int(copies.get(obj.name, 1))
+
 
 class SkillToggleSerializer(serializers.ModelSerializer):
     """Skill 启用/禁用切换序列化器"""
@@ -226,6 +258,35 @@ class SkillToggleSerializer(serializers.ModelSerializer):
     class Meta:
         model = Skill
         fields = ['is_active']
+
+
+class SkillStageBindingSerializer(serializers.Serializer):
+    """给 Skill 补填 / 撤销能力阶段（Skill Hub「阶段未声明」的补救入口）。
+
+    为什么要在服务端卡取值：写进 ``declared_stage`` 的裸标识符会一路走进阶段匹配
+    逻辑（``task_binding`` 的 ``Q(declared_stage=stage)``）。拼错的阶段**不会报错**，
+    只会让这个 Skill 永远匹配不上任何阶段——那种问题在页面上看起来和"没填"一样，
+    极难排查。所以只放行登记过的业务能力阶段。
+
+    取值真值 = ``capability_registry.BUSINESS_CAPABILITY_STAGES``（8 类业务能力）。
+    **不含** ``knowledge_query``：它属 ``PLATFORM_UTILITY_STAGES``（平台工具），
+    不参与业务能力口径，也不该被绑成某个阶段的实现。
+    空串表示撤销声明（允许，否则填错了退不回去）。
+    """
+
+    stage = serializers.CharField(required=True, allow_blank=True, max_length=64)
+
+    def validate_stage(self, value):
+        from knowledge_evolution.capability_registry import BUSINESS_CAPABILITY_STAGES
+
+        value = (value or '').strip()
+        if not value:
+            return ''
+        if value not in BUSINESS_CAPABILITY_STAGES:
+            raise serializers.ValidationError(
+                f'未知的能力阶段：{value}；可选值见 capability_registry.BUSINESS_CAPABILITY_STAGES'
+            )
+        return value
 
 
 # ---------------------------------------------------------------------------

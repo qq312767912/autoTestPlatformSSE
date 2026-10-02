@@ -13,9 +13,10 @@ from rest_framework.response import Response
 from wharttest_django.viewsets import BaseModelViewSet
 from projects.models import Project
 from projects.roles import (
-    IsProjectScoped, IsTestExecutor, IsTestLead,
+    IsProjectScoped, IsTestExecutor, IsTestLead, IsTestLeadAnywhere,
     business_role, is_test_executor, is_test_lead, visible_project_ids,
 )
+from .canonical import canonical_skills
 from .exporter import SkillPackageExporter
 from .models import Skill, SkillVersion
 from .serializers import (
@@ -24,6 +25,7 @@ from .serializers import (
     SkillVersionSerializer, SkillVersionListSerializer,
     SkillPreflightSerializer, SkillCandidateCreateSerializer,
     SkillVersionDiffQuerySerializer, SkillQuarantineSerializer,
+    SkillStageBindingSerializer,
     SkillVersionValidateSerializer,
 )
 from .validation import SkillPackageValidationService
@@ -54,12 +56,16 @@ class SkillViewSet(BaseModelViewSet):
     Skill 视图集
 
     支持：
-    - GET /projects/{project_id}/skills/ - 列表
+    - GET /projects/{project_id}/skills/ - 列表（**公共目录**：不按项目过滤，同名归并成一条正本）
     - POST /projects/{project_id}/skills/upload/ - 上传
     - POST /projects/{project_id}/skills/import-git/ - 从 Git 导入
     - GET /projects/{project_id}/skills/{id}/ - 详情
     - PATCH /projects/{project_id}/skills/{id}/ - 更新（仅 is_active）
     - DELETE /projects/{project_id}/skills/{id}/ - 删除
+    - POST /projects/{project_id}/skills/{id}/stage/ - 补填能力阶段（超管 / 任一项目测试负责人）
+
+    URL 仍保留嵌套的 ``project_pk``：它在**读**侧不再起过滤作用（列表是公共的），
+    在**写**侧仍是"这份资源算在哪个项目名下"的锚点（上传出处、删除边界）。
     """
 
     parser_classes = [JSONParser, MultiPartParser, FormParser]
@@ -72,18 +78,31 @@ class SkillViewSet(BaseModelViewSet):
     })
     #: 仅做配置返回或远程代理拉取、不读写 Skill 数据的动作，只要求登录。
     PUBLIC_ACTIONS = frozenset({'store_config', 'store_manifest', 'store_readme'})
+    #: 读侧动作：Skill Hub 是公共目录，任何登录用户看到的都是同一份内容。
+    #: 去掉这里的项目过滤 = "每个项目看到的 Skill Hub 是一样的"，这是用户明确要求的口径。
+    PUBLIC_READ_ACTIONS = frozenset({'list', 'retrieve'})
+    #: 需要跨项目取对象的动作：作用于**公共池里的一条 Skill**，而不是"URL 那个项目
+    #: 名下的 Skill"。所以对象查询不能加项目过滤，否则 A 项目的负责人改不到
+    #: A 项目自己上传、但正本落在别的项目名下的那份（同名归并后这是常态）。
+    #: 权限由 ``IsTestLeadAnywhere`` 单独把关，不靠项目过滤兜底。
+    GLOBAL_LOOKUP_ACTIONS = PUBLIC_READ_ACTIONS | frozenset({'bind_stage'})
 
     def get_queryset(self):
-        """所有读写一律锁定 URL 中的项目，杜绝跨项目读取与 UUID 猜测。
+        """读侧公共、写侧锚定项目。
 
-        原实现返回 ``Skill.objects.all()``，任何登录用户都能列出、读取、修改
-        和删除全平台的 Skill。这里改为强制按嵌套路由的 ``project_pk`` 过滤；
-        非嵌套场景（权限类反查模型信息、schema 生成）退化为"仅当前用户可见
-        项目"，绝不返回全量。
+        - ``list`` / ``retrieve`` / ``bind_stage``：返回全平台 Skill —— Skill Hub 是
+          公共目录，任何项目进来看到的是同一份内容。
+        - 其余动作（上传、启停、删除、版本治理）：仍按嵌套路由的 ``project_pk``
+          过滤。**这是刻意保留的边界**——不能因为读侧公共了，就让"A 项目的 URL"
+          变成能改到 B 项目 Skill 的后门。
+          非嵌套场景（权限类反查模型信息、schema 生成）退化为"仅当前用户可见项目"。
+
+        ``active_version`` 一起预取：列表页要用它作为"展示版本"的优先项，
+        不预取就会按 Skill 逐个查版本（N+1）。
         """
-        # ``active_version`` 一起预取：列表页要用它作为"展示版本"的优先项，
-        # 不预取就会按 Skill 逐个查版本（N+1）。
         queryset = Skill.objects.select_related('project', 'creator', 'active_version')
+        if getattr(self, 'action', None) in self.GLOBAL_LOOKUP_ACTIONS:
+            return queryset
         project_id = (getattr(self, 'kwargs', None) or {}).get('project_pk')
         if project_id:
             return queryset.filter(project_id=project_id)
@@ -98,6 +117,14 @@ class SkillViewSet(BaseModelViewSet):
         # store_config / store_manifest / store_readme 仅做配置返回或远程代理拉取，不读写 Skill 数据。
         if action in self.PUBLIC_ACTIONS:
             return [IsAuthenticated()]
+        # 读侧公共：Skill Hub 的目录内容对所有项目一致，不再要求"是本项目成员"。
+        # 注意这里放开的是**可见性**，不是可改性——写侧仍各自把关。
+        if action in self.PUBLIC_READ_ACTIONS:
+            return [IsAuthenticated()]
+        # 补填能力阶段作用于公共池里的 Skill（不归属单一项目），所以要求
+        # "超管 或在任一项目里是测试负责人"，而不是 URL 那个项目的负责人。
+        if action == 'bind_stage':
+            return [IsAuthenticated(), IsTestLeadAnywhere()]
         # hub_access 只回答"调用者在本项目属于哪种业务角色"，供控制台做按钮门控，
         # 不读任何 Skill 数据，因此不绑定具体业务角色：它要求的只是"是本项目成员"。
         # 非成员应当拿到 403「无权访问该项目」，而不是被误报成"缺少执行人员权限"——
@@ -141,6 +168,8 @@ class SkillViewSet(BaseModelViewSet):
             return SkillZipUrlImportSerializer
         if self.action == 'partial_update':
             return SkillToggleSerializer
+        if self.action == 'bind_stage':
+            return SkillStageBindingSerializer
         return SkillSerializer
 
     def get_project(self):
@@ -149,19 +178,44 @@ class SkillViewSet(BaseModelViewSet):
         return get_object_or_404(Project, id=project_id)
 
     def list(self, request, *args, **kwargs):
-        """获取项目下的所有 Skills
+        """获取公共 Skill 目录
+
+        **不按项目过滤**：Skill Hub 是公共目录，任何项目进来看到的是同一份内容。
+
+        同名副本归并成一条「正本」展示（存量迁移与商店安装会按项目各落一份，实测
+        34 条 Skill 只有 20 个名字），并把副本数一并返回——多重性要显式给出，而不是
+        藏起来。归并规则与"为什么不直接合并数据"见 ``skills.canonical``。
 
         一并给出每个 Skill 的**展示版本**元数据（来源 / 声明阶段 / 版本号），
-        供 Skill Hub 的筛选器与卡片标签使用；版本一次批量取齐，不按 Skill 逐个查。
+        供筛选器与卡片标签使用；版本一次批量取齐，不按 Skill 逐个查。
         """
-        queryset = self.get_queryset()
+        skills, copies = canonical_skills(self.get_queryset())
         serializer = self.get_serializer(
-            queryset, many=True, context={'versions': self._display_versions(queryset)},
+            skills, many=True, context={
+                'versions': self._display_versions(skills),
+                'copies': copies,
+            },
         )
+        # 随信封带回"调用者能不能管这个公共目录"和可绑定的阶段清单：
+        # 放在信封里而不是每行——它与具体哪条 Skill 无关（同名的正本可能落在别的
+        # 项目名下，按 URL 项目判角色会判错）。可绑定阶段复用后端能力注册表的真值，
+        # 免得前端再抄一份阶段清单、两边慢慢漂移。
+        from knowledge_evolution.capability_registry import (
+            BUSINESS_CAPABILITY_STAGES, STAGE_LABELS,
+        )
+        from projects.roles import is_test_lead_anywhere
+
         return Response({
             'code': 200,
             'message': '获取成功',
-            'data': serializer.data
+            'data': serializer.data,
+            'meta': {
+                'can_bind_stage': is_test_lead_anywhere(getattr(request, 'user', None)),
+                'stage_options': [
+                    {'value': stage, 'label': STAGE_LABELS.get(stage, stage)}
+                    for stage in BUSINESS_CAPABILITY_STAGES
+                ],
+            },
         })
 
     @staticmethod
@@ -204,6 +258,40 @@ class SkillViewSet(BaseModelViewSet):
             'code': 200,
             'message': '获取成功',
             'data': serializer.data
+        })
+
+    @action(detail=True, methods=['post'], url_path='stage')
+    def bind_stage(self, request, *args, **kwargs):
+        """补填 / 撤销 Skill 的能力阶段（Skill Hub 上「阶段未声明」的补救入口）。
+
+        为什么阶段只能记在 Skill 上：存量迁移来的包 manifest 里没有 ``stage``，
+        而版本包是**不可变产物**——改写 manifest 会让包哈希对不上（``package_tampered``），
+        自进化会在"基线包被篡改"处中止。所以补填走 ``Skill.declared_stage``：
+        解析时版本 manifest 声明**优先**，它只作回落（见 ``SkillListSerializer._stage_of``）。
+
+        也刻意**不写** ``Skill.capability``：那是能力注册表（kind / evaluation_mode /
+        gate_rules / active_release），拿它当一个"阶段标签"用会扭曲语义。
+
+        权限 = ``IsTestLeadAnywhere``（平台超管，或在任一项目里是测试负责人）。
+        对象查询走全局（见 ``GLOBAL_LOOKUP_ACTIONS``）：同名的正本可能落在别的
+        项目名下，按 URL 项目过滤会让 A 项目的负责人改不到自己上传的那份。
+
+        副作用：无。不改版本包、不改发布单元，对飞轮与自进化链路零影响。
+        """
+        skill = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        stage = serializer.validated_data['stage']
+        skill.declared_stage = stage
+        skill.save(update_fields=['declared_stage', 'updated_at'])
+        logger.info(
+            "Skill 阶段声明已更新：skill=%s name=%s stage=%r by=%s",
+            skill.pk, skill.name, stage, getattr(request.user, 'username', None),
+        )
+        return Response({
+            'code': 200,
+            'message': '已更新阶段声明' if stage else '已撤销阶段声明',
+            'data': {'id': skill.pk, 'name': skill.name, 'declared_stage': skill.declared_stage},
         })
 
     @action(detail=False, methods=['get'], url_path='hub-access')

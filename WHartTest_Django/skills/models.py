@@ -82,6 +82,21 @@ class Skill(models.Model):
         verbose_name=_('当前活跃版本'),
         help_text='运行时快速解析用的活跃版本指针；权威状态仍以版本关联的发布单元为准',
     )
+    # 「阶段未声明」的补救入口（Skill Hub 上由管理员补填）。
+    # 为什么不写进版本 manifest：版本包是不可变产物，改写 manifest 会让包哈希对不上
+    # （package_tampered），自进化会在"基线包被篡改"处中止。
+    # 为什么不复用 capability：CapabilityDefinition 是重量级的能力注册表
+    # （kind / evaluation_mode / gate_rules / active_release），拿它当一个
+    # "阶段标签"用会扭曲语义。所以单独放一个轻量声明位。
+    # 解析顺序：版本 manifest 声明的 stage 优先，缺失时回落到这里。
+    declared_stage = models.CharField(
+        _('声明能力阶段'),
+        max_length=64,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text='manifest 未声明阶段的 Skill 由管理员补填，取值见 capability_registry.STAGE_LABELS',
+    )
     created_at = models.DateTimeField(_('创建时间'), auto_now_add=True)
     updated_at = models.DateTimeField(_('更新时间'), auto_now=True)
 

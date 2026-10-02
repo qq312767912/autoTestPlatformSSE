@@ -77,19 +77,28 @@ class TaskSkillBindingService:
             skill: 用户在本次审查中显式选中的 Skill。给了它就以它为准，
                 不再按名称去猜（同名多条时猜错会静默用错包）。
         """
+        from django.db.models import Count
+
+        from skills.canonical import pick_canonical
         from skills.models import Skill
 
         project = review.project
-        project_id = getattr(project, "pk", project)
         workflow_id = str(review.pk)
         candidate = skill if skill is not None else getattr(review, "selected_skill", None)
 
         if candidate is None:
-            candidate = (
+            # 默认用例审查 Skill 在**公共池**里按名字找，再取正本。
+            # 不能直接 ``.first()``：同名可能有多条副本（实测
+            # ``test-case-clarity-review`` 在 3 个项目里各有一条），查询顺序取到哪条
+            # 是任意的 —— 可能挑到只有 ``0.0.0-migrated``（无包目录、跑不起来）那份，
+            # 于是"审查明知有可用包却起不来"。正本规则见 ``skills.canonical``。
+            rows = list(
                 Skill.objects
-                .filter(project_id=project_id, name=DEFAULT_CASE_REVIEW_SKILL_NAME)
-                .first()
+                .filter(name=DEFAULT_CASE_REVIEW_SKILL_NAME)
+                .annotate(n_versions=Count("versions"))
+                .select_related("active_version")
             )
+            candidate = pick_canonical(rows).get(DEFAULT_CASE_REVIEW_SKILL_NAME)
         if candidate is None:
             return {
                 "lock": None, "skill_version": None, "managed": False,
@@ -152,17 +161,31 @@ class TaskSkillBindingService:
         from skills.models import Skill
 
         project_id = getattr(project, "pk", project)
+        # ⚠️ ``project_id`` 在本方法内已不再参与过滤（Skill 是公共的，见下）；
+        # 保留它是为了日志与审计里仍能看出"这次是哪个项目发起的"。
         # "登记过"要按**任意版本**的 manifest 判断，不能只看活跃版本：
         # 只看活跃版本会把"有候选但还没审批"错判成"根本没登记"，于是静默放行。
+        #
+        # 阶段来源有三处，按优先级理解：
+        #   ① 版本 manifest 声明的 stage —— 包作者自己声明，最权威；
+        #   ② Skill.declared_stage —— 存量迁移包 manifest 里没有 stage，由管理员在
+        #      Skill Hub 上补填（版本包不可改写，只能记在 Skill 上）；
+        #   ③ 能力定义 CapabilityDefinition.stages —— 复合能力覆盖多个阶段。
+        #
+        # ⚠️ 这里**不再按 project 过滤**（2026-10-02 用户明确 Skill 是公共的）：
+        # Skill Hub 是公共目录，任何项目看到的是同一份内容，所以"平台有没有为这个
+        # 阶段登记 Skill"也应当是全局判据。继续按项目过滤会导致"管理员在 A 项目
+        # 补填的阶段，B 项目发起流程时仍报未登记"——表面填了、实际不生效。
         if skill is not None:
             # 显式指定了包，就不再按声明挑：否则"新链路阶段还没有包声明它"会把
             # 人选好的包直接判成"未登记"，回落到无版本溯源的默认行为——
             # 这与用户的意图正好相反。
-            registered = Skill.objects.filter(project_id=project_id, pk=getattr(skill, "pk", skill))
+            registered = Skill.objects.filter(pk=getattr(skill, "pk", skill))
         else:
             registered = Skill.objects.filter(
-                Q(versions__manifest__stage=stage) | Q(capability__stages__contains=[stage]),
-                project_id=project_id,
+                Q(versions__manifest__stage=stage)
+                | Q(declared_stage=stage)
+                | Q(capability__stages__contains=[stage]),
             ).distinct()
         if not registered.exists():
             if not allow_unmanaged:

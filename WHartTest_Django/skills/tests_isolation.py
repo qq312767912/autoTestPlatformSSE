@@ -1,11 +1,18 @@
-"""T01 验收测试：Skill 项目隔离与业务角色授权。
+"""T01 验收测试：Skill 的业务角色授权与**写侧**项目边界。
 
-覆盖 tasks.md T01 的验收项：
+覆盖 tasks.md T01 的验收项，外加 2026-10-02 的口径修订：
 
-- 跨项目读取、猜测 UUID、状态变更全部被拒绝（403/404）。
-- 列表接口不再返回全量 Skill，只返回 URL 指定项目的数据。
+- 跨项目**写**（状态变更、删除）全部被拒绝（403/404）。
 - 同项目授权矩阵：项目成员可读，非成员一律 403；测试负责人与测试执行人员的
   角色判定与 ``knowledge_evolution`` 既有约定一致。
+
+⚠️ **口径已修订（2026-10-02 用户明确）**：Skill 的内容对每个项目都是公开的，
+Skill Hub 是平台公共资源。所以**读侧不再按项目过滤**——列表返回的是公共目录
+（同名副本已归并成一条正本），详情也跨项目可读。原 T01 里"列表不再返回全量
+Skill""跨项目读取被拒绝""猜 UUID 404"三条读侧验收项**已作废**，对应的用例已
+改写为断言公共目录的行为（见 ``SkillProjectIsolationTests``）。
+
+写侧边界**未放宽**：上传、启停、删除、版本治理仍锚定 URL 中的项目。
 """
 from types import SimpleNamespace
 
@@ -90,7 +97,17 @@ class RoleMappingTests(TestCase):
 
 
 class SkillProjectIsolationTests(APITestCase):
-    """列表与详情必须锁定 URL 中的项目。"""
+    """**读侧是公共目录，写侧仍锁定 URL 中的项目。**
+
+    2026-10-02 用户明确口径：Skill 的内容对每个项目都是公开的 —— Skill Hub 是
+    平台公共资源，不是"某个项目名下的私产"。所以列表与详情不再按项目过滤，
+    任何项目进来看到的是同一份内容。
+
+    但这**不**等于把 URL 里的 ``project_pk`` 变成摆设：写操作（上传、启停、删除、
+    版本治理）仍锚定 URL 中的项目，否则"在 A 项目的路径下改到 B 项目的 Skill"
+    就成了后门。写侧的边界由 ``SkillWritePermissionTests`` 与
+    ``tests_public_catalogue.WriteSideStaysProjectAnchoredTests`` 各自钉住。
+    """
 
     def setUp(self):
         self.project = Project.objects.create(name="隔离项目 A")
@@ -110,20 +127,27 @@ class SkillProjectIsolationTests(APITestCase):
             return reverse("project-skills-list", kwargs={"project_pk": project.id})
         return reverse("project-skills-detail", kwargs={"project_pk": project.id, "pk": skill_id})
 
-    def test_list_only_returns_current_project_skills(self):
+    def test_list_returns_the_shared_catalogue(self):
+        """列表是公共目录：本项目的与别的项目的 Skill 都要出现（按名字排序）。"""
         response = self.client.get(self._url(self.project))
         self.assertEqual(response.status_code, 200)
         names = [item["name"] for item in response.data["data"]]
-        self.assertEqual(names, ["case-review"])
+        self.assertEqual(names, ["case-review", "foreign-skill"])
 
-    def test_cross_project_read_is_forbidden(self):
+    def test_read_does_not_require_membership_of_the_url_project(self):
+        """用户不是 B 项目的成员，照样能读 B 项目路径下的公共目录。"""
+        self.assertFalse(
+            ProjectMember.objects.filter(project=self.other_project, user=self.user).exists()
+        )
         response = self.client.get(self._url(self.other_project))
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("foreign-skill", [item["name"] for item in response.data["data"]])
 
-    def test_guessing_uuid_inside_other_project_is_not_found(self):
-        """在自己有权限的项目路径下猜别的项目的 UUID：查询集过滤后 404。"""
+    def test_foreign_skill_detail_is_readable(self):
+        """详情也是公共的：换一个 URL 项目也读得到。"""
         response = self.client.get(self._url(self.project, self.foreign_skill.id))
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["data"]["name"], "foreign-skill")
 
     def test_own_skill_detail_is_visible(self):
         response = self.client.get(self._url(self.project, self.skill.id))
@@ -140,7 +164,10 @@ class SkillProjectIsolationTests(APITestCase):
         self.client.force_authenticate(user=root)
         response = self.client.get(self._url(self.other_project))
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["data"][0]["name"], "foreign-skill")
+        # 按名字找，不按下标取 —— 列表已按名字排序，用下标断言会把"排序"和
+        # "内容"两件事混在一起（上一版就是这么写的）。
+        names = [item["name"] for item in response.data["data"]]
+        self.assertIn("foreign-skill", names)
 
 
 class SkillWritePermissionTests(APITestCase):
