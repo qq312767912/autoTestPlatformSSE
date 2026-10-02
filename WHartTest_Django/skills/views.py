@@ -81,7 +81,9 @@ class SkillViewSet(BaseModelViewSet):
         非嵌套场景（权限类反查模型信息、schema 生成）退化为"仅当前用户可见
         项目"，绝不返回全量。
         """
-        queryset = Skill.objects.select_related('project', 'creator')
+        # ``active_version`` 一起预取：列表页要用它作为"展示版本"的优先项，
+        # 不预取就会按 Skill 逐个查版本（N+1）。
+        queryset = Skill.objects.select_related('project', 'creator', 'active_version')
         project_id = (getattr(self, 'kwargs', None) or {}).get('project_pk')
         if project_id:
             return queryset.filter(project_id=project_id)
@@ -147,14 +149,52 @@ class SkillViewSet(BaseModelViewSet):
         return get_object_or_404(Project, id=project_id)
 
     def list(self, request, *args, **kwargs):
-        """获取项目下的所有 Skills"""
+        """获取项目下的所有 Skills
+
+        一并给出每个 Skill 的**展示版本**元数据（来源 / 声明阶段 / 版本号），
+        供 Skill Hub 的筛选器与卡片标签使用；版本一次批量取齐，不按 Skill 逐个查。
+        """
         queryset = self.get_queryset()
-        serializer = self.get_serializer(queryset, many=True)
+        serializer = self.get_serializer(
+            queryset, many=True, context={'versions': self._display_versions(queryset)},
+        )
         return Response({
             'code': 200,
             'message': '获取成功',
             'data': serializer.data
         })
+
+    @staticmethod
+    def _display_versions(skills):
+        """列表页的"展示版本"：活跃版本优先，其余取最新一版。
+
+        只用来给筛选器与卡片提供**描述性元数据**（来源 / 声明阶段 / 版本号），
+        **不是可用性判据** —— 可用性判据只有一处（``SkillRuntimeResolver``）。
+
+        刻意**包含不可运行**的版本：存量迁移那批（``package_path`` 为空、跑不起来）
+        恰恰是用户最需要"一眼看出它没包"的对象，若按可用性过滤，它们会显示成
+        "无来源 / 无版本"，反而把问题藏起来。
+        """
+        skills = list(skills)
+        if not skills:
+            return {}
+
+        versions = {}
+        # 一次查询取回全部版本，按 (skill, -created_at) 排序后在 Python 里取每 Skill 首条。
+        # 只取展示要用的列：``validation_report`` 等大字段不读。
+        for version in (
+            SkillVersion.objects
+            .filter(skill_id__in=[skill.pk for skill in skills])
+            .only('id', 'skill_id', 'version', 'source_type', 'manifest', 'created_at')
+            .order_by('skill_id', '-created_at')
+        ):
+            versions.setdefault(version.skill_id, version)
+
+        # 活跃版本优先：它代表"这个 Skill 现在认定的生产版本"。
+        for skill in skills:
+            if skill.active_version is not None:
+                versions[skill.pk] = skill.active_version
+        return versions
 
     def retrieve(self, request, *args, **kwargs):
         """获取 Skill 详情"""

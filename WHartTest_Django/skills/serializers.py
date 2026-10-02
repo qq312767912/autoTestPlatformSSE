@@ -155,15 +155,69 @@ class SkillZipUrlImportSerializer(serializers.Serializer):
 
 
 class SkillListSerializer(serializers.ModelSerializer):
-    """Skill 列表序列化器（轻量）"""
+    """Skill 列表序列化器（轻量）。
+
+    除基本信息外，额外给出四个**描述性元数据**字段，供 Skill Hub 的筛选器与
+    卡片标签使用：``source_type``(+label) / ``stage``(+label) / ``version``。
+
+    它们取自"展示版本"（``context["versions"]``：活跃版本优先，否则最新一版），
+    由视图**一次性批量取好**注入 context —— 列表页不许按 Skill 逐个查版本（N+1）。
+    取不到版本时统一返回空串，表示"这个 Skill 还没有版本"，不是错误。
+    """
+
     creator_name = serializers.CharField(source='creator.username', read_only=True, allow_null=True)
+    source_type = serializers.SerializerMethodField()
+    source_type_label = serializers.SerializerMethodField()
+    stage = serializers.SerializerMethodField()
+    stage_label = serializers.SerializerMethodField()
+    version = serializers.SerializerMethodField()
 
     class Meta:
         model = Skill
         fields = [
             'id', 'name', 'description', 'is_active',
-            'creator_name', 'created_at'
+            'creator_name', 'created_at',
+            # 描述性元数据：筛选器与卡片标签用，不参与任何可用性判定。
+            'source_type', 'source_type_label',
+            'stage', 'stage_label', 'version',
         ]
+
+    # -- 展示版本（元数据来源，不是可用性判据） ---------------------------
+
+    def _version(self, obj):
+        versions = self.context.get('versions') or {}
+        return versions.get(obj.pk)
+
+    def get_source_type(self, obj):
+        version = self._version(obj)
+        return version.source_type if version is not None else ''
+
+    def get_source_type_label(self, obj):
+        version = self._version(obj)
+        if version is None:
+            return ''
+        # 直接复用模型 choices 的中文标签，避免前端再抄一份来源映射。
+        return dict(SkillVersion.SOURCE_TYPE_CHOICES).get(version.source_type, version.source_type)
+
+    def get_stage(self, obj):
+        version = self._version(obj)
+        if version is None:
+            return ''
+        return str((version.manifest or {}).get('stage') or '')
+
+    def get_stage_label(self, obj):
+        stage = self.get_stage(obj)
+        if not stage:
+            return ''
+        # 阶段中文名真值在 capability_registry；未登记的自定义阶段原样返回，
+        # 不编造标签——"看到裸标识符"比"看到编出来的名字"更好排查。
+        from knowledge_evolution.capability_registry import STAGE_LABELS
+
+        return STAGE_LABELS.get(stage, stage)
+
+    def get_version(self, obj):
+        version = self._version(obj)
+        return version.version if version is not None else ''
 
 
 class SkillToggleSerializer(serializers.ModelSerializer):
