@@ -18,6 +18,40 @@
       </a-space>
     </div>
 
+    <!-- 类型筛选：来源 + 能力阶段。纯前端过滤，列表本来就是这个项目的全量。 -->
+    <div class="filter-bar">
+      <span class="filter-label">{{ text.filterLabel }}</span>
+      <a-select
+        v-model="sourceFilter"
+        class="filter-select"
+        size="small"
+        allow-clear
+        :placeholder="text.filterSourceAll"
+      >
+        <a-option v-for="opt in sourceOptions" :key="`src-${opt.value}`" :value="opt.value">
+          {{ opt.label }}（{{ opt.count }}）
+        </a-option>
+      </a-select>
+      <a-select
+        v-model="stageFilter"
+        class="filter-select"
+        size="small"
+        allow-clear
+        :placeholder="text.filterStageAll"
+      >
+        <a-option v-for="opt in stageOptions" :key="`stage-${opt.value}`" :value="opt.value">
+          {{ opt.label }}（{{ opt.count }}）
+        </a-option>
+      </a-select>
+      <span class="filter-summary">{{ text.filterSummary(filteredSkills.length, skills.length) }}</span>
+      <a-button v-if="hasFilter" type="text" size="mini" @click="clearFilters">
+        {{ text.clearFilters }}
+      </a-button>
+    </div>
+
+    <!-- 存量 Skill 的 manifest 没有声明阶段，筛选器只剩"未声明"一档是真实情况，先说清楚。 -->
+    <p v-if="stageFilterHint" class="filter-hint">{{ text.stageUndeclaredHint }}</p>
+
     <!-- Skills 列表 -->
     <a-spin :loading="loading">
       <div v-if="skills.length === 0" class="empty-state">
@@ -25,9 +59,14 @@
         <p>{{ text.emptyState }}</p>
       </div>
 
+      <div v-else-if="filteredSkills.length === 0" class="empty-state">
+        <icon-search style="font-size: 48px; color: #c0c4cc" />
+        <p>{{ text.filterEmpty }}</p>
+      </div>
+
       <div v-else class="skill-list">
         <div
-          v-for="skill in skills"
+          v-for="skill in filteredSkills"
           :key="skill.id"
           class="skill-card"
           :class="{ inactive: !skill.is_active }"
@@ -40,7 +79,21 @@
               @change="(val) => handleToggle(skill, val as boolean)"
             />
           </div>
-          <div class="skill-description">{{ skill.description }}</div>
+          <div class="skill-tags">
+            <a-tag v-if="skill.source_type_label" size="small" :color="sourceTagColor(skill.source_type)">
+              {{ skill.source_type_label }}
+            </a-tag>
+            <a-tag v-if="skill.stage_label" size="small" color="arcoblue">{{ skill.stage_label }}</a-tag>
+            <a-tag v-else size="small" color="gray">{{ text.stageUndeclared }}</a-tag>
+            <a-tag v-if="skill.version" size="small">{{ skill.version }}</a-tag>
+          </div>
+          <!-- 功能简介：卡片里最多两行，超出省略；悬浮看完整简介。 -->
+          <div class="skill-summary">
+            <span class="skill-summary__label">{{ text.summaryLabel }}</span>
+            <a-tooltip :content="skill.description" position="top" :disabled="!isSummaryClipped(skill.description)">
+              <div class="skill-description">{{ skill.description }}</div>
+            </a-tooltip>
+          </div>
           <div class="skill-footer">
             <span class="skill-meta">
               <icon-user /> {{ skill.creator_name }}
@@ -210,6 +263,15 @@ const text = computed(() => (
       }
     : {
         skillStore: 'Skill 商店',
+        summaryLabel: '功能简介',
+        filterLabel: '类型筛选',
+        filterSourceAll: '全部来源',
+        filterStageAll: '全部阶段',
+        filterSummary: (shown: number, total: number) => `显示 ${shown} / ${total}`,
+        clearFilters: '清空',
+        filterEmpty: '没有符合当前筛选条件的 Skill',
+        stageUndeclared: '阶段未声明',
+        stageUndeclaredHint: '本项目的 Skill 都还没有在 manifest 里声明能力阶段，阶段筛选目前只有「阶段未声明」一档；补齐需要在 Skill 进化工坊按阶段绑定。',
         importFromGit: '从 Git 导入',
         uploadSkill: '上传 Skill',
         emptyState: '暂无 Skills，点击上方按钮上传',
@@ -257,6 +319,83 @@ const importing = ref(false)
 const showApiKeyConfirm = ref(false)
 const pendingApiKeySkillNames = ref<string[]>([])
 const pendingApiKeyAction = ref<'upload' | 'git' | null>(null)
+
+// ---------------- 类型筛选（来源 / 能力阶段） ----------------
+// 纯前端过滤：列表拿到的是本项目全量（量级十几条），不必为此加后端参数。
+// 两个维度都来自展示版本的元数据：来源（source_type）100% 有值；阶段（manifest.stage）
+// 存量包大多没声明，会落进「阶段未声明」一档——那是真实情况，不掩盖。
+const sourceFilter = ref<string | undefined>(undefined)
+const stageFilter = ref<string | undefined>(undefined)
+
+/** 「阶段未声明」的哨兵值：筛选器要能单独看"没声明阶段的那批"才有用。 */
+const UNDECLARED_STAGE = '__undeclared__'
+
+const hasFilter = computed(() => Boolean(sourceFilter.value || stageFilter.value))
+
+const sourceOptions = computed(() => {
+  const counter = new Map<string, { count: number; label: string }>()
+  for (const skill of skills.value) {
+    if (!skill.source_type) continue
+    const hit = counter.get(skill.source_type)
+    if (hit) { hit.count += 1 } else {
+      counter.set(skill.source_type, { count: 1, label: skill.source_type_label || skill.source_type })
+    }
+  }
+  return [...counter.entries()]
+    .map(([value, meta]) => ({ value, ...meta }))
+    .sort((a, b) => b.count - a.count)
+})
+
+const stageOptions = computed(() => {
+  const counter = new Map<string, { count: number; label: string }>()
+  for (const skill of skills.value) {
+    const key = skill.stage || UNDECLARED_STAGE
+    const label = skill.stage
+      ? (skill.stage_label || skill.stage)
+      : text.value.stageUndeclared
+    const hit = counter.get(key)
+    if (hit) { hit.count += 1 } else { counter.set(key, { count: 1, label }) }
+  }
+  return [...counter.entries()]
+    .map(([value, meta]) => ({ value, ...meta }))
+    // 「未声明」永远排最后：它是"缺数据"的兜底，不该抢在真实阶段前面。
+    .sort((a, b) => {
+      const aLast = a.value === UNDECLARED_STAGE ? 1 : 0
+      const bLast = b.value === UNDECLARED_STAGE ? 1 : 0
+      return aLast - bLast || b.count - a.count
+    })
+})
+
+const filteredSkills = computed(() => skills.value.filter((skill) => {
+  if (sourceFilter.value && skill.source_type !== sourceFilter.value) return false
+  if (stageFilter.value && (skill.stage || UNDECLARED_STAGE) !== stageFilter.value) return false
+  return true
+}))
+
+/** 只有当"所有 Skill 都没声明阶段"时才提示，正常项目里不多一句废话。 */
+const stageFilterHint = computed(
+  () => skills.value.length > 0 && skills.value.every((skill) => !skill.stage),
+)
+
+const clearFilters = () => {
+  sourceFilter.value = undefined
+  stageFilter.value = undefined
+}
+
+/** 简介是否会被两行截断，决定要不要挂悬浮全文。按字符数粗判，省去逐卡量高。 */
+const isSummaryClipped = (description: string) => (description || '').length > 34
+
+/** 来源标签配色：四类来源一眼可辨，而不是全灰。 */
+const sourceTagColor = (sourceType: string) => {
+  switch (sourceType) {
+    case 'upload': return 'arcoblue'
+    case 'git': return 'purple'
+    case 'store': return 'green'
+    case 'evolution': return 'orangered'
+    case 'migration': return 'gray'
+    default: return 'gray'
+  }
+}
 
 const fetchSkills = async () => {
   loading.value = true
@@ -435,6 +574,69 @@ onMounted(() => {
   margin-bottom: 16px;
   flex-wrap: wrap;
   gap: 12px;
+}
+
+.filter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-fill-1);
+}
+
+.filter-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-2);
+}
+
+.filter-select {
+  width: 168px;
+}
+
+.filter-summary {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--color-text-3);
+}
+
+.filter-hint {
+  margin: 8px 0 0;
+  padding: 6px 12px;
+  border-left: 3px solid #ff9a2e;
+  border-radius: 6px;
+  background: var(--color-warning-light-1, #fff7e8);
+  color: var(--color-text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.skill-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.skill-summary {
+  margin-top: 12px;
+  margin-bottom: 12px;
+}
+
+.skill-summary__label {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  color: var(--color-text-3);
+}
+
+.skill-summary .skill-description {
+  margin-bottom: 0;
+  cursor: default;
 }
 
 .empty-state {

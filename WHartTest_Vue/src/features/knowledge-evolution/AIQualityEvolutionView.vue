@@ -12,6 +12,7 @@
       <nav v-if="primaryView==='data'" class="quick-tabs" aria-label="数据飞轮功能">
         <button type="button" :class="{active:quickMode==='console'}" @click="quickMode='console'">控制台</button>
         <button type="button" :class="{active:quickMode==='skills'}" @click="quickMode='skills'">Skill 进化工坊</button>
+        <button type="button" :class="{active:quickMode==='hub'}" @click="quickMode='hub'">Skill Hub</button>
       </nav>
 
       <div class="workspace-shell" :class="{'graph-layout':primaryView==='graph'}">
@@ -80,6 +81,16 @@
 
         <section v-else-if="quickMode === 'skills'" class="skill-hub-embed">
           <SkillHubConsole :project-id="projectStore.currentProjectId!" :key="`quality-skill-hub-${projectStore.currentProjectId}`" />
+        </section>
+
+        <!-- Skill Hub：与左侧菜单的 Skill Hub 页是同一份实现（SkillManager）。
+             两处入口都指向同一个组件，避免"同一套列表两处各写一遍"随后漂移。 -->
+        <section v-else-if="quickMode === 'hub'" class="skill-hub-embed">
+          <div class="embed-heading">
+            <h2>Skill Hub</h2>
+            <p>上传、从 Git 导入、从 Skill 商店发现并安装公开 Skill；按来源与能力阶段筛选。</p>
+          </div>
+          <SkillManager :project-id="projectStore.currentProjectId!" :key="`quality-skill-list-${projectStore.currentProjectId}`" />
         </section>
 
         <section v-else-if="workspace === 'overview'" class="panel launch-console">
@@ -394,7 +405,7 @@
               </div>
             </section>
           </div>
-          <p v-if="!pinsComplete" class="pin-warn">四个阶段都要选定一个<strong>可运行</strong>的 Skill 包才能进入下一步。没有合适的包时，请先到 Skill 广场上传该阶段的版本（上传即可用，无需先激活）。</p>
+          <p v-if="!pinsComplete" class="pin-warn">四个阶段都要选定一个<strong>可运行</strong>的 Skill 包才能进入下一步。没有合适的包时，请先到 Skill Hub 上传该阶段的版本（上传即可用，无需先激活）。</p>
         </a-spin>
       </template>
 
@@ -581,7 +592,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
 import { IconBranch, IconDashboard, IconDownload, IconEdit, IconExperiment, IconFile, IconMessage, IconPlayArrow, IconPlus, IconRefresh, IconRight, IconRobot, IconSafe, IconStorage, IconUser } from '@arco-design/web-vue/es/icon';
 import { useProjectStore } from '@/store/projectStore';
-import { SkillHubConsole } from '@/features/skills';
+import { SkillHubConsole, SkillManager } from '@/features/skills';
 import KnowledgeGraphView from '@/features/knowledge-graph/KnowledgeGraphView.vue';
 import { WORKFLOW_STAGES as DEFAULT_WORKFLOW_STAGES } from '@/features/skills/utils/stages';
 import { confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, downloadSkillPackage, evaluateWorkflowStage, evolveCaseReview, executeWorkflowStage, generateCandidatesFromRun, getProjectQualityCockpit, getStageOutput, getWorkflowStageCatalog, getWorkflowStatus, listCapabilityReleases, listCaseReviewEvolutionCandidates, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, overrideWorkflowStage, preflightCaseReviewEvolution, scoreWorkflowStage, startWorkflow, updateCandidateState } from './service';
@@ -589,7 +600,7 @@ import type { CapabilityRelease, CaseReviewEvolutionCandidate, CaseReviewEvoluti
 
 type Workspace='overview'|'single'|'workflow'|'gold'|'evaluation'|'attribution'|'optimization';
 type PrimaryView='agents'|'data'|'graph';
-type QuickMode='console'|'skills';
+type QuickMode='console'|'skills'|'hub';
 const projectStore=useProjectStore(); const projectName=computed(()=>projectStore.currentProject?.name||'当前项目'); const workspace=ref<Workspace>('overview');
 const route=useRoute(),router=useRouter();
 const routeView=():PrimaryView=>['agents','data','graph'].includes(String(route.query.view))?String(route.query.view) as PrimaryView:'agents';
@@ -1171,6 +1182,11 @@ watch(()=>projectStore.currentProjectId,async id=>{if(id)await bootstrap()},{imm
 @media(max-width:720px){.qe-page{padding-right:10px;padding-left:10px}.hero{margin-right:-10px;margin-left:-10px;align-items:flex-start}.hero p{display:block;margin:5px 0 0}.hero-actions{width:100%;margin:10px 0 0}.workspace-tabs{border-radius:8px}.metrics{grid-template-columns:1fr}.metrics article{border-right:0;border-bottom:1px solid #f0f1f2!important}.loop{display:grid;grid-template-columns:1fr}.loop button{border-right:0;border-bottom:1px solid #e5e6eb}.team-panel .people-group{display:block}}
 .primary-tabs{display:flex;gap:24px;margin:0 -18px 14px;padding:0 22px;border-bottom:1px solid #e5e6eb;background:#fff}.primary-tabs button{position:relative;display:flex;height:48px;align-items:center;gap:7px;padding:0 2px;border:0;color:#4e5969;background:transparent;cursor:pointer;font-size:14px}.primary-tabs button:hover{color:#165dff}.primary-tabs button.active{color:#1d2129;font-weight:600}.primary-tabs button.active:after{content:"";position:absolute;right:0;bottom:-1px;left:0;height:2px;border-radius:2px;background:#165dff}.primary-tabs svg{font-size:16px}
 .quick-tabs{display:flex;width:max-content;gap:3px;margin:0 0 14px;padding:3px;border-radius:8px;background:#e5e6eb}.quick-tabs button{min-width:88px;padding:7px 16px;border:0;border-radius:6px;color:#4e5969;background:transparent;cursor:pointer}.quick-tabs button.active{color:#1d2129;background:#fff;box-shadow:0 1px 4px rgb(29 33 41/10%);font-weight:600}
+/* 数据飞轮里嵌页面的抬头（Skill Hub / 进化工坊各自带一层小标题，与外层 hero 区分） */
+.embed-heading{margin-bottom:12px}
+.embed-heading h2{margin:0;font-size:18px;color:#1d2129}
+.embed-heading p{margin:4px 0 0;font-size:13px;color:#86909c}
+.skill-hub-embed{display:flex;flex-direction:column}
 .launch-console{min-height:560px;padding:24px}.launch-heading{display:flex;align-items:flex-start;justify-content:space-between;padding-bottom:20px;border-bottom:1px solid #e5e6eb}.launch-heading span{font-size:10px;font-weight:700;letter-spacing:.14em;color:#165dff}.launch-heading h2{margin:5px 0 4px;font-size:20px}.launch-heading p{margin:0;color:#86909c}.launch-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:20px}.launch-grid button{display:grid;grid-template-columns:42px minmax(0,1fr) auto 14px;align-items:center;gap:12px;min-height:116px;padding:18px;text-align:left;border:1px solid #e5e6eb;border-radius:9px;background:#fff;cursor:pointer}.launch-grid button:hover{border-color:#94bfff;background:#f7faff;box-shadow:0 8px 20px rgb(22 93 255/7%)}.launch-grid button>i{display:grid;width:40px;height:40px;place-items:center;border-radius:8px;color:#165dff;background:#e8f3ff;font-size:18px;font-style:normal}.launch-grid b,.launch-grid small{display:block}.launch-grid b{font-size:14px}.launch-grid small{margin-top:5px;color:#86909c;line-height:1.45}.launch-grid em{align-self:start;padding:3px 7px;border-radius:10px;color:#86909c;background:#f2f3f5;font-size:10px;font-style:normal;white-space:nowrap}.launch-grid>button>svg{color:#86909c}
 .console-context{display:flex;align-items:center;gap:12px;margin-bottom:10px}.console-context button{display:flex;align-items:center;gap:4px;padding:6px 0;border:0;color:#165dff;background:transparent;cursor:pointer}.console-context button svg{transform:rotate(180deg)}.console-context span{color:#86909c;font-size:12px}.skill-hub-embed{min-height:680px;overflow:hidden;border:1px solid #e5e6eb;border-radius:10px;background:#fff}.knowledge-graph-embed{min-width:0}.graph-layout{grid-template-columns:minmax(0,1fr)}.knowledge-graph-embed :deep(.knowledge-graph-page){padding:0}.skill-hub-embed :deep(.skill-hub-console){border:0}
 @media(max-width:1320px){.launch-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}

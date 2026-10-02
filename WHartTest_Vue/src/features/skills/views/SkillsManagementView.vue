@@ -9,9 +9,10 @@
 
     <div v-if="currentProjectId" class="skills-container">
       <!--
-        Skill 广场（本页）只负责"上传和发现公开 Skill"：上传、Git 导入、从 Skill 商店安装、
-        启停与删除。Skill 的进化（候选版本、评测门禁、发布治理）不在这一页——
-        它属于数据飞轮，入口在「数据飞轮 → Skill 进化工坊」，避免同一套版本治理两处并存。
+        Skill Hub（本页）负责"上传和发现公开 Skill"：上传、Git 导入、从 Skill 商店安装、
+        按来源与能力阶段筛选，以及启停与删除。Skill 的进化（候选版本、评测门禁、发布治理）
+        不在这一页——它在数据飞轮的「Skill 进化工坊」页签里，避免同一套版本治理两处并存。
+        数据飞轮下也挂了同名页签，与本页是同一份实现（`SkillManager`）。
       -->
       <SkillManager :project-id="currentProjectId" :key="`skills-${currentProjectId}`" />
     </div>
@@ -35,13 +36,13 @@ const currentProjectId = computed(() => projectStore.currentProjectId)
 const pageText = computed(() => (
   isEnglish.value
     ? {
-        pageTitle: 'Skill Square',
-        pageDescription: 'Upload, import and discover public Skills, then manage the general Skills available to this project (enable, disable, delete).',
+        pageTitle: 'Skill Hub',
+        pageDescription: 'Upload, import and discover public Skills, then filter by source and capability stage; manage the general Skills available to this project (enable, disable, delete).',
         selectProjectFirst: 'Select a project from the navigation first',
       }
     : {
-        pageTitle: 'Skill 广场',
-        pageDescription: '上传、从 Git 导入、从 Skill 商店发现并安装公开 Skill；管理本项目可用的通用 Skill（启停与删除）。',
+        pageTitle: 'Skill Hub',
+        pageDescription: '上传、从 Git 导入、从 Skill 商店发现并安装公开 Skill；按来源与能力阶段筛选，管理本项目可用的通用 Skill（启停与删除）。',
         selectProjectFirst: '请先在导航栏选择一个项目',
       }
 ))

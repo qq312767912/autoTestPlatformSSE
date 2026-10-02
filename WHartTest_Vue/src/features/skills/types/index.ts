@@ -21,6 +21,18 @@ export interface SkillListItem {
   is_active: boolean
   creator_name: string
   created_at: string
+  /**
+   * 展示版本的元数据（来源 / 声明阶段 / 版本号）。
+   *
+   * 取自"展示版本"（活跃版本优先，否则最新一版），**纯描述性**，
+   * 不参与任何可用性判定——可用性判据只有后端一处（`SkillVersion.is_runnable`）。
+   * Skill 一个版本都没有时统一为空串。
+   */
+  source_type: string
+  source_type_label: string
+  stage: string
+  stage_label: string
+  version: string
 }
 
 export interface SkillUploadResponse {

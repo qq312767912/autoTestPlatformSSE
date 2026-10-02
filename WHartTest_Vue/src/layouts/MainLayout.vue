@@ -435,7 +435,9 @@ const operationLogsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Logs'
 const testHostConfigMenuLabel = computed(() => (locale.value === 'en-US' ? 'Test Host Mapping' : tl('测试域名配置')));
 const modelsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Models' : tl('LLM配置')));
 const mcpMenuLabel = computed(() => (locale.value === 'en-US' ? 'MCP' : tl('MCP配置')));
-const skillsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Skills' : tl('Skills管理')));
+// 页面名改叫「Skill Hub」后，中英界面同形：它既是英文名也是中文界面里的正式称谓，
+// 因此两边都直出字面量，不再走 tl('Skills管理')（该词条已同步改为 Skill Hub）。
+const skillsMenuLabel = computed(() => 'Skill Hub');
 const anonymizationMenuLabel = computed(() => (locale.value === 'en-US' ? 'Anonymize' : tl('文档脱敏')));
 
 // 更新说明预览（显示完整内容）
