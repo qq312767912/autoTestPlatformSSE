@@ -140,7 +140,7 @@ export class SkillService {
     if (response.success && api?.data) {
       return api.data
     }
-    throw new Error(api?.message || response.error || '获取 Skill 中心配置失败')
+    throw new Error(api?.message || response.error || '获取 Skill 商店配置失败')
   }
 
   /**

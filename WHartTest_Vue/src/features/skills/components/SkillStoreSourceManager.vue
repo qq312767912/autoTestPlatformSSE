@@ -124,7 +124,7 @@ const { isEnglish } = useAppI18n()
 const text = computed(() => (
   isEnglish.value
     ? {
-        title: 'Manage Skill Hub Sources',
+        title: 'Manage Skill Store Sources',
         defaultSourceTitle: 'Default source',
         builtinTag: 'Built-in',
         defaultSourceHint: 'Configured by the platform. Cannot be modified here.',
@@ -149,7 +149,7 @@ const text = computed(() => (
         deleteSuccess: 'Source removed',
       }
     : {
-        title: '管理 Skill 中心源',
+        title: '管理 Skill 商店源',
         defaultSourceTitle: '默认源',
         builtinTag: '内置',
         defaultSourceHint: '由平台部署方配置，此处不可修改。',
@@ -157,7 +157,7 @@ const text = computed(() => (
         customSourcesTitle: '自定义源',
         addSource: '添加源',
         fieldName: '显示名称',
-        fieldNamePlaceholder: '例如：公司内网 Skill 中心',
+        fieldNamePlaceholder: '例如：公司内网 Skill 商店',
         fieldBaseUrl: '基础 URL',
         fieldBaseUrlPlaceholder: 'https://example.com/path/to/store/',
         fieldBaseUrlTip: '必须为 HTTPS，且应是包含 manifest.json 的目录。',

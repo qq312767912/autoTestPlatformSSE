@@ -9,9 +9,9 @@
 
     <div v-if="currentProjectId" class="skills-container">
       <!--
-        这一页只负责"管理项目可用的通用 Skill"：上传、Git 导入、从 Skill 中心安装、
-        启停与删除。Skill 的生产控制台（候选版本、评测门禁、发布治理）不在这一页——
-        它属于数据飞轮，入口在「数据飞轮 → Skill Hub」，避免同一套版本治理两处并存。
+        Skill 广场（本页）只负责"上传和发现公开 Skill"：上传、Git 导入、从 Skill 商店安装、
+        启停与删除。Skill 的进化（候选版本、评测门禁、发布治理）不在这一页——
+        它属于数据飞轮，入口在「数据飞轮 → Skill 进化工坊」，避免同一套版本治理两处并存。
       -->
       <SkillManager :project-id="currentProjectId" :key="`skills-${currentProjectId}`" />
     </div>
@@ -35,13 +35,13 @@ const currentProjectId = computed(() => projectStore.currentProjectId)
 const pageText = computed(() => (
   isEnglish.value
     ? {
-        pageTitle: 'Skills Management',
-        pageDescription: 'Manage the general Skills available to this project: upload a package, import from Git, install from the Skill Hub, then enable, disable or delete them.',
+        pageTitle: 'Skill Square',
+        pageDescription: 'Upload, import and discover public Skills, then manage the general Skills available to this project (enable, disable, delete).',
         selectProjectFirst: 'Select a project from the navigation first',
       }
     : {
-        pageTitle: 'Skills 管理',
-        pageDescription: '管理本项目可用的通用 Skill：上传、从 Git 导入、从 Skill 中心安装，以及启停与删除。',
+        pageTitle: 'Skill 广场',
+        pageDescription: '上传、从 Git 导入、从 Skill 商店发现并安装公开 Skill；管理本项目可用的通用 Skill（启停与删除）。',
         selectProjectFirst: '请先在导航栏选择一个项目',
       }
 ))

@@ -380,8 +380,10 @@ export async function preflightCaseReviewEvolution(
 /**
  * 发起自进化：从这份已确认报告派生 Skill 候选版本。
  *
- * 返回的候选一律是 `draft`，**不会**自动激活——它还要走 Skill Hub 的评测与负责人
- * 审批。`active_untouched` 是"派生过程没碰活跃包"的断言，界面上要如实显示。
+ * 返回的候选一律是 `draft`，**不会**自动顶掉正在使用的版本——已激活的 Skill 要
+ * 在 Skill 进化工坊走完评测与负责人审批才会切包；未激活的 Skill 本来就在用最新的
+ * 可运行版本，但派生候选仍需人工激活才会生效（激活是钉版手段，见 requirements §R13.1）。
+ * `active_untouched` 是"派生过程没碰活跃包"的断言，界面上要如实显示。
  */
 export async function evolveCaseReview(
   projectId: number,

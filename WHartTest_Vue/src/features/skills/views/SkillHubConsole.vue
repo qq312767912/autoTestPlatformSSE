@@ -3,13 +3,13 @@
     <!-- 页面抬头只回答三个问题：这里是什么、当前有多少能力、下一步能做什么。 -->
     <header class="console__bar">
       <div class="console__bar-left">
-        <div class="console__brand-mark">S</div>
+        <div class="console__brand-mark">E</div>
         <div class="console__heading">
           <div class="console__heading-line">
-            <h2 class="console__title">Skill Hub</h2>
+            <h2 class="console__title">Skill 进化工坊</h2>
             <a-tag size="small" :color="isMember ? 'arcoblue' : 'red'">{{ roleLabel }}</a-tag>
           </div>
-          <p>管理项目使用的 Skill、候选版本与发布门禁</p>
+          <p>让 Skill 进化：候选版本、评测门禁与发布治理</p>
         </div>
       </div>
 
@@ -43,7 +43,7 @@
       </a-space>
     </header>
 
-    <section v-if="isMember" class="console__overview" aria-label="Skill Hub 概览">
+    <section v-if="isMember" class="console__overview" aria-label="Skill 进化工坊 概览">
       <div class="console__metric">
         <span class="console__metric-value">{{ catalogStats.total }}</span>
         <span class="console__metric-label">全部 Skill</span>

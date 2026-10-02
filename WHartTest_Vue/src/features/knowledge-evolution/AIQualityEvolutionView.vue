@@ -11,7 +11,7 @@
 
       <nav v-if="primaryView==='data'" class="quick-tabs" aria-label="数据飞轮功能">
         <button type="button" :class="{active:quickMode==='console'}" @click="quickMode='console'">控制台</button>
-        <button type="button" :class="{active:quickMode==='skills'}" @click="quickMode='skills'">Skill Hub</button>
+        <button type="button" :class="{active:quickMode==='skills'}" @click="quickMode='skills'">Skill 进化工坊</button>
       </nav>
 
       <div class="workspace-shell" :class="{'graph-layout':primaryView==='graph'}">
@@ -122,7 +122,7 @@
           </div>
 
           <!-- 进化结果常驻页面：只在弹窗里闪一下就没了的话，关掉后连候选版本号和
-               下载入口都找不回来，用户只能去 Skill Hub 里翻。 -->
+               下载入口都找不回来，用户只能去 Skill 进化工坊里翻。 -->
           <div v-if="reviewEvolutionResult" class="start-result">
             <div class="start-result-head">
               <div>
@@ -178,7 +178,9 @@
             </div>
             <pre v-if="reviewEvolutionDiffText" class="output-content">{{ reviewEvolutionDiffText }}</pre>
             <p class="detail-note">
-              候选版本<strong>尚未激活</strong>：需在 Skill Hub 完成评测与负责人审批后才会生效；
+              候选版本<strong>尚未激活</strong>。激活是可选的钉版手段：该项目若已有激活的生产版本，
+              需在 Skill 进化工坊完成评测与负责人审批后才会切到新包；若此前没有激活版本，
+              新包已经是最新的可运行版本，下一次运行即按新包执行。
               回滚目标 {{ reviewEvolutionResult.rollback_target }}。
             </p>
           </div>
@@ -386,13 +388,13 @@
                     <a-tag v-if="skill.declared_stage && skill.declared_stage!==item.stage" size="small" color="orange">声明 {{ skill.declared_stage_label }}</a-tag>
                     <a-tag v-if="!skill.runnable" size="small" color="gray">不可运行</a-tag>
                   </div>
-                  <small>{{ skill.version || '无活跃版本' }}<template v-if="skill.package_sha256"> · sha {{ skill.package_sha256.slice(0,10) }}</template></small>
+                  <small>{{ skill.version || '无可用版本' }}<template v-if="skill.package_sha256"> · sha {{ skill.package_sha256.slice(0,10) }}</template></small>
                 </button>
                 <p v-if="!pinCandidates(item.stage).length" class="pin-empty">没有匹配的 Skill 包</p>
               </div>
             </section>
           </div>
-          <p v-if="!pinsComplete" class="pin-warn">四个阶段都要选定一个<strong>可运行</strong>的 Skill 包才能进入下一步。没有合适的包时，请先到 Skill Hub 上传并激活该阶段的版本。</p>
+          <p v-if="!pinsComplete" class="pin-warn">四个阶段都要选定一个<strong>可运行</strong>的 Skill 包才能进入下一步。没有合适的包时，请先到 Skill 广场上传该阶段的版本（上传即可用，无需先激活）。</p>
         </a-spin>
       </template>
 
@@ -530,11 +532,11 @@
         <a-alert type="warning" style="margin-top:16px">
           发起后会按报告里人工确认的缺陷，在<strong>基线的副本</strong>上生成新候选版本，
           并把每条结论写成新包 <code>SKILL.md</code> 里的受管护栏。候选是<strong>草稿</strong>：
-          不会自动激活，还要在 Skill Hub 走评测与负责人审批。
+          不会自动顶掉正在使用的版本。
         </a-alert>
         <p class="detail-note">
-          基线必须是当前活跃版本——这一点已校验过。若这次审查用的版本已被替换，
-          派生目标就是错的，平台会直接拒绝而不是照旧派生。
+          若这次审查用的版本已经不是当前生效的活跃版本，派生目标就是错的，
+          平台会直接拒绝而不是照旧派生。
         </p>
       </template>
     </a-modal>
@@ -951,7 +953,7 @@ const suiteForm=ref({name:'',description:'',suite_type:'regression',task_type:'c
 const suiteTypeLabels:Record<string,string>={seed:'种子集',gold:'金标集',regression:'回归集',fresh:'新鲜集',challenge:'挑战集'};
 /** 阶段中文名的**短标签**（质量飞轮页面专用）。四阶段的叫法按用户口径：
  *  方案生成 → 用例生成 → 测试执行 → 报告产出。
- *  Skill Hub 那边用同名的**完整**标签（`features/skills/utils/stages.ts`：
+ *  Skill 进化工坊那边用同名的**完整**标签（`features/skills/utils/stages.ts`：
  *  测试方案生成 / 测试用例生成 / …），两边只是繁简不同，指的都是同一个 stage。
  *  ⚠️ 这里只负责"显示成什么"，不负责"哪四个阶段是链路"——那是后端 stage_order 的事。 */
 const taskTypeLabels:Record<string,string>={case_review:'用例审查',code_review:'代码审查',knowledge_query:'知识库问答',risk_identification:'风险识别',test_plan_generation:'方案生成',testcase_generation:'用例生成',test_execution:'测试执行',report_generation:'报告产出',issue_tracking:'问题跟踪'};

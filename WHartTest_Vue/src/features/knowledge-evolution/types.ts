@@ -339,7 +339,7 @@ export interface WorkflowCatalogSkill {
   /** 包自己声明的阶段。与所选阶段不同即为跨声明选用，会写进流程锁的留痕。 */
   declared_stage: string;
   declared_stage_label: string;
-  /** 包启用 + 有活跃版本 + 发布单元未否决。为 false 时选它锁不上，向导要拦。 */
+  /** 包处于启用 且 版本可运行（未被隔离/驳回、且有包目录）。与"已激活"无关。 */
   runnable: boolean;
   skill_version_id: string;
   version: string;

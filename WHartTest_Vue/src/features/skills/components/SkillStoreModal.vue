@@ -241,7 +241,7 @@ const { isEnglish } = useAppI18n()
 const text = computed(() => (
   isEnglish.value
     ? {
-        title: 'Skill Hub',
+        title: 'Skill Store',
         selectSource: 'Select source',
         manageSources: 'Manage sources',
         refresh: 'Refresh',
@@ -271,7 +271,7 @@ const text = computed(() => (
         loadConfigFailed: 'Failed to load store config',
       }
     : {
-        title: 'Skill 中心',
+        title: 'Skill 商店',
         selectSource: '选择源',
         manageSources: '管理源',
         refresh: '刷新',

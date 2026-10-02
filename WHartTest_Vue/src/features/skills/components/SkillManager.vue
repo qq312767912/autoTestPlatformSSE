@@ -178,7 +178,7 @@ const { isEnglish } = useAppI18n()
 const text = computed(() => (
   isEnglish.value
     ? {
-        skillStore: 'Skill Hub',
+        skillStore: 'Skill Store',
         importFromGit: 'Import from Git',
         uploadSkill: 'Upload Skill',
         emptyState: 'No Skills yet. Click the button above to upload',
@@ -209,7 +209,7 @@ const text = computed(() => (
         importFailed: 'Import failed',
       }
     : {
-        skillStore: 'Skill 中心',
+        skillStore: 'Skill 商店',
         importFromGit: '从 Git 导入',
         uploadSkill: '上传 Skill',
         emptyState: '暂无 Skills，点击上方按钮上传',
