@@ -495,6 +495,8 @@ export interface SingleCapabilitySummary {
   feedback: number;
   failed: number;
   latest_at?: string | null;
+  /** 该能力是否走 Skill 自进化通道。由后端按注册表判定，前端不自己认阶段名。 */
+  self_evolution?: boolean;
 }
 
 export interface ProjectQualityCockpit {
@@ -503,4 +505,100 @@ export interface ProjectQualityCockpit {
   single_capabilities: SingleCapabilitySummary[];
   workflows: ProjectWorkflowView[];
   stage_order: string[];
+}
+
+// ---------------------------------------------------------------- 用例审查自进化（T23）
+// 独立能力质量面板里「用例审查」的自进化通道：选一个跑完的审查项目，
+// 回传人工确认过的报告，派生出新的 Skill 候选版本。
+
+/** 一个已跑完、可（或不可）用于自进化的用例审查项目。 */
+export interface CaseReviewEvolutionCandidate {
+  review_id: string;
+  source_name: string;
+  review_mode: string;
+  skill_name: string;
+  status: string;
+  completed_at: string;
+  created_at: string;
+  creator: string;
+  output_id: string;
+  trace_id: string;
+  issues_count: number | null;
+  skill_version: string;
+  skill_version_id: string;
+  package_sha256: string;
+  skill_id: string;
+  /** 审查时用的版本是否仍是活跃版本——派生基线必须是活跃版本，否则派生目标就是错的。 */
+  is_active_version: boolean;
+  evolvable: boolean;
+  /** 不能进化的具体原因。页面必须逐条显示：说"不可用"而不说为什么，用户只能去猜。 */
+  blockers: string[];
+  derived_candidates: Array<{ version_id: string; version: string; state: string; created_at: string }>;
+}
+
+/** 报告里一类被人工确认的缺陷（按归因类别 + 报告问题类型聚合）。 */
+export interface CaseReviewEvolutionDefect {
+  category: string;
+  issue_type: string;
+  count: number;
+  /** 会被原样写进 SKILL.md 受管护栏的要求句，界面展示它等于让人预览"包会被改成什么样"。 */
+  hypothesis: string;
+  samples: Array<Record<string, string>>;
+}
+
+/** 一份已确认报告的解析结果。 */
+export interface CaseReviewEvolutionScan {
+  total_rows: number;
+  affirmative: number;
+  negative: number;
+  rewritten: number;
+  unconfirmed: number;
+  confirmed: number;
+  defect_total: number;
+  defects: CaseReviewEvolutionDefect[];
+  warnings: string[];
+  source_name: string;
+}
+
+/** 上传报告后的预检结果：**不落库**，只回答"现在能不能发起"。 */
+export interface CaseReviewEvolutionPreflight {
+  review: CaseReviewEvolutionCandidate;
+  threshold: number;
+  human_score: number | null;
+  scan: CaseReviewEvolutionScan;
+  attribution_preview: Array<{ category: string; issue_type: string; count: number }>;
+  blockers: string[];
+  ready: boolean;
+}
+
+/** 派生成功后的结果：候选版本 + 可读 diff + 下载入口。 */
+export interface CaseReviewEvolutionResult {
+  review_id: string;
+  source_name: string;
+  skill_id: string;
+  skill_name: string;
+  baseline_version: string;
+  baseline_package_sha256: string;
+  human_score: number;
+  threshold: number;
+  feedback_id: string;
+  scan: CaseReviewEvolutionScan;
+  attribution_ids: string[];
+  candidate: {
+    version_id: string;
+    version: string;
+    state: string;
+    package_sha256: string;
+    change_reason: string;
+    created_at: string;
+  };
+  diff: {
+    summary?: string;
+    files?: { added: string[]; removed: string[]; modified: Array<Record<string, unknown>>; unchanged_count: number };
+    text_diffs?: Array<Record<string, unknown>>;
+  };
+  rollback_target: string;
+  /** 派生过程是否一个字节都没碰活跃包。这是本功能能上生产的前提，页面上要明说。 */
+  active_untouched: boolean;
+  download_url: string;
 }

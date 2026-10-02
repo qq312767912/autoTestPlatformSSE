@@ -99,7 +99,89 @@
 
         <section v-else-if="workspace === 'single'" class="panel content-panel">
           <div class="section-head toolbar"><div><span>单次评测</span><h2>独立能力质量面板</h2><p>用例审查是当前唯一的单次能力 Agent；代码审查与知识库问答属平台基础能力，只做质量观测、不进自进化。</p></div></div>
-          <div class="single-grid"><article v-for="item in cockpit.single_capabilities" :key="item.stage"><header><div><span>{{ capabilityCode(item.stage) }}</span><h3>{{ taskTypeLabels[item.stage] || item.stage }}</h3></div><a-tag :color="item.failed ? 'red' : item.outputs ? 'green' : 'gray'">{{ item.failed ? '存在失败' : item.outputs ? '正常' : '暂无产出' }}</a-tag></header><div class="single-stats"><span><b>{{ item.outputs }}</b><small>产出</small></span><span><b>{{ item.feedback }}</b><small>反馈</small></span><span><b>{{ item.failed }}</b><small>失败</small></span></div><footer>最近产出 {{ formatDate(item.latest_at || undefined) }}</footer></article></div>
+          <div class="single-grid">
+            <article v-for="item in cockpit.single_capabilities" :key="item.stage">
+              <header>
+                <div><span>{{ capabilityCode(item.stage) }}</span><h3>{{ taskTypeLabels[item.stage] || item.stage }}</h3></div>
+                <a-tag :color="item.failed ? 'red' : item.outputs ? 'green' : 'gray'">{{ item.failed ? '存在失败' : item.outputs ? '正常' : '暂无产出' }}</a-tag>
+              </header>
+              <div class="single-stats">
+                <span><b>{{ item.outputs }}</b><small>产出</small></span>
+                <span><b>{{ item.feedback }}</b><small>反馈</small></span>
+                <span><b>{{ item.failed }}</b><small>失败</small></span>
+              </div>
+              <footer>
+                <span>最近产出 {{ formatDate(item.latest_at || undefined) }}</span>
+                <!-- 「能不能自进化」由后端给（注册表判定），前端不按阶段名认：
+                     代码审查是复合能力、知识库问答是平台工具，两者都不该出现这个入口。 -->
+                <a-button v-if="item.self_evolution" size="small" type="primary" @click="openReviewEvolution">
+                  <template #icon><icon-plus/></template>发起流程
+                </a-button>
+              </footer>
+            </article>
+          </div>
+
+          <!-- 进化结果常驻页面：只在弹窗里闪一下就没了的话，关掉后连候选版本号和
+               下载入口都找不回来，用户只能去 Skill Hub 里翻。 -->
+          <div v-if="reviewEvolutionResult" class="start-result">
+            <div class="start-result-head">
+              <div>
+                <b>已派生候选版本 {{ reviewEvolutionResult.candidate.version }}</b>
+                <small>{{ reviewEvolutionResult.skill_name }} · 基线 {{ reviewEvolutionResult.baseline_version }}</small>
+              </div>
+              <div class="actions">
+                <a-button size="mini" type="primary" :loading="reviewEvolutionDownloading" @click="downloadReviewCandidate">
+                  <template #icon><icon-download/></template>下载 Skill 包
+                </a-button>
+                <a-button size="mini" @click="reviewEvolutionResult=null">收起</a-button>
+              </div>
+            </div>
+            <div class="evolution-facts">
+              <article>
+                <small>候选版本</small>
+                <b>{{ reviewEvolutionResult.candidate.version }}</b>
+                <em>{{ reviewEvolutionResult.candidate.state==='draft' ? '草稿 · 待评测与审批' : reviewEvolutionResult.candidate.state }}</em>
+              </article>
+              <article>
+                <small>包哈希</small>
+                <b class="sha">{{ (reviewEvolutionResult.candidate.package_sha256||'').slice(0,16) }}</b>
+                <em>基线 {{ (reviewEvolutionResult.baseline_package_sha256||'').slice(0,16) }}</em>
+              </article>
+              <article>
+                <small>人工打分</small>
+                <b>{{ reviewEvolutionResult.human_score }}/100</b>
+                <em>门槛 {{ reviewEvolutionResult.threshold }}</em>
+              </article>
+              <article>
+                <small>活跃包</small>
+                <b :class="reviewEvolutionResult.active_untouched?'':'bad'">{{ reviewEvolutionResult.active_untouched ? '未改动' : '⚠ 被改动' }}</b>
+                <em>派生只写新版本目录</em>
+              </article>
+            </div>
+            <p class="evolution-scan">
+              报告解析：采纳 <b>{{ reviewEvolutionResult.scan.affirmative }}</b> 条 ·
+              误报 <b>{{ reviewEvolutionResult.scan.negative }}</b> 条 ·
+              说明被改写 <b>{{ reviewEvolutionResult.scan.rewritten }}</b> 条 ·
+              未确认 <b>{{ reviewEvolutionResult.scan.unconfirmed }}</b> 条
+            </p>
+            <div class="evolution-defects">
+              <article v-for="item in reviewEvolutionResult.scan.defects" :key="`${item.category}:${item.issue_type}`">
+                <header>
+                  <a-tag :color="item.category==='prompt_error' ? 'orange' : 'blue'" size="small">{{ attributionCategoryText(item.category) }}</a-tag>
+                  <b>{{ item.issue_type }}</b>
+                  <span>{{ item.count }} 条</span>
+                </header>
+                <!-- 这段文字会被原样写进新包的 SKILL.md 护栏小节，
+                     显示出来等于让人在提交前就看见"包会被改成什么要求"。 -->
+                <p>{{ item.hypothesis }}</p>
+              </article>
+            </div>
+            <pre v-if="reviewEvolutionDiffText" class="output-content">{{ reviewEvolutionDiffText }}</pre>
+            <p class="detail-note">
+              候选版本<strong>尚未激活</strong>：需在 Skill Hub 完成评测与负责人审批后才会生效；
+              回滚目标 {{ reviewEvolutionResult.rollback_target }}。
+            </p>
+          </div>
         </section>
 
         <section v-else-if="workspace === 'workflow'" class="panel content-panel workflow-panel">
@@ -328,6 +410,134 @@
         </a-form>
       </template>
     </a-modal>
+    <!-- 用例审查自进化向导：① 选跑完的审查项目 ② 上传已确认报告 + 人工打分 ③ 确认 Skill 并发起。
+         三步而不是一屏：这三件事各有各的前置条件，挤在一屏会让"为什么按钮是灰的"变成一个谜。 -->
+    <a-modal
+      v-model:visible="showReviewEvolutionModal"
+      :title="reviewEvolutionTitle"
+      :ok-text="reviewEvolutionOkText"
+      :ok-loading="reviewEvolutionSubmitting"
+      :ok-button-props="{disabled: !reviewEvolutionCanAdvance}"
+      :on-before-ok="onReviewEvolutionOk"
+      :mask-closable="false"
+      width="820px"
+    >
+      <template v-if="reviewEvolutionStep===1">
+        <a-alert type="info">自进化只作用于<strong>能力能被 Skill 直接迭代升级</strong>的单次能力：从选中的那次审查所用的 Skill 包上<strong>派生一个新候选版本</strong>，不会改动当前活跃版本。</a-alert>
+        <a-spin :loading="reviewEvolutionLoading" style="width:100%">
+          <div class="review-list">
+            <button
+              v-for="item in reviewEvolutionItems"
+              :key="item.review_id"
+              type="button"
+              :class="['review-item',{selected:reviewEvolutionSelected===item.review_id,blocked:!item.evolvable}]"
+              @click="reviewEvolutionSelected=item.review_id"
+            >
+              <div class="review-item-head">
+                <b>{{ item.source_name }}</b>
+                <a-tag :color="item.evolvable ? 'green' : 'gray'" size="small">{{ item.evolvable ? '可进化' : '暂不可进化' }}</a-tag>
+              </div>
+              <div class="review-item-meta">
+                <span>{{ item.skill_name }} · {{ item.skill_version || '未锁定版本' }}</span>
+                <span v-if="item.package_sha256" class="sha">sha {{ item.package_sha256.slice(0,12) }}</span>
+                <span>完成 {{ formatDate(item.completed_at) }}</span>
+                <span v-if="item.issues_count!==null && item.issues_count!==undefined">问题 {{ item.issues_count }} 条</span>
+                <span v-if="item.derived_candidates.length">已派生 {{ item.derived_candidates.length }} 个候选</span>
+              </div>
+              <p v-for="text in item.blockers" :key="text" class="review-blocker">⚠ {{ text }}</p>
+            </button>
+            <a-empty v-if="!reviewEvolutionLoading && !reviewEvolutionItems.length" description="当前项目还没有已跑完的用例审查；先跑一次审查再回来"/>
+          </div>
+        </a-spin>
+      </template>
+
+      <template v-else-if="reviewEvolutionStep===2">
+        <div class="review-target">
+          <b>{{ selectedReview?.source_name }}</b>
+          <span>{{ selectedReview?.skill_name }} · {{ selectedReview?.skill_version }}</span>
+          <span v-if="selectedReview?.package_sha256" class="sha">sha {{ selectedReview.package_sha256.slice(0,12) }}</span>
+        </div>
+        <a-form layout="vertical" style="margin-top:12px">
+          <a-form-item
+            label="已确认的审查报告（平台导出的 xlsx）"
+            required
+            extra="在报告「问题明细」页填好「问题确认」「问题描述」「修改点」「不采纳原因」后再传回来。平台按列名读取，调整列序不影响解析。"
+          >
+            <a-upload
+              :auto-upload="false"
+              :limit="1"
+              accept=".xlsx"
+              :file-list="reviewEvolutionFileList"
+              @change="onReviewReportChange"
+              @before-remove="onReviewReportRemove"
+            />
+          </a-form-item>
+          <a-form-item
+            :label="`人工打分（0–100，门槛 ${reviewEvolutionThreshold}）`"
+            required
+            extra="分数是对本次审查结果可信度的评价。未达门槛不允许发起进化——照着一份人工自己都不认可的结果去改 Skill 包，只会把噪声固化进护栏。"
+          >
+            <a-slider v-model="reviewEvolutionScore" :min="0" :max="100" :step="1"/>
+            <a-input-number v-model="reviewEvolutionScore" :min="0" :max="100" :step="1" style="width:140px;margin-top:8px"/>
+            <span :class="['score-preview',reviewEvolutionScore>=reviewEvolutionThreshold?'ok':'bad']" style="margin-left:12px">
+              {{ reviewEvolutionScore }} 分 · {{ reviewEvolutionScore>=reviewEvolutionThreshold ? '达门槛' : '未达门槛' }}
+            </span>
+          </a-form-item>
+        </a-form>
+        <a-button long :loading="reviewEvolutionPreflighting" :disabled="!reviewEvolutionFile" @click="runReviewEvolutionPreflight">
+          <template #icon><icon-experiment/></template>解析报告并预检
+        </a-button>
+
+        <!-- 预检结果：把"能不能发起"的所有条件一次性摊开。只报一条，
+             用户要来回试三次才知道真正卡在哪。 -->
+        <div v-if="preflightReady || preflightBlockers.length" class="preflight">
+          <div class="preflight-scan">
+            <span><b>{{ reviewEvolutionPreflight?.scan.total_rows || 0 }}</b><small>问题行</small></span>
+            <span><b>{{ reviewEvolutionPreflight?.scan.affirmative || 0 }}</b><small>人工确认</small></span>
+            <span><b>{{ reviewEvolutionPreflight?.scan.negative || 0 }}</b><small>误报</small></span>
+            <span><b>{{ reviewEvolutionPreflight?.scan.rewritten || 0 }}</b><small>说明被改写</small></span>
+            <span><b>{{ reviewEvolutionPreflight?.scan.unconfirmed || 0 }}</b><small>未确认</small></span>
+            <span><b>{{ reviewEvolutionPreflight?.scan.defect_total || 0 }}</b><small>可修复缺陷</small></span>
+          </div>
+          <article v-for="item in reviewEvolutionPreflight?.scan.defects || []" :key="`p-${item.category}:${item.issue_type}`" class="preflight-defect">
+            <a-tag :color="item.category==='prompt_error' ? 'orange' : 'blue'" size="small">{{ attributionCategoryText(item.category) }}</a-tag>
+            <b>{{ item.issue_type }}</b><span>{{ item.count }} 条</span>
+          </article>
+          <p v-for="text in reviewEvolutionPreflight?.scan.warnings || []" :key="text" class="warn-line">⚠ {{ text }}</p>
+          <p v-for="text in preflightBlockers" :key="text" class="warn-line">✕ {{ text }}</p>
+        </div>
+      </template>
+
+      <template v-else>
+        <div class="pin-summary">
+          <article>
+            <b>Skill</b>
+            <small>{{ selectedReview?.skill_name }}</small>
+          </article>
+          <article>
+            <b>基线版本</b>
+            <small>{{ selectedReview?.skill_version }}</small>
+          </article>
+          <article>
+            <b>包哈希</b>
+            <small class="sha">{{ (selectedReview?.package_sha256||'').slice(0,12) }}</small>
+          </article>
+          <article>
+            <b>人工打分</b>
+            <small>{{ reviewEvolutionScore }}/100</small>
+          </article>
+        </div>
+        <a-alert type="warning" style="margin-top:16px">
+          发起后会按报告里人工确认的缺陷，在<strong>基线的副本</strong>上生成新候选版本，
+          并把每条结论写成新包 <code>SKILL.md</code> 里的受管护栏。候选是<strong>草稿</strong>：
+          不会自动激活，还要在 Skill Hub 走评测与负责人审批。
+        </a-alert>
+        <p class="detail-note">
+          基线必须是当前活跃版本——这一点已校验过。若这次审查用的版本已被替换，
+          派生目标就是错的，平台会直接拒绝而不是照旧派生。
+        </p>
+      </template>
+    </a-modal>
     <a-modal v-model:visible="showStageScoreModal" title="人工评分" ok-text="提交评分" :ok-loading="stageScoreBusy" @ok="confirmStageScore">
       <a-alert type="info">评分是<strong>百分制</strong>：达到阈值判通过并放行下一阶段，低于阈值判未通过。分数、评分人与备注都会被永久记录——「谁认为这一阶段合格」在事后必须能查。</a-alert>
       <a-form layout="vertical" style="margin-top:16px">
@@ -367,13 +577,13 @@
 import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
-import { IconBranch, IconDashboard, IconEdit, IconExperiment, IconFile, IconMessage, IconPlayArrow, IconPlus, IconRefresh, IconRight, IconRobot, IconSafe, IconStorage, IconUser } from '@arco-design/web-vue/es/icon';
+import { IconBranch, IconDashboard, IconDownload, IconEdit, IconExperiment, IconFile, IconMessage, IconPlayArrow, IconPlus, IconRefresh, IconRight, IconRobot, IconSafe, IconStorage, IconUser } from '@arco-design/web-vue/es/icon';
 import { useProjectStore } from '@/store/projectStore';
 import { SkillHubConsole } from '@/features/skills';
 import KnowledgeGraphView from '@/features/knowledge-graph/KnowledgeGraphView.vue';
 import { WORKFLOW_STAGES as DEFAULT_WORKFLOW_STAGES } from '@/features/skills/utils/stages';
-import { confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, evaluateWorkflowStage, executeWorkflowStage, generateCandidatesFromRun, getProjectQualityCockpit, getStageOutput, getWorkflowStageCatalog, getWorkflowStatus, listCapabilityReleases, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, overrideWorkflowStage, scoreWorkflowStage, startWorkflow, updateCandidateState } from './service';
-import type { CapabilityRelease, EvaluationResult, EvaluationRun, EvaluationSuite, ExecutionSpan, FailureAttribution, FeedbackEvent, GoldDataset, KnowledgeCandidate, OptimizationProposal, ProjectQualityCockpit, ProjectQualityPerson, ProjectWorkflowView, RetrievalTrace, StageExecutionPlan, StageOutputView, StartWorkflowResult, WorkflowCatalogSkill, WorkflowStageCatalog, WorkflowStageGateView } from './types';
+import { confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, downloadSkillPackage, evaluateWorkflowStage, evolveCaseReview, executeWorkflowStage, generateCandidatesFromRun, getProjectQualityCockpit, getStageOutput, getWorkflowStageCatalog, getWorkflowStatus, listCapabilityReleases, listCaseReviewEvolutionCandidates, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, overrideWorkflowStage, preflightCaseReviewEvolution, scoreWorkflowStage, startWorkflow, updateCandidateState } from './service';
+import type { CapabilityRelease, CaseReviewEvolutionCandidate, CaseReviewEvolutionPreflight, CaseReviewEvolutionResult, EvaluationResult, EvaluationRun, EvaluationSuite, ExecutionSpan, FailureAttribution, FeedbackEvent, GoldDataset, KnowledgeCandidate, OptimizationProposal, ProjectQualityCockpit, ProjectQualityPerson, ProjectWorkflowView, RetrievalTrace, StageExecutionPlan, StageOutputView, StartWorkflowResult, WorkflowCatalogSkill, WorkflowStageCatalog, WorkflowStageGateView } from './types';
 
 type Workspace='overview'|'single'|'workflow'|'gold'|'evaluation'|'attribution'|'optimization';
 type PrimaryView='agents'|'data'|'graph';
@@ -601,6 +811,142 @@ async function confirmWorkflowStart():Promise<boolean>{
   }catch{Message.error('发起流程失败：该操作仅限测试负责人');return false}
   finally{workflowStarting.value=false}
 }
+// ---- 用例审查自进化（T23）：独立能力面板 → 用例审查 → 发起流程
+// 三步而不是一屏：选项目、传报告打分、确认 Skill 各有各的前置条件，
+// 挤在一屏会让"按钮为什么是灰的"变成一个谜。
+const showReviewEvolutionModal=ref(false),reviewEvolutionStep=ref<1|2|3>(1);
+const reviewEvolutionLoading=ref(false),reviewEvolutionPreflighting=ref(false),reviewEvolutionSubmitting=ref(false),reviewEvolutionDownloading=ref(false);
+const reviewEvolutionItems=ref<CaseReviewEvolutionCandidate[]>([]);
+const reviewEvolutionThreshold=ref(70),reviewEvolutionSelected=ref(''),reviewEvolutionScore=ref(90);
+const reviewEvolutionFileList=ref<any[]>([]);
+const reviewEvolutionPreflight=ref<CaseReviewEvolutionPreflight|null>(null);
+const reviewEvolutionResult=ref<CaseReviewEvolutionResult|null>(null);
+const selectedReview=computed(()=>reviewEvolutionItems.value.find(v=>v.review_id===reviewEvolutionSelected.value));
+const reviewEvolutionFile=computed<File|null>(()=>reviewEvolutionFileList.value[0]?.file||null);
+const preflightBlockers=computed(()=>reviewEvolutionPreflight.value?.blockers||[]);
+const preflightReady=computed(()=>reviewEvolutionPreflight.value?.ready===true);
+const reviewEvolutionTitle=computed(()=>{
+  if(reviewEvolutionStep.value===1)return '发起自进化 · 1/3 选择已跑完的审查项目';
+  if(reviewEvolutionStep.value===2)return '发起自进化 · 2/3 上传已确认报告并打分';
+  return '发起自进化 · 3/3 确认当前使用的 Skill';
+});
+const reviewEvolutionOkText=computed(()=>reviewEvolutionStep.value===1?'下一步：上传已确认报告':reviewEvolutionStep.value===2?'下一步：确认 Skill 版本':'发起自进化');
+const reviewEvolutionCanAdvance=computed(()=>{
+  if(reviewEvolutionStep.value===1)return !!reviewEvolutionSelected.value;
+  // 第二步必须预检通过才放行：让"报告里没有可修复缺陷"这类结论在提交前就暴露，
+  // 而不是等用户点完「发起」再吃一个 400。
+  if(reviewEvolutionStep.value===2)return preflightReady.value;
+  return true;
+});
+/** diff 预览只取**第一个**被改的文本文件：派生通常只动 SKILL.md，
+ *  全量渲染会把几百行 diff 糊满屏幕，反而没人看关键那几行。 */
+const reviewEvolutionDiffText=computed(()=>{
+  const diff=reviewEvolutionResult.value?.diff;
+  const summary=diff?.summary||'';
+  const first=(diff?.text_diffs||[]).find((v:any)=>typeof v.unified_diff==='string'&&v.unified_diff);
+  if(!first)return summary;
+  return `${summary}\n\n${(first as any).path}\n${(first as any).unified_diff}`;
+});
+/** 把 axios 错误翻成一句话。后端业务拒绝回的是 `{"detail": "..."}`，
+ *  但字段级错误是对象，直接塞给 Message 会显示成 [object Object]。 */
+function errorText(error:any,fallback:string):string{
+  const detail=error?.response?.data?.detail;
+  if(typeof detail==='string'&&detail)return detail;
+  if(detail&&typeof detail==='object')return Object.values(detail).flat().join('；');
+  return error?.message||fallback;
+}
+async function openReviewEvolution(){
+  reviewEvolutionStep.value=1;
+  reviewEvolutionSelected.value='';
+  reviewEvolutionFileList.value=[];
+  reviewEvolutionPreflight.value=null;
+  reviewEvolutionScore.value=90;
+  reviewEvolutionResult.value=null;
+  showReviewEvolutionModal.value=true;
+  await loadReviewEvolutionItems();
+}
+async function loadReviewEvolutionItems(){
+  if(!projectStore.currentProjectId)return;
+  reviewEvolutionLoading.value=true;
+  try{
+    const data=await listCaseReviewEvolutionCandidates(projectStore.currentProjectId);
+    reviewEvolutionItems.value=data.items;
+    reviewEvolutionThreshold.value=data.threshold;
+    // 默认选中第一条可进化的：人点「发起流程」就是要发起，
+    // 让他在一堆不可进化的条目里自己找那一条是多余的。
+    const first=reviewEvolutionItems.value.find(v=>v.evolvable);
+    if(first)reviewEvolutionSelected.value=first.review_id;
+  }catch(error:any){Message.error(errorText(error,'加载用例审查项目失败'))}
+  finally{reviewEvolutionLoading.value=false}
+}
+function onReviewReportChange(fileList:any[]){
+  reviewEvolutionFileList.value=(fileList||[]).slice(-1);
+  // 换了文件，之前的预检结论就不成立了——留着它会让人拿着 A 的解析结果去提交 B。
+  reviewEvolutionPreflight.value=null;
+}
+function onReviewReportRemove(){reviewEvolutionPreflight.value=null;return true}
+async function runReviewEvolutionPreflight(){
+  const file=reviewEvolutionFile.value;
+  if(!projectStore.currentProjectId||!file||!reviewEvolutionSelected.value)return;
+  reviewEvolutionPreflighting.value=true;
+  try{
+    reviewEvolutionPreflight.value=await preflightCaseReviewEvolution(
+      projectStore.currentProjectId,reviewEvolutionSelected.value,file,
+      reviewEvolutionScore.value,reviewEvolutionThreshold.value,
+    );
+  }catch(error:any){
+    reviewEvolutionPreflight.value=null;
+    Message.error(errorText(error,'解析报告失败'));
+  }finally{reviewEvolutionPreflighting.value=false}
+}
+async function onReviewEvolutionOk():Promise<boolean>{
+  if(reviewEvolutionStep.value===1){
+    if(!reviewEvolutionSelected.value){Message.warning('请选择一个已跑完的审查项目');return false}
+    reviewEvolutionStep.value=2;return false;
+  }
+  if(reviewEvolutionStep.value===2){
+    if(!reviewEvolutionReadyOrWarn())return false;
+    reviewEvolutionStep.value=3;return false;
+  }
+  return submitReviewEvolution();
+}
+function reviewEvolutionReadyOrWarn():boolean{
+  if(preflightReady.value)return true;
+  Message.warning('请先点「解析报告并预检」，预检通过后才能进入下一步');
+  return false;
+}
+async function submitReviewEvolution():Promise<boolean>{
+  const file=reviewEvolutionFile.value;
+  if(!projectStore.currentProjectId||!file||!reviewEvolutionSelected.value)return false;
+  reviewEvolutionSubmitting.value=true;
+  try{
+    reviewEvolutionResult.value=await evolveCaseReview(
+      projectStore.currentProjectId,reviewEvolutionSelected.value,file,reviewEvolutionScore.value,
+      {threshold:reviewEvolutionThreshold.value},
+    );
+    showReviewEvolutionModal.value=false;
+    reviewEvolutionStep.value=1;
+    await loadCockpit();
+    Message.success(`已派生候选版本 ${reviewEvolutionResult.value.candidate.version}（草稿，待评测与审批）`);
+    return true;
+  }catch(error:any){
+    Message.error(errorText(error,'发起自进化失败'));
+    return false;
+  }finally{reviewEvolutionSubmitting.value=false}
+}
+async function downloadReviewCandidate(){
+  const result=reviewEvolutionResult.value;
+  if(!result)return;
+  reviewEvolutionDownloading.value=true;
+  try{
+    const filename=await downloadSkillPackage(result.download_url);
+    Message.success(`已下载 ${filename}`);
+  }catch(error:any){Message.error(errorText(error,'下载 Skill 包失败'))}
+  finally{reviewEvolutionDownloading.value=false}
+}
+// 分数改了就作废预检：门槛判定是预检结论的一部分，留着旧结论等于用旧分数去提交。
+watch(reviewEvolutionScore,()=>{reviewEvolutionPreflight.value=null});
+
 const suiteForm=ref({name:'',description:'',suite_type:'regression',task_type:'code_review'}),candidateForm=ref({threshold:.5,minFailureCount:1});
 const suiteTypeLabels:Record<string,string>={seed:'种子集',gold:'金标集',regression:'回归集',fresh:'新鲜集',challenge:'挑战集'};
 /** 阶段中文名的**短标签**（质量飞轮页面专用）。四阶段的叫法按用户口径：
@@ -888,5 +1234,41 @@ watch(()=>projectStore.currentProjectId,async id=>{if(id)await bootstrap()},{imm
 .pin-summary article{padding:10px;border:1px solid #e5e6eb;border-radius:8px;background:#fafafa}
 .pin-summary b,.pin-summary small{display:block}.pin-summary b{font-size:12px}
 .pin-summary small{margin-top:4px;overflow:hidden;color:#86909c;font-size:11px;text-overflow:ellipsis;white-space:nowrap}
+/* ---- 用例审查自进化向导 */
+.single-grid footer{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.review-list{display:flex;flex-direction:column;gap:8px;max-height:360px;margin-top:12px;overflow:auto}
+.review-item{display:block;width:100%;padding:11px 13px;border:1px solid var(--color-border-2);border-radius:9px;background:var(--color-bg-2);text-align:left;cursor:pointer;transition:border-color .15s ease,background .15s ease}
+.review-item:hover{border-color:rgb(var(--arcoblue-4))}
+.review-item.selected{border-color:var(--blue);background:rgb(var(--arcoblue-1))}
+.review-item.blocked{background:var(--color-fill-1);opacity:.86}
+.review-item-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.review-item-head b{font-size:13px;color:var(--color-text-1)}
+.review-item-meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;color:var(--color-text-3);font-size:11px}
+.review-item-meta .sha{font-family:monospace}
+.review-blocker{margin:6px 0 0;color:rgb(var(--orange-6));font-size:11px;line-height:1.6}
+.review-target{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;background:var(--color-fill-1);font-size:12px}
+.review-target b{color:var(--color-text-1)}
+.review-target span{color:var(--color-text-3)}
+.review-target .sha{font-family:monospace}
+.preflight{margin-top:14px;padding:12px;border:1px solid var(--color-border-2);border-radius:9px;background:var(--color-fill-1)}
+.preflight-scan{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-bottom:10px}
+.preflight-scan span{display:flex;flex-direction:column;align-items:center;padding:7px 4px;border-radius:7px;background:var(--color-bg-2)}
+.preflight-scan b{font-size:15px;color:var(--color-text-1)}
+.preflight-scan small{color:var(--color-text-3);font-size:11px}
+.preflight-defect{display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px}
+.preflight-defect span{color:var(--color-text-3)}
+.evolution-facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:12px 0}
+.evolution-facts article{padding:10px;border:1px solid var(--color-border-2);border-radius:8px;background:var(--color-bg-2)}
+.evolution-facts small,.evolution-facts b,.evolution-facts em{display:block}
+.evolution-facts small{color:var(--color-text-3);font-size:11px}
+.evolution-facts b{margin-top:4px;font-size:14px;color:var(--color-text-1)}
+.evolution-facts b.bad{color:#cb2634}
+.evolution-facts b.sha{font-family:monospace;font-size:12px}
+.evolution-facts em{margin-top:2px;color:var(--color-text-3);font-size:11px;font-style:normal}
+.evolution-scan{margin:0 0 10px;color:var(--color-text-2);font-size:12px}
+.evolution-defects article{margin-bottom:8px;padding:9px 11px;border-radius:8px;background:var(--color-fill-1)}
+.evolution-defects header{display:flex;align-items:center;gap:8px;margin-bottom:5px;font-size:12px}
+.evolution-defects header span{color:var(--color-text-3)}
+.evolution-defects p{margin:0;color:var(--color-text-2);font-size:12px;line-height:1.65}
 @media(max-width:1080px){.wf-shell{grid-template-columns:1fr}.wf-flows{max-height:240px}.wf-stage-bar{grid-template-columns:repeat(2,minmax(0,1fr))}.wf-card-body,.pin-grid,.pin-summary{grid-template-columns:1fr}}
 </style>

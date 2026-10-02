@@ -24,6 +24,9 @@ import type {
   StageOutputView,
   WorkflowStageCatalog,
   WorkflowStatusView,
+  CaseReviewEvolutionCandidate,
+  CaseReviewEvolutionPreflight,
+  CaseReviewEvolutionResult,
 } from './types';
 
 const BASE = '/api/knowledge-evolution';
@@ -317,4 +320,110 @@ export async function evaluateWorkflow(projectId: number, workflowId: string, st
 /** 按产出的 `protocol.parent_output_ids` 建联合链路图，幂等 upsert。 */
 export async function buildWorkflowGraph(projectId: number, workflowId: string): Promise<{ workflow_id: string; node_count: number; edge_count: number }> {
   return post<{ workflow_id: string; node_count: number; edge_count: number }>('/operations/build-workflow-graph/', { project: projectId, workflow_id: workflowId });
+}
+
+// ---------------------------------------------------------------- 用例审查自进化（T23）
+
+/**
+ * 上传专用请求。**不能复用 `getHeaders()`**：它写死 `Content-Type: application/json`，
+ * 会覆盖 axios 为 `FormData` 生成的 multipart boundary，后端拿到的 `request.FILES` 是空的，
+ * 表现为"上传了但报没传文件"。
+ */
+async function upload<T>(path: string, form: FormData): Promise<T> {
+  const authStore = useAuthStore();
+  const token = authStore.getAccessToken;
+  const res = await axios({
+    method: 'post',
+    url: `${BASE}${path}`,
+    data: form,
+    headers: {
+      Authorization: token ? `Bearer ${token}` : '',
+      Accept: 'application/json',
+    },
+  });
+  return (res.data?.data ?? res.data) as T;
+}
+
+/**
+ * 独立能力面板里「用例审查」的自进化候选：该项目下已跑完的审查项目。
+ *
+ * 列表里的 `evolvable` / `blockers` 由后端按 `evolve` 的真实判据算，前端不另做一套
+ * 判断——两处各写一份必然出现"页面说可以、接口报错"。
+ */
+export async function listCaseReviewEvolutionCandidates(projectId: number): Promise<{ threshold: number; items: CaseReviewEvolutionCandidate[] }> {
+  const data = await get<{ threshold: number; items: CaseReviewEvolutionCandidate[] }>('/case-review-evolution/candidates/', { project: projectId });
+  return { threshold: data?.threshold ?? 70, items: data?.items ?? [] };
+}
+
+/**
+ * 上传已确认报告做预检：**不落库**，只返回解析结果与全部阻塞条件。
+ *
+ * 预检存在的意义是让"不能进化"在点下按钮之前就可见。直接调 `evolve` 一次只说
+ * 一条原因，用户要来回试三次才知道真正卡在哪。
+ */
+export async function preflightCaseReviewEvolution(
+  projectId: number,
+  reviewId: string,
+  file: File,
+  humanScore: number | null,
+  threshold?: number,
+): Promise<CaseReviewEvolutionPreflight> {
+  const form = new FormData();
+  form.append('project', String(projectId));
+  form.append('review_id', reviewId);
+  form.append('file', file);
+  if (humanScore !== null && humanScore !== undefined) form.append('human_score', String(humanScore));
+  if (threshold !== undefined) form.append('threshold', String(threshold));
+  return upload<CaseReviewEvolutionPreflight>('/case-review-evolution/preflight/', form);
+}
+
+/**
+ * 发起自进化：从这份已确认报告派生 Skill 候选版本。
+ *
+ * 返回的候选一律是 `draft`，**不会**自动激活——它还要走 Skill Hub 的评测与负责人
+ * 审批。`active_untouched` 是"派生过程没碰活跃包"的断言，界面上要如实显示。
+ */
+export async function evolveCaseReview(
+  projectId: number,
+  reviewId: string,
+  file: File,
+  humanScore: number,
+  options?: { threshold?: number; changeReason?: string },
+): Promise<CaseReviewEvolutionResult> {
+  const form = new FormData();
+  form.append('project', String(projectId));
+  form.append('review_id', reviewId);
+  form.append('file', file);
+  form.append('human_score', String(humanScore));
+  if (options?.threshold !== undefined) form.append('threshold', String(options.threshold));
+  if (options?.changeReason) form.append('change_reason', options.changeReason);
+  return upload<CaseReviewEvolutionResult>('/case-review-evolution/evolve/', form);
+}
+
+/**
+ * 下载导出后的 Skill 包。
+ *
+ * 必须走 blob 而不是 `window.open(url)`：下载端点要鉴权，新开标签不会带
+ * `Authorization` 头，只会拿到 401 页面（还常常表现为"下载了一个坏 zip"）。
+ * 文件名优先用服务端 `Content-Disposition` 给的那个——它才是导出时的正式命名。
+ */
+export async function downloadSkillPackage(downloadUrl: string): Promise<string> {
+  const authStore = useAuthStore();
+  const token = authStore.getAccessToken;
+  const res = await axios.get(downloadUrl, {
+    responseType: 'blob',
+    headers: { Authorization: token ? `Bearer ${token}` : '' },
+  });
+  const disposition = String(res.headers?.['content-disposition'] || '');
+  const matched = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
+  const filename = matched ? decodeURIComponent(matched[1]) : 'skill-package.zip';
+  const blobUrl = URL.createObjectURL(res.data as Blob);
+  const link = document.createElement('a');
+  link.href = blobUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(blobUrl);
+  return filename;
 }
