@@ -1139,6 +1139,17 @@ class KnowledgeAuditLog(models.Model):
         ("rollback", "回滚"),
         ("conflict_resolved", "冲突裁决"),
         ("acl_change", "权限变更"),
+        # 以下四类来自 Skill Hub 的审计要求（R12）：上传、校验、下载与隔离
+        # 必须可分别追溯，不能都塞进 "transition" 里变得无法区分。
+        ("validate", "包校验"),
+        ("download", "下载导出"),
+        ("quarantine", "隔离"),
+        # T13/R12：发布治理的四个动作必须分别可追溯。原先只有 "publish" 与
+        # "rollback"，"提交审批 / 批准 / 驳回"只能挤进 "transition"，
+        # 审计上无法区分"谁批准的"和"谁只是提交了"——而这两件事的责任完全不同。
+        ("submit_approval", "提交审批"),
+        ("approve", "审批通过"),
+        ("reject", "驳回"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

@@ -250,6 +250,10 @@ class AgentLoopRequirementImageMessageTests(TestCase):
             project=self.project,
             supports_vision=True,
             uploaded_images_base64=[],
+            # 需求文档原图是否送入多模态，由 ``include_requirement_images`` 决定
+            # （接口侧默认 false，只有显式要求时才附加原图）。本用例验证的是
+            # "显式要求时确实附加"，因此必须传 True；不传就只会重写占位符为 URL。
+            include_requirement_images=True,
         )
 
         self.assertIsInstance(human_message_content, list)

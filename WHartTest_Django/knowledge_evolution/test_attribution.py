@@ -3,7 +3,9 @@ from django.core.exceptions import ValidationError
 from django.test import TestCase
 from projects.models import Project
 
-from .attribution import AttributionService, SpanRecorder
+from langgraph_integration.models import LLMConfig
+
+from .attribution import AttributionService, LLMAssistedAttributionService, SpanRecorder
 from .models import FeedbackEvent, GenerationOutput, RetrievalTrace
 
 
@@ -61,3 +63,69 @@ class AttributionServiceTest(TestCase):
                 trace=self.trace, stage="code_review", step_type="tool",
                 status="completed", parent_span=parent,
             )
+
+    def test_human_edit_records_hashes_and_diff_without_raw_content(self):
+        span = SpanRecorder.record_human_edit(
+            output=self.output, actor=self.user,
+            before={"risk": "old", "private": "secret-a"},
+            after={"risk": "new", "private": "secret-b", "owner": "qa"},
+            comment="人工修正风险",
+        )
+        self.assertEqual(span.step_type, "human_edit")
+        self.assertTrue(span.input_hash and span.output_hash)
+        self.assertEqual(span.evidence[0]["changed_keys"], ["private", "risk"])
+        self.assertNotIn("secret-a", str(span.evidence))
+
+    def test_later_success_is_counterevidence_for_failed_tool(self):
+        SpanRecorder.record(
+            trace=self.trace, stage="code_review", step_type="tool", status="failed",
+            sequence=1, tool_name="crg",
+        )
+        SpanRecorder.record(
+            trace=self.trace, stage="code_review", step_type="tool", status="completed",
+            sequence=2, tool_name="crg",
+        )
+        result = AttributionService.run_for_output(self.output)[0]
+        self.assertEqual(result.counterevidence[0]["type"], "later_recovery")
+        self.assertLessEqual(result.confidence, 0.6)
+
+    def test_reverse_attribution_follows_parent_outputs(self):
+        parent_trace = RetrievalTrace.objects.create(
+            project=self.project, task_type="risk_identification", task_id="parent",
+        )
+        parent = GenerationOutput.objects.create(
+            project=self.project, trace=parent_trace, task_type="risk_identification",
+            task_id="parent", content="risk", output_hash="d" * 64,
+            metadata={"protocol": {"workflow_id": "wf-1", "parent_output_ids": []}},
+        )
+        SpanRecorder.record(
+            trace=parent_trace, stage="risk_identification", step_type="planning",
+            status="failed", sequence=1,
+        )
+        self.output.metadata = {"protocol": {
+            "workflow_id": "wf-1", "parent_output_ids": [str(parent.id)],
+        }}
+        self.output.save(update_fields=["metadata"])
+        linked = AttributionService.run_reverse_for_output(self.output)
+        self.assertEqual(linked[0].category, "planning_error")
+        self.assertIn("上游 risk_identification", linked[0].hypothesis)
+
+    def test_llm_attribution_is_capped_and_requires_human_confirmation(self):
+        LLMConfig.objects.create(
+            config_name="attribution-judge", name="judge", api_url="http://example.com/v1",
+            is_active=True,
+        )
+
+        class Response:
+            content = '{"hypotheses":[{"category":"prompt_error","confidence":0.95,' \
+                      '"hypothesis":"Prompt遗漏边界条件","evidence":[],' \
+                      '"counterevidence":[{"reason":"工具已成功"}]}]}'
+
+        class LLM:
+            def invoke(self, _prompt): return Response()
+
+        results = LLMAssistedAttributionService(llm_factory=lambda _config: LLM()).run(self.output)
+        self.assertEqual(results[0].source, "llm")
+        self.assertEqual(results[0].state, "proposed")
+        self.assertEqual(results[0].confidence, 0.8)
+        self.assertTrue(results[0].counterevidence)

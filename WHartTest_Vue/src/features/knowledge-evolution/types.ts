@@ -54,7 +54,7 @@ export interface EvaluationSuite {
   id: string;
   project: number;
   name: string;
-  suite_type: 'seed' | 'regression' | 'fresh' | 'challenge';
+  suite_type: 'seed' | 'gold' | 'regression' | 'fresh' | 'challenge';
   task_type: string;
   description: string;
   split_ratio: Record<string, number>;
@@ -161,9 +161,67 @@ export interface CapabilityDefinition {
 
 export interface CapabilityRelease {
   id: string;
+  project?: number;
   kind: CapabilityDefinition['kind'];
   name: string;
   version: string;
+  state: string;
+  gate_report?: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface GoldDataset {
+  id: string;
+  project: number;
+  name: string;
+  task_type: string;
+  description: string;
+  status: 'active' | 'archived';
+  version_count?: number;
+  created_at: string;
+}
+
+export interface ExecutionSpan {
+  id: string;
+  trace: string;
+  parent_span?: string | null;
+  workflow_id: string;
+  stage: string;
+  step_type: string;
+  sequence: number;
+  tool_name?: string;
+  status: 'running' | 'completed' | 'failed' | 'skipped';
+  latency_ms: number;
+  token_usage: number;
+  error_type?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface FailureAttribution {
+  id: string;
+  project: number;
+  output?: string | null;
+  span?: string | null;
+  workflow_id: string;
+  category: string;
+  source: 'rule' | 'llm' | 'human';
+  confidence: number;
+  hypothesis: string;
+  evidence: unknown[];
+  counterevidence: unknown[];
+  state: 'proposed' | 'confirmed' | 'rejected';
+  created_at: string;
+}
+
+export interface OptimizationProposal {
+  id: string;
+  project: number;
+  proposal_type: string;
+  title: string;
+  summary: string;
+  expected_benefit: string;
+  risk_notes: string;
+  rollback_plan: string;
   state: string;
   created_at: string;
 }
@@ -182,4 +240,47 @@ export interface RunEvolutionResponse {
   case_count: number;
   created_release_id: string | null;
   gate_passed: boolean | null;
+}
+
+export interface ProjectQualityPerson {
+  id: number;
+  username: string;
+  display_name: string;
+  email: string;
+  project_role: 'owner' | 'admin' | 'member' | string;
+}
+
+export interface WorkflowStageGateView {
+  stage: string;
+  status: 'pending' | 'passed' | 'failed' | 'overridden' | 'ready' | 'blocked';
+  output_id?: string | null;
+  task_id: string;
+  gate_id?: string | null;
+  scores: Record<string, number>;
+  reason: string;
+  decided_by: string;
+  skill_name: string;
+  skill_version: string;
+  self_evolution: boolean;
+}
+
+export interface ProjectWorkflowView {
+  workflow_id: string;
+  stages: WorkflowStageGateView[];
+}
+
+export interface SingleCapabilitySummary {
+  stage: string;
+  outputs: number;
+  feedback: number;
+  failed: number;
+  latest_at?: string | null;
+}
+
+export interface ProjectQualityCockpit {
+  people: { leads: ProjectQualityPerson[]; executors: ProjectQualityPerson[] };
+  gold_by_type: Record<string, Array<{ id: string; name: string; status: string; versions: number; cases: number }>>;
+  single_capabilities: SingleCapabilitySummary[];
+  workflows: ProjectWorkflowView[];
+  stage_order: string[];
 }

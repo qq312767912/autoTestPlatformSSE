@@ -48,7 +48,13 @@ description: nested zip skill
 
                 self.assertEqual(skill.name, 'nested-skill')
                 self.assertIn('nested zip skill', skill.description)
-                self.assertTrue(os.path.exists(os.path.join(skill.get_full_path(), 'scripts', 'run.py')))
+                # 文件落在**不可变版本目录**里；skill_path 要等版本被激活后才指向它
+                # （R13：没有活跃版本的 Skill 不可执行，所以旧指针此时仍为空）。
+                version = skill.versions.get()
+                self.assertTrue(os.path.exists(
+                    os.path.join(version.get_full_path(), 'scripts', 'run.py')
+                ))
+                self.assertIsNone(skill.get_full_path())
 
     def test_create_from_zip_supports_multiple_skills_in_one_archive(self):
         zip_file = self._build_zip_file({
@@ -72,5 +78,12 @@ description: skill b
 
                 self.assertEqual(len(skills), 2)
                 self.assertEqual({skill.name for skill in skills}, {'skill-a', 'skill-b'})
-                self.assertTrue(any(os.path.exists(os.path.join(skill.get_full_path(), 'run.py')) for skill in skills))
-                self.assertTrue(any(os.path.exists(os.path.join(skill.get_full_path(), 'lib', 'main.py')) for skill in skills))
+                # 每个 Skill 的文件各自落在自己的版本目录下，互不串包。
+                version_dirs = [skill.versions.get().get_full_path() for skill in skills]
+                self.assertTrue(any(
+                    os.path.exists(os.path.join(directory, 'run.py')) for directory in version_dirs
+                ))
+                self.assertTrue(any(
+                    os.path.exists(os.path.join(directory, 'lib', 'main.py'))
+                    for directory in version_dirs
+                ))

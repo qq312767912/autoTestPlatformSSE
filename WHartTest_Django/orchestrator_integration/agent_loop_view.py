@@ -15,6 +15,7 @@ Agent Loop API 视图 (LangChain v1 重构版)
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -28,7 +29,7 @@ from django.http import StreamingHttpResponse, JsonResponse
 from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
-from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.exceptions import AuthenticationFailed, ValidationError
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -836,6 +837,78 @@ class AgentLoopStreamAPIView(View):
     # 最大步骤数（用于前端显示）
     MAX_STEPS = 500
 
+    @staticmethod
+    def _tool_execution_spans(messages):
+        """从 LangChain 真实消息链提取工具调用，只留哈希和受限错误摘要。"""
+        calls = {}
+        ordered = []
+        for message in messages or []:
+            if isinstance(message, AIMessage):
+                for call in getattr(message, "tool_calls", None) or []:
+                    call_id = str(call.get("id") or "") if isinstance(call, dict) else str(getattr(call, "id", "") or "")
+                    name = str(call.get("name") or "unknown") if isinstance(call, dict) else str(getattr(call, "name", "unknown"))
+                    args = call.get("args", call.get("arguments", {})) if isinstance(call, dict) else getattr(call, "args", {})
+                    raw = json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+                    item = {
+                        "tool_name": name,
+                        "call_id": call_id,
+                        "input_hash": hashlib.sha256(raw.encode()).hexdigest(),
+                        "status": "running",
+                        "step": len(ordered) + 1,
+                    }
+                    calls[call_id] = item
+                    ordered.append(item)
+            elif isinstance(message, ToolMessage):
+                call_id = str(getattr(message, "tool_call_id", "") or "")
+                item = calls.get(call_id)
+                if item is None:
+                    item = {
+                        "tool_name": str(getattr(message, "name", "unknown") or "unknown"),
+                        "call_id": call_id, "input_hash": "", "step": len(ordered) + 1,
+                    }
+                    ordered.append(item)
+                raw = json.dumps(getattr(message, "content", ""), ensure_ascii=False, sort_keys=True, default=str)
+                status_value = str(getattr(message, "status", "") or "").lower()
+                item.update({
+                    "output_hash": hashlib.sha256(raw.encode()).hexdigest(),
+                    "status": "failed" if status_value in {"error", "failed"} else "completed",
+                    "error_type": "tool_error" if status_value in {"error", "failed"} else "",
+                    "error_message": raw[:500] if status_value in {"error", "failed"} else "",
+                })
+        for item in ordered:
+            if item.get("status") == "running":
+                item["status"] = "failed"
+                item["error_type"] = "missing_tool_result"
+                item["error_message"] = "工具调用未返回结果"
+        return ordered
+
+    @staticmethod
+    def _bind_stage_skill(*, project, workflow_id, stage, actor=None):
+        """取（必要时锁定）该阶段应使用的 Skill 版本（T15）。
+
+        刻意**不抛异常**：这里是"记录产出"的旁路，不该因为版本解析失败把一份
+        已经生成好的结果丢掉。解析不到就如实返回 None，产出按"无版本溯源"入库，
+        页面上能看到这一点——这比静默丢失业务结果好得多。
+        """
+        if not workflow_id:
+            return None
+        try:
+            from knowledge_evolution.task_binding import (
+                SkillBindingRefused,
+                TaskSkillBindingService,
+            )
+
+            binding = TaskSkillBindingService.bind_stage(
+                project=project, workflow_id=str(workflow_id), stage=stage, actor=actor,
+            )
+        except SkillBindingRefused as exc:
+            logger.warning("阶段 %s 的 Skill 版本未能绑定，产出将无版本溯源：%s", stage, exc)
+            return None
+        except Exception:
+            logger.exception("阶段 %s 的 Skill 版本绑定异常，产出将无版本溯源", stage)
+            return None
+        return binding.get("skill_version")
+
     async def _record_module_output(
         self, *, request, project, session_id, user_message, all_messages,
         model_name, prompt_id, total_tokens, step_count, use_knowledge_base,
@@ -871,17 +944,25 @@ class AgentLoopStreamAPIView(View):
                 except Exception:
                     capability = None
             adapter = ADAPTERS[module_key]
+            workflow_id = (
+                (getattr(request, "_flywheel_workflow_id", "") or session_id)
+                if module_key in {"test_plan_generation", "testcase_generation", "report_generation"}
+                else ""
+            )
+            skill_version = await sync_to_async(self._bind_stage_skill)(
+                project=project, workflow_id=workflow_id, stage=module_key,
+                actor=request.user,
+            )
             envelope = adapter.build(
                 project=project,
                 user=request.user,
                 source_id=session_id,
                 input_summary=user_message,
                 output={"content": content},
-                workflow_id=(getattr(request, "_flywheel_workflow_id", "") or session_id)
-                if module_key in {"risk_identification", "test_plan_generation", "testcase_generation", "issue_tracking"}
-                else "",
+                workflow_id=workflow_id,
                 parent_output_ids=getattr(request, "_flywheel_parent_output_ids", []),
                 capability=capability or getattr(request, "_flywheel_capability", None),
+                skill_version=skill_version,
                 metrics={"token_usage": total_tokens, "step_count": step_count},
                 channels={
                     "agent": {"enabled": True, "steps": step_count},
@@ -899,6 +980,10 @@ class AgentLoopStreamAPIView(View):
                     "session_id": session_id,
                     "knowledge_enabled": bool(use_knowledge_base and knowledge_base_ids),
                     "knowledge_base_ids": list(knowledge_base_ids or []),
+                    "execution_spans": self._tool_execution_spans(all_messages),
+                    "enforce_quality_gate": module_key in {
+                        "test_plan_generation", "testcase_generation", "report_generation",
+                    },
                 },
             )
             return await sync_to_async(publish_output)(envelope)
@@ -1674,12 +1759,12 @@ class AgentLoopStreamAPIView(View):
         module_key = str(body_data.get("module_key") or "")
         flywheel_modules = {
             "case_review", "knowledge_query", "risk_identification",
-            "test_plan_generation", "testcase_generation", "issue_tracking",
+            "test_plan_generation", "testcase_generation", "issue_tracking", "report_generation",
         }
         request._flywheel_module_key = module_key if module_key in flywheel_modules else ""
         request._flywheel_workflow_id = str(body_data.get("workflow_id") or "")
         if request._flywheel_module_key in {
-            "risk_identification", "test_plan_generation", "testcase_generation", "issue_tracking",
+            "test_plan_generation", "testcase_generation", "report_generation",
         } and not request._flywheel_workflow_id:
             request._flywheel_workflow_id = str(body_data.get("session_id") or "")
         parent_ids = body_data.get("parent_output_ids") or []
@@ -1760,6 +1845,19 @@ class AgentLoopStreamAPIView(View):
         if not session_id:
             session_id = uuid.uuid4().hex
             logger.info(f"AgentLoopStreamAPI: Generated new session_id: {session_id}")
+
+        # 链路型业务在真正调用模型前执行质量门禁，防止先生成后拦截。
+        if request._flywheel_module_key in {
+            "testcase_generation", "report_generation",
+        }:
+            workflow_id = request._flywheel_workflow_id or session_id
+            try:
+                from knowledge_evolution.operations import WorkflowGateService
+                await sync_to_async(WorkflowGateService.assert_can_enter)(
+                    int(project_id), workflow_id, request._flywheel_module_key
+                )
+            except ValidationError as exc:
+                return api_error_response(f"质量门禁未通过：{exc}", 409)
 
         # 5.1 在加载 LLM/工具前完成登录态绑定；Cookie/token 不进入模型参数。
         try:

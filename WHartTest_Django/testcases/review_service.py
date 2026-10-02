@@ -163,6 +163,29 @@ def _skill_prompt(review):
     return review.skill_snapshot or build_skill_snapshot(review.selected_skill)
 
 
+def _lock_review_skill(review):
+    """在审查启动时锁定用例审查 Skill 版本（T14）。
+
+    锁定必须发生在**读取文件、调用模型之前**：一旦开跑才发现没有活跃版本，
+    已经产生的中间状态（进度、部分结果）就成了没有版本溯源的孤儿产出，
+    而飞轮后半段（金标、归因、派生）全都要求产出能定位到具体版本。
+
+    项目登记了用例审查 Skill 却没有活跃版本时这里会抛
+    ``SkillBindingRefused``，任务被标记失败并携带可读原因；项目根本没有登记
+    该 Skill 时返回未绑定结果，审查回落到平台内置规则（见
+    ``knowledge_evolution.task_binding`` 的三分支说明）。
+    """
+    from knowledge_evolution.task_binding import TaskSkillBindingService
+
+    binding = TaskSkillBindingService.bind_case_review(
+        review=review, actor=review.creator,
+    )
+    review.current_step = binding["detail"]
+    review.save(update_fields=["current_step", "updated_at"])
+    logger.info("用例审查 %s 版本绑定：%s", review.pk, binding["detail"])
+    return binding
+
+
 def _read_rows(path):
     suffix = Path(path).suffix.lower()
     rows = []
@@ -496,6 +519,9 @@ def run_testcase_review(review_id):
     review = TestCaseReview.objects.get(pk=review_id)
     if review.status == "cancelled":
         return {"cancelled": True}
+    # 先锁版本再改状态：拒绝启动时任务仍停在 pending，不会留下一个
+    # "running 但从未真正开始"的孤儿记录，运维侧也就不会去追一个不存在的执行。
+    binding = _lock_review_skill(review)
     review.status = "running"
     review.started_at = timezone.now()
     review.current_step = "读取测试用例"
@@ -684,33 +710,127 @@ def run_testcase_review(review_id):
     review.save()
 
     # 记录到平台统一产出协议，进入数据飞轮
+    # 注意：summary 已被 _write_report 整体覆盖，问题明细只能在这里直接传入。
+    _publish_to_evolution(
+        review, issues=issues, pending=pending, governance=governance,
+        total_chunks=len(chunks), uncovered_chunks=len(uncovered),
+        skill_version=binding.get("skill_version"),
+    )
+
+    return review.summary
+
+
+def build_review_findings(review, issues):
+    """把审查问题明细转成统一产出协议的 findings。
+
+    飞轮的金标、分层评测与逐条反馈都以 finding 为最小单位，因此这里必须
+    同时保留「可定位」（sheet/row/case_id）与「可判定」（severity/disposition）。
+    """
+    findings = []
+    for index, item in enumerate(issues or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        try:
+            line_start = int(item.get("row") or 0)
+        except (TypeError, ValueError):
+            line_start = 0
+        findings.append({
+            "index": index,
+            "key": f"{item.get('sheet')}:{item.get('row')}:{item.get('case_id')}",
+            "file": str(review.source_name),
+            "line_start": line_start,
+            "case_id": str(item.get("case_id") or ""),
+            "module": str(item.get("module") or ""),
+            "issue_type": str(item.get("issue_type") or ""),
+            "severity": str(item.get("severity") or "中"),
+            "disposition": str(item.get("judgement") or "needs_confirmation"),
+            "reason": str(item.get("description") or "")[:500],
+            "suggestion": str(item.get("suggestion") or "")[:500],
+            "original": str(item.get("original") or "")[:500],
+        })
+    return findings
+
+
+def _recover_issues_from_checkpoint(review):
+    """历史记录补录用：从断点里恢复问题明细。
+
+    `_write_report` 会用报告摘要整体覆盖 summary，因此正常流程结束后
+    checkpoint 已经不存在，只能作为兜底。
+    """
+    checkpoint = (review.summary or {}).get("_checkpoint") or {}
+    issues, pending, governance = [], [], []
+    for key in sorted((checkpoint.get("results") or {}).keys(), key=int):
+        result = checkpoint["results"][str(key)] or {}
+        issues.extend(result.get("issues") or [])
+        pending.extend(result.get("pending_confirmations") or [])
+        governance.extend(result.get("governance_suggestions") or [])
+    return issues, pending, governance, int(checkpoint.get("total_chunks") or 0), len(checkpoint.get("uncovered") or {})
+
+
+def _publish_to_evolution(review, issues=None, pending=None, governance=None,
+                          total_chunks=None, uncovered_chunks=None, skill_version=None):
+    """把已完成的用例审查结果发布到数据飞轮，幂等。
+
+    issues 由调用方直接传入真实明细；未传入时才回退到 checkpoint，
+    供历史记录补录使用。
+
+    ``skill_version`` 是本次审查锁定的 Skill 版本（T14）。它必须一路带到产出上：
+    飞轮后续的反馈绑定、金标候选、归因与候选派生都从产出的 ``skill_version`` /
+    ``skill_package_sha256`` 往下读，断在这里会让整条闭环失去版本锚点。
+    """
     try:
         from knowledge_evolution.protocol import ADAPTERS, publish_output
+        if issues is None:
+            issues, pending, governance, total_chunks, uncovered_chunks = (
+                _recover_issues_from_checkpoint(review)
+            )
+        issues = list(issues or [])
+        pending = list(pending or [])
+        governance = list(governance or [])
+        if total_chunks is None:
+            total_chunks = int((review.summary or {}).get("total_chunks") or 0)
+        if uncovered_chunks is None:
+            uncovered_chunks = int((review.summary or {}).get("uncovered_chunks") or 0)
         duration_ms = 0
         if review.started_at and review.completed_at:
             duration_ms = max(0, round((review.completed_at - review.started_at).total_seconds() * 1000))
+        findings = build_review_findings(review, issues)
         envelope = ADAPTERS["case_review"].build(
             project=review.project,
             user=review.creator,
             source_id=str(review.pk),
+            # 单能力任务也带上 workflow_id：Skill 版本锁是按
+            # (project, workflow_id, lock_key) 定位的，不带它事后就找不到
+            # "这次审查当时用的是哪一份包"。
+            workflow_id=str(review.pk),
             input_summary=review.business_context or f"测试用例审查：{review.source_name}",
-            output={"summary": review.summary or {}, "issues": issues, "pending": pending, "governance": governance},
-            findings=[{
-                "key": f"{item.get('sheet')}:{item.get('row')}:{item.get('case_id')}",
-                "file": str(review.source_name),
-                "line_start": int(item.get("row") or 0),
-                "severity": str(item.get("severity") or "中"),
-                "disposition": str(item.get("judgement") or "needs_confirmation"),
-                "reason": str(item.get("description") or "")[:500],
-                "suggestion": str(item.get("suggestion") or "")[:500],
-            } for item in issues],
+            output={
+                "summary": {k: v for k, v in (review.summary or {}).items() if k != "_checkpoint"},
+                # 与代码审查一致：正文必须携带结论明细本体。只存计数会让
+                # 飞轮的 L1 裁判拿不到「问题说明/修改建议」，评测恒判不合格。
+                "findings": findings,
+                "pending": [str(item) for item in pending],
+                "governance": [str(item) for item in governance],
+                "issues_count": len(issues),
+                "pending_count": len(pending),
+                "governance_count": len(governance),
+            },
+            findings=findings,
             evidence=[{"source_type": "testcase_review", "source_id": str(review.pk), "location": review.source_name}],
-            metrics={"latency_ms": duration_ms, "token_usage": 0, "chunks": len(chunks), "uncovered_chunks": len(uncovered)},
+            metrics={
+                "latency_ms": duration_ms,
+                "token_usage": 0,
+                "chunks": int(total_chunks or 0),
+                "uncovered_chunks": int(uncovered_chunks or 0),
+                "issues_count": len(issues),
+                "pending_count": len(pending),
+            },
             producer={
                 "policy_version": f"testcase-review-v1",
                 "prompt_version": review.skill_name,
                 "model_version": "",
             },
+            skill_version=skill_version,
         )
         evolution_ids = publish_output(envelope)
         if evolution_ids:
@@ -718,5 +838,3 @@ def run_testcase_review(review_id):
             review.save(update_fields=["summary"])
     except Exception:
         logger.exception("用例审查结果未能记录到数据飞轮")
-
-    return review.summary

@@ -41,7 +41,7 @@
     <a-drawer :visible="!!selectedTask" :width="780" unmount-on-close @cancel="selectedTask = null">
       <template #title>{{ selectedTask?.title || '分析详情' }}</template>
       <div v-if="selectedTask" class="iteration-overview">
-        <div class="overview-title"><div><span>本次迭代分析</span><h2>{{ iterationConclusion(selectedTask) }}</h2></div><a-tag :color="selectedTask.change_report?.summary?.high_risk_count ? 'red' : 'green'">{{ selectedTask.change_report?.summary?.high_risk_count ? '建议重点回归' : '常规回归' }}</a-tag></div>
+        <div class="overview-title"><div><span>本次迭代分析</span><h2>{{ iterationConclusion(selectedTask) }}</h2></div><div style="display:flex;gap:8px;align-items:center"><a-button size="small" type="primary" @click="qualitySidebarVisible = true">质量反馈</a-button><a-tag :color="selectedTask.change_report?.summary?.high_risk_count ? 'red' : 'green'">{{ selectedTask.change_report?.summary?.high_risk_count ? '建议重点回归' : '常规回归' }}</a-tag></div></div>
         <div class="overview-numbers">
           <div><b>{{ selectedTask.change_report?.summary?.changed_files || 0 }}</b><span>变更文件</span></div>
           <div class="addition"><b>+{{ selectedTask.change_report?.summary?.additions || 0 }}</b><span>新增行</span></div>
@@ -220,6 +220,14 @@
       </a-tabs>
     </a-drawer>
 
+    <QualitySidebar
+      v-model:visible="qualitySidebarVisible"
+      :project-id="selectedTask?.project || projectStore.currentProjectId || 0"
+      task-type="code_review"
+      :task-id="selectedTask?.id || ''"
+      :title="selectedTask?.title || selectedTask?.repository_name"
+    />
+
     <a-modal v-model:visible="convertVisible" title="转为正式测试用例" :ok-loading="converting" @ok="convertDraft">
       <p class="convert-description">将保留代码审查任务与风险来源，正式用例可在“测试用例”模块继续维护。</p>
       <a-form layout="vertical"><a-form-item label="目标用例模块" required><a-select v-model="convertModuleId" placeholder="选择当前项目下的用例模块"><a-option v-for="module in testcaseModules" :key="module.id" :value="module.id">{{ module.name }}</a-option></a-select></a-form-item></a-form>
@@ -350,6 +358,7 @@ import * as api from './service';
 import { downloadHtmlReport } from './reportExport';
 import { KnowledgeService } from '@/features/knowledge/services/knowledgeService';
 import KnowledgeDocumentScopeSelector from '@/features/knowledge/components/KnowledgeDocumentScopeSelector.vue';
+import QualitySidebar from '@/features/knowledge-evolution/components/QualitySidebar.vue';
 import type { KnowledgeBase } from '@/features/knowledge/types/knowledge';
 
 const projectStore = useProjectStore();
@@ -380,6 +389,7 @@ const testPriorityFilter = ref<string|undefined>();
 const testTypeFilter = ref<string[]>([]);
 const diffVisible = ref(false), diffLoading = ref(false), diffTitle = ref('代码 Diff'), diffText = ref(''), diffNotice = ref(''), diffNoticeType = ref<'success'|'warning'|'info'>('info'), diffFixPlan = ref(''), diffFixLocation = ref('');
 const patchLoadingKey = ref('');
+const qualitySidebarVisible = ref(false);
 const analysisModeOptions = [
   { value:'quick', label:'快速', badge:'极速', summary:'仅规则扫描，不调用模型' },
   { value:'standard', label:'标准', badge:'推荐', summary:'规则扫描 + AI 降级分析' },

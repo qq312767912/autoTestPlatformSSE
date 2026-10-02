@@ -10,7 +10,9 @@ from .models import (
     KnowledgeCandidate,
     RetrievalTrace,
 )
-from .capability_models import CapabilityDefinition, CapabilityRelease, PromotionDecision
+from .capability_models import (
+    CapabilityDefinition, CapabilityRelease, PromotionDecision, ReleaseObservation,
+)
 from .gold_models import (
     AnnotationConflict,
     GoldAnnotation,
@@ -35,7 +37,14 @@ class PromotionDecisionSerializer(serializers.ModelSerializer):
     class Meta:
         model = PromotionDecision
         fields = "__all__"
-        read_only_fields = fields
+        read_only_fields = [f.name for f in model._meta.get_fields() if getattr(f, "name", None)]
+
+
+class ReleaseObservationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ReleaseObservation
+        fields = "__all__"
+        read_only_fields = [f.name for f in model._meta.get_fields() if getattr(f, "name", None)]
 
 
 class CapabilityReleaseBriefSerializer(serializers.ModelSerializer):
@@ -47,6 +56,7 @@ class CapabilityReleaseBriefSerializer(serializers.ModelSerializer):
 
 class CapabilityReleaseSerializer(serializers.ModelSerializer):
     decisions = PromotionDecisionSerializer(many=True, read_only=True)
+    observations = ReleaseObservationSerializer(many=True, read_only=True)
 
     class Meta:
         model = CapabilityRelease
@@ -54,7 +64,7 @@ class CapabilityReleaseSerializer(serializers.ModelSerializer):
             "id", "project", "kind", "name", "version", "config", "artifact_hash",
             "state", "candidate", "previous_release", "baseline_run", "candidate_run",
             "gate_report", "created_by", "approved_by", "approved_at", "activated_at",
-            "created_at", "updated_at", "decisions",
+            "created_at", "updated_at", "decisions", "observations",
         ]
         read_only_fields = [
             "artifact_hash", "state", "previous_release", "gate_report", "created_by",
@@ -176,21 +186,21 @@ class JudgeResultSerializer(serializers.ModelSerializer):
     class Meta:
         model = JudgeResult
         fields = "__all__"
-        read_only_fields = fields
+        read_only_fields = [f.name for f in model._meta.get_fields() if getattr(f, "name", None)]
 
 
 class ExecutionSpanSerializer(serializers.ModelSerializer):
     class Meta:
         model = ExecutionSpan
         fields = "__all__"
-        read_only_fields = fields
+        read_only_fields = [f.name for f in model._meta.get_fields() if getattr(f, "name", None)]
 
 
 class FailureAttributionSerializer(serializers.ModelSerializer):
     class Meta:
         model = FailureAttribution
         fields = "__all__"
-        read_only_fields = fields
+        read_only_fields = [f.name for f in model._meta.get_fields() if getattr(f, "name", None)]
 
 
 class OptimizationProposalSerializer(serializers.ModelSerializer):
@@ -214,7 +224,7 @@ class OptimizationExperimentSerializer(serializers.ModelSerializer):
     class Meta:
         model = OptimizationExperiment
         fields = "__all__"
-        read_only_fields = fields
+        read_only_fields = [f.name for f in model._meta.get_fields() if getattr(f, "name", None)]
 
 
 class RetrievalTraceSerializer(serializers.ModelSerializer):

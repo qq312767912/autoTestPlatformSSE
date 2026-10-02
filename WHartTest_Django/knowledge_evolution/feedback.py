@@ -14,7 +14,93 @@ from typing import Any, Optional
 from django.db import transaction
 from django.utils import timezone
 
+from .capability_registry import capability_info
 from .models import FeedbackEvent, GenerationOutput, RetrievalTrace
+
+
+def resolve_binding(*, output, task_type: str = "") -> dict:
+    """从产出反查"生成它的版本"，供反馈精确绑定（T10 / R5）。
+
+    取值顺序刻意是"产出已落定的外键优先，注册表兜底"：
+
+    - ``output.skill_version`` / ``output.capability`` 是服务端在产出时解析并写入的，
+      是事实；注册表只能给出"这类能力是什么形态"。
+    - ``release`` 从 Skill 版本一对一取（Skill 版本不复制发布状态）；
+      复合能力没有 SkillVersion，此时沿 ``CapabilityDefinition.active_release`` 取，
+      否则反馈落到复合能力上就查不到责任发布。
+
+    任何一步取不到都不抛错：反馈本身是有效信息，不该因为溯源链不全被丢弃。
+    但 ``evidence`` 是否完整由 ``assert_evidence_complete`` 单独判定，
+    决定"能不能升级成金标"，而不是"能不能记录"。
+    """
+    info = capability_info(task_type or getattr(output, "task_type", ""))
+    resolved = {
+        "capability_id": None,
+        "release_id": None,
+        "skill_version_id": None,
+        "capability_kind": info["kind"],
+    }
+    if output is None:
+        return resolved
+
+    skill_version = getattr(output, "skill_version", None)
+    if skill_version is not None:
+        resolved["skill_version_id"] = skill_version.pk
+        resolved["release_id"] = getattr(skill_version, "release_id", None)
+        if resolved["capability_id"] is None:
+            resolved["capability_id"] = getattr(skill_version.skill, "capability_id", None)
+
+    capability = getattr(output, "capability", None)
+    if capability is not None:
+        resolved["capability_id"] = capability.pk
+        if resolved["release_id"] is None:
+            resolved["release_id"] = getattr(capability, "active_release_id", None)
+    return resolved
+
+
+def effective_evidence(feedback) -> list:
+    """汇总一条反馈的可用证据。
+
+    两处来源都要认，不能只看新加的 ``FeedbackEvent.evidence``：
+
+    - ``feedback.evidence``：本次反馈显式提交的证据；
+    - ``output.metadata["protocol"]["evidence"]``：产出发布时随协议一起落下的证据
+      （统一协议里 ``evidence`` 是标准字段）。
+
+    只看后者会让新接口提交的证据被忽略；只看前者会让存量产出已有的证据被判成缺失。
+    """
+    items = list(feedback.evidence or [])
+    output = getattr(feedback, "output", None)
+    if output is not None:
+        protocol = (output.metadata or {}).get("protocol") or {}
+        items.extend(protocol.get("evidence") or [])
+    return items
+
+
+def assert_evidence_complete(feedback, *, min_items: int = 1) -> list:
+    """判定一条反馈的证据是否足以升级为金标资产。
+
+    需求 R5：「当反馈无证据、来源不可追溯或包含禁止入模数据时，系统不得自动生成优化候选」。
+    这里返回**缺失项清单**而不是布尔值，好让调用方把"缺什么"直接展示给用户。
+
+    只对会产生**事实性结论**的信号要求证据：``false_positive`` / ``missed`` /
+    ``defect_confirmed`` / ``rejected``——它们断言"平台漏了/错了"或"结论不成立"，
+    没有证据就无法复核。``accepted`` / ``test_passed`` 属于确认型信号，
+    证据就是"结果本身被采纳/通过"，不额外要求。
+    """
+    EVIDENCE_REQUIRED = {"false_positive", "missed", "defect_confirmed", "rejected"}
+    missing = []
+    if feedback.signal in EVIDENCE_REQUIRED and len(effective_evidence(feedback)) < min_items:
+        missing.append({
+            "code": "evidence_missing", "label": "证据链",
+            "detail": f"{feedback.get_signal_display()} 必须附带可核验的证据才能升级为金标",
+        })
+    if not feedback.output_id and not feedback.trace_id:
+        missing.append({
+            "code": "source_untraceable", "label": "来源可追溯",
+            "detail": "反馈未关联产出或轨迹，无法回溯来源",
+        })
+    return missing
 
 
 @dataclass
@@ -129,7 +215,8 @@ class FeedbackService:
 
     def _create(
         self, *, signal: str, value: float, reason_code: str = "",
-        comment: str = "", detail: dict | None = None
+        comment: str = "", detail: dict | None = None,
+        evidence: list | None = None, binding: dict | None = None,
     ) -> FeedbackEvent:
         output = self.context.output
         output_hash = output.output_hash if output else ""
@@ -139,6 +226,7 @@ class FeedbackService:
         idempotency_key = self._build_idempotency_key(
             task_type, task_id, output_hash, signal, actor_key
         )
+        resolved = binding if binding is not None else resolve_binding(output=output, task_type=task_type)
 
         with transaction.atomic():
             try:
@@ -150,6 +238,11 @@ class FeedbackService:
                 project_id=self.project_id,
                 output=output,
                 trace=self.context.trace,
+                capability_id=resolved.get("capability_id"),
+                release_id=resolved.get("release_id"),
+                skill_version_id=resolved.get("skill_version_id"),
+                capability_kind=resolved.get("capability_kind", ""),
+                evidence=_json_safe(evidence or []),
                 signal=signal,
                 value=value,
                 reason_code=reason_code,
@@ -276,6 +369,7 @@ class FeedbackService:
         comment: str = "",
         detail: dict | None = None,
         knowledge_version_ids: list[str] | None = None,
+        evidence: list | None = None,
     ) -> FeedbackEvent:
         """快捷入口：直接对 GenerationOutput 记录反馈。"""
         ctx = FeedbackContext(
@@ -299,6 +393,7 @@ class FeedbackService:
             reason_code=reason_code,
             comment=comment,
             detail=detail,
+            evidence=evidence,
         )
 
 

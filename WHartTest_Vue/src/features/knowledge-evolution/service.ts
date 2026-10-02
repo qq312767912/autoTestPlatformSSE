@@ -13,6 +13,12 @@ import type {
   CreateCandidateFromRunRequest,
   RunEvolutionRequest,
   RunEvolutionResponse,
+  GoldDataset,
+  ExecutionSpan,
+  FailureAttribution,
+  OptimizationProposal,
+  GenerationOutput,
+  ProjectQualityCockpit,
 } from './types';
 
 const BASE = '/api/knowledge-evolution';
@@ -153,4 +159,61 @@ export async function activateCapabilityRelease(definitionId: string, releaseId:
 export async function listCapabilityReleases(params?: { project?: number; kind?: string; state?: string }): Promise<CapabilityRelease[]> {
   const data = await get<CapabilityRelease[] | { results: CapabilityRelease[] }>('/capability-releases/', params);
   return Array.isArray(data) ? data : (data?.results ?? []);
+}
+
+export async function listGoldDatasets(projectId: number): Promise<GoldDataset[]> {
+  const data = await get<GoldDataset[] | { results: GoldDataset[] }>('/gold-datasets/', { project: projectId });
+  return Array.isArray(data) ? data : (data?.results ?? []);
+}
+
+export async function listExecutionSpans(traceId: string): Promise<ExecutionSpan[]> {
+  const data = await get<ExecutionSpan[] | { results: ExecutionSpan[] }>('/execution-spans/', { trace: traceId });
+  return Array.isArray(data) ? data : (data?.results ?? []);
+}
+
+export async function listFailureAttributions(projectId: number): Promise<FailureAttribution[]> {
+  const data = await get<FailureAttribution[] | { results: FailureAttribution[] }>('/failure-attributions/', { project: projectId });
+  return Array.isArray(data) ? data : (data?.results ?? []);
+}
+
+export async function listOptimizationProposals(projectId: number): Promise<OptimizationProposal[]> {
+  const data = await get<OptimizationProposal[] | { results: OptimizationProposal[] }>('/optimization-proposals/', { project: projectId });
+  return Array.isArray(data) ? data : (data?.results ?? []);
+}
+
+export async function getGenerationOutputsByTask(projectId: number, taskType: string, taskId: string): Promise<GenerationOutput[]> {
+  const data = await get<GenerationOutput[] | { results: GenerationOutput[] }>('/generation-outputs/', {
+    project: projectId,
+    task_type: taskType,
+    task_id: taskId,
+  });
+  return Array.isArray(data) ? data : (data?.results ?? []);
+}
+
+export async function listFailureAttributionsForOutput(outputId: string): Promise<FailureAttribution[]> {
+  const data = await get<FailureAttribution[] | { results: FailureAttribution[] }>('/failure-attributions/', { output: outputId });
+  return Array.isArray(data) ? data : (data?.results ?? []);
+}
+
+export async function submitFeedbackOutcome(payload: {
+  output_id?: string;
+  trace_id?: string;
+  signal: CreateFeedbackRequest['signal'];
+  reason_code?: string;
+  comment?: string;
+  detail?: Record<string, unknown>;
+}): Promise<FeedbackEvent> {
+  return post<FeedbackEvent>('/feedback/outcomes/', payload);
+}
+
+export async function getProjectQualityCockpit(projectId: number): Promise<ProjectQualityCockpit> {
+  return get<ProjectQualityCockpit>('/operations/cockpit/', { project: projectId });
+}
+
+export async function evaluateWorkflowStage(projectId: number, workflowId: string, stage: string): Promise<unknown> {
+  return post('/operations/evaluate-workflow-stage/', { project: projectId, workflow_id: workflowId, stage });
+}
+
+export async function overrideWorkflowStage(projectId: number, workflowId: string, stage: string, reason: string): Promise<unknown> {
+  return post('/operations/override-workflow-stage/', { project: projectId, workflow_id: workflowId, stage, reason });
 }

@@ -9,6 +9,8 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
+from .capability_registry import package_sha256_of
+from .feedback import assert_evidence_complete, effective_evidence
 from .gold_models import (
     AnnotationConflict,
     GoldAnnotation,
@@ -35,11 +37,23 @@ class GoldCandidateService:
             raise ValidationError("冻结版本不能新增金标候选")
         if feedback.signal not in GoldCandidateService.ELIGIBLE_SIGNALS:
             raise ValidationError("该反馈信号不足以生成金标候选")
+        # 证据不完整时禁止升级（R5）。把"缺什么"直接带进异常，而不是只报"不允许"。
+        missing = assert_evidence_complete(feedback)
+        if missing:
+            raise ValidationError(
+                "反馈不足以升级为金标：" + "；".join(item["detail"] for item in missing)
+            )
         output = feedback.output
         if not output:
             raise ValidationError("金标候选必须关联具体业务产出")
         if output.project_id != version.dataset.project_id:
             raise ValidationError("反馈与金标数据集不属于同一项目")
+        # 金标必须按能力组织：数据集声明的 task_type 与产出必须一致，
+        # 否则会出现"代码审查的样本被塞进用例审查金标集"，评测时毫无意义。
+        if output.task_type != version.dataset.task_type:
+            raise ValidationError(
+                f"产出能力（{output.task_type}）与金标数据集能力（{version.dataset.task_type}）不一致"
+            )
 
         protocol = (output.metadata or {}).get("protocol") or {}
         privacy = protocol.get("privacy") or {}
@@ -52,7 +66,7 @@ class GoldCandidateService:
             "output_hash": output.output_hash,
             "signal": feedback.signal,
         })
-        evidence = protocol.get("evidence") or []
+        evidence = effective_evidence(feedback)
         case, _ = GoldCase.objects.get_or_create(
             version=version,
             source_hash=source_hash,
@@ -68,10 +82,21 @@ class GoldCandidateService:
                     "query_hash": _canonical_hash(output.trace.query),
                     "output_hash": output.output_hash,
                     "protocol_version": protocol.get("schema_version", ""),
+                    # 责任版本溯源：下游 Badcase 要能反向定位到具体 Skill 包/发布。
+                    "capability_id": str(feedback.capability_id or ""),
+                    "release_id": str(feedback.release_id or ""),
+                    "skill_version_id": str(feedback.skill_version_id or ""),
+                    "package_sha256": package_sha256_of(output),
                 },
                 "expected_output": (feedback.detail or {}).get("expected_output") or {},
                 "evidence": evidence,
-                "tags": [feedback.signal, feedback.reason_code] if feedback.reason_code else [feedback.signal],
+                "tags": [
+                    tag for tag in (
+                        feedback.signal,
+                        feedback.reason_code,
+                        feedback.capability_kind,
+                    ) if tag
+                ],
                 "split": split,
                 "state": "candidate",
                 "privacy_level": "prohibited" if prohibited else privacy_level,
@@ -207,3 +232,86 @@ class GoldVersionService:
             "content_hash", "sample_stats", "state", "frozen_by", "frozen_at", "updated_at",
         ])
         return version
+
+
+class GoldCatalogService:
+    """按能力与评测分区组织金标资产（T10 / R10）。
+
+    为什么不再让页面自己 group by：能力分类口径、必需分区、可用性判定这三件事
+    在别处已经有了唯一真值（``capability_registry`` / ``evaluation_gates``）。
+    页面若各自 group by，就会出现"金标页认为某分区是必须的、门禁页却不这么认为"。
+    """
+
+    @staticmethod
+    def overview(project_id) -> dict:
+        from .capability_registry import ALL_TASK_TYPES, PARTITION_ORDER_SAFE, capability_info
+        from .gold_models import GoldDataset
+
+        datasets = list(
+            GoldDataset.objects.filter(project_id=project_id)
+            .prefetch_related("versions__cases")
+            .order_by("task_type", "name")
+        )
+        by_capability = {}
+        for task_type in ALL_TASK_TYPES:
+            info = capability_info(task_type)
+            by_capability[task_type] = {
+                "task_type": task_type,
+                "label": info["label"],
+                "kind": info["kind"],
+                "mode": info["mode"],
+                "required_partitions": list(info["partitions"]),
+                "datasets": [],
+            }
+
+        for dataset in datasets:
+            bucket = by_capability.setdefault(dataset.task_type, {
+                "task_type": dataset.task_type, "label": dataset.task_type,
+                "kind": "feedback_source", "mode": "single",
+                "required_partitions": [], "datasets": [],
+            })
+            latest = None
+            for version in dataset.versions.all():
+                if latest is None or version.created_at > latest.created_at:
+                    latest = version
+            splits = {}
+            if latest is not None:
+                counts = Counter(case.split for case in latest.cases.all())
+                splits = dict(sorted(counts.items()))
+            bucket["datasets"].append({
+                "id": str(dataset.id),
+                "name": dataset.name,
+                "status": dataset.status,
+                "latest_version": latest.version if latest else "",
+                "latest_state": latest.state if latest else "",
+                "case_count": latest.cases.count() if latest else 0,
+                "splits": splits,
+                # 冻结版本才有 content_hash，才能被 GoldReplayService 回放。
+                "replayable": bool(latest and latest.state == "frozen" and latest.content_hash),
+                "missing_partitions": [
+                    item for item in (bucket["required_partitions"] if latest else [])
+                    if splits.get(item, 0) == 0
+                ],
+            })
+
+        covered = [item for item in by_capability.values() if item["datasets"]]
+        # 能力级的缺口：该能力**必需**的分区在整个项目里一条样本都没有。
+        # 与数据集级缺口分开报：数据集缺某项说明"这个集不全"，
+        # 能力缺某项说明"这个能力的门禁根本跑不起来"——后果完全不同。
+        for item in by_capability.values():
+            covered_splits = set()
+            for dataset in item["datasets"]:
+                covered_splits.update(
+                    split for split, count in (dataset["splits"] or {}).items() if count
+                )
+            item["missing_partitions"] = [
+                split for split in item["required_partitions"]
+                if split not in covered_splits
+            ]
+        return {
+            "project_id": project_id,
+            "partition_order": list(PARTITION_ORDER_SAFE),
+            "capabilities": by_capability,
+            "covered_capability_count": len(covered),
+            "total_capability_count": len(ALL_TASK_TYPES),
+        }

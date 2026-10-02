@@ -8,7 +8,7 @@ from django.conf import settings
 from rest_framework import serializers
 
 # 导入 Skill 模型。
-from .models import Skill
+from .models import Skill, SkillVersion
 
 
 class SkillSerializer(serializers.ModelSerializer):
@@ -172,3 +172,118 @@ class SkillToggleSerializer(serializers.ModelSerializer):
     class Meta:
         model = Skill
         fields = ['is_active']
+
+
+# ---------------------------------------------------------------------------
+# Skill 版本（T02/T06/T07）
+# ---------------------------------------------------------------------------
+
+
+class SkillVersionSerializer(serializers.ModelSerializer):
+    """版本详情。``state`` 来自关联发布单元，不是本模型字段，因此显式声明只读。"""
+
+    state = serializers.CharField(read_only=True)
+    # 发布单元主键。控制台要拿它去调 ``capability-releases/{id}/approval-view/``
+    # 与 ``bindings/``；没有这个字段，前端只能按 (name, version) 去猜关联关系，
+    # 而关联本来就在库里，不该由前端重建。
+    release_id = serializers.UUIDField(read_only=True, allow_null=True)
+    skill_name = serializers.CharField(source='skill.name', read_only=True)
+    created_by_name = serializers.CharField(
+        source='created_by.username', read_only=True, allow_null=True,
+    )
+    stage = serializers.SerializerMethodField()
+    entrypoint = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SkillVersion
+        fields = [
+            'id', 'skill', 'skill_name', 'version', 'state', 'release_id',
+            'package_sha256', 'manifest', 'validation_report',
+            'source_type', 'source_metadata', 'previous_version',
+            'stage', 'entrypoint',
+            'created_by', 'created_by_name', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'skill', 'skill_name', 'version', 'state', 'release_id',
+            'package_sha256', 'manifest', 'validation_report',
+            'source_type', 'source_metadata', 'previous_version',
+            'stage', 'entrypoint',
+            'created_by', 'created_by_name', 'created_at', 'updated_at',
+        ]
+
+    def get_stage(self, obj) -> str:
+        return obj.manifest_stage()
+
+    def get_entrypoint(self, obj) -> str:
+        return obj.manifest_entrypoint()
+
+
+class SkillVersionListSerializer(serializers.ModelSerializer):
+    """版本列表（轻量）：不含 manifest 与校验报告，避免列表接口体积膨胀。"""
+
+    state = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = SkillVersion
+        fields = ['id', 'version', 'state', 'package_sha256', 'source_type', 'created_at']
+
+
+class SkillPreflightSerializer(serializers.Serializer):
+    """包预检请求：只上传文件，校验结果与短期令牌在响应里返回。"""
+
+    file = serializers.FileField(help_text='包含 SKILL.md 的技能包 zip')
+
+    def validate_file(self, value):
+        if not (value.name or '').lower().endswith('.zip'):
+            raise serializers.ValidationError('只支持 .zip 文件')
+        # 与 ``validation.MAX_TOTAL_UNCOMPRESSED``（50MB）配套：压缩包本身不该更大。
+        if value.size > 20 * 1024 * 1024:
+            raise serializers.ValidationError('文件大小不能超过 20MB')
+        return value
+
+
+class SkillCandidateCreateSerializer(serializers.Serializer):
+    """用预检令牌创建候选版本。"""
+
+    token = serializers.CharField(help_text='预检接口返回的短期令牌')
+    change_reason = serializers.CharField(
+        required=False, allow_blank=True, max_length=500,
+        help_text='变更原因，工作台会展示给审批人',
+    )
+    expected_benefit = serializers.CharField(
+        required=False, allow_blank=True, max_length=500, help_text='预期收益',
+    )
+    impact_scope = serializers.CharField(
+        required=False, allow_blank=True, max_length=500, help_text='影响范围',
+    )
+    api_key = serializers.CharField(
+        required=False, allow_blank=True, max_length=128, write_only=True,
+        help_text='内部平台 Skill 安装时用户确认的 API Key',
+    )
+
+
+class SkillVersionDiffQuerySerializer(serializers.Serializer):
+    """版本 diff 的查询参数；``base`` 缺省时与上一版本比较。"""
+
+    base = serializers.UUIDField(required=False, allow_null=True)
+
+
+class SkillQuarantineSerializer(serializers.Serializer):
+    """隔离请求：原因必填（R12 要求安全事件必须留痕）。"""
+
+    reason = serializers.CharField(max_length=500)
+
+
+class SkillVersionValidateSerializer(serializers.Serializer):
+    """提交静态校验请求。
+
+    ``reason`` 可选：校验本身会产出逐条报告，报告就是最好的说明，
+    不像隔离那种安全事件必须由人补上"为什么"。把它做成必填只会逼出
+    "校验""提交"这类无信息量的原因。
+    """
+
+    reason = serializers.CharField(
+        required=False, allow_blank=True, max_length=500,
+        help_text='可选：提交校验的说明',
+    )
+

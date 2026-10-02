@@ -23,11 +23,12 @@ class OutputStage(str, Enum):
     TESTCASE_GENERATION = "testcase_generation"
     TEST_EXECUTION = "test_execution"
     ISSUE_TRACKING = "issue_tracking"
+    REPORT_GENERATION = "report_generation"
 
 
 WORKFLOW_STAGES = {
-    OutputStage.RISK_IDENTIFICATION, OutputStage.TEST_PLAN_GENERATION,
-    OutputStage.TESTCASE_GENERATION, OutputStage.TEST_EXECUTION, OutputStage.ISSUE_TRACKING,
+    OutputStage.TEST_PLAN_GENERATION, OutputStage.TESTCASE_GENERATION,
+    OutputStage.TEST_EXECUTION, OutputStage.REPORT_GENERATION,
 }
 
 
@@ -50,6 +51,10 @@ class OutputEnvelope:
     producer: dict[str, Any] = field(default_factory=dict)
     extensions: dict[str, Any] = field(default_factory=dict)
     capability: Any = None
+    #: 本次产出所依赖的 Skill 版本（T08 的任务锁解析结果）。
+    #: 放在协议层而不是让各业务自己往 metadata 里塞，是因为下游的反馈绑定、金标候选、
+    #: 归因与派生全都要读它——一旦有业务漏填，闭环就会在那一环断掉却查不出原因。
+    skill_version: Any = None
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     schema_version: str = "platform-output/v1"
 
@@ -64,6 +69,16 @@ class OutputEnvelope:
             raise ValueError(f"链路型阶段 {self.stage.value} 必须提供 workflow_id")
         if not isinstance(self.output, dict):
             raise ValueError("output 必须是对象")
+        # 引用 ID 一律归一成字符串。调用方很自然会直接传 ``output.pk``（UUID 对象），
+        # 而 UUID 不是 JSON 可序列化类型——`metadata` 落库前会整体退化成 ``str(dict)``，
+        # 后果不是"丢一个字段"，而是下游读 ``metadata["protocol"]`` 时直接抛
+        # ``AttributeError``，门禁登记当场失败、产出也拿不到版本溯源。
+        # 在协议入口收口，比要求每个业务方都记得 ``str()`` 可靠。
+        self.parent_output_ids = [
+            str(item) for item in (self.parent_output_ids or []) if str(item or "")
+        ]
+        self.supersedes_output_id = str(self.supersedes_output_id or "")
+        self.workflow_id = str(self.workflow_id or "")
         return self
 
     @property
@@ -71,6 +86,23 @@ class OutputEnvelope:
         if self.capability is None:
             return ""
         return str(self.capability.pk if hasattr(self.capability, "pk") else self.capability)
+
+    @property
+    def skill_descriptor(self) -> dict[str, Any]:
+        """产出自带的 Skill 版本指纹，写进协议元数据供事后核对。
+
+        刻意只写标识与哈希、不写包内容：协议元数据会被多处读取与回显，
+        把包内容塞进去等于把 Skill 全文复制到每条产出上。
+        """
+        version = self.skill_version
+        if version is None:
+            return {"skill_id": "", "skill_version_id": "", "version": "", "package_sha256": ""}
+        return {
+            "skill_id": str(getattr(version, "skill_id", "") or ""),
+            "skill_version_id": str(getattr(version, "pk", "") or ""),
+            "version": str(getattr(version, "version", "") or ""),
+            "package_sha256": str(getattr(version, "package_sha256", "") or ""),
+        }
 
     def canonical(self) -> dict[str, Any]:
         self.validate()
@@ -97,6 +129,7 @@ class OutputEnvelope:
             "channels": self.channels,
             "metrics": self.metrics,
             "producer": self.producer,
+            "skill": self.skill_descriptor,
             "extensions": self.extensions,
         }
 
@@ -121,19 +154,26 @@ class TestPlanGenerationAdapter(OutputAdapter): stage = OutputStage.TEST_PLAN_GE
 class TestcaseGenerationAdapter(OutputAdapter): stage = OutputStage.TESTCASE_GENERATION
 class TestExecutionAdapter(OutputAdapter): stage = OutputStage.TEST_EXECUTION
 class IssueTrackingAdapter(OutputAdapter): stage = OutputStage.ISSUE_TRACKING
+class ReportGenerationAdapter(OutputAdapter): stage = OutputStage.REPORT_GENERATION
 
 
 ADAPTERS = {adapter.stage.value: adapter() for adapter in (
     CaseReviewAdapter, CodeReviewAdapter, KnowledgeQueryAdapter, RiskIdentificationAdapter,
     TestPlanGenerationAdapter, TestcaseGenerationAdapter, TestExecutionAdapter, IssueTrackingAdapter,
+    ReportGenerationAdapter,
 )}
 
 
 def publish_output(envelope: OutputEnvelope):
     from .services import record_task_output
+    from .operations import WorkflowGateService
+    if envelope.evaluation_mode == EvaluationMode.WORKFLOW and envelope.extensions.get("enforce_quality_gate"):
+        WorkflowGateService.assert_can_enter(
+            envelope.project.pk, envelope.workflow_id, envelope.stage.value
+        )
     payload = envelope.canonical()
     content = json.dumps(envelope.output, ensure_ascii=False, sort_keys=True)
-    return record_task_output(
+    result = record_task_output(
         project=envelope.project, user=envelope.user, task_type=envelope.stage.value,
         task_id=envelope.source_id, query=envelope.input_summary, content=content,
         channels=envelope.channels, candidates=envelope.findings, citations=envelope.evidence,
@@ -144,4 +184,11 @@ def publish_output(envelope: OutputEnvelope):
         prompt_version=envelope.producer.get("prompt_version", "platform-output/v1"),
         model_version=envelope.producer.get("model_version", ""), status=envelope.status,
         capability=envelope.capability,
+        execution_spans=envelope.extensions.get("execution_spans") or [],
+        skill_version=envelope.skill_version,
     )
+    if envelope.evaluation_mode == EvaluationMode.WORKFLOW:
+        from .models import GenerationOutput
+        output = GenerationOutput.objects.get(pk=result[1])
+        WorkflowGateService.register_output(output)
+    return result

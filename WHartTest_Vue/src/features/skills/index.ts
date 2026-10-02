@@ -1,3 +1,7 @@
 export { default as SkillManager } from './components/SkillManager.vue'
+export { default as SkillHubConsole } from './views/SkillHubConsole.vue'
 export { SkillService } from './services/skillService'
+export { SkillHubService, toErrorMessage } from './services/skillHubService'
+export { useSkillHubAccess } from './composables/useSkillHubAccess'
 export * from './types'
+export * from './types/hub'

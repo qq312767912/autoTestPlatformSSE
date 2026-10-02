@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["workflow_id", "website_url", "output_root"],
+  "properties": {
+    "workflow_id": {"type": "string", "minLength": 1},
+    "website_url": {"type": "string", "format": "uri"},
+    "requirements": {"type": ["string", "object", "array", "null"]},
+    "page_structure": {"type": ["object", "null"]},
+    "historical_context": {"type": ["object", "array", "null"]},
+    "auth_reference": {"type": ["string", "null"]},
+    "output_root": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": true
+}

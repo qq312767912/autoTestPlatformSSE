@@ -1,6 +1,7 @@
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from projects.models import ProjectMember
+from projects.roles import ensure_test_lead
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -74,14 +75,12 @@ def _ensure_project_member(user, project_id):
 
 
 def _ensure_test_lead(user, project_id):
-    """现有 admin/owner 映射为测试负责人，member 映射为测试执行人员。"""
-    if user.is_superuser:
-        return
-    if not ProjectMember.objects.filter(
-        user=user, project_id=project_id, role__in=["admin", "owner"]
-    ).exists():
-        from rest_framework.exceptions import PermissionDenied
-        raise PermissionDenied("该操作仅允许测试负责人执行")
+    """现有 admin/owner 映射为测试负责人，member 映射为测试执行人员。
+
+    角色判定真值统一在 ``projects.roles``：Skill Hub 与质量飞轮共用一套映射，
+    避免"同一语义、两处实现"导致授权口径分叉。
+    """
+    ensure_test_lead(user, project_id)
 
 
 class ProjectScopedReadOnlyViewSet(viewsets.ReadOnlyModelViewSet):
@@ -333,6 +332,20 @@ class ExecutionSpanViewSet(viewsets.ReadOnlyModelViewSet):
             trace__project_id__in=_project_ids(self.request.user)
         )
 
+    @action(detail=False, methods=["post"], url_path="record-human-edit")
+    def record_human_edit(self, request):
+        output = get_object_or_404(GenerationOutput, pk=request.data.get("output"))
+        _ensure_project_member(request.user, output.project_id)
+        if "before" not in request.data or "after" not in request.data:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"before": "必须提供 before 和 after 以计算编辑差异"})
+        from .attribution import SpanRecorder
+        span = SpanRecorder.record_human_edit(
+            output=output, actor=request.user, before=request.data["before"],
+            after=request.data["after"], comment=request.data.get("comment", ""),
+        )
+        return Response(self.get_serializer(span).data, status=201)
+
 
 class FailureAttributionViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = FailureAttributionSerializer
@@ -355,10 +368,26 @@ class FailureAttributionViewSet(viewsets.ReadOnlyModelViewSet):
         results = AttributionService.run_for_output(output)
         return Response(self.get_serializer(results, many=True).data)
 
+    @action(detail=False, methods=["post"], url_path="run-reverse")
+    def run_reverse(self, request):
+        output = get_object_or_404(GenerationOutput, pk=request.data.get("output"))
+        _ensure_project_member(request.user, output.project_id)
+        from .attribution import AttributionService
+        results = AttributionService.run_reverse_for_output(output)
+        return Response(self.get_serializer(results, many=True).data)
+
+    @action(detail=False, methods=["post"], url_path="run-llm-assisted")
+    def run_llm_assisted(self, request):
+        output = get_object_or_404(GenerationOutput, pk=request.data.get("output"))
+        _ensure_project_member(request.user, output.project_id)
+        from .attribution import LLMAssistedAttributionService
+        results = LLMAssistedAttributionService().run(output)
+        return Response(self.get_serializer(results, many=True).data)
+
     @action(detail=True, methods=["post"])
     def confirm(self, request, pk=None):
         attribution = self.get_object()
-        _ensure_project_member(request.user, attribution.project_id)
+        _ensure_test_lead(request.user, attribution.project_id)
         from .attribution import AttributionService
         return Response(self.get_serializer(AttributionService.decide(
             attribution=attribution, actor=request.user, accepted=True,
@@ -367,7 +396,7 @@ class FailureAttributionViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=["post"])
     def reject(self, request, pk=None):
         attribution = self.get_object()
-        _ensure_project_member(request.user, attribution.project_id)
+        _ensure_test_lead(request.user, attribution.project_id)
         from .attribution import AttributionService
         return Response(self.get_serializer(AttributionService.decide(
             attribution=attribution, actor=request.user, accepted=False,
@@ -413,6 +442,24 @@ class OptimizationProposalViewSet(viewsets.ReadOnlyModelViewSet):
         except DjangoValidationError as exc:
             raise ValidationError(exc.messages)
         return Response(self.get_serializer(proposals, many=True).data, status=201)
+
+    @action(detail=True, methods=["post"], url_path="materialize")
+    def materialize(self, request, pk=None):
+        proposal = self.get_object()
+        _ensure_test_lead(request.user, proposal.project_id)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+        from .optimization import OptimizationMaterializationService
+        try:
+            release = OptimizationMaterializationService.materialize(
+                proposal=proposal, actor=request.user,
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(
+            CapabilityReleaseSerializer(release, context={"request": request}).data,
+            status=201,
+        )
 
 
 class OptimizationExperimentViewSet(viewsets.ReadOnlyModelViewSet):
@@ -623,6 +670,43 @@ class EvaluationResultViewSet(ProjectScopedReadOnlyViewSet):
         project_ids = _project_ids(self.request.user)
         return queryset.filter(run__suite__project_id__in=project_ids)
 
+    @action(detail=True, methods=["post"], url_path="layered-evaluate")
+    def layered_evaluate(self, request, pk=None):
+        """对一条已产出结果执行 L0-L3 分层评测；未显式传入裁判票时调用双 LLM 裁判。"""
+        result = self.get_object()
+        output = get_object_or_404(GenerationOutput, pk=request.data.get("output"))
+        if output.project_id != result.run.suite.project_id:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"output": "产出与评测运行不属于同一项目"})
+        rubric_id = request.data.get("rubric")
+        rubric = (
+            get_object_or_404(EvaluationRubric, pk=rubric_id)
+            if rubric_id else EvaluationRubric.objects.filter(
+                project_id=output.project_id, task_type=output.task_type, is_active=True,
+            ).first()
+        )
+        if rubric and rubric.project_id != output.project_id:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"rubric": "量表与产出不属于同一项目"})
+        workflow_id = ((output.metadata or {}).get("protocol") or {}).get("workflow_id")
+        workflow_outputs = []
+        if workflow_id:
+            workflow_outputs = list(GenerationOutput.objects.filter(
+                project_id=output.project_id,
+                metadata__protocol__workflow_id=workflow_id,
+            ))
+        from .evaluators import LayeredEvaluationService
+        LayeredEvaluationService.evaluate(
+            evaluation_result=result, output=output, workflow_outputs=workflow_outputs,
+            rubric=rubric,
+        )
+        return Response({
+            "result": self.get_serializer(result).data,
+            "judges": JudgeResultSerializer(
+                result.judge_results.all(), many=True, context={"request": request},
+            ).data,
+        })
+
 
 class KnowledgeCandidateViewSet(
     mixins.CreateModelMixin,
@@ -696,6 +780,7 @@ class CapabilityReleaseViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         from .capabilities import CapabilityReleaseService
         data = serializer.validated_data
+        _ensure_test_lead(self.request.user, data["project"].id)
         release = CapabilityReleaseService.create(
             project=data["project"], kind=data["kind"], name=data["name"],
             version=data["version"], config=data.get("config", {}), actor=self.request.user,
@@ -707,23 +792,262 @@ class CapabilityReleaseViewSet(viewsets.ModelViewSet):
     def evaluate_shadow(self, request, pk=None):
         from .capabilities import CapabilityReleaseService
         from .evaluation_models import EvaluationRun
+
         release = self.get_object()
-        baseline = EvaluationRun.objects.get(pk=request.data["baseline_run"])
-        candidate = EvaluationRun.objects.get(pk=request.data["candidate_run"])
-        report = CapabilityReleaseService.evaluate_shadow(release, baseline, candidate)
+        _ensure_test_lead(request.user, release.project_id)
+        from rest_framework.exceptions import ValidationError
+
+        try:
+            baseline = EvaluationRun.objects.get(pk=request.data["baseline_run"])
+            candidate = EvaluationRun.objects.get(pk=request.data["candidate_run"])
+        except KeyError as exc:
+            raise ValidationError({"runs": f"缺少参数 {exc.args[0]}"})
+        except (EvaluationRun.DoesNotExist, ValueError, TypeError):
+            raise ValidationError({"runs": "评测运行不存在"})
+        if baseline.suite.project_id != release.project_id or candidate.suite.project_id != release.project_id:
+            raise ValidationError({"runs": "评测运行必须属于发布单元所在项目"})
+        # 只透传已知阈值键：把请求体原样展开会把拼错的参数变成 TypeError（500），
+        # 而正确行为是忽略无关字段、按默认阈值判定。
+        allowed = (
+            "min_mean_diff", "max_latency_regression", "max_token_regression",
+            "min_sample_count", "max_p_value", "require_significance",
+        )
+        incoming = request.data.get("thresholds") or {}
+        overrides = {key: incoming[key] for key in allowed if key in incoming}
+        report = _run_release_action(
+            CapabilityReleaseService.evaluate_shadow, release,
+            baseline_run=baseline, candidate_run=candidate, **overrides,
+        )
         return Response(report)
 
     @action(detail=True, methods=["post"])
     def promote(self, request, pk=None):
         from .capabilities import CapabilityReleaseService
-        release = CapabilityReleaseService.promote(self.get_object(), actor=request.user, reason=request.data.get("reason", ""))
+
+        release = self.get_object()
+        _ensure_test_lead(request.user, release.project_id)
+        release = _run_release_action(
+            CapabilityReleaseService.promote, release,
+            actor=request.user, reason=request.data.get("reason", ""),
+        )
         return Response(self.get_serializer(release).data)
 
     @action(detail=True, methods=["post"])
     def rollback(self, request, pk=None):
         from .capabilities import CapabilityReleaseService
-        previous = CapabilityReleaseService.rollback(self.get_object(), actor=request.user, reason=request.data.get("reason", ""))
+
+        release = self.get_object()
+        _ensure_test_lead(request.user, release.project_id)
+        previous = _run_release_action(
+            CapabilityReleaseService.rollback, release,
+            actor=request.user, reason=request.data.get("reason", ""),
+        )
         return Response({"restored_release_id": str(previous.id) if previous else None})
+
+    @action(detail=True, methods=["post"], url_path="approve-canary")
+    def approve_canary(self, request, pk=None):
+        from .capabilities import CapabilityReleaseService
+
+        release = self.get_object()
+        _ensure_test_lead(request.user, release.project_id)
+        release = _run_release_action(
+            CapabilityReleaseService.approve_for_canary, release,
+            actor=request.user, reason=request.data.get("reason", ""),
+        )
+        return Response(self.get_serializer(release).data)
+
+    @action(detail=True, methods=["post"], url_path="record-observation")
+    def record_observation(self, request, pk=None):
+        release = self.get_object()
+        _ensure_project_member(request.user, release.project_id)
+        from rest_framework.exceptions import ValidationError
+        if not request.data.get("window_key"):
+            raise ValidationError({"window_key": "必须指定观察窗口"})
+        from .capabilities import CapabilityReleaseService
+        from .serializers import ReleaseObservationSerializer
+
+        observation = _run_release_action(
+            CapabilityReleaseService.record_observation, release,
+            window_key=request.data["window_key"],
+            metrics=request.data.get("metrics") or {}, actor=request.user,
+            thresholds=request.data.get("thresholds"),
+        )
+        return Response(ReleaseObservationSerializer(observation).data, status=201)
+
+    @action(detail=True, methods=["post"], url_path="complete-canary")
+    def complete_canary(self, request, pk=None):
+        from .capabilities import CapabilityReleaseService
+
+        release = self.get_object()
+        _ensure_test_lead(request.user, release.project_id)
+        release = _run_release_action(
+            CapabilityReleaseService.complete_canary, release,
+            actor=request.user, reason=request.data.get("reason", ""),
+            min_observations=request.data.get("min_observations"),
+        )
+        return Response(self.get_serializer(release).data)
+
+    # ------------------------------------------------------------------
+    # T18：Skill Hub 生产控制台所需的治理读口与动作
+    #
+    # 控制台的右栏要先回答两个问题才谈得上"可操作"：
+    #   1）现在处在状态机的哪一格，还差什么才能提交/激活（``approval-view``）；
+    #   2）缺的这些东西为什么缺（``missing_conditions`` 的逐条明细）。
+    #
+    # 关键设计约束：**缺失条件不在前端重算**。前端自己拼一套"能不能点"的判据，
+    # 迟早会与后端校验分叉，表现为"按钮亮着但一点就报错"。这里把
+    # ``EvaluationGateService.missing_conditions`` 原样透出，前端只做渲染。
+    # ------------------------------------------------------------------
+
+    @action(detail=True, methods=["get"], url_path="approval-view")
+    def approval_view(self, request, pk=None):
+        """控制台右栏的权威状态：状态机位置、门禁快照、缺失条件、可否提交/激活。
+
+        执行人员也需要读这个口——他要看到"为什么还不能提交审批"，才知道该补什么。
+        写操作（提交/驳回/激活/回滚/隔离）的权限在各自 action 里单独判定。
+        """
+        release = self.get_object()
+        _ensure_project_member(request.user, release.project_id)
+        from .capabilities import CapabilityReleaseService
+        from .evaluation_gates import EvaluationGateService
+
+        payload = CapabilityReleaseService.approval_view(release)
+        # 门禁快照摘要另给一份：审批面板要展示逐项 checks 与阈值，而 approval_view
+        # 只带结论性的 gate_report，不足以渲染"哪一项没过"。
+        payload["gate"] = EvaluationGateService.snapshot_summary(release) or {}
+        return Response(payload)
+
+    @action(detail=True, methods=["post"], url_path="submit-approval")
+    def submit_approval(self, request, pk=None):
+        """把通过硬门禁的候选提交测试负责人审批（R12：留痕）。
+
+        权限刻意只要"项目成员"而非"负责人"：提交审批属于验评环节，
+        按设计第 10 节"上传和验评允许测试执行人员"，执行人员发现问题修好后
+        应当能自己发起复核，而不是事事等负责人代劳。
+        """
+        release = self.get_object()
+        _ensure_project_member(request.user, release.project_id)
+        from .capabilities import CapabilityReleaseService
+
+        release = _run_release_action(
+            CapabilityReleaseService.submit_for_approval, release,
+            actor=request.user, reason=request.data.get("reason", ""),
+            kind=request.data.get("kind", "full"),
+        )
+        return Response(self.get_serializer(release).data)
+
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+        """负责人驳回候选。原因必填——驳回不留原因，执行人员无从知道要改什么。"""
+        release = self.get_object()
+        _ensure_test_lead(request.user, release.project_id)
+        from .capabilities import CapabilityReleaseService
+
+        release = _run_release_action(
+            CapabilityReleaseService.reject, release,
+            actor=request.user, reason=request.data.get("reason", ""),
+        )
+        return Response(self.get_serializer(release).data)
+
+    @action(detail=True, methods=["post"])
+    def quarantine(self, request, pk=None):
+        """紧急隔离：立即阻断运行时加载（安全事件，原因必填，仅负责人可发起）。"""
+        release = self.get_object()
+        _ensure_test_lead(request.user, release.project_id)
+        from .capabilities import CapabilityReleaseService
+
+        release = _run_release_action(
+            CapabilityReleaseService.quarantine, release,
+            actor=request.user, reason=request.data.get("reason", ""),
+        )
+        return Response(self.get_serializer(release).data)
+
+    @action(detail=True, methods=["get"])
+    def bindings(self, request, pk=None):
+        """能力绑定（R10-5）：该发布单元被哪些单次能力或四阶段流程使用。
+
+        两种绑定关系分开标注，不能混为一谈：
+
+        - ``active_release``：某个能力定义的**当前活跃发布**就是这一版——强绑定；
+        - ``stage``：能力定义的阶段集合包含本发布单元的阶段，但活跃版本是别人
+          ——候选绑定。控制台据此提示"激活后会影响这 N 个能力"。
+        """
+        release = self.get_object()
+        _ensure_project_member(request.user, release.project_id)
+
+        from .capability_registry import STAGE_LABELS, WORKFLOW_STAGES
+
+        stage = _release_stage(release)
+        definitions = CapabilityDefinition.objects.filter(project_id=release.project_id)
+
+        bindings = []
+        for definition in definitions:
+            stages = list(definition.stages or [])
+            if str(definition.active_release_id or "") == str(release.id):
+                binding = "active_release"
+            elif stage and stage in stages:
+                binding = "stage"
+            else:
+                continue
+            position = stages.index(stage) + 1 if (stage and stage in stages) else None
+            bindings.append({
+                "id": str(definition.id),
+                "name": definition.name,
+                "kind": definition.kind,
+                "evaluation_mode": definition.evaluation_mode,
+                "is_active": definition.is_active,
+                "stages": stages,
+                "stage_labels": [STAGE_LABELS.get(item, item) for item in stages],
+                "position": position,
+                "binding": binding,
+            })
+
+        # 强绑定排在前面：控制台首屏要看"谁正在用这一版"。
+        bindings.sort(key=lambda item: (item["binding"] != "active_release", item["name"]))
+        return Response({
+            "release_id": str(release.id),
+            "kind": release.kind,
+            "name": release.name,
+            "version": release.version,
+            "stage": stage,
+            "stage_label": STAGE_LABELS.get(stage, stage),
+            "workflow_stages": list(WORKFLOW_STAGES),
+            "definitions": bindings,
+        })
+
+
+def _release_stage(release) -> str:
+    """解析发布单元对应的业务阶段。
+
+    Skill 型发布单元的阶段来自版本包 manifest 的 ``stage``；非 Skill 型（复合能力、
+    Prompt 等）没有包 manifest，退化为从 ``config`` 里读，读不到就返回空串——
+    空串表示"阶段未知"，此时只做 ``active_release`` 强绑定匹配，不做阶段匹配，
+    避免把一个阶段未知的发布单元错绑到所有能力定义上。
+    """
+    if release.kind == "skill":
+        from skills.models import SkillVersion
+
+        version = SkillVersion.objects.filter(release=release).first()
+        if version is not None:
+            stage = version.manifest_stage()
+            if stage:
+                return stage
+    return str((release.config or {}).get("stage", "") or "")
+
+
+def _run_release_action(service_method, release, **kwargs):
+    """调用发布服务并把 ``django.core.exceptions.ValidationError`` 转成 DRF 400。
+
+    服务层刻意抛 Django 版 ValidationError（不依赖 DRF），视图层负责收口；
+    这里集中一处转换，免得每个 action 各写一遍 try/except 而漏掉一两个。
+    """
+    from django.core.exceptions import ValidationError as DjangoValidationError
+    from rest_framework.exceptions import ValidationError as DRFValidationError
+
+    try:
+        return service_method(release, **kwargs)
+    except DjangoValidationError as exc:
+        raise DRFValidationError(exc.messages)
 
 
 class CapabilityDefinitionViewSet(viewsets.ModelViewSet):
@@ -750,6 +1074,7 @@ class CapabilityDefinitionViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="activate-release")
     def activate_release(self, request, pk=None):
         definition = self.get_object()
+        _ensure_test_lead(request.user, definition.project_id)
         release_id = request.data.get("release_id")
         if not release_id:
             from rest_framework.exceptions import ValidationError
@@ -814,6 +1139,137 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
         from .operations import KnowledgeHealthService
         project_id = int(request.query_params["project"]); self._check(request, project_id)
         return Response(KnowledgeHealthService().inspect(project_id))
+
+    @action(detail=False, methods=["get"], url_path="cockpit")
+    def cockpit(self, request):
+        from .operations import ProjectQualityCockpitService
+        project_id = int(request.query_params["project"]); self._check(request, project_id)
+        return Response(ProjectQualityCockpitService().summarize(project_id))
+
+    @action(detail=False, methods=["post"], url_path="start-workflow")
+    def start_workflow(self, request):
+        """启动四阶段流水线：锁定四个阶段的 Skill 版本（T15）。
+
+        只允许测试负责人启动：启动动作决定了整条链路用哪几个能力包，
+        属于发布决策而非日常执行。
+        """
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+
+        from .operations import WorkflowGateService
+        from projects.models import Project
+
+        project_id = int(request.data["project"]); self._check(request, project_id)
+        _ensure_test_lead(request.user, project_id)
+        project = get_object_or_404(Project, pk=project_id)
+        try:
+            result = WorkflowGateService.start_workflow(
+                project=project, workflow_id=str(request.data.get("workflow_id") or ""),
+                actor=request.user,
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(result, status=201)
+
+    @action(detail=False, methods=["get"], url_path="workflow-status")
+    def workflow_status(self, request):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+
+        from .operations import WorkflowGateService
+        from projects.models import Project
+
+        project_id = int(request.query_params["project"]); self._check(request, project_id)
+        project = get_object_or_404(Project, pk=project_id)
+        try:
+            payload = WorkflowGateService.workflow_status(
+                project=project,
+                workflow_id=str(request.query_params.get("workflow_id") or ""),
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(payload)
+
+    @action(detail=False, methods=["post"], url_path="evaluate-workflow-stage")
+    def evaluate_workflow_stage(self, request):
+        from .operations import WorkflowGateService
+        from .workflow_models import WorkflowStageGate
+        project_id = int(request.data["project"]); self._check(request, project_id)
+        gate = get_object_or_404(
+            WorkflowStageGate, project_id=project_id,
+            workflow_id=str(request.data["workflow_id"]), stage=str(request.data["stage"]),
+        )
+        gate = WorkflowGateService.evaluate(gate, actor=request.user)
+        return Response({
+            "id": str(gate.id), "status": gate.status, "scores": gate.scores,
+            "reason": gate.reason, "decided_by": request.user.username,
+        })
+
+    @action(detail=False, methods=["post"], url_path="override-workflow-stage")
+    def override_workflow_stage(self, request):
+        from .operations import WorkflowGateService
+        from .workflow_models import WorkflowStageGate
+        project_id = int(request.data["project"]); self._check(request, project_id)
+        _ensure_test_lead(request.user, project_id)
+        gate = get_object_or_404(
+            WorkflowStageGate, project_id=project_id,
+            workflow_id=str(request.data["workflow_id"]), stage=str(request.data["stage"]),
+        )
+        gate = WorkflowGateService.override(gate, request.user, str(request.data.get("reason") or ""))
+        return Response({
+            "id": str(gate.id), "status": gate.status, "scores": gate.scores,
+            "reason": gate.reason, "decided_by": request.user.username,
+        })
+
+    @action(detail=False, methods=["post"], url_path="evaluate-workflow")
+    def evaluate_workflow(self, request):
+        """同时产出「阶段独立评测」与「四阶段端到端评测」（T16）。
+
+        不改变门禁状态：评测是放行决定的输入，不是决定本身。
+        结论落到该阶段门禁的 ``detail``，由 workflow-status 统一回给页面。
+        """
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+
+        from .report_gates import WorkflowEvaluationService
+        from projects.models import Project
+
+        project_id = int(request.data["project"]); self._check(request, project_id)
+        project = get_object_or_404(Project, pk=project_id)
+        try:
+            payload = WorkflowEvaluationService.evaluate_and_record(
+                project=project,
+                workflow_id=str(request.data.get("workflow_id") or ""),
+                stage=str(request.data.get("stage") or "report_generation"),
+                actor=request.user,
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(payload)
+
+    @action(detail=False, methods=["get"], url_path="responsibility")
+    def responsibility(self, request):
+        """下游 Badcase → 责任阶段 + SkillVersion（T16 / R8）。
+
+        只读。``resolved`` 为 false 表示上游没有已确认归因，此时结论**不可用于**
+        派生候选；接口如实返回这一点，而不是给一个看起来可用的阶段名。
+        """
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+
+        from .lineage import ResponsibilityService
+        from projects.models import Project
+
+        project_id = int(request.query_params["project"]); self._check(request, project_id)
+        project = get_object_or_404(Project, pk=project_id)
+        output_id = str(request.query_params.get("output") or "")
+        if not output_id:
+            raise ValidationError("必须提供 output（产出 ID）")
+        try:
+            payload = ResponsibilityService.locate(output_id, project=project)
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(payload)
 
     @action(detail=False, methods=["post"], url_path="build-workflow-graph")
     def build_workflow_graph(self, request):

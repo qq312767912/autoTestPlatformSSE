@@ -1390,6 +1390,13 @@ class TestExecutionViewSet(viewsets.ModelViewSet):
             from knowledge_evolution.models import GenerationOutput
             source_output = get_object_or_404(GenerationOutput, pk=source_output_id)
 
+        # 带 workflow_id 的测试执行属于全链路测试，用例生成门禁通过后才能创建。
+        if workflow_id:
+            from knowledge_evolution.operations import WorkflowGateService
+            WorkflowGateService.assert_can_enter(
+                int(project_pk), workflow_id, "test_execution"
+            )
+
         # 创建执行记录
         execution = TestExecution.objects.create(
             suite=suite,

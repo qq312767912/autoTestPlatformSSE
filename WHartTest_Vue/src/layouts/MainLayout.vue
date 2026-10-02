@@ -161,6 +161,30 @@
             <a href="#" @click="checkProjectAndNavigate($event, '/requirements')">{{ requirementsMenuLabel }}</a>
           </a-menu-item>
 
+          <!-- 测试管理子菜单 -->
+          <a-sub-menu key="test-management" v-if="hasTestManagementMenuItems">
+            <template #icon><icon-experiment /></template>
+            <template #title>
+              <span @click="handleTestManagementClick">{{ testManagementMenuLabel }}</span>
+            </template>
+            <a-menu-item key="testcases" v-if="hasTestcasesPermission">
+              <template #icon><icon-code-block /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/testcases')">{{ caseManagementMenuLabel }}</a>
+            </a-menu-item>
+            <a-menu-item key="testcase-reviews" v-if="hasTestcasesPermission">
+              <template #icon><icon-safe /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/testcase-reviews')">{{ caseReviewMenuLabel }}</a>
+            </a-menu-item>
+            <a-menu-item key="testsuites" v-if="hasTestSuitesPermission">
+              <template #icon><icon-folder /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/testsuites')">{{ suitesMenuLabel }}</a>
+            </a-menu-item>
+            <a-menu-item key="test-executions" v-if="hasTestExecutionsPermission">
+              <template #icon><icon-history /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/test-executions')">{{ executionHistoryMenuLabel }}</a>
+            </a-menu-item>
+          </a-sub-menu>
+
           <a-menu-item key="code-analysis" v-if="hasCodeAnalysisPermission">
             <template #icon><icon-code-block /></template>
             <a href="#" @click="checkProjectAndNavigate($event, '/code-analysis')">{{ codeAnalysisMenuLabel }}</a>
@@ -186,35 +210,6 @@
             <a href="#" @click="checkProjectAndNavigate($event, '/file-management')">{{ fileManagementMenuLabel }}</a>
           </a-menu-item>
 
-          <a-menu-item key="knowledge-graph" v-if="hasKnowledgeGraphPermission">
-            <template #icon><icon-relation /></template>
-            <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-graph')">{{ knowledgeGraphMenuLabel }}</a>
-          </a-menu-item>
-
-          <!-- 测试管理子菜单 -->
-          <a-sub-menu key="test-management" v-if="hasTestManagementMenuItems">
-            <template #icon><icon-experiment /></template>
-            <template #title>
-              <span @click="handleTestManagementClick">{{ testManagementMenuLabel }}</span>
-            </template>
-            <a-menu-item key="testcases" v-if="hasTestcasesPermission">
-              <template #icon><icon-code-block /></template>
-              <a href="#" @click="checkProjectAndNavigate($event, '/testcases')">{{ caseManagementMenuLabel }}</a>
-            </a-menu-item>
-            <a-menu-item key="testcase-reviews" v-if="hasTestcasesPermission">
-              <template #icon><icon-safe /></template>
-              <a href="#" @click="checkProjectAndNavigate($event, '/testcase-reviews')">{{ caseReviewMenuLabel }}</a>
-            </a-menu-item>
-            <a-menu-item key="testsuites" v-if="hasTestSuitesPermission">
-              <template #icon><icon-folder /></template>
-              <a href="#" @click="checkProjectAndNavigate($event, '/testsuites')">{{ suitesMenuLabel }}</a>
-            </a-menu-item>
-            <a-menu-item key="test-executions" v-if="hasTestExecutionsPermission">
-              <template #icon><icon-history /></template>
-              <a href="#" @click="checkProjectAndNavigate($event, '/test-executions')">{{ executionHistoryMenuLabel }}</a>
-            </a-menu-item>
-          </a-sub-menu>
-
           <a-menu-item key="langgraph-chat" v-if="hasLangGraphChatPermission">
             <template #icon><icon-message /></template>
             <a href="#" @click="checkProjectAndNavigate($event, '/langgraph-chat')">{{ chatMenuLabel }}</a>
@@ -234,11 +229,23 @@
             </a-menu-item>
           </a-sub-menu>
 
-          <!-- AI 质量进化（反馈、评测、改进候选与发布治理） -->
-          <a-menu-item key="knowledge-evolution" v-if="hasKnowledgeEvolutionPermission">
+          <!-- 质量飞轮：智能体观测、数据闭环与知识图谱的统一入口 -->
+          <a-sub-menu key="quality-flywheel" v-if="hasQualityFlywheelMenuItems">
             <template #icon><icon-loop /></template>
-            <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-evolution')">{{ knowledgeEvolutionMenuLabel }}</a>
-          </a-menu-item>
+            <template #title>{{ knowledgeEvolutionMenuLabel }}</template>
+            <a-menu-item key="quality-agents" v-if="hasKnowledgeEvolutionPermission">
+              <template #icon><icon-dashboard /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-evolution?view=agents')">智能体总览</a>
+            </a-menu-item>
+            <a-menu-item key="quality-data" v-if="hasKnowledgeEvolutionPermission">
+              <template #icon><icon-experiment /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-evolution?view=data')">数据飞轮</a>
+            </a-menu-item>
+            <a-menu-item key="quality-graph" v-if="hasKnowledgeGraphPermission">
+              <template #icon><icon-relation /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-evolution?view=graph')">{{ knowledgeGraphMenuLabel }}</a>
+            </a-menu-item>
+          </a-sub-menu>
 
           <!-- 系统管理子菜单 -->
           <a-sub-menu key="settings" v-if="hasSystemMenuItems">
@@ -412,7 +419,7 @@ const fileManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'File
 const knowledgeMenuLabel = computed(() => (locale.value === 'en-US' ? 'RAG' : tl('知识库管理')));
 const knowledgeListLabel = computed(() => (locale.value === 'en-US' ? 'Knowledge List' : tl('知识库列表')));
 const knowledgeGraphMenuLabel = computed(() => (locale.value === 'en-US' ? 'Knowledge Graph' : tl('知识图谱')));
-const knowledgeEvolutionMenuLabel = computed(() => (locale.value === 'en-US' ? 'AI Quality Evolution' : tl('AI 质量进化')));
+const knowledgeEvolutionMenuLabel = computed(() => (locale.value === 'en-US' ? 'Quality Flywheel' : tl('质量飞轮')));
 const apiKeysMenuLabel = computed(() => (locale.value === 'en-US' ? 'Keys' : tl('KEY管理')));
 const testManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Testing' : tl('测试管理')));
 const caseManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Cases' : tl('用例管理')));
@@ -489,10 +496,15 @@ const activeMenu = computed(() => {
   if (path.startsWith('/langgraph-chat')) return 'langgraph-chat';
   if (path.startsWith('/task-center')) return 'task-center';
   if (path.startsWith('/file-management')) return 'file-management';
-  if (path.startsWith('/knowledge-graph')) return 'knowledge-graph';
+  if (path.startsWith('/knowledge-graph')) return 'quality-graph';
   if (path.startsWith('/knowledge-management')) return 'knowledge-list';
   if (path.startsWith('/document-anonymization')) return 'document-anonymization';
-  if (path.startsWith('/knowledge-evolution')) return 'knowledge-evolution';
+  if (path.startsWith('/knowledge-evolution')) {
+    const view = String(router.currentRoute.value.query.view || 'agents');
+    if (view === 'data') return 'quality-data';
+    if (view === 'graph') return 'quality-graph';
+    return 'quality-agents';
+  }
   if (path.startsWith('/api-keys')) return 'api-keys';
   if (path.startsWith('/remote-mcp-configs')) return 'remote-mcp-configs';
   // 其他路由对应的菜单项
@@ -501,6 +513,15 @@ const activeMenu = computed(() => {
 
 // 当前打开的子菜单
 const openKeys = ref<string[]>([]); // 默认所有子菜单都收起
+watch(
+  () => router.currentRoute.value.path,
+  (path) => {
+    if ((path.startsWith('/knowledge-evolution') || path.startsWith('/knowledge-graph')) && !openKeys.value.includes('quality-flywheel')) {
+      openKeys.value = [...openKeys.value, 'quality-flywheel'];
+    }
+  },
+  { immediate: true },
+);
 
 // 侧边栏收起状态
 const collapsed = ref(false);
@@ -611,6 +632,7 @@ const hasKnowledgeEvolutionPermission = computed(() => {
          authStore.hasPermission('knowledge_evolution.view_knowledgecandidate') ||
          authStore.currentUser?.is_staff;
 });
+const hasQualityFlywheelMenuItems = computed(() => hasKnowledgeEvolutionPermission.value || hasKnowledgeGraphPermission.value);
 
 // 检查是否有知识库管理菜单项的权限
 const hasKnowledgeMenuItems = computed(() => {

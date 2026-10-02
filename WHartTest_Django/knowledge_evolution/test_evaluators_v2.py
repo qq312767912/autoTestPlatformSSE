@@ -52,7 +52,7 @@ class LayeredEvaluatorTest(TestCase):
         self.assertAlmostEqual(self.result.l1_score, 0.85)
         self.assertEqual(self.result.l2_score, 1.0)
         self.assertAlmostEqual(self.result.l3_score, 0.0)
-        self.assertEqual(JudgeResult.objects.filter(evaluation_result=self.result).count(), 6)
+        self.assertEqual(JudgeResult.objects.filter(evaluation_result=self.result).count(), 10)
         self.assertEqual(self.result.raw_scores["evaluator_version"], "layered-v2")
 
     def test_jury_disagreement_requires_review(self):

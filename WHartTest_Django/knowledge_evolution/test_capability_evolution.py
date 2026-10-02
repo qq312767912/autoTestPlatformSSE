@@ -71,7 +71,7 @@ class CapabilityEvolutionServiceTest(TestCase):
         self.definition = CapabilityDefinition.objects.create(
             project=self.project, kind="agent", name="风险驱动测试生成",
             evaluation_mode="workflow",
-            stages=["risk_identification", "test_plan_generation", "testcase_generation", "test_execution", "issue_tracking"],
+            stages=["test_plan_generation", "testcase_generation", "test_execution", "report_generation"],
             gate_rules={"min_mean_diff": 0.0, "max_latency_regression": 0.5, "max_token_regression": 0.5},
             created_by=self.user,
         )

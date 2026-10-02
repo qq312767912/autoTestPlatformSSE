@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["workflow_id", "stage", "coverage", "plan_items", "artifacts", "open_questions"],
+  "properties": {
+    "workflow_id": {"type": "string"},
+    "stage": {"const": "test_plan_generation"},
+    "coverage": {"type": "number", "minimum": 0, "maximum": 1},
+    "plan_items": {"type": "array", "items": {"type": "object", "required": ["plan_item_id", "module", "scenario_type", "priority", "source_refs"]}},
+    "uncovered_items": {"type": "array"},
+    "open_questions": {"type": "array"},
+    "artifacts": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

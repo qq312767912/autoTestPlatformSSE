@@ -51,6 +51,7 @@
             </div>
             <div class="actions">
               <a-button v-if="item.report_url" type="primary" @click="download(item.report_url)">下载报告</a-button>
+              <a-button v-if="['completed','failed','cancelled'].includes(item.status)" @click="openQualitySidebar(item)">质量反馈</a-button>
               <a-button v-if="['completed','failed','cancelled'].includes(item.status)" @click="retry(item)">重跑</a-button>
               <a-popconfirm v-if="['pending','running'].includes(item.status)" content="确认取消？取消后任务将不再继续生成报告。" @ok="cancel(item)"><a-button status="warning">取消</a-button></a-popconfirm>
               <a-popconfirm content="删除记录、源文件和报告？" @ok="remove(item)">
@@ -164,6 +165,14 @@
         <a-space><a-button :disabled="!llmConfigForm.id" :loading="llmConfigTesting" @click="testLlmConfig">测试连接</a-button><a-tag v-if="llmConfigForm.has_api_key" color="green">密钥已配置</a-tag></a-space>
       </a-form>
     </a-modal>
+
+    <QualitySidebar
+      v-model:visible="qualitySidebarVisible"
+      :project-id="projectId || 0"
+      task-type="case_review"
+      :task-id="selectedReviewForQuality?.id || ''"
+      :title="selectedReviewForQuality?.source_name"
+    />
   </div>
 </template>
 
@@ -193,6 +202,7 @@ import * as codeReviewApi from '@/features/code-analysis/service';
 import { KnowledgeService } from '@/features/knowledge/services/knowledgeService';
 import KnowledgeDocumentScopeSelector from '@/features/knowledge/components/KnowledgeDocumentScopeSelector.vue';
 import type { KnowledgeBase } from '@/features/knowledge/types/knowledge';
+import QualitySidebar from '@/features/knowledge-evolution/components/QualitySidebar.vue';
 
 const projectStore = useProjectStore();
 const projectId = computed(() => projectStore.currentProjectId);
@@ -212,6 +222,8 @@ const requirementDocumentIds = ref<string[]>([]);
 const knowledgeBases = ref<KnowledgeBase[]>([]);
 const knowledgeBaseIds = ref<string[]>([]);
 const knowledgeDocumentIds = ref<string[]>([]);
+const qualitySidebarVisible = ref(false);
+const selectedReviewForQuality = ref<TestCaseReview | null>(null);
 let timer: number | undefined;
 
 const authStore = useAuthStore();
@@ -379,6 +391,7 @@ async function retry(item: TestCaseReview) { if (!projectId.value) return; await
 async function cancel(item: TestCaseReview) { if (!projectId.value) return; await cancelReview(projectId.value, item.id); Message.success('任务已取消'); await load(); }
 async function remove(item: TestCaseReview) { if (!projectId.value) return; await deleteReview(projectId.value, item.id); Message.success('已删除'); await load(); }
 function download(url: string) { const link = document.createElement('a'); link.href = url; link.download = ''; document.body.appendChild(link); link.click(); link.remove(); }
+function openQualitySidebar(item: TestCaseReview) { selectedReviewForQuality.value = item; qualitySidebarVisible.value = true; }
 
 watch(projectId, () => load());
 onMounted(() => { load(); timer = window.setInterval(() => { if (reviews.value.some(item => ['pending', 'running'].includes(item.status))) load(true); }, 4000); });

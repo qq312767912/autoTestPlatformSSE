@@ -1,6 +1,8 @@
 import logging
+import uuid
 
 from django.core.exceptions import ValidationError
+from django.http import Http404
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.decorators import action
@@ -10,10 +12,41 @@ from rest_framework.response import Response
 
 from wharttest_django.viewsets import BaseModelViewSet
 from projects.models import Project
-from .models import Skill
-from .serializers import SkillSerializer, SkillUploadSerializer, SkillGitImportSerializer, SkillListSerializer, SkillToggleSerializer, SkillZipUrlImportSerializer
+from projects.roles import (
+    IsProjectScoped, IsTestExecutor, IsTestLead,
+    business_role, is_test_executor, is_test_lead, visible_project_ids,
+)
+from .exporter import SkillPackageExporter
+from .models import Skill, SkillVersion
+from .serializers import (
+    SkillSerializer, SkillUploadSerializer, SkillGitImportSerializer,
+    SkillListSerializer, SkillToggleSerializer, SkillZipUrlImportSerializer,
+    SkillVersionSerializer, SkillVersionListSerializer,
+    SkillPreflightSerializer, SkillCandidateCreateSerializer,
+    SkillVersionDiffQuerySerializer, SkillQuarantineSerializer,
+    SkillVersionValidateSerializer,
+)
+from .validation import SkillPackageValidationService
+from .versions import SkillVersionService
 
 logger = logging.getLogger(__name__)
+
+
+def _validation_message(exc) -> str:
+    """把 ValidationError 提取成一句可直接展示的中文提示。"""
+    messages = getattr(exc, 'messages', None)
+    if messages:
+        return messages[0]
+    return str(exc)
+
+
+def _get_version_or_404(skill, version_id):
+    """按版本 ID 取版本；ID 非法或不属于该 Skill 一律 404，不泄露存在性。"""
+    try:
+        uuid.UUID(str(version_id))
+    except (ValueError, TypeError, AttributeError):
+        raise Http404('版本不存在')
+    return get_object_or_404(SkillVersion, id=version_id, skill=skill)
 
 
 class SkillViewSet(BaseModelViewSet):
@@ -28,17 +61,59 @@ class SkillViewSet(BaseModelViewSet):
     - PATCH /projects/{project_id}/skills/{id}/ - 更新（仅 is_active）
     - DELETE /projects/{project_id}/skills/{id}/ - 删除
     """
+
     parser_classes = [JSONParser, MultiPartParser, FormParser]
 
+    #: 治理类动作（审批、激活、回滚、隔离）仅测试负责人可执行。
+    LEAD_ONLY_ACTIONS = frozenset({
+        'approve', 'reject', 'activate', 'rollback', 'quarantine',
+        # 版本维度的治理动作（T07）：隔离是安全事件，必须由测试负责人发起。
+        'quarantine_version',
+    })
+    #: 仅做配置返回或远程代理拉取、不读写 Skill 数据的动作，只要求登录。
+    PUBLIC_ACTIONS = frozenset({'store_config', 'store_manifest', 'store_readme'})
+
     def get_queryset(self):
-        # Skills 当前设计为全局共享资源，不按项目过滤查询集。
-        return Skill.objects.all()
+        """所有读写一律锁定 URL 中的项目，杜绝跨项目读取与 UUID 猜测。
+
+        原实现返回 ``Skill.objects.all()``，任何登录用户都能列出、读取、修改
+        和删除全平台的 Skill。这里改为强制按嵌套路由的 ``project_pk`` 过滤；
+        非嵌套场景（权限类反查模型信息、schema 生成）退化为"仅当前用户可见
+        项目"，绝不返回全量。
+        """
+        queryset = Skill.objects.select_related('project', 'creator')
+        project_id = (getattr(self, 'kwargs', None) or {}).get('project_pk')
+        if project_id:
+            return queryset.filter(project_id=project_id)
+        allowed_project_ids = visible_project_ids(getattr(getattr(self, 'request', None), 'user', None))
+        if allowed_project_ids is None:
+            # None 表示超级用户不受项目限制。
+            return queryset
+        return queryset.filter(project_id__in=allowed_project_ids)
 
     def get_permissions(self):
+        action = getattr(self, 'action', None)
         # store_config / store_manifest / store_readme 仅做配置返回或远程代理拉取，不读写 Skill 数据。
-        if getattr(self, 'action', None) in ('store_config', 'store_manifest', 'store_readme'):
+        if action in self.PUBLIC_ACTIONS:
             return [IsAuthenticated()]
-        return super().get_permissions()
+        # hub_access 只回答"调用者在本项目属于哪种业务角色"，供控制台做按钮门控，
+        # 不读任何 Skill 数据，因此不绑定具体业务角色：它要求的只是"是本项目成员"。
+        # 非成员应当拿到 403「无权访问该项目」，而不是被误报成"缺少执行人员权限"——
+        # 后者的文案会让人以为"再申请一下权限就能进"，其实是压根不在这个项目里。
+        if action == 'hub_access':
+            return [IsAuthenticated(), IsProjectScoped()]
+        # 这里刻意**不叠加** HasModelPermission（基础视图集的全局模型权限位）。
+        #
+        # Skill Hub 的授权维度是"项目内业务角色"（测试负责人 / 测试执行人员），粒度比
+        # 全局模型权限更细：一名项目成员完全应当能上传与预检本项目的 Skill，但他通常
+        # 并不持有全局的 skills.add_skill 权限位。叠加模型权限会让 T01 要求的
+        # "测试执行人员可以上传、预检"直接失效——验收时表现为项目成员一律 403。
+        #
+        # 项目边界（是否本项目成员）与角色（是否测试负责人）由下面两个权限类负责。
+        return [
+            IsAuthenticated(),
+            IsTestLead() if action in self.LEAD_ONLY_ACTIONS else IsTestExecutor(),
+        ]
 
     def get_serializer_class(self):
         # 按动作切换序列化器，确保每个接口只暴露必要字段与校验规则。
@@ -46,6 +121,18 @@ class SkillViewSet(BaseModelViewSet):
             return SkillListSerializer
         if self.action == 'upload':
             return SkillUploadSerializer
+        if self.action == 'preflight':
+            return SkillPreflightSerializer
+        if self.action == 'create_candidate':
+            return SkillCandidateCreateSerializer
+        if self.action == 'list_versions':
+            return SkillVersionListSerializer
+        if self.action in ('version_detail', 'download_version', 'quarantine_version'):
+            return SkillVersionSerializer
+        if self.action == 'validate_version':
+            return SkillVersionValidateSerializer
+        if self.action == 'version_diff':
+            return SkillVersionDiffQuerySerializer
         if self.action == 'import_git':
             return SkillGitImportSerializer
         if self.action == 'import_zip_url':
@@ -77,6 +164,35 @@ class SkillViewSet(BaseModelViewSet):
             'code': 200,
             'message': '获取成功',
             'data': serializer.data
+        })
+
+    @action(detail=False, methods=['get'], url_path='hub-access')
+    def hub_access(self, request, *args, **kwargs):
+        """返回调用者在本项目内的业务角色（控制台自服务的角色真值）。
+
+        T18 的控制台需要知道"我是测试负责人还是测试执行人员"来决定按钮的呈现与禁用。
+        原实现让前端读 ``/projects/{id}/members/`` 反查自己那一行，有两个问题：
+
+        ① **权限口径不对**。``members`` 是成员管理接口，要求
+           ``projects.view_projectmember`` 这一全局模型权限位；而业务角色的真值本来
+           就在 ``projects.roles``，与全局模型权限无关。于是一个实打实的项目成员
+           （他持有 ``member`` 角色，本该能进控制台）会因为缺权限位拿到 403，
+           前端据此把他判成"非本项目成员"——T18 验收的"只显示测试负责人和测试
+           执行人员"就此落空。
+        ② **取数范围过大**。为了知道自己是谁，前端要把整个项目的成员列表拉回来。
+
+        这里改为直接返回调用者自己的角色：不需要额外权限位，也不返回其他成员。
+        """
+        project = self.get_project()
+        return Response({
+            'code': 200,
+            'message': '获取成功',
+            'data': {
+                'project_id': project.id,
+                'business_role': business_role(request.user, project.id),
+                'is_test_lead': is_test_lead(request.user, project.id),
+                'is_test_executor': is_test_executor(request.user, project.id),
+            },
         })
 
     def partial_update(self, request, *args, **kwargs):
@@ -141,7 +257,7 @@ class SkillViewSet(BaseModelViewSet):
             }, status=status.HTTP_201_CREATED)
         except ValidationError as e:
             # 参数/文件内容校验失败返回 400，便于前端直接提示用户修正输入。
-            msg = e.messages[0] if hasattr(e, 'messages') and e.messages else str(e)
+            msg = _validation_message(e)
             return Response({
                 'code': 400,
                 'message': msg,
@@ -186,7 +302,7 @@ class SkillViewSet(BaseModelViewSet):
                 'data': SkillSerializer(skills, many=True).data
             }, status=status.HTTP_201_CREATED)
         except ValidationError as e:
-            msg = e.messages[0] if hasattr(e, 'messages') and e.messages else str(e)
+            msg = _validation_message(e)
             return Response({
                 'code': 400,
                 'message': msg,
@@ -244,7 +360,7 @@ class SkillViewSet(BaseModelViewSet):
                 'data': SkillSerializer(skills, many=True).data
             }, status=status.HTTP_201_CREATED)
         except ValidationError as e:
-            msg = e.messages[0] if hasattr(e, 'messages') and e.messages else str(e)
+            msg = _validation_message(e)
             return Response({
                 'code': 400,
                 'message': msg,
@@ -337,7 +453,7 @@ class SkillViewSet(BaseModelViewSet):
         try:
             text = self._proxy_fetch_text(url, max_size=1 * 1024 * 1024)
         except ValidationError as e:
-            msg = e.messages[0] if hasattr(e, 'messages') and e.messages else str(e)
+            msg = _validation_message(e)
             return Response({
                 'code': 400, 'message': msg, 'data': None
             }, status=status.HTTP_400_BAD_REQUEST)
@@ -372,9 +488,195 @@ class SkillViewSet(BaseModelViewSet):
         try:
             content = self._proxy_fetch_text(url, max_size=1 * 1024 * 1024)
         except ValidationError as e:
-            msg = e.messages[0] if hasattr(e, 'messages') and e.messages else str(e)
+            msg = _validation_message(e)
             return Response({
                 'code': 400, 'message': msg, 'data': None
             }, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({'code': 200, 'message': '获取成功', 'data': {'content': content}})
+
+    # ------------------------------------------------------------------
+    # Skill 版本（T06 / T07）
+    #
+    # 路由要点：这些 action 都是 detail=True，URL 形如
+    # ``skills/{skill_id}/versions/...``。不能把集合入口做成
+    # ``skills/versions/``——那会被 DRF 的详情路由 ``skills/{pk}/`` 抢先匹配，
+    # 于是把 "versions" 当成 Skill 主键去查，得到 404。
+    # ------------------------------------------------------------------
+
+    @action(detail=False, methods=['post'], url_path='preflight')
+    def preflight(self, request, *args, **kwargs):
+        """上传包**预检**：只校验并返回报告与短期令牌，不写正式版本库（R1 / T05）。
+
+        两阶段上传的第一步。暂存区在 ``MEDIA_ROOT/.skill-preflight`` 下，令牌带
+        过期时间并与包哈希绑定；预检未通过的包会立即从暂存区删掉。
+        """
+        serializer = SkillPreflightSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        # 项目必须先解析出来：即使权限类放行，也要确保 project_pk 指向真实项目。
+        self.get_project()
+
+        upload = serializer.validated_data['file']
+        result = SkillPackageValidationService.preflight(
+            zip_file=upload, filename=getattr(upload, 'name', '') or '',
+        )
+        payload = result.as_dict()
+        if not result.report.ok:
+            return Response(
+                {'code': 400, 'message': '包校验未通过', 'data': payload},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({'code': 200, 'message': '预检通过', 'data': payload})
+
+    @action(detail=False, methods=['post'], url_path='candidates')
+    def create_candidate(self, request, *args, **kwargs):
+        """用预检令牌创建候选版本（两阶段上传的第二步）。
+
+        新建版本一律 ``draft``：候选不可能绕过评测与负责人审批直接生效（R7）。
+        同一 Skill 下内容相同的包由服务层幂等返回已有版本，不会重复落库。
+        """
+        serializer = SkillCandidateCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        project = self.get_project()
+        data = serializer.validated_data
+
+        try:
+            skill, version = SkillVersionService.create_candidate_from_preflight(
+                token=data['token'], project=project, actor=request.user,
+                change_reason=data.get('change_reason', ''),
+                expected_benefit=data.get('expected_benefit', ''),
+                impact_scope=data.get('impact_scope', ''),
+                api_key=data.get('api_key') or None,
+            )
+        except ValidationError as e:
+            return Response(
+                {'code': 400, 'message': _validation_message(e), 'data': None},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response({
+            'code': 201,
+            'message': f"候选版本 {version.version} 已创建（草稿，待评测与审批）",
+            'data': {
+                'skill': SkillSerializer(skill).data,
+                'version': SkillVersionSerializer(version).data,
+            },
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get'], url_path='versions')
+    def list_versions(self, request, *args, **kwargs):
+        """列出该 Skill 的全部版本（新→旧）。"""
+        skill = self.get_object()
+        versions = skill.versions.select_related('release', 'created_by').order_by('-created_at')
+        return Response({
+            'code': 200,
+            'message': '获取成功',
+            'data': SkillVersionSerializer(versions, many=True).data,
+        })
+
+    @action(detail=True, methods=['get'], url_path=r'versions/(?P<version_id>[^/.]+)')
+    def version_detail(self, request, version_id=None, *args, **kwargs):
+        """版本详情（含 manifest 与校验报告）。"""
+        skill = self.get_object()
+        version = _get_version_or_404(skill, version_id)
+        return Response({
+            'code': 200,
+            'message': '获取成功',
+            'data': SkillVersionSerializer(version).data,
+        })
+
+    @action(detail=True, methods=['get'], url_path=r'versions/(?P<version_id>[^/.]+)/diff')
+    def version_diff(self, request, version_id=None, *args, **kwargs):
+        """版本差异；``?base=<version_id>`` 缺省时与该版本的父版本比较。"""
+        skill = self.get_object()
+        candidate = _get_version_or_404(skill, version_id)
+        query = SkillVersionDiffQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+
+        base_id = query.validated_data.get('base')
+        base = _get_version_or_404(skill, base_id) if base_id else candidate.previous_version
+
+        try:
+            diff = SkillVersionService.diff(base, candidate)
+        except ValidationError as e:
+            return Response(
+                {'code': 400, 'message': _validation_message(e), 'data': None},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({'code': 200, 'message': '获取成功', 'data': diff})
+
+    @action(detail=True, methods=['get'], url_path=r'versions/(?P<version_id>[^/.]+)/download')
+    def download_version(self, request, version_id=None, *args, **kwargs):
+        """下载确定性脱敏包（T07）。
+
+        相同版本重复导出字节与 SHA-256 一致；导出前会做二次敏感扫描，命中即
+        把该版本转为 ``quarantined`` 并拒绝下载。导出动作写 ``download`` 审计。
+        """
+        skill = self.get_object()
+        version = _get_version_or_404(skill, version_id)
+        try:
+            return SkillPackageExporter.export_response(version, actor=request.user)
+        except ValidationError as e:
+            return Response(
+                {'code': 400, 'message': _validation_message(e), 'data': None},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    @action(detail=True, methods=['post'], url_path=r'versions/(?P<version_id>[^/.]+)/quarantine')
+    def quarantine_version(self, request, version_id=None, *args, **kwargs):
+        """隔离版本：停止运行时加载并留痕（仅测试负责人可执行）。"""
+        skill = self.get_object()
+        version = _get_version_or_404(skill, version_id)
+        serializer = SkillQuarantineSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            SkillVersionService.quarantine(
+                version, actor=request.user, reason=serializer.validated_data['reason'],
+            )
+        except ValidationError as e:
+            return Response(
+                {'code': 400, 'message': _validation_message(e), 'data': None},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        version.refresh_from_db()
+        return Response({
+            'code': 200,
+            'message': f"版本 {version.version} 已隔离",
+            'data': SkillVersionSerializer(version).data,
+        })
+
+    @action(detail=True, methods=['post'], url_path=r'versions/(?P<version_id>[^/.]+)/validate')
+    def validate_version(self, request, version_id=None, *args, **kwargs):
+        """提交静态校验：把草稿候选推进到影子验证（可进入评测）。
+
+        执行人员即可发起：校验属于验评环节，按设计第 10 节"上传和验评允许测试
+        执行人员"。返回体同时给出版本快照与完整校验报告——控制台要当场展示
+        "哪一项没过"，而不是只弹一句红字。
+        """
+        skill = self.get_object()
+        version = _get_version_or_404(skill, version_id)
+        serializer = SkillVersionValidateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            report, version = SkillVersionService.submit_for_validation(
+                version, actor=request.user,
+                reason=serializer.validated_data.get('reason', ''),
+            )
+        except ValidationError as e:
+            return Response(
+                {'code': 400, 'message': _validation_message(e), 'data': None},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        version.refresh_from_db()
+        return Response({
+            'code': 200,
+            'message': f"版本 {version.version} 静态校验通过，已进入影子验证",
+            'data': {
+                'version': SkillVersionSerializer(version).data,
+                'report': report.as_dict(),
+            },
+        })

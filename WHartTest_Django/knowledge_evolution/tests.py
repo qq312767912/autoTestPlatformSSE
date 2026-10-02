@@ -11,7 +11,7 @@ from knowledge.models import KnowledgeBase
 from testcases.models import TestExecution, TestSuite
 from rest_framework import status
 from rest_framework.test import APIClient
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from orchestrator_integration.agent_loop_view import AgentLoopStreamAPIView
 
 from .models import FeedbackEvent, GenerationOutput, RetrievalTrace
@@ -160,6 +160,26 @@ class KnowledgeEvolutionTestCase(TestCase):
         self.assertEqual(str(event.trace_id), ids[0])
 
     def test_testcase_generation_agent_output_is_traceable(self):
+        # 用例生成是全链路测试的第二段：平台自 T15 起强制"上一阶段门禁通过才能进入
+        # 下一阶段"。所以这里必须先有一条已放行的方案阶段，否则 agent 产出会被链路
+        # 门禁拦下、`publish_output` 返回 None——那是链路的正确行为，不是记录故障。
+        # 用真实协议发一份方案产出再放行门禁，而不是直接捏一条门禁记录，
+        # 是为了让这条用例同时覆盖"方案阶段产出 → 门禁 → 用例阶段产出"的真实顺序。
+        from .protocol import ADAPTERS, publish_output
+        from .workflow_models import WorkflowStageGate
+
+        plan_envelope = ADAPTERS["test_plan_generation"].build(
+            project=self.project, user=self.user, source_id="plan-for-generation",
+            workflow_id="generation-session-1", input_summary="登录需求测试方案",
+            output={"content": "方案正文"},
+            extensions={"enforce_quality_gate": True},
+        )
+        self.assertIsNotNone(publish_output(plan_envelope))
+        WorkflowStageGate.objects.filter(
+            project=self.project, workflow_id="generation-session-1",
+            stage="test_plan_generation",
+        ).update(status="passed")
+
         request = SimpleNamespace(
             user=self.user, _flywheel_module_key="testcase_generation"
         )
@@ -171,6 +191,10 @@ class KnowledgeEvolutionTestCase(TestCase):
             user_message="根据登录需求生成测试用例",
             all_messages=[
                 HumanMessage(content="生成用例"),
+                AIMessage(content="", tool_calls=[{
+                    "id": "save-1", "name": "save_testcases", "args": {"private": "secret"},
+                }]),
+                ToolMessage(content="saved 5", tool_call_id="save-1", name="save_testcases"),
                 AIMessage(content="已生成并保存 5 条登录测试用例"),
             ],
             model_name="test-model",
@@ -188,3 +212,10 @@ class KnowledgeEvolutionTestCase(TestCase):
         self.assertTrue(trace.channels["knowledge"]["enabled"])
         self.assertEqual(output.model_version, "test-model")
         self.assertEqual(output.prompt_version, "12")
+        tool_span = trace.spans.get(
+            step_type="tool", tool_name="save_testcases",
+            metadata__granularity="real_tool_call",
+        )
+        self.assertEqual(tool_span.status, "completed")
+        self.assertTrue(tool_span.input_hash and tool_span.output_hash)
+        self.assertNotIn("secret", str(tool_span.metadata))

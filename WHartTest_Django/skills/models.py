@@ -1,6 +1,7 @@
 import logging
 import os
 import stat
+import uuid
 import zipfile
 import yaml
 import shutil
@@ -62,6 +63,24 @@ class Skill(models.Model):
     is_active = models.BooleanField(
         _('是否启用'),
         default=True
+    )
+    capability = models.ForeignKey(
+        'knowledge_evolution.CapabilityDefinition',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='skills',
+        verbose_name=_('绑定能力'),
+        help_text='一个 Skill 绑定一个可进化能力定义，用于评测与发布治理',
+    )
+    active_version = models.ForeignKey(
+        'SkillVersion',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='active_for_skills',
+        verbose_name=_('当前活跃版本'),
+        help_text='运行时快速解析用的活跃版本指针；权威状态仍以版本关联的发布单元为准',
     )
     created_at = models.DateTimeField(_('创建时间'), auto_now_add=True)
     updated_at = models.DateTimeField(_('更新时间'), auto_now=True)
@@ -203,6 +222,8 @@ class Skill(models.Model):
         project: Project,
         creator: User,
         api_key: str | None = None,
+        source_type: str = 'upload',
+        source_metadata: dict | None = None,
     ) -> list['Skill']:
         """
         从上传的 zip 文件创建一个或多个 Skill
@@ -212,17 +233,22 @@ class Skill(models.Model):
             project: 所属项目
             creator: 创建者
             api_key: 内部平台 Skill 安装时用户确认的 API Key
+            source_type: 版本来源标记（upload / git / store），用于审计与溯源
+            source_metadata: 额外来源信息（原始文件名、提交号、商店条目等）
 
         Returns:
             成功导入的 Skill 列表
         """
         import tempfile
 
+        from .validation import safe_extract_zip
+
         with tempfile.TemporaryDirectory() as temp_dir:
             try:
-                with zipfile.ZipFile(zip_file, 'r') as zf:
-                    # 安全解压，统一处理路径穿越/超量解压/符号链接风险。
-                    cls._safe_extract_zip(zf, temp_dir)
+                # 用统一的 safe_extract_zip（比本模型原有的 _safe_extract_zip 更严：
+                # 额外拦硬链接、单文件体积、路径长度与层级、压缩比），保证三个导入
+                # 来源在"什么算危险包"上口径完全一致。
+                safe_extract_zip(zip_file, temp_dir)
             except zipfile.BadZipFile:
                 raise ValidationError('无效的 zip 文件')
 
@@ -236,7 +262,11 @@ class Skill(models.Model):
             for skill_dir in skill_dirs:
                 try:
                     skill = cls._create_skill_from_dir(
-                        skill_dir, project, creator, api_key=api_key
+                        skill_dir, project, creator, api_key=api_key,
+                        source_type=source_type,
+                        source_metadata=source_metadata or {
+                            'original_filename': getattr(zip_file, 'name', '') or '',
+                        },
                     )
                     created_skills.append(skill)
                 except ValidationError as e:
@@ -309,74 +339,30 @@ class Skill(models.Model):
         project: Project,
         creator: User,
         api_key: str | None = None,
+        source_type: str = 'upload',
+        source_metadata: dict | None = None,
     ) -> 'Skill':
-        """从包含 SKILL.md 的目录创建单个 Skill 实例（含文件落盘）"""
-        from django.conf import settings
-        from .platform_skills import inject_api_key_into_skill_dir, is_internal_platform_skill
+        """从包含 SKILL.md 的目录创建 Skill 及其候选版本（T06 的唯一收敛点）。
 
-        skill_md_path = os.path.join(skill_root, 'SKILL.md')
-        try:
-            with open(skill_md_path, 'r', encoding='utf-8') as f:
-                skill_content = f.read()
-        except UnicodeDecodeError:
-            raise ValidationError('SKILL.md 文件编码必须为 UTF-8')
+        本地上传、Git 导入、商店 URL 导入三条来源在这里汇合：无论目录从哪来，
+        校验、取包哈希、注入 API Key、不可变落盘、建版本记录和写审计都由
+        ``SkillVersionService.create_candidate_from_dir`` 统一完成，避免"某个来源
+        绕过了密钥扫描"这类只在一条路径上出现的安全缺口。
 
-        parsed = cls.parse_skill_md(skill_content)
+        与旧实现的差异：同名 Skill 不再报错，而是**追加一个新版本**（R2 不可变版本）。
+        内容与已有版本完全相同则由服务层幂等返回已有版本，不会落重复数据。
+        """
+        from .versions import SkillVersionService
 
-        if cls.objects.filter(project=project, name=parsed['name']).exists():
-            raise ValidationError(f"项目中已存在名为 '{parsed['name']}' 的 Skill")
-
-        # 内部平台 Skill 必须使用用户确认的 API Key 再落盘
-        if is_internal_platform_skill(parsed['name']):
-            if not (api_key or '').strip():
-                raise ValidationError(
-                    f"安装内部 Skill '{parsed['name']}' 需要确认 API Key，请选择或创建后重试"
-                )
-            try:
-                inject_api_key_into_skill_dir(
-                    skill_dir=skill_root,
-                    skill_name=parsed['name'],
-                    api_key=api_key.strip(),
-                )
-            except ValueError as e:
-                raise ValidationError(str(e)) from e
-
-        full_storage_path = None
-        try:
-            with transaction.atomic():
-                skill = cls.objects.create(
-                    project=project,
-                    creator=creator,
-                    name=parsed['name'],
-                    description=parsed['description'],
-                    skill_content=skill_content,
-                    is_active=True
-                )
-
-                skill_storage_path = f'skills/{project.id}/{skill.id}'
-                full_storage_path = os.path.join(settings.MEDIA_ROOT, skill_storage_path)
-                os.makedirs(full_storage_path, exist_ok=False)
-
-                for item in os.listdir(skill_root):
-                    if item in ('.git', '__pycache__', 'node_modules'):
-                        continue
-                    src = os.path.join(skill_root, item)
-                    if os.path.islink(src):
-                        continue
-                    dst = os.path.join(full_storage_path, item)
-                    if os.path.isdir(src):
-                        shutil.copytree(src, dst, symlinks=False, ignore=shutil.ignore_patterns('.git'))
-                    else:
-                        shutil.copy2(src, dst)
-
-                skill.skill_path = skill_storage_path
-                skill.save(update_fields=['skill_path'])
-
-            return skill
-        except Exception:
-            if full_storage_path and os.path.isdir(full_storage_path):
-                shutil.rmtree(full_storage_path, ignore_errors=True)
-            raise
+        skill, _version = SkillVersionService.create_candidate_from_dir(
+            source_dir=skill_root,
+            project=project,
+            actor=creator,
+            source_type=source_type,
+            source_metadata=source_metadata or {},
+            api_key=api_key,
+        )
+        return skill
 
     @staticmethod
     def _validate_remote_url(url: str) -> str:
@@ -503,8 +489,13 @@ class Skill(models.Model):
                     raise ValidationError(f'SHA256 校验失败：期望 {expected}，实际 {actual}')
 
             buf.seek(0)
-            # 复用现有 create_from_zip 解压与建表逻辑，避免逻辑重复。
-            return cls.create_from_zip(buf, project, creator, api_key=api_key)
+            # 复用 create_from_zip 的解压与建版本逻辑，避免逻辑重复；
+            # 来源标记为 store，让审计能区分"商店安装"和"本地上传"。
+            return cls.create_from_zip(
+                buf, project, creator, api_key=api_key,
+                source_type='store',
+                source_metadata={'zip_url': zip_url, 'expected_sha256': expected_sha256 or ''},
+            )
         finally:
             buf.close()
 
@@ -539,7 +530,9 @@ class Skill(models.Model):
             for skill_dir in skill_dirs:
                 try:
                     skill = cls._create_skill_from_dir(
-                        skill_dir, project, creator, api_key=api_key
+                        skill_dir, project, creator, api_key=api_key,
+                        source_type='git',
+                        source_metadata={'git_url': git_url, 'branch': branch},
                     )
                     created_skills.append(skill)
                 except ValidationError as e:
@@ -558,6 +551,133 @@ class Skill(models.Model):
             return created_skills
 
 
+class SkillVersion(models.Model):
+    """Skill 的不可变版本包。
+
+    ``Skill`` 是逻辑身份（同一项目内同名唯一），``SkillVersion`` 是某一次入库的
+    具体内容快照。入库后**不得原地覆盖**：任何内容变化都必须产生新版本、新包哈希。
+
+    发布状态不在这里复制一份，而是通过 ``release`` 一对一关联一条 ``kind="skill"``
+    的 ``CapabilityRelease``，复用统一的发布状态机（草稿/校验/影子/待审批/生效/
+    退役/回滚/驳回/隔离）。
+    """
+
+    SOURCE_TYPE_CHOICES = [
+        ("upload", "本地上传"),
+        ("git", "Git 导入"),
+        ("store", "Skill 商店"),
+        ("evolution", "自进化派生"),
+        ("migration", "存量迁移"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    skill = models.ForeignKey(
+        Skill,
+        on_delete=models.CASCADE,
+        related_name='versions',
+        verbose_name=_('所属 Skill'),
+    )
+    version = models.CharField(
+        _('版本号'), max_length=100,
+        help_text='SemVer 或可比较的版本字符串，如 1.2.0、0.0.0-migrated',
+    )
+    release = models.OneToOneField(
+        'knowledge_evolution.CapabilityRelease',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='skill_version',
+        verbose_name=_('发布单元'),
+        help_text='kind=skill 的发布单元，承载本版本的发布状态与门禁快照',
+    )
+    package_path = models.CharField(
+        _('包存储路径'), max_length=500,
+        help_text='相对 MEDIA_ROOT 的不可变存储目录',
+    )
+    package_sha256 = models.CharField(
+        _('包哈希'), max_length=64, db_index=True,
+        help_text='基于标准化文件清单与内容的 SHA-256（见 skills.packaging）',
+    )
+    manifest = models.JSONField(
+        _('版本清单'), default=dict, blank=True,
+        help_text='版本、阶段、入口、输入/输出 Schema、依赖与权限声明',
+    )
+    validation_report = models.JSONField(
+        _('校验报告'), default=dict, blank=True,
+        help_text='结构、密钥、静态扫描与 Schema 校验结果',
+    )
+    source_type = models.CharField(
+        _('来源类型'), max_length=16, choices=SOURCE_TYPE_CHOICES,
+        default='upload', db_index=True,
+    )
+    source_metadata = models.JSONField(
+        _('来源元数据'), default=dict, blank=True,
+        help_text='原始文件名、Git URL/commit、商店条目、上传人等',
+    )
+    previous_version = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='derived_versions',
+        verbose_name=_('父版本'),
+        help_text='用于 diff 与回滚的派生来源',
+    )
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_skill_versions',
+        verbose_name=_('创建人'),
+    )
+    created_at = models.DateTimeField(_('创建时间'), auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(_('更新时间'), auto_now=True)
+
+    class Meta:
+        verbose_name = _('Skill 版本')
+        verbose_name_plural = _('Skill 版本')
+        ordering = ['-created_at']
+        constraints = [
+            # 同一 Skill 下版本号唯一，避免出现两个"1.2.0"。
+            models.UniqueConstraint(fields=['skill', 'version'], name='uniq_skill_version'),
+            # 同一 Skill 下同一份内容只入库一次，重复上传由服务层幂等返回已有版本。
+            models.UniqueConstraint(fields=['skill', 'package_sha256'], name='uniq_skill_version_package'),
+        ]
+        indexes = [
+            models.Index(fields=['skill', '-created_at']),
+            models.Index(fields=['source_type', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.skill.name}@{self.version}"
+
+    def get_full_path(self):
+        """返回版本包的绝对路径；未落盘时返回 None。"""
+        from django.conf import settings
+        if not self.package_path:
+            return None
+        return os.path.abspath(os.path.join(settings.MEDIA_ROOT, self.package_path))
+
+    @property
+    def state(self):
+        """发布状态，委托给关联的发布单元；未关联时视为草稿。"""
+        return self.release.state if self.release_id else 'draft'
+
+    @property
+    def is_runnable(self):
+        """是否允许被运行时加载：必须处于生效状态且未被隔离/驳回。"""
+        return self.state == 'active' and self.skill.is_active
+
+    def manifest_stage(self):
+        """返回 manifest 中声明的能力阶段（可能为空）。"""
+        return (self.manifest or {}).get('stage') or ''
+
+    def manifest_entrypoint(self):
+        """返回 manifest 中声明的入口文件路径（可能为空）。"""
+        return (self.manifest or {}).get('entrypoint') or ''
+
+
 @receiver(post_delete, sender=Skill)
 def _cleanup_skill_files(sender, instance, **kwargs):
     """删除 Skill 记录后清理磁盘文件（适用于所有删除场景，包括 QuerySet 批量删除和 CASCADE 级联删除）"""
@@ -568,6 +688,11 @@ def _cleanup_skill_files(sender, instance, **kwargs):
     media_root = Path(settings.MEDIA_ROOT).resolve(strict=False)
     expected_root = (media_root / 'skills' / str(instance.project_id) / str(instance.id)).resolve(strict=False)
     target = Path(full_path).resolve(strict=False)
+    # 版本化之后 ``skill_path`` 可能指向"当前活跃版本的不可变目录"，那类目录的清理
+    # 归 ``_cleanup_version_files`` 管（由 SkillVersion 的级联删除触发），这里不插手，
+    # 也不打无意义的告警。
+    if _is_version_package_path(target, media_root):
+        return
     # 条件：路径精确匹配预期目录；动作：递归删除；结果：防止误删非 Skill 目录。
     if target == expected_root and target.exists():
         try:
@@ -577,3 +702,33 @@ def _cleanup_skill_files(sender, instance, **kwargs):
     elif target.exists():
         # 路径异常时仅告警不删除，避免潜在路径拼接错误导致数据破坏。
         logger.warning("Refusing to delete unexpected Skill path: %s (expected %s)", target, expected_root)
+
+
+def _is_version_package_path(target: Path, media_root: Path) -> bool:
+    """判断路径是否位于 ``MEDIA_ROOT/skills/{project}/versions/`` 之下。
+
+    只做纯字符串结构校验（``skills`` / 项目段 / ``versions`` / …），不查库——
+    级联删除时 Skill 记录可能已经不可读，查库反而会抛异常。
+    """
+    try:
+        relative_parts = target.relative_to(media_root).parts
+    except ValueError:
+        return False
+    return len(relative_parts) >= 4 and relative_parts[0] == 'skills' and relative_parts[2] == 'versions'
+
+
+@receiver(post_delete, sender=SkillVersion)
+def _cleanup_version_files(sender, instance, **kwargs):
+    """删除版本记录后清理其不可变目录。
+
+    只在路径确实落在版本根之下时才动手，避免 ``package_path`` 被写坏时误删别处。
+    """
+    if not instance.package_path:
+        return
+    from django.conf import settings
+    media_root = Path(settings.MEDIA_ROOT).resolve(strict=False)
+    target = (media_root / instance.package_path).resolve(strict=False)
+    if not _is_version_package_path(target, media_root):
+        logger.warning("Refusing to delete unexpected version path: %s", target)
+        return
+    shutil.rmtree(target, ignore_errors=True)

@@ -101,6 +101,149 @@ class SensitiveDataEvaluator:
         )
 
 
+class ReferenceValidityEvaluator:
+    evaluator_type = "reference_validity"
+    version = "ref-validity-v1"
+    level = "l0"
+
+    def evaluate(self, context):
+        protocol = (context.output.metadata or {}).get("protocol") or {}
+        evidence = protocol.get("evidence") or []
+        citations = protocol.get("citations") or []
+        checks = []
+        for item in evidence:
+            checks.append({
+                "source_type": bool(item.get("source_type")),
+                "source_id": bool(item.get("source_id")),
+                "location": bool(item.get("location")),
+            })
+        for item in citations:
+            checks.append({
+                "source_type": bool(item.get("source_type") or item.get("finding_key")),
+                "source_id": bool(item.get("source_id") or item.get("file")),
+                "location": bool(item.get("location") or item.get("line_start")),
+            })
+        if not checks:
+            score, passed = 1.0, True
+            dimensions = {"reference_count": 0, "valid_count": 0}
+        else:
+            valid = sum(all(c.values()) for c in checks)
+            score = valid / len(checks)
+            passed = score == 1.0
+            dimensions = {"reference_count": len(checks), "valid_count": valid}
+        return EvaluationEvidence(
+            level=self.level, evaluator_type=self.evaluator_type, evaluator_version=self.version,
+            judge_name="deterministic-reference", score=score, passed=passed,
+            confidence=1.0, dimensions=dimensions,
+            rationale="引用来源、标识与定位信息完整性检查",
+        )
+
+
+class ToolSuccessEvaluator:
+    evaluator_type = "tool_success"
+    version = "tool-success-v1"
+    level = "l0"
+
+    def evaluate(self, context):
+        trace = context.output.trace
+        if not trace:
+            return EvaluationEvidence(
+                level=self.level, evaluator_type=self.evaluator_type, evaluator_version=self.version,
+                judge_name="deterministic-tool", score=None, passed=None,
+                status="needs_review", rationale="无轨迹，跳过工具调用检查",
+            )
+        tool_spans = trace.spans.filter(step_type="tool")
+        total = tool_spans.count()
+        if not total:
+            return EvaluationEvidence(
+                level=self.level, evaluator_type=self.evaluator_type, evaluator_version=self.version,
+                judge_name="deterministic-tool", score=1.0, passed=True,
+                dimensions={"tool_count": 0, "failed_count": 0},
+                rationale="本次产出未调用工具",
+            )
+        failed = tool_spans.filter(status="failed").count()
+        score = (total - failed) / total
+        return EvaluationEvidence(
+            level=self.level, evaluator_type=self.evaluator_type, evaluator_version=self.version,
+            judge_name="deterministic-tool", score=score, passed=failed == 0,
+            confidence=1.0, dimensions={"tool_count": total, "failed_count": failed},
+            rationale="工具调用 span 成功状态检查",
+        )
+
+
+class TruncationEvaluator:
+    evaluator_type = "truncation"
+    version = "truncation-v2"
+    level = "l0"
+    # 显式截断标记：出现即视为正文被裁剪。
+    EXPLICIT_MARKERS = ["[truncated]", "(truncated)", "内容已截断", "输出已截断"]
+    # 省略号只有出现在**结尾**才指示截断；中文正文里的「……」是正常标点，
+    # 若按「出现即扣分」处理，会让所有中文产出被误判为截断。
+    ELLIPSIS_MARKERS = ["...", "…"]
+
+    def evaluate(self, context):
+        content = context.output.content or ""
+        stripped = content.rstrip()
+        ends_with_marker = any(
+            stripped.endswith(marker)
+            for marker in self.EXPLICIT_MARKERS + self.ELLIPSIS_MARKERS
+        )
+        contains_marker = any(marker in content for marker in self.EXPLICIT_MARKERS)
+        # 内容为空或极短也视为异常
+        too_short = len(content.strip()) < 3
+        passed = not ends_with_marker and not too_short
+        score = 0.0 if too_short else (0.5 if contains_marker else 1.0)
+        return EvaluationEvidence(
+            level=self.level, evaluator_type=self.evaluator_type, evaluator_version=self.version,
+            judge_name="deterministic-truncation", score=score, passed=passed,
+            confidence=1.0,
+            dimensions={"content_length": len(content), "ends_with_marker": ends_with_marker, "contains_marker": contains_marker},
+            rationale="产出内容截断标记与空内容检查",
+        )
+
+
+class ParsabilityEvaluator:
+    evaluator_type = "parsability"
+    version = "parsability-v1"
+    level = "l0"
+
+    def evaluate(self, context):
+        content = context.output.content or ""
+        if not content.strip():
+            return EvaluationEvidence(
+                level=self.level, evaluator_type=self.evaluator_type, evaluator_version=self.version,
+                judge_name="deterministic-parse", score=0.0, passed=False,
+                dimensions={"empty": True},
+                rationale="产出内容为空，无法解析",
+            )
+        # 如果 protocol 声明输出包含 json 键，则尝试解析
+        protocol = (context.output.metadata or {}).get("protocol") or {}
+        descriptor_keys = set((protocol.get("output_descriptor") or {}).get("keys") or [])
+        looks_like_json = bool(descriptor_keys) or content.strip().startswith(("{", "["))
+        if looks_like_json:
+            try:
+                json.loads(content)
+                return EvaluationEvidence(
+                    level=self.level, evaluator_type=self.evaluator_type, evaluator_version=self.version,
+                    judge_name="deterministic-parse", score=1.0, passed=True,
+                    dimensions={"json": True},
+                    rationale="JSON 内容可解析",
+                )
+            except (json.JSONDecodeError, ValueError):
+                return EvaluationEvidence(
+                    level=self.level, evaluator_type=self.evaluator_type, evaluator_version=self.version,
+                    judge_name="deterministic-parse", score=0.0, passed=False,
+                    dimensions={"json": True, "parse_error": True},
+                    rationale="内容看起来像 JSON 但解析失败",
+                )
+        return EvaluationEvidence(
+            level=self.level, evaluator_type=self.evaluator_type, evaluator_version=self.version,
+            judge_name="deterministic-parse", score=1.0, passed=True,
+            dimensions={"json": False},
+            rationale="非 JSON 文本内容，可视为可解析",
+        )
+
+
 class RuleEvaluator:
     evaluator_type = "rubric_rule"
     version = "rubric-rule-v2"
@@ -190,32 +333,26 @@ class WorkflowOutcomeEvaluator:
     version = "workflow-v2"
     level = "l3"
     STAGES = [
-        "risk_identification", "test_plan_generation", "testcase_generation",
-        "test_execution", "issue_tracking",
+        "test_plan_generation", "testcase_generation", "test_execution", "report_generation",
     ]
 
     def evaluate(self, context):
         outputs = context.workflow_outputs or [context.output]
         stages = {output.task_type for output in outputs}
         coverage = len(stages & set(self.STAGES)) / len(self.STAGES)
-        issue_outputs = [output for output in outputs if output.task_type == "issue_tracking"]
-        closed = 0
-        for output in issue_outputs:
-            signals = set(output.feedback_events.values_list("signal", flat=True))
-            if signals & {"defect_confirmed", "test_passed", "merged"}:
-                closed += 1
-        closure = closed / len(issue_outputs) if issue_outputs else 0.0
-        score = 0.7 * coverage + 0.3 * closure
+        report_outputs = [output for output in outputs if output.task_type == "report_generation"]
+        report_ready = 1.0 if any(output.content.strip() for output in report_outputs) else 0.0
+        score = 0.8 * coverage + 0.2 * report_ready
         return EvaluationEvidence(
             level=self.level, evaluator_type=self.evaluator_type, evaluator_version=self.version,
             judge_name="workflow-business-outcome", score=score,
-            passed=coverage == 1.0 and (not issue_outputs or closure >= 0.7),
+            passed=coverage == 1.0 and report_ready == 1.0,
             confidence=1.0 if len(outputs) >= len(self.STAGES) else coverage,
             dimensions={
                 "stage_coverage": coverage, "covered_stages": sorted(stages),
-                "issue_count": len(issue_outputs), "closed_issue_count": closed,
+                "report_count": len(report_outputs), "report_ready": bool(report_ready),
             },
-            rationale="五阶段链路覆盖与问题闭环结果",
+            rationale="全链路测试四阶段覆盖与报告可用性",
         )
 
 
@@ -233,7 +370,9 @@ class EvaluatorRegistry:
 
 DEFAULT_EVALUATORS = EvaluatorRegistry()
 for _evaluator in (
-    SchemaEvaluator(), SensitiveDataEvaluator(), RuleEvaluator(), JuryAggregator(),
+    SchemaEvaluator(), SensitiveDataEvaluator(), ReferenceValidityEvaluator(),
+    ToolSuccessEvaluator(), TruncationEvaluator(), ParsabilityEvaluator(),
+    RuleEvaluator(), JuryAggregator(),
     FeedbackOutcomeEvaluator(), WorkflowOutcomeEvaluator(),
 ):
     DEFAULT_EVALUATORS.register(_evaluator)
@@ -244,12 +383,33 @@ class LayeredEvaluationService:
 
     @staticmethod
     @transaction.atomic
-    def evaluate(*, evaluation_result, output, workflow_outputs=None, rubric=None, jury_votes=None):
+    def evaluate(*, evaluation_result, output, workflow_outputs=None, rubric=None, jury_votes=None,
+                 jury_service=None):
+        llm_evidences = []
+        if jury_votes is None:
+            from .llm_judges import LLMJuryService
+            service = jury_service or LLMJuryService()
+            expected_payload = getattr(getattr(evaluation_result, "case", None), "expected_payload", {})
+            llm_votes = service.run(
+                output=output, rubric=rubric, expected_payload=expected_payload,
+            )
+            jury_votes = [vote.aggregate_vote() for vote in llm_votes if vote.aggregate_vote()]
+            llm_evidences = [
+                EvaluationEvidence(
+                    level="l1", evaluator_type="llm_judge", evaluator_version="llm-judge-v1",
+                    judge_name=vote.judge_name, model_version=vote.model_version,
+                    score=vote.score, passed=vote.passed, confidence=vote.confidence,
+                    dimensions=vote.dimensions, evidence=vote.evidence, rationale=vote.rationale,
+                    raw_output=vote.raw_output, status=vote.status, latency_ms=vote.latency_ms,
+                    token_usage=vote.token_usage,
+                ) for vote in llm_votes
+            ]
         context = EvaluationContext(
             output=output, workflow_outputs=list(workflow_outputs or []),
             rubric=rubric, jury_votes=list(jury_votes or []),
         )
         evidences = [evaluator.evaluate(context) for evaluator in DEFAULT_EVALUATORS.all()]
+        evidences[3:3] = llm_evidences
         JudgeResult.objects.filter(evaluation_result=evaluation_result).delete()
         for item in evidences:
             JudgeResult.objects.create(
