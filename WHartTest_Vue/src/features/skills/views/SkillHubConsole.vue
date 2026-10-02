@@ -431,7 +431,7 @@ async function loadCatalog() {
   catalogLoading.value = true
   catalogError.value = ''
   try {
-    const list = await SkillService.getSkills(id)
+    const { items: list } = await SkillService.getSkills(id)
     skills.value = list
 
     // 版本概览逐个拉取：一个 Skill 拉失败不影响其它项，失败的那一项如实标错。

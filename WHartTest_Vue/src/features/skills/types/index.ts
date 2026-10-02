@@ -32,7 +32,19 @@ export interface SkillListItem {
   source_type_label: string
   stage: string
   stage_label: string
+  /**
+   * 阶段是从哪来的：`manifest`（包自己声明）/ `declared`（管理员在 Skill Hub 补填）/
+   * `''`（未声明）。前端靠它区分"包声明的"与"人补的"，避免把补填的东西
+   * 说成是包自带的能力。
+   */
+  stage_source: string
   version: string
+  /**
+   * 同名副本数。Skill Hub 是公共目录，列表按名字归并成一条「正本」展示；
+   * 库里其实可能有多份（存量迁移与商店安装会按项目各落一份）。
+   * `1` 表示只有一条，`>1` 表示这条是归并展示的结果。
+   */
+  copies: number
 }
 
 export interface SkillUploadResponse {
@@ -47,10 +59,24 @@ export interface SkillGitImportResponse {
   data: Skill[] | null
 }
 
+/**
+ * 列表信封里的**能力声明**（与具体哪条 Skill 无关）。
+ *
+ * `can_bind_stage`：调用者能不能给「阶段未声明」的 Skill 补填阶段 —— 由后端按
+ * "平台超管或在任一项目里是测试负责人"判定。前端**不得**自己用"我是当前项目的
+ * 什么角色"去推：同名的正本可能落在别的项目名下，按 URL 项目判角色会判错，
+ * 表现就是"该给的入口没给 / 给了却 403"。
+ */
+export interface SkillListMeta {
+  can_bind_stage: boolean
+  stage_options: Array<{ value: string; label: string }>
+}
+
 export interface SkillListResponse {
   code: number
   message: string
   data: SkillListItem[]
+  meta?: SkillListMeta
 }
 
 export interface SkillDetailResponse {

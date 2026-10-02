@@ -20,36 +20,59 @@
 
     <!-- 类型筛选：来源 + 能力阶段。纯前端过滤，列表本来就是这个项目的全量。 -->
     <div class="filter-bar">
-      <span class="filter-label">{{ text.filterLabel }}</span>
-      <a-select
-        v-model="sourceFilter"
-        class="filter-select"
-        size="small"
-        allow-clear
-        :placeholder="text.filterSourceAll"
-      >
-        <a-option v-for="opt in sourceOptions" :key="`src-${opt.value}`" :value="opt.value">
-          {{ opt.label }}（{{ opt.count }}）
-        </a-option>
-      </a-select>
-      <a-select
-        v-model="stageFilter"
-        class="filter-select"
-        size="small"
-        allow-clear
-        :placeholder="text.filterStageAll"
-      >
-        <a-option v-for="opt in stageOptions" :key="`stage-${opt.value}`" :value="opt.value">
-          {{ opt.label }}（{{ opt.count }}）
-        </a-option>
-      </a-select>
-      <span class="filter-summary">{{ text.filterSummary(filteredSkills.length, skills.length) }}</span>
-      <a-button v-if="hasFilter" type="text" size="mini" @click="clearFilters">
-        {{ text.clearFilters }}
-      </a-button>
+      <div class="filter-row">
+        <span class="filter-title">{{ text.filterLabel }}</span>
+        <!-- ⚠️ 每个下拉都要包一层定宽容器。``a-select`` 的根元素是 Arco 自己的
+             ``.arco-select-view``，它拿不到本组件的 scoped 属性，所以
+             ``.filter-select[data-v-x]{width:168px}`` 匹配不到任何元素（实测计算宽度
+             是 1294px）——宽度会被 Arco 的 ``.arco-select-view-single{width:100%}``
+             接管，两个下拉各占满一整行。包一层就与 scoped 是否落到组件根上无关了。 -->
+        <div class="filter-field">
+          <span class="filter-field__label">{{ text.filterSource }}</span>
+          <a-select
+            v-model="sourceFilter"
+            size="small"
+            allow-clear
+            :placeholder="text.filterSourceAll"
+          >
+            <a-option v-for="opt in sourceOptions" :key="`src-${opt.value}`" :value="opt.value">
+              {{ opt.label }}（{{ opt.count }}）
+            </a-option>
+          </a-select>
+        </div>
+        <div class="filter-field">
+          <span class="filter-field__label">{{ text.filterStage }}</span>
+          <a-select
+            v-model="stageFilter"
+            size="small"
+            allow-clear
+            :placeholder="text.filterStageAll"
+          >
+            <a-option v-for="opt in stageOptions" :key="`stage-${opt.value}`" :value="opt.value">
+              {{ opt.label }}（{{ opt.count }}）
+            </a-option>
+          </a-select>
+        </div>
+        <span class="filter-summary">{{ text.filterSummary(filteredSkills.length, skills.length) }}</span>
+      </div>
+
+      <!-- 已选条件回显：不用再展开下拉才知道自己筛了什么，每个条件都能单独撤掉。 -->
+      <div v-if="hasFilter" class="filter-chips">
+        <span class="filter-chips__label">{{ text.activeFilters }}</span>
+        <a-tag
+          v-for="chip in activeChips"
+          :key="chip.key"
+          size="small"
+          closable
+          color="arcoblue"
+          @close="clearFilter(chip.key)"
+        >{{ chip.label }}</a-tag>
+        <a-button type="text" size="mini" @click="clearFilters">{{ text.clearFilters }}</a-button>
+      </div>
     </div>
 
-    <!-- 存量 Skill 的 manifest 没有声明阶段，筛选器只剩"未声明"一档是真实情况，先说清楚。 -->
+    <!-- 存量 Skill 的 manifest 没声明阶段是真实情况，先说清楚——并指出补填的入口，
+         不让使用者以为"这一档永远只能是这样"。 -->
     <p v-if="stageFilterHint" class="filter-hint">{{ text.stageUndeclaredHint }}</p>
 
     <!-- Skills 列表 -->
@@ -83,9 +106,41 @@
             <a-tag v-if="skill.source_type_label" size="small" :color="sourceTagColor(skill.source_type)">
               {{ skill.source_type_label }}
             </a-tag>
-            <a-tag v-if="skill.stage_label" size="small" color="arcoblue">{{ skill.stage_label }}</a-tag>
-            <a-tag v-else size="small" color="gray">{{ text.stageUndeclared }}</a-tag>
+            <!-- 阶段来源决定这个标签能不能点：
+                 ① 包在 manifest 里声明的（`stage_source === 'manifest'`）—— 版本包不可变，
+                    改它只能发新版本，所以这里不给入口，挂 tooltip 说清楚；
+                 ② 管理员在 Skill Hub 补填的（`'declared'`）—— 可点，能改也能撤。
+                    填错了必须能改回来，否则"补填"就是个单向下沉的口子；
+                 ③ 未声明 —— 可点，补填入口。 -->
+            <a-tooltip
+              v-if="skill.stage_label"
+              :content="text.stageFromManifest"
+              :disabled="skill.stage_source !== 'manifest'"
+            >
+              <a-tag
+                size="small"
+                :color="skill.stage_source === 'declared' ? 'cyan' : 'arcoblue'"
+                :class="['stage-tag', { 'stage-tag--actionable': canEditStage(skill) }]"
+                @click="handleStageTagClick(skill)"
+              >
+                {{ skill.stage_label }}
+                <icon-edit v-if="canEditStage(skill)" class="stage-tag__icon" />
+              </a-tag>
+            </a-tooltip>
+            <a-tag
+              v-else
+              size="small"
+              :color="canBindStage ? 'orange' : 'gray'"
+              :class="['stage-tag', { 'stage-tag--actionable': canBindStage }]"
+              @click="handleStageTagClick(skill)"
+            >
+              {{ text.stageUndeclared }}<icon-plus v-if="canBindStage" class="stage-tag__icon" />
+            </a-tag>
             <a-tag v-if="skill.version" size="small">{{ skill.version }}</a-tag>
+            <!-- 同名副本数：列表按名字归并成一条展示，得让使用者知道库里不止一份。 -->
+            <a-tooltip v-if="skill.copies > 1" :content="text.copiesTip">
+              <a-tag size="small" color="purple">{{ text.copiesTag(skill.copies) }}</a-tag>
+            </a-tooltip>
           </div>
           <!-- 功能简介：卡片里最多两行，超出省略；悬浮看完整简介。 -->
           <div class="skill-summary">
@@ -211,6 +266,35 @@
       @confirmed="onApiKeyConfirmed"
       @update:visible="onApiKeyModalVisible"
     />
+
+    <!-- 补填能力阶段：Skill Hub 上「阶段未声明」的补救入口。
+         只改 Skill 上的声明位，不碰版本包（版本包不可改写，改 manifest 会让包哈希对不上）。 -->
+    <a-modal
+      v-model:visible="showStageModal"
+      :title="text.bindStageTitle"
+      :width="460"
+      :ok-text="text.confirm"
+      :cancel-text="text.cancel"
+      :confirm-loading="bindingStage"
+      @ok="handleBindStage"
+    >
+      <p class="stage-modal__intro">{{ stageModalIntro }}</p>
+      <div class="stage-modal__target">{{ stageTarget?.name }}</div>
+      <div class="filter-field filter-field--block">
+        <span class="filter-field__label">{{ text.filterStage }}</span>
+        <a-select
+          v-model="pendingStage"
+          allow-clear
+          :placeholder="text.bindStagePlaceholder"
+          style="width: 100%"
+        >
+          <a-option v-for="opt in stageOptionList" :key="opt.value" :value="opt.value">
+            {{ opt.label }}
+          </a-option>
+        </a-select>
+      </div>
+      <p class="stage-modal__note">{{ text.bindStageNote }}</p>
+    </a-modal>
   </div>
 </template>
 
@@ -260,6 +344,20 @@ const text = computed(() => (
         gitRepoRequired: 'Enter a Git repository URL',
         importSuccess: (count: number, names: string) => `Imported ${count} Skill(s) successfully: ${names}`,
         importFailed: 'Import failed',
+        stageUndeclared: 'No stage declared',
+        stageUndeclaredHint: 'These Skills do not declare a capability stage in their manifest. A platform admin or project test lead can fill it in from the skill card.',
+        filterSource: 'Source',
+        filterStage: 'Stage',
+        activeFilters: 'Filters',
+        copiesTag: (count: number) => `${count} copies`,
+        copiesTip: 'Skill Hub is a shared catalogue: the same Skill exists once per project in the database, and they are merged into a single row here.',
+        bindStageTitle: 'Declare capability stage',
+        bindStageIntro: 'The manifest of this Skill does not declare a capability stage. Pick the stage it is meant to serve.',
+        bindStagePlaceholder: 'Select a capability stage',
+        bindStageNote: 'This only records a declaration on the Skill. Version packages are immutable and are never rewritten.',
+        bindStageSuccess: 'Capability stage declared',
+        revokeStageSuccess: 'Stage declaration cleared',
+        bindStageFailed: 'Failed to update the stage declaration',
       }
     : {
         skillStore: 'Skill 商店',
@@ -271,7 +369,21 @@ const text = computed(() => (
         clearFilters: '清空',
         filterEmpty: '没有符合当前筛选条件的 Skill',
         stageUndeclared: '阶段未声明',
-        stageUndeclaredHint: '本项目的 Skill 都还没有在 manifest 里声明能力阶段，阶段筛选目前只有「阶段未声明」一档；补齐需要在 Skill 进化工坊按阶段绑定。',
+        stageUndeclaredHint: '这些 Skill 都没有在 manifest 里声明能力阶段。平台管理员或项目测试负责人可以直接在卡片上补填——补的是 Skill 上的声明位，不会改写版本包。',
+        filterSource: '来源',
+        filterStage: '阶段',
+        activeFilters: '已选条件',
+        copiesTag: (count: number) => `含 ${count} 份副本`,
+        copiesTip: 'Skill Hub 是公共目录：同一个 Skill 在库里每个项目各有一份，这里按名字归并成一条展示。',
+        bindStageTitle: '补填能力阶段',
+        bindStageIntro: '这个 Skill 的 manifest 没有声明能力阶段。请选择它实际服务的阶段。',
+        bindStageIntroEdit: '这个 Skill 的阶段是人工补填的（不在版本包 manifest 里）。可以改成别的阶段，或留空撤销声明。',
+        bindStagePlaceholder: '选择能力阶段',
+        bindStageNote: '只会记下 Skill 上的阶段声明。版本包是不可变产物，不会被改写；留空可撤销声明。',
+        bindStageSuccess: '已补填能力阶段',
+        revokeStageSuccess: '已撤销阶段声明',
+        bindStageFailed: '更新阶段声明失败',
+        stageFromManifest: '由版本包 manifest 声明。版本包是不可变产物，改它只能发新版本；这里不提供修改入口。',
         importFromGit: '从 Git 导入',
         uploadSkill: '上传 Skill',
         emptyState: '暂无 Skills，点击上方按钮上传',
@@ -382,6 +494,84 @@ const clearFilters = () => {
   stageFilter.value = undefined
 }
 
+/** 已选条件的回显：不用展开下拉就知道自己筛了什么，且每个条件能单独撤掉。 */
+const activeChips = computed(() => {
+  const chips: Array<{ key: 'source' | 'stage'; label: string }> = []
+  if (sourceFilter.value) {
+    const hit = sourceOptions.value.find((opt) => opt.value === sourceFilter.value)
+    chips.push({
+      key: 'source',
+      label: `${text.value.filterSource}：${hit?.label || sourceFilter.value}`,
+    })
+  }
+  if (stageFilter.value) {
+    const hit = stageOptions.value.find((opt) => opt.value === stageFilter.value)
+    chips.push({
+      key: 'stage',
+      label: `${text.value.filterStage}：${hit?.label || stageFilter.value}`,
+    })
+  }
+  return chips
+})
+
+const clearFilter = (key: 'source' | 'stage') => {
+  if (key === 'source') sourceFilter.value = undefined
+  else stageFilter.value = undefined
+}
+
+// ---------------- 补填能力阶段（公共目录的管理动作） ----------------
+// 是否给出入口**完全看后端返回的 can_bind_stage**，前端不按"我是当前项目的什么
+// 角色"去推：Skill 是公共的，同名的正本可能落在别的项目名下，那样推会推错。
+const canBindStage = ref(false)
+const stageOptionList = ref<Array<{ value: string; label: string }>>([])
+const showStageModal = ref(false)
+const stageTarget = ref<SkillListItem | null>(null)
+const pendingStage = ref<string | undefined>(undefined)
+const bindingStage = ref(false)
+
+/** 弹窗说明分两种：从"没声明"进来（补填）与从"我补的"进来（改 / 撤）。 */
+const stageModalIntro = computed(() =>
+  stageTarget.value?.stage_label ? text.value.bindStageIntroEdit : text.value.bindStageIntro,
+)
+
+const openStageBinding = (skill: SkillListItem) => {
+  stageTarget.value = skill
+  // 回填当前补填值：这个弹窗既要能"补"，也要能"改"和"撤"（清空 = 撤销）。
+  pendingStage.value = skill.stage_source === 'declared' && skill.stage ? skill.stage : undefined
+  showStageModal.value = true
+}
+
+/**
+ * 这个阶段标签能不能点开改。
+ *
+ * - 包在 manifest 里声明的：**不能**。版本包不可变，改它等于篡改包（`package_tampered`），
+ *   想改只能发新版本 —— 给个点了没反应的入口比不给更糟。
+ * - 管理员补填的 / 未声明的：能（前提是有管理权）。
+ */
+const canEditStage = (skill: SkillListItem) =>
+  canBindStage.value && skill.stage_source !== 'manifest'
+
+/** 标签点击统一走这里：没权限时点标签不该有任何反应。 */
+const handleStageTagClick = (skill: SkillListItem) => {
+  if (skill.stage_label ? canEditStage(skill) : canBindStage.value) openStageBinding(skill)
+}
+
+const handleBindStage = async () => {
+  if (!stageTarget.value) return
+  bindingStage.value = true
+  const stage = pendingStage.value || ''
+  try {
+    await SkillService.bindSkillStage(props.projectId, stageTarget.value.id, stage)
+    Message.success(stage ? text.value.bindStageSuccess : text.value.revokeStageSuccess)
+    showStageModal.value = false
+    await fetchSkills()
+  } catch (e: any) {
+    Message.error(e.message || text.value.bindStageFailed)
+  } finally {
+    bindingStage.value = false
+  }
+}
+
 /** 简介是否会被两行截断，决定要不要挂悬浮全文。按字符数粗判，省去逐卡量高。 */
 const isSummaryClipped = (description: string) => (description || '').length > 34
 
@@ -400,7 +590,12 @@ const sourceTagColor = (sourceType: string) => {
 const fetchSkills = async () => {
   loading.value = true
   try {
-    skills.value = await SkillService.getSkills(props.projectId)
+    const { items, meta } = await SkillService.getSkills(props.projectId)
+    skills.value = items
+    // 能力声明来自后端信封，不自己推断：Skill 是公共的，同名的正本可能落在别的
+    // 项目名下，按"我是当前项目的什么角色"判会判错（该给的入口没给 / 给了却 403）。
+    canBindStage.value = Boolean(meta?.can_bind_stage)
+    stageOptionList.value = meta?.stage_options ?? []
   } catch (e: any) {
     Message.error(e.message || text.value.fetchSkillsFailed)
   } finally {
@@ -576,25 +771,57 @@ onMounted(() => {
   gap: 12px;
 }
 
+/* 类型筛选条：第一行放完（标题 + 两个定宽下拉 + 计数），已选条件另起一行以 tag 回显。
+   之前把两个下拉写成整行宽、字段含义只靠 placeholder 猜，既占地方又读不出在筛什么。 */
 .filter-bar {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
+  flex-direction: column;
+  gap: 8px;
   padding: 10px 12px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   background: var(--color-fill-1);
 }
 
-.filter-label {
+.filter-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.filter-title {
   font-size: 13px;
   font-weight: 600;
   color: var(--color-text-2);
 }
 
-.filter-select {
-  width: 168px;
+/* ⚠️ 定宽写在**外层容器**上，不要写在 a-select 上：a-select 的根元素是 Arco 自己的
+   .arco-select-view，它拿不到本组件的 scoped 属性 —— 给它写 `.filter-select[data-v-x]
+   {width:168px}` 不会命中任何元素（实测计算宽度 1294px），宽度会被 Arco 的
+   `.arco-select-view-single{width:100%}` 接管，两个下拉各占满一整行。 */
+.filter-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 220px;
+}
+
+/* 弹窗里用：占满一行、标签在上。 */
+.filter-field--block {
+  display: flex;
+  width: 100%;
+}
+
+.filter-field > :last-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.filter-field__label {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--color-text-3);
 }
 
 .filter-summary {
@@ -603,13 +830,25 @@ onMounted(() => {
   color: var(--color-text-3);
 }
 
+.filter-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.filter-chips__label {
+  font-size: 12px;
+  color: var(--color-text-3);
+}
+
 .filter-hint {
   margin: 8px 0 0;
   padding: 6px 12px;
-  border-left: 3px solid #ff9a2e;
+  border-left: 3px solid var(--color-fill-4, #d9d9d9);
   border-radius: 6px;
-  background: var(--color-warning-light-1, #fff7e8);
-  color: var(--color-text-2);
+  background: var(--color-fill-1);
+  color: var(--color-text-3);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -619,6 +858,46 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 10px;
+}
+
+/* 「阶段未声明」在有管理权时可点：加手型与图标提示，别让人去猜哪个标签能点。 */
+.stage-tag--actionable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.stage-tag--actionable:hover {
+  filter: brightness(0.94);
+  text-decoration: underline;
+}
+
+.stage-tag__icon {
+  margin-left: 2px;
+  font-size: 11px;
+}
+
+.stage-modal__intro {
+  margin: 0 0 8px;
+  color: var(--color-text-2);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.stage-modal__target {
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--color-fill-1);
+  color: var(--color-text-1);
+  font-size: 13px;
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.stage-modal__note {
+  margin: 12px 0 0;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .skill-summary {

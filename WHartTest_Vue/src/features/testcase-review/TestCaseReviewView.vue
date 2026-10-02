@@ -262,8 +262,9 @@ async function load(silent = false) {
   try {
     reviews.value = await listReviews(projectId.value);
     if (!silent || !availableSkills.value.length) {
-      const [skills, docs, bases] = await Promise.all([SkillService.getSkills(projectId.value), codeReviewApi.getProjectDocuments(projectId.value), KnowledgeService.getKnowledgeBases({ project: projectId.value, is_active: true, page_size: 100 })]);
-      availableSkills.value = skills.filter(skill => skill.is_active);
+      const [skillsResult, docs, bases] = await Promise.all([SkillService.getSkills(projectId.value), codeReviewApi.getProjectDocuments(projectId.value), KnowledgeService.getKnowledgeBases({ project: projectId.value, is_active: true, page_size: 100 })]);
+      // getSkills 现在返回 { items, meta }：Skill 目录是公共的，meta 里带"能否补填阶段"等能力声明。
+      availableSkills.value = skillsResult.items.filter(skill => skill.is_active);
       requirementDocuments.value = docs;
       knowledgeBases.value = Array.isArray(bases) ? bases : (bases.results || []);
     }

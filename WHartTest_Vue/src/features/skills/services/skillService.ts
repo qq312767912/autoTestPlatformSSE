@@ -5,6 +5,7 @@ import type {
   SkillUploadResponse,
   SkillGitImportResponse,
   SkillListResponse,
+  SkillListMeta,
   SkillDetailResponse,
   SkillContentResponse,
   SkillStoreConfig
@@ -12,9 +13,17 @@ import type {
 
 export class SkillService {
   /**
-   * 获取项目下的所有 Skills
+   * 获取**公共** Skill 目录（Skill Hub）。
+   *
+   * ⚠️ 返回的列表**不按项目过滤**：Skill 是平台公共资源，任何项目看到的是同一份
+   * 内容，同名副本已在后端归并成一条正本（`copies` 给出库里实际有几份）。
+   * `projectId` 仍要传（后端要它做写侧的项目锚点与角色判定），但它不再决定
+   * "能看到什么"。
+   *
+   * 同时返回 `meta`：调用者能否补填阶段、可绑定的阶段清单。调用方若用不到 meta，
+   * 只取 `items` 即可。
    */
-  static async getSkills(projectId: number): Promise<SkillListItem[]> {
+  static async getSkills(projectId: number): Promise<{ items: SkillListItem[]; meta: SkillListMeta }> {
     const response = await request<SkillListResponse>({
       url: `/projects/${projectId}/skills/`,
       method: 'GET'
@@ -23,9 +32,37 @@ export class SkillService {
     const api = response.data as any
     if (response.success && api) {
       const data = api.data
-      return Array.isArray(data) ? data : []
+      return {
+        items: Array.isArray(data) ? data : [],
+        meta: api.meta ?? { can_bind_stage: false, stage_options: [] }
+      }
     }
     throw new Error(response.error || '获取 Skills 列表失败')
+  }
+
+  /**
+   * 给 Skill 补填 / 撤销能力阶段（Skill Hub 上「阶段未声明」的补救入口）。
+   *
+   * 后端只改 `Skill.declared_stage`（版本包不可改写），阶段取值必须是
+   * 能力注册表里登记过的业务能力阶段；传空串表示撤销声明。
+   * 权限由后端判定：平台超管，或在任一项目里是测试负责人。
+   */
+  static async bindSkillStage(
+    projectId: number,
+    skillId: number,
+    stage: string
+  ): Promise<{ id: number; name: string; declared_stage: string }> {
+    const response = await request<{ code: number; message: string; data: any }>({
+      url: `/projects/${projectId}/skills/${skillId}/stage/`,
+      method: 'POST',
+      data: { stage }
+    })
+
+    const api = response.data as any
+    if (response.success && api?.data) {
+      return api.data
+    }
+    throw new Error(response.error || '更新阶段声明失败')
   }
 
   /**
