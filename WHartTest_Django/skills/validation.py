@@ -73,6 +73,10 @@ RECOMMENDED_MANIFEST_FIELDS = (
 )
 
 #: 允许的能力阶段，与知识飞轮统一产出协议保持一致。
+#: ⚠️ 这是**只读副本**：真值在 ``knowledge_evolution/capability_registry.ALL_TASK_TYPES``。
+#: 本模块不能反向 import 它（``knowledge_evolution`` 依赖 ``skills.models``，会成环），
+#: 所以改成用测试守一致：``tests_t22.test_skills_manifest_valid_stages_match_the_registry``。
+#: 副本过期时的症状很难查——写进 manifest 的合法阶段会被拒，报错只说"未知阶段"。
 VALID_STAGES = frozenset({
     "case_review", "code_review", "knowledge_query", "risk_identification",
     "test_plan_generation", "testcase_generation", "test_execution",

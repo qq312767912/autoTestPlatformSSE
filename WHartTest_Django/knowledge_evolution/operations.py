@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 #: 不允许在本文件另写一份字面量，否则"主链路是哪四个阶段"又会有两个答案。
 DEFAULT_WORKFLOW_STAGE_ORDER = list(WORKFLOW_STAGES)
 
-#: 历史流程的阶段序列（2026-10-02 之前发起）。**只为读懂存量数据而存在**，
+#: 历史流程的阶段序列（短期中间模板期间发起）。**只为读懂存量数据而存在**，
 #: 新能力不要往它上面挂；它退场的条件只有一个：存量流程都跑完并归档。
 LEGACY_WORKFLOW_STAGE_ORDER = list(LEGACY_WORKFLOW_STAGES)
 
@@ -49,7 +49,7 @@ WORKFLOW_STAGE_ORDER = DEFAULT_WORKFLOW_STAGE_ORDER
 #: 存量流程的产出当成旁路产出，门禁、版本锁与进度都会凭空消失。
 ALL_WORKFLOW_STAGE_SET = frozenset(ALL_WORKFLOW_STAGES)
 
-#: 收口阶段 = 链路的最后一段：新流程是「问题跟踪」，存量流程是「报告生成」。
+#: 收口阶段 = 链路的最后一段：新流程是「报告产出」，存量流程是「问题跟踪」。
 #: 报告契约只对收口阶段生效，两边都要认；只认新的会让存量流程的报告不再被校验。
 CLOSING_STAGES = frozenset({
     DEFAULT_WORKFLOW_STAGE_ORDER[-1], LEGACY_WORKFLOW_STAGE_ORDER[-1],
@@ -204,7 +204,8 @@ class WorkflowGateService:
             })
         return {
             "stage_order": targets,
-            # 新链路在前，存量阶段也列出来：向导里能选到它们，历史流程才谈得上继续推进。
+            # 当前链路在前，历史模板的阶段也列出来：向导里能选到它们，
+            # 用过历史模板的流程才谈得上继续推进。
             "all_stage_order": list(ALL_WORKFLOW_STAGES),
             "stages": stages_payload,
             "skills": skills,

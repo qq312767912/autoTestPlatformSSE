@@ -22,6 +22,7 @@ from knowledge_evolution.attribution import (
 from knowledge_evolution.capability_models import CapabilityDefinition, CapabilityRelease
 from knowledge_evolution.capability_registry import (
     ALL_TASK_TYPES,
+    ALL_WORKFLOW_STAGES,
     BUSINESS_CAPABILITY_STAGES,
     WORKFLOW_STAGES,
     capability_info,
@@ -276,9 +277,15 @@ class PartitionRegistryTests(SkillHubBaseTests):
         for stage in WORKFLOW_STAGES:
             self.assertEqual(len(required_partitions(stage)), 5, stage)
 
-    def test_demoted_stages_only_require_three_partitions(self):
-        """降为单次能力的阶段不再要求五分区：凑"隐藏集"对它们没有链路意义。"""
-        for stage in ("test_plan_generation", "report_generation"):
+    def test_off_chain_stages_only_require_three_partitions(self):
+        """不在链路里的 Skill 型能力不要求五分区：凑"隐藏集"对它们没有链路意义。
+
+        采样同样走真值源而不是抄阶段名——抄下来的那份会在口径变更后变成
+        "测的还是老四个阶段"，看起来绿其实是空的。
+        """
+        off_chain = [stage for stage in ALL_WORKFLOW_STAGES if stage not in WORKFLOW_STAGES]
+        self.assertTrue(off_chain, "两套模板若完全重合，这条用例就没有被测量对象了")
+        for stage in off_chain:
             self.assertEqual(len(required_partitions(stage)), 3, stage)
             self.assertNotIn("hidden", required_partitions(stage))
 

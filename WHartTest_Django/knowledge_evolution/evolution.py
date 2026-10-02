@@ -23,11 +23,15 @@ from .models import EvaluationCase, EvaluationSuite, FeedbackEvent, GenerationOu
 # ``weighted_score / total_weight``，**按实际出现的阶段做了归一化**，
 # 所以这张表加总不等于 1 不影响满分流程拿到满分，只影响阶段间的相对权重。
 # 想改成"每套模板一张表"之前先确认这一点，否则只是把能用的东西改坏。
+# ⚠️ 这张表必须覆盖 ``ALL_WORKFLOW_STAGES`` **全部六个**阶段——漏掉的阶段会掉进
+# ``_stage_weight`` 的兜底分支（``1.0/len(stages)``），和同链路其它阶段的权重口径
+# 不一致。`tests_t22` 里有一条断言专门守这件事。
 DEFAULT_STAGE_WEIGHTS = {
     "risk_identification": 0.15,
     "test_plan_generation": 0.20,
     "testcase_generation": 0.25,
     "test_execution": 0.25,
+    "report_generation": 0.25,
     "issue_tracking": 0.15,
 }
 

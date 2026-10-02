@@ -24,7 +24,6 @@ from knowledge_evolution.models import (
 )
 from knowledge_evolution.operations import (
     DEFAULT_WORKFLOW_STAGE_ORDER,
-    LEGACY_WORKFLOW_STAGE_ORDER,
     WorkflowGateService,
 )
 from knowledge_evolution.protocol import ADAPTERS, publish_output
@@ -37,11 +36,13 @@ from knowledge_evolution.tests_t09_t13 import TEST_MEDIA_ROOT
 from knowledge_evolution.tests_t15 import WorkflowBaseTests
 from knowledge_evolution.workflow_models import WorkflowStageGate
 
-# 本文件整体针对**历史链路**（方案 → 用例 → 执行 → 报告）的收口契约。
-# 主链路口径已改为「风险识别 → 用例 → 执行 → 问题跟踪」，但报告契约并没有被删掉：
-# 存量流程仍要靠它收口。所以这组用例继续按历史序列跑，而不是跟着新序列改写——
-# 改写等于把"存量流程的报告还被校验着"这件事测掉。
-STAGES = list(LEGACY_WORKFLOW_STAGE_ORDER)
+# 本文件整体针对**当前主链路**（方案 → 用例 → 执行 → 报告）的收口契约。
+# 链路序列从 ``DEFAULT_WORKFLOW_STAGE_ORDER`` 派生而不是抄一份阶段名：
+# 2026-10-02 那次口径翻错方向时，正是因为这里写死了"哪四个阶段是当前链路"
+# 而这一组用例又只按旧的那套跑，才让方向性错误整套漏过去。
+# 另一套模板（风险识别 → 用例 → 执行 → 问题跟踪）的收口契约由
+# ``tests_t22.LegacyChainClosingContractTests`` 覆盖，两边各测各的。
+STAGES = list(DEFAULT_WORKFLOW_STAGE_ORDER)
 UPSTREAM = STAGES[:3]
 REPORT = STAGES[3]
 

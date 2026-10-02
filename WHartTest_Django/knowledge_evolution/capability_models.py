@@ -144,12 +144,14 @@ class CapabilityDefinition(models.Model):
 
     def clean(self):
         from django.core.exceptions import ValidationError
+
+        from .capability_registry import ALL_TASK_TYPES
+
         valid_stages = {c[0] for c in self.default_suite.TASK_TYPE_CHOICES} if self.default_suite else set()
-        valid_stages = valid_stages or {
-            "case_review", "code_review", "knowledge_query", "risk_identification",
-            "test_plan_generation", "testcase_generation", "test_execution", "issue_tracking",
-            "report_generation",
-        }
+        # 兜底集合取注册表真值，不在本文件另抄一份枚举——抄的那份在口径变更后
+        # 会静默留在原地，而这里恰好是"校验别人用的阶段名合不合法"的地方，
+        # 留着旧枚举等于让合法的新阶段被拒、或被误判为合法。
+        valid_stages = valid_stages or set(ALL_TASK_TYPES)
         if not isinstance(self.stages, list):
             raise ValidationError({"stages": "必须是列表"})
         if not self.stages:

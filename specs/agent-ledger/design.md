@@ -593,18 +593,23 @@ buildWorkflowGraph(projectId, workflowId) → { workflow_id, node_count, edge_co
 
 ---
 
-## 11. 主链路口径变更：风险识别 → 测试用例 → 测试执行 → 问题跟踪
+## 11. 主链路阶段模板与双模板机制
 
-（2026-10-02）主链路由历史四阶段（方案/用例/执行/报告）改为
-**`risk_identification → testcase_generation → test_execution → issue_tracking`**。
-`test_plan_generation` 与 `report_generation` **不删除**，只是降为单次能力（仍可评测/反馈/自进化，但不再占链路阶段位）。
+（2026-10-02）主链路口径**保持不变**，仍是
+**方案生成 → 用例生成 → 测试执行 → 报告产出**
+（`test_plan_generation → testcase_generation → test_execution → report_generation`）。
 
-### 11.1 双模板并存是这次变更的核心决策
+本节记录的是这次折腾的真正产出：**双模板机制**。中间一度把主链路误改成
+`risk_identification → testcase_generation → test_execution → issue_tracking`
+（把「风险识别 / 问题跟踪」当成了链路阶段），当天已回退——回退经过见 §11.8。
+那段时间确实发起过流程，所以那套序列作为**历史模板**保留下来，不是删掉。
 
-存量流程的阶段序列与新流程不同，**不能套同一套序列解释**，否则存量流程的产出会因
-「没带 workflow_id」被协议层拒掉，越阶段校验也会静默失效。因此：
+### 11.1 双模板并存：两套序列真实共存，不能互相解释
 
-- `capability_registry`：`WORKFLOW_STAGES`（新）/ `LEGACY_WORKFLOW_STAGES`（历史）/ `ALL_WORKFLOW_STAGES`（并集）。
+中间模板期间发起过流程，它们的阶段序列与当前流程不同，**不能套同一套序列解释**，
+否则那批流程的产出会因「没带 workflow_id」被协议层拒掉，越阶段校验也会静默失效。因此：
+
+- `capability_registry`：`WORKFLOW_STAGES`（当前主链路）/ `LEGACY_WORKFLOW_STAGES`（历史模板）/ `ALL_WORKFLOW_STAGES`（并集）。
 - `WorkflowGateService.stage_order_for(project_id, workflow_id, *, stage="")`：按**流程自身留痕**
   （版本锁 ∪ 门禁记录 ∪ 产出 `metadata.protocol.workflow_id`）判定该流程用哪套序列；
   第三份证据 `stage` 参数用于"流程无留痕 + 问的恰好是历史独有阶段"的场景。
@@ -621,7 +626,8 @@ buildWorkflowGraph(projectId, workflowId) → { workflow_id, node_count, edge_co
 ### 11.3 向导逐阶段选包（`pins`）
 
 - `stage_catalog` 端点按阶段给出候选与默认包；**不按 manifest 声明硬筛候选**——
-  主链路刚换阶段名，现存包声明的还是旧阶段，硬筛会让向导一个候选都给不出来。
+  库里存在声明着另一套模板阶段的包，硬筛会让向导对某些阶段一个候选都给不出来；
+  跨模板使用由人选 + `pins` 明确表达，而不是靠过滤悄悄消掉。
 - `start_workflow(pins={stage: skill_id})`：人选到"声明的是别的阶段"的包允许（`allow_stage_mismatch=True`），
   但必须把 `pinned` / `declared_stage` / `stage_mismatch` 写进流程锁 `detail` 留痕，并在返回里给 `mismatched_stages`。
 - 仍必须 `active` 版本（R13 不放宽）。
@@ -643,7 +649,9 @@ buildWorkflowGraph(projectId, workflowId) → { workflow_id, node_count, edge_co
 ### 11.5 顺带收敛的写死点
 
 - `workflow_models.WorkflowStageGate.STAGE_CHOICES`：改读 `ALL_WORKFLOW_STAGES` + `STAGE_LABELS`，
-  配套手写迁移 `0030_workflowstagegate_stage_choices`（只改 `choices`，库层面空操作）。
+  配套手写迁移 `0030_workflowstagegate_stage_choices`（扩取值）与
+  `0031_workflowstagegate_stage_choices_order`（回退时把顺序调回当前模板在前）。
+  两条都只改 `choices`，库层面空操作。
 - `orchestrator_integration/agent_loop_view.py`：四处写死阶段集合改为
   `FLYWHEEL_MODULE_KEYS`（`ALL_TASK_TYPES`）与 `WORKFLOW_MODULE_KEYS`（`ALL_WORKFLOW_STAGES`）。
   其中 `workflow_id` 拼装那处若不改，新链路的 `risk_identification` / `issue_tracking`
@@ -651,48 +659,80 @@ buildWorkflowGraph(projectId, workflowId) → { workflow_id, node_count, edge_co
 - `evolution.DEFAULT_STAGE_WEIGHTS`：是"两套模板的并集先验表"，加总不为 1 是**可以**的
   （最终分 `weighted_score/total_weight` 按实际出现的阶段归一化）。补注释防止后人误改。
 
-### 11.6 验收
+### 11.6 验收（回退后重跑）
 
-**后端**（全部 `--noinput`，按模块拆分避免 OOM）：
+**后端**（全部 `--noinput`，按模块拆分避免 OOM；共 29 个 `knowledge_evolution` 模块 + 编排集成 + `skills` + `testcases`）：
 
-| 模块 | 结果 |
+| 批次 | 结果 |
 | --- | --- |
-| `tests_t22_stage_order_templates`（新建 38 项） | ✓ |
-| `tests_t15` / `tests_t16` / `tests_t21` / `tests_t22`（127 项） | ✓ |
-| `tests_t09_t13` / `test_capability_evolution`（70 项） | ✓ |
-| `test_capabilities_protocol` / `test_project_quality_cockpit` / `test_attribution`（25 项） | ✓ |
-| `tests_t18` / `test_capability_evolution`（39 项） | ✓ |
-| `test_evaluation` / `test_evaluators_v2` / `test_feedback` / `test_gold`（24 项） | ✓ |
-| `test_optimization` / `test_experiments` / `test_retrieval` / `test_distillation` / `test_eval_review_bridge`（27 项） | ✓ |
-| `test_extractors` / `test_graph` / `test_graph_adapters` / `test_graph_client` / `test_knowledge_models` / `test_llm_judges` / `test_projection`（78 项） | ✓ |
-| `tests` / `tests_t14` / `test_seed_flywheel_demo`（29 项） | ✓ |
-| `orchestrator_integration`（35 项） | ✓ |
-| `skills` + `testcases`（191 项） | ✓ |
+| `tests_t22_stage_order_templates`（40） | ✓ |
+| `tests_t09_t13` / `test_capabilities_protocol` / `test_project_quality_cockpit`（84） | ✓ |
+| `tests_t15` / `tests_t16` / `test_capability_evolution` / `tests_t18` / `test_attribution`（112） | ✓ |
+| `tests_t21_stage_progression` / `test_evaluation` / `test_evaluators_v2` / `test_feedback` / `test_gold`（47） | ✓ |
+| `test_optimization` / `test_experiments` / `test_retrieval` / `test_distillation` / `test_eval_review_bridge` / `tests` / `tests_t14` / `test_seed_flywheel_demo`（56） | ✓ |
+| `test_extractors` / `test_graph` / `test_graph_adapters` / `test_graph_client` / `test_knowledge_models` / `test_llm_judges` / `test_projection`（78） | ✓ |
+| `orchestrator_integration.test_auth_state_binding` + `orchestrator_integration.tests`（35） | ✓ |
+| `skills`（172）+ `testcases`（19） | ✓ |
 
-`makemigrations --check` → `No changes detected`（含手写迁移 0029 / 0030）。
+合计 **643 项，0 失败**。`makemigrations --check` → `No changes detected`（含手写迁移 0029 / 0030 / 0031）。
 
-**真实浏览器**（项目 7「test」，账号 `admin`）：
+> `orchestrator_integration` 整套一起跑会 OOM（exit 137），必须拆成两个模块分别跑。
+
+**接口层实测**（项目 7，`admin`）：
 
 | 验收项 | 实测 |
 | --- | --- |
-| 向导第一步 | 标题「发起全链路测试 · 1/2 选择 Skill 包」，四阶段 4 个搜索框，每阶段 10 个候选 / 4 个可运行 |
-| 未选满时「下一步」 | **真 disabled**（`arco-btn-disabled`），弹窗不关、不进第二步；缺的是「风险识别」「问题跟踪」 |
-| 选满后 | `okDisabled=false`；第二步显示四阶段选定摘要 + `workflow_id` 输入 |
-| 发起结果 | 4 个 binding 全 `locked`（带版本与 sha）；跨声明提示「跨声明选用 2 个阶段（风险识别、问题跟踪）」 |
-| 左栏 | 2 条流程；发起后自动选中新流程；分别标注「当前链路四阶段」/「历史链路四阶段」；锁定 4/4 |
-| 中栏 | 阶段状态条 01–04（风险识别/测试用例/测试执行/问题跟踪）；4 张卡片各含「AI 生成/处理」与「人工确认/复核」两栏；未轮到 `todo` 灰 |
-| 右栏 | 「AI 专家团队 4/4 已锁定」，逐阶段列出 Skill 与版本 |
-| 左栏切换 | 高亮唯一且与中栏一致；切换后卡片数仍 4 |
-| 旧版选择器 | `.workflow-list` / `.stage-stepper` 已不存在 |
+| `cockpit.stage_order` | `["test_plan_generation","testcase_generation","test_execution","report_generation"]` |
+| `cockpit.workflows[].stage_template` | 当前模板流程 → `current`；中间模板流程 → `legacy`（各自 `stage_order` 正确） |
+| `workflow-stage-catalog` | `stage_order` 四段；`all_stage_order` 六段；四段**都有默认包**（`default` 非空、`declared` 各 1） |
+
+**真实浏览器**（项目 7，账号 `admin`）：
+
+| 验收项 | 实测 |
+| --- | --- |
+| 启动卡副标题 | 取自后端 `stage_order` → 「方案生成 → 用例生成 → 测试执行 → 报告产出」 |
+| 当前模板流程中栏 | 阶段条 01–04 = 方案生成 / 用例生成 / 测试执行 / 报告产出；4 张卡片同序，均带 Skill 版本 |
+| 历史模板流程中栏 | 阶段条 01–04 = 风险识别 / 用例生成 / 测试执行 / 问题跟踪；左栏标注「历史链路四阶段」 |
+| 向导第一步 | 四张卡 = 方案生成 / 用例生成 / 测试执行 / 报告产出；每阶段 4 个搜索框、10 候选 / 4 可运行 |
+| 向导默认包 | 四段默认包**已预选**（`webtest-plan-generator` / `webtest-case-generator` / `webtest-execution-runner` / `webtest-report-generator`），`okDisabled=false`、无 `pin-warn` |
 | 页面报错 | `pageerror` + `console.error` = **0** |
 
-**证据**：`/tmp/shot-wf-panel.png`、`/tmp/shot-wf-wizard-step1.png`、`/tmp/shot-wf-wizard-filled.png`、
-`/tmp/shot-wf-wizard-step2.png`、`/tmp/shot-wf-after-start.png`、`/tmp/shot-wf-switch2.png`
-**脚本**：`/tmp/wf_three_column_check.js`、`/tmp/wf_highlight_check.js`
+**证据**：`/tmp/shot-stage-fix-panel.png`、`/tmp/shot-stage-fix-current-flow.png`、`/tmp/shot-stage-fix-wizard.png`
+**脚本**：`/tmp/wf_stage_fix_check.js`（逐条流程点过去，两套模板各读一遍阶段名）
 
 ### 11.7 仍未做
 
 - `cockpit.workflows[].stages[]` 与 `workflow-status.stages[]` 两套 schema **仍未收敛**（B4）。
-- `test_execution` 之外三个新链路阶段的平台内执行器仍缺（同 §10.8）。
-- 未 commit / 未 push。
+- 后端存在**两份阶段中文标签表**：`capability_registry.STAGE_LABELS`（全称，如「测试方案生成」）
+  与 `WorkflowGateService.STAGE_LABELS`（简称，如「测试方案」）。同一个概念两份文案，
+  迟早会漂移；当前前端统一以页面内的 `taskTypeLabels` 显示，后端那两份只作兜底。
+- `test_execution` 之外三个链路阶段的平台内执行器仍缺（同 §10.8）。
+
+### 11.8 回退记录：一次"改错方向但测试全绿"
+
+把主链路误改成风险识别那套之后，**整套回归测试仍然全绿**。原因不是测试少，而是测试
+**写死了"哪四个阶段是当前链路"**：
+
+- `tests_t16` 用 `STAGES = list(LEGACY_WORKFLOW_STAGE_ORDER)` 并注释「本文件整体针对历史链路」——
+  口径翻转后它测的还是同一批阶段，只是名字从"当前"变成了"历史"，测的关系没变，所以照过。
+- `tests_t22` / `tests_t09_t13` 里多处硬编码 `risk_identification` 作为"新链路第一段"。
+- 前端 `features/skills/utils/stages.ts` 的 `WORKFLOW_STAGES` 一直是方案→用例→执行→报告，
+  但质量飞轮页 `workflowChainText` 的兜底数组抄了风险那套——**同一个仓库里两处对"四阶段"给出不同答案**，
+  两处都不报错，所以谁也没发现。
+
+回退时做的加固：
+
+1. `tests_t22` 重写为**模板无关**：只在两条口径真值用例里写死字面量，其余全部从
+   `capability_registry` 派生（`CURRENT` / `LEGACY` / `CURRENT_ONLY` / `LEGACY_ONLY`）。
+2. `tests_t16` 的 `STAGES` 改从 `DEFAULT_WORKFLOW_STAGE_ORDER` 派生，不再抄一份。
+3. 前端兜底数组删掉，改 import 展示层那份同名副本，**消除第三份阶段列表**。
+4. 新增 `test_default_stage_weights_cover_every_chain_stage`：权重表漏阶段会掉进
+   `1.0/len(stages)` 兜底分支（`report_generation` 当时正是漏的，已补上）。
+5. `report_gates._upstream_of()`：两套模板的**收口阶段刚好互换**，原来按"当前取这个、
+   历史取那个"写死的 upstream 推导在翻转后会算出错的上游集合（严重时收口阶段的上游里
+   会冒出它自己），改为"在包含它的那套模板里取差集"。
+
+**结论**：口径真值必须只有一处，且必须有且只有一条用例钉住它；
+其余用例只能测"关系"，不能测"哪四个是当前链路"。
+
 

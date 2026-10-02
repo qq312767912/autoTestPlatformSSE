@@ -46,11 +46,26 @@ from .workflow_models import GATE_PASSING_STATES
 
 logger = logging.getLogger(__name__)
 
-#: 收口阶段（链路最后一段）的历史名字。**不要**把它当成"唯一的收口阶段"，
+#: 报告阶段的阶段名。它既是**当前主链路**的收口阶段（方案 → 用例 → 执行 → 报告），
+#: 也是契约字段别名表的默认解析目标。**不要**把它当成"唯一的收口阶段"，
 #: 判"是不是收口"请用 ``is_closing_stage``。
 REPORT_STAGE = "report_generation"
 
-#: 收口阶段 -> 契约参数。主链路口径变过一次（报告生成 → 问题跟踪），
+
+def _upstream_of(stage: str) -> tuple[str, ...]:
+    """某阶段的上游阶段集合 = 包含它的那套模板里除它自己以外的阶段。
+
+    不能按"当前模板取这个、历史模板取那个"来写死：两套模板的**收口阶段刚好互换**
+    （当前是 ``report_generation``，历史是 ``issue_tracking``），写死任一边都会让
+    另一边的上游集合错掉——严重时收口阶段的上游里会冒出它自己。
+    """
+    for template in (WORKFLOW_STAGES, LEGACY_WORKFLOW_STAGES):
+        if stage in template:
+            return tuple(item for item in template if item != stage)
+    return ()
+
+
+#: 收口阶段 -> 契约参数。主链路口径变动过（两套模板的收口分别是报告与问题跟踪），
 #: 两个阶段的"收口内容"本来就不同，用同一套必需字段只会逼出编造的数字：
 #:
 #: - ``report_generation``：完整四件套（覆盖率/通过率/失败分布/未闭环问题）。
@@ -58,11 +73,11 @@ REPORT_STAGE = "report_generation"
 #:   这两个概念，硬要求只会让人填假数——契约的意义是把编造拦在门外，不是逼人编造。
 CLOSING_CONTRACTS: dict[str, dict] = {
     REPORT_STAGE: {
-        "upstream": tuple(s for s in LEGACY_WORKFLOW_STAGES if s != REPORT_STAGE),
+        "upstream": _upstream_of(REPORT_STAGE),
         "stats": ("coverage", "pass_rate", "failure_distribution", "unclosed_issues"),
     },
     "issue_tracking": {
-        "upstream": tuple(s for s in WORKFLOW_STAGES if s != "issue_tracking"),
+        "upstream": _upstream_of("issue_tracking"),
         "stats": ("failure_distribution", "unclosed_issues"),
     },
 }
@@ -131,7 +146,7 @@ class ReportGateService:
     def is_closing_stage(stage: str) -> bool:
         """该阶段是不是链路的收口阶段（需要过契约校验）。
 
-        新流程的收口是「问题跟踪」，存量流程是「报告生成」，两个都要认。
+        新流程的收口是「报告产出」，存量流程是「问题跟踪」，两个都要认。
         """
         return str(stage or "") in CLOSING_CONTRACTS
 
