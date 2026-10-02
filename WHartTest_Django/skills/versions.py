@@ -379,8 +379,9 @@ class SkillVersionService:
             name=manifest["name"],
             description=manifest.get("description", ""),
             skill_content=content,
-            # skill_path 是"当前活跃版本目录"的指针，激活时才写入；
-            # 未激活的新 Skill 保持为空，运行时按 R13 拒绝执行。
+            # skill_path 是"当前活跃版本目录"的指针，激活时才写入。
+            # 留空不等于不可用：运行时按版本记录解析（活跃版本优先，
+            # 没有活跃版本就用最新的可运行版本），这个字段只服务于旧调用方。
             skill_path="",
             is_active=True,
         )

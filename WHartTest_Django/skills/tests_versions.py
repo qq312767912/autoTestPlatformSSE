@@ -78,7 +78,8 @@ class CandidateCreationTests(VersionTestBase):
         self.assertEqual(skill.name, "case-review")
         self.assertEqual(version.version, "1.0.0")
         self.assertEqual(version.state, "draft")
-        self.assertFalse(version.is_runnable)
+        # 入库即候选，但候选**可以直接用**：可用性不依赖审批（激活只是钉版手段）。
+        self.assertTrue(version.is_runnable)
         self.assertEqual(len(version.package_sha256), 64)
 
     def test_new_version_is_never_auto_activated(self):

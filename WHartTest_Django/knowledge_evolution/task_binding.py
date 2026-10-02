@@ -41,10 +41,14 @@ UNMANAGED_DETAIL = (
 
 
 class SkillBindingRefused(ValidationError):
-    """拒绝启动任务：存在候选能力包但没有任何可运行的活跃版本。
+    """拒绝启动任务：登记了能力包，但没有任何**可运行**的版本。
 
     继承 ``ValidationError`` → 上层按"可预期的业务拒绝"处理（回 4xx/标记任务失败
     并给出提示），而不是当服务端故障。抛出它**不会**写入任何业务状态。
+
+    注意"可运行"与"已激活"不是一回事：上传的包未激活也能跑（见
+    ``skills.runtime``）。走到这里说明包真的不可用——整个 Skill 被停用、
+    版本被隔离，或静态校验被驳回。
     """
 
 
@@ -59,10 +63,12 @@ class TaskSkillBindingService:
 
         三种结局，必须区分开（这是本方法存在的全部意义）：
 
-        1. **项目登记了用例审查 Skill，且有活跃版本** → 锁定并返回版本，产出可溯源。
-        2. **项目登记了该 Skill，但没有活跃版本**（候选未审批、被隔离、被退役）
-           → 抛 ``SkillBindingRefused``，**拒绝启动**。这是 R13 的实际拦截点：
-           未经验证的候选包绝不能因为"反正没人拦"就跑进生产审查。
+        1. **项目登记了用例审查 Skill，且有可运行版本** → 锁定并返回版本，产出可溯源。
+           注意"可运行"不等于"已激活"：上传通道的包刚入库就是 ``draft``，
+           照样直接可用（见 ``skills.runtime`` 的说明）。激活只是可选的钉版手段。
+        2. **项目登记了该 Skill，但没有任何可运行版本**（Skill 被停用、版本被隔离、
+           校验被驳回）→ 抛 ``SkillBindingRefused``，**拒绝启动**。这才是真正的
+           拦截点：包本身已经不可信/被关掉，不能让审查拿它去产出结论。
         3. **项目根本没有登记该 Skill** → 返回未绑定结果，审查回落到平台内置规则。
            这种情况不拒绝，因为拒绝的后果是"该项目的用例审查功能整体不可用"，
            而风险面并没有扩大——它本来就在用内置规则。
@@ -98,7 +104,7 @@ class TaskSkillBindingService:
             )
         except SkillRuntimeUnavailable as exc:
             raise SkillBindingRefused(
-                f"用例审查 Skill 当前没有可运行的活跃版本，已拒绝启动审查：{exc}"
+                f"用例审查 Skill 当前没有可运行的版本，已拒绝启动审查：{exc}"
             ) from exc
 
         version = SkillRuntimeResolver.resolve_locked(lock)
@@ -131,12 +137,12 @@ class TaskSkillBindingService:
             allow_unmanaged: 项目完全没登记该阶段的 Skill 时是否放行。
                 四阶段流水线默认放行：一个刚开始接入的能力包通常只覆盖其中一两个
                 阶段，硬拒绝会让整条链路不可用，而风险面并没有扩大——它本来就在用
-                平台默认行为。但**登记了却没有可用活跃版本**时一律拒绝，
-                两种情况不能混为一谈。
+                平台默认行为。但**登记了却没有可运行版本**（被停用/隔离/驳回）时
+                一律拒绝，两种情况不能混为一谈。
             skill: 人在发起流程时**为这个阶段显式选中的包**。给了它就以它为准：
                 - 不再按 manifest 声明去筛阶段（见 ``allow_stage_mismatch``）；
                 - 不再要求"项目登记过声明该阶段的包"——显式选择本身就是登记行为。
-                仍然必须是 ``active`` 版本，绑不到就拒绝，不放行。
+                包不可运行（被停用/隔离/驳回）时仍然拒绝，不放行。
             allow_stage_mismatch: 显式选中的包声明的阶段与所选阶段不一致时是否放行。
                 True 时把"声明了什么"与"实际用在哪个阶段"一起写进锁的 ``detail``，
                 保证事后能看出这是**人主动跨声明使用**，而不是系统静默用错包。
@@ -177,7 +183,7 @@ class TaskSkillBindingService:
             )
         except SkillRuntimeUnavailable as exc:
             raise SkillBindingRefused(
-                f"阶段 {stage} 的 Skill 没有可运行的活跃版本，已拒绝进入该阶段：{exc}"
+                f"阶段 {stage} 的 Skill 没有可运行的版本，已拒绝进入该阶段：{exc}"
             ) from exc
 
         version = SkillRuntimeResolver.resolve_locked(lock)

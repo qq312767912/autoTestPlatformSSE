@@ -166,14 +166,17 @@ def _skill_prompt(review):
 def _lock_review_skill(review):
     """在审查启动时锁定用例审查 Skill 版本（T14）。
 
-    锁定必须发生在**读取文件、调用模型之前**：一旦开跑才发现没有活跃版本，
+    锁定必须发生在**读取文件、调用模型之前**：一旦开跑才发现没有可用版本，
     已经产生的中间状态（进度、部分结果）就成了没有版本溯源的孤儿产出，
     而飞轮后半段（金标、归因、派生）全都要求产出能定位到具体版本。
 
-    项目登记了用例审查 Skill 却没有活跃版本时这里会抛
-    ``SkillBindingRefused``，任务被标记失败并携带可读原因；项目根本没有登记
-    该 Skill 时返回未绑定结果，审查回落到平台内置规则（见
-    ``knowledge_evolution.task_binding`` 的三分支说明）。
+    项目登记了用例审查 Skill 却一个可运行版本都没有（Skill 被停用、版本被隔离
+    或校验被驳回）时这里会抛 ``SkillBindingRefused``，任务被标记失败并携带可读
+    原因；项目根本没有登记该 Skill 时返回未绑定结果，审查回落到平台内置规则
+    （见 ``knowledge_evolution.task_binding`` 的三分支说明）。
+
+    注意**上传/导入的包不需要先激活**：未激活的版本照样是可运行版本，
+    激活只是可选的钉版手段。
     """
     from knowledge_evolution.task_binding import TaskSkillBindingService
 

@@ -77,7 +77,12 @@ class RuntimeTestBase(TestCase):
 
 
 class ResolveActiveVersionTests(RuntimeTestBase):
-    """新建任务：必须解析到当前 active 版本，否则拒绝启动。"""
+    """新建任务：解析到**可运行**版本即可，"已激活"不是前提。
+
+    可用性与可用性判据只有一条：``Skill.is_active`` 且发布状态不属于
+    ``UNRUNNABLE_RELEASE_STATES``（隔离/驳回）。激活只决定优先级——
+    有活跃版本时优先用它，没有则退到最新可运行版本。
+    """
 
     def test_resolves_active_version_by_name(self):
         _skill, version = self.create()
@@ -85,14 +90,61 @@ class ResolveActiveVersionTests(RuntimeTestBase):
         resolved = SkillRuntimeResolver.require_version(project=self.project, name="case-review")
         self.assertEqual(resolved.id, version.id)
 
-    def test_draft_version_is_not_runnable(self):
-        self.create()
-        with self.assertRaises(SkillRuntimeUnavailable):
-            SkillRuntimeResolver.require_version(project=self.project, name="case-review")
+    def test_uploaded_draft_is_runnable_without_activation(self):
+        """上传通道刚入库的包是 draft，但必须直接可用。"""
+        skill, version = self.create()
+        self.assertEqual(version.state, "draft")
+        self.assertIsNone(skill.active_version_id)
 
-    def test_shadow_version_is_not_runnable(self):
+        resolved = SkillRuntimeResolver.require_version(project=self.project, name="case-review")
+
+        self.assertEqual(resolved.id, version.id)
+        self.assertEqual(resolved.package_sha256, version.package_sha256)
+
+    def test_shadow_version_is_runnable_without_activation(self):
         _skill, version = self.create()
         version.release.state = "shadow"
+        version.release.save(update_fields=["state"])
+        resolved = SkillRuntimeResolver.require_version(project=self.project, name="case-review")
+        self.assertEqual(resolved.id, version.id)
+
+    def test_active_version_wins_over_a_newer_draft(self):
+        """激活的意义是**钉住生产版本**：派生出的候选不会因为"更新"就自动生效。"""
+        _skill, active = self.create(version="1.0.0", body="已激活")
+        self.activate(active)
+        _s, newer = self.create(version="2.0.0", body="新候选")
+
+        resolved = SkillRuntimeResolver.require_version(project=self.project, name="case-review")
+
+        self.assertEqual(resolved.id, active.id)
+        self.assertNotEqual(resolved.id, newer.id)
+
+    def test_newest_version_wins_when_nothing_is_activated(self):
+        """从未激活过：用最新的可运行版本，而不是"没有版本可用"。"""
+        _skill, first = self.create(version="1.0.0", body="旧")
+        _s, second = self.create(version="2.0.0", body="新")
+
+        resolved = SkillRuntimeResolver.require_version(project=self.project, name="case-review")
+
+        self.assertEqual(resolved.id, second.id)
+        self.assertNotEqual(resolved.id, first.id)
+
+    def test_resolution_falls_back_when_the_active_version_is_quarantined(self):
+        """隔离一版不该把整个 Skill 停掉：回落到仍可运行的旧版本。"""
+        _skill, older = self.create(version="1.0.0", body="旧")
+        _s, newer = self.create(version="2.0.0", body="新")
+        self.activate(newer)
+        SkillVersionService.quarantine(newer, actor=self.user, reason="安全事件")
+        _skill.refresh_from_db()
+        self.assertIsNone(_skill.active_version_id)
+
+        resolved = SkillRuntimeResolver.require_version(project=self.project, name="case-review")
+
+        self.assertEqual(resolved.id, older.id)
+
+    def test_rejected_version_is_not_runnable(self):
+        _skill, version = self.create()
+        version.release.state = "rejected"
         version.release.save(update_fields=["state"])
         with self.assertRaises(SkillRuntimeUnavailable):
             SkillRuntimeResolver.require_version(project=self.project, name="case-review")
@@ -148,15 +200,19 @@ class ResolveActiveVersionTests(RuntimeTestBase):
         resolved = SkillRuntimeResolver.require_version(project=self.project, stage="case_review")
         self.assertEqual(resolved.id, version.id)
 
-    def test_missing_active_version_returns_none_when_optional(self):
-        self.create()
+    def test_stage_filter_still_excludes_other_stages(self):
+        """按阶段解析时，声明别的阶段的包不能被拿来跑（与是否激活无关）。"""
+        self.create(name="other-stage", version="1.0.0")
         self.assertIsNone(
-            SkillRuntimeResolver.resolve_version(project=self.project, name="case-review")
+            SkillRuntimeResolver.resolve_version(
+                project=self.project, stage="testcase_generation",
+            )
         )
 
     def test_failed_resolution_writes_no_business_state(self):
         """解析失败只阻止新任务，不得留下任何业务记录。"""
-        self.create()
+        _skill, version = self.create()
+        SkillVersionService.quarantine(version, actor=self.user, reason="不可用")
         with self.assertRaises(SkillRuntimeUnavailable):
             SkillRuntimeResolver.require_version(project=self.project, name="case-review")
         self.assertEqual(WorkflowSkillLock.objects.count(), 0)
@@ -259,7 +315,9 @@ class TaskLockTests(RuntimeTestBase):
             SkillRuntimeResolver.resolve_locked(lock)
 
     def test_allow_missing_returns_none(self):
-        self.create()
+        # 只隔离、不删 Skill：这样"包在但不可运行"，才真的走到 allow_missing 分支。
+        _skill, version = self.create()
+        SkillVersionService.quarantine(version, actor=self.user, reason="不可用")
         lock = SkillRuntimeResolver.lock_for_task(
             project=self.project, workflow_id="wf-6", name="case-review",
             actor=self.user, allow_missing=True,

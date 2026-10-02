@@ -277,14 +277,33 @@ class StageCatalogTests(WorkflowBaseTests):
         self.assertEqual(listed["declared_stage"], "case_review")
         self.assertTrue(listed["runnable"])
 
-    def test_package_without_active_version_is_listed_but_not_runnable(self):
-        skill, _version = self._skill(stage="testcase_generation", activate=False)
+    def test_package_without_activation_is_runnable(self):
+        """未激活的包也要算"可运行"：否则向导会把它判成锁不上，用户选不了。
+
+        可用性不依赖激活（激活只是钉版手段），所以这类包必须显示版本与包哈希——
+        页面承诺"选它就能锁上"，判据与运行时同源才做得到。
+        """
+        skill, version = self._skill(stage="testcase_generation", activate=False)
+
+        listed = {item["skill_id"]: item for item in self._catalog()["skills"]}[str(skill.pk)]
+
+        self.assertTrue(listed["runnable"])
+        self.assertEqual(listed["version"], version.version)
+        self.assertEqual(listed["package_sha256"], version.package_sha256)
+        self.assertEqual(listed["declared_stage"], "testcase_generation")
+
+    def test_quarantined_package_is_listed_but_not_runnable(self):
+        """隔离是唯一的"在库却不能用"：页面要看得见它、且明确标成不可运行。"""
+        from skills.versions import SkillVersionService
+
+        skill, version = self._skill(stage="testcase_generation", activate=False)
+        SkillVersionService.quarantine(version, actor=self.lead, reason="安全事件")
 
         listed = {item["skill_id"]: item for item in self._catalog()["skills"]}[str(skill.pk)]
 
         self.assertFalse(listed["runnable"])
         self.assertEqual(listed["version"], "")
-        # 声明仍然要看得见：候选版本已经声明了阶段，只是还没激活。
+        # 声明仍然要看得见：候选版本已经声明了阶段。
         self.assertEqual(listed["declared_stage"], "testcase_generation")
 
     def test_unknown_stage_is_rejected(self):
@@ -339,15 +358,33 @@ class StartWorkflowPinsTests(WorkflowBaseTests):
         self.assertTrue(lock.detail["stage_mismatch"])
         self.assertEqual(lock.detail["declared_stage"], LEGACY_ONLY[0])
 
-    def test_pinned_package_without_active_version_is_refused(self):
-        """跨声明可以放宽，R13（无活跃版本拒绝执行）不放宽。"""
-        skill, _version = self.make_skill_version(
+    def test_pinned_package_needs_no_activation(self):
+        """人显式指定的包，未激活也能锁上——激活不是可用的前提。"""
+        skill, version = self.make_skill_version(
             name="not-activated", version="1.0.0", stage=CURRENT[0],
         )
 
+        result = WorkflowGateService.start_workflow(
+            project=self.project, workflow_id="wf-noactive", actor=self.lead,
+            pins={CURRENT[0]: str(skill.pk)},
+        )
+
+        binding = result["bindings"][CURRENT[0]]
+        self.assertEqual(binding["skill_version_id"], str(version.pk))
+        self.assertTrue(binding["pinned"])
+
+    def test_pinned_quarantined_package_is_refused(self):
+        """显式指定可以放宽声明与激活要求，但"包不可用"这条不放宽。"""
+        from skills.versions import SkillVersionService
+
+        skill, version = self.make_skill_version(
+            name="quarantined-pin", version="1.0.0", stage=CURRENT[0],
+        )
+        SkillVersionService.quarantine(version, actor=self.lead, reason="安全事件")
+
         with self.assertRaises(SkillBindingRefused):
             WorkflowGateService.start_workflow(
-                project=self.project, workflow_id="wf-noactive", actor=self.lead,
+                project=self.project, workflow_id="wf-quarantined-pin", actor=self.lead,
                 pins={CURRENT[0]: str(skill.pk)},
             )
 

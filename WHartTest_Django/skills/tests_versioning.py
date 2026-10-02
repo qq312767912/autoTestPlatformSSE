@@ -89,9 +89,11 @@ class SkillVersionImmutabilityTests(TestCase):
     def test_state_falls_back_to_draft_without_release(self):
         version = self._make_version("1.0.0", "f" * 64)
         self.assertEqual(version.state, "draft")
-        self.assertFalse(version.is_runnable)
+        # 没有发布单元只说明"还没人走过审批"，不说明不能用：包已落盘、
+        # 校验在入库时已跑过，所以它仍是可运行版本。
+        self.assertTrue(version.is_runnable)
 
-    def test_is_runnable_requires_active_state(self):
+    def test_is_runnable_ignores_activation_but_respects_quarantine(self):
         release = make_release(self.project, self.skill.name, "1.0.0", state="active")
         version = SkillVersion.objects.create(
             skill=self.skill, version="1.0.0", release=release,
@@ -103,6 +105,14 @@ class SkillVersionImmutabilityTests(TestCase):
         release.state = "quarantined"
         release.save(update_fields=["state"])
         version.refresh_from_db()
+        self.assertFalse(version.is_runnable)
+
+    def test_version_without_a_package_dir_is_never_runnable(self):
+        """迁移只留下内联 SKILL.md 的记录没有包目录，运行时读不到文件，不能跑。"""
+        version = SkillVersion.objects.create(
+            skill=self.skill, version="1.0.0", package_path="", package_sha256="2" * 64,
+        )
+        self.assertEqual(version.state, "draft")
         self.assertFalse(version.is_runnable)
 
 
@@ -358,8 +368,8 @@ class ExistingSkillMigrationTests(TestCase):
     def test_inline_only_skill_gets_draft_version_and_stays_non_runnable(self):
         """只有内联 SKILL.md 的 Skill 也要有版本记录，但必须是 draft，绝不能变 active。
 
-        R13 要求为每条记录生成初始版本，同时"无活跃版本就拒绝执行"——所以这类
-        记录必须留下可查询的版本痕迹，又不能被运行时当成可运行版本。
+        这类记录必须留下可查询的版本痕迹；不可运行的理由不是"没激活"，而是
+        **它根本没有包目录**——运行时读不到任何文件。
         """
         skill = Skill.objects.create(
             project=self.project, name="inline-only", description="无包目录",

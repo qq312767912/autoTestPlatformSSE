@@ -182,7 +182,17 @@ def main() -> int:
             check(version.state == "draft", "T06 新候选一律 draft（不自动激活）", version.state)
             check(
                 version.skill.active_version_id is None,
-                "T06 未激活时活跃指针为空（R13 不可执行）",
+                "T06 未激活时活跃指针为空（激活只是可选的钉版手段）",
+            )
+            # 关键回归点：上传进来就是 draft，但**必须已经能跑**。
+            runnable_before_activation = SkillRuntimeResolver.resolve_version(
+                project=project, name="live-skill",
+            )
+            check(
+                runnable_before_activation is not None
+                and str(runnable_before_activation.id) == str(version_id),
+                "T06/T08 未激活的 draft 版本即可被运行时解析（无需激活）",
+                f"resolved={getattr(runnable_before_activation, 'version', None)}",
             )
 
         # 同一份包重复提交：幂等命中
@@ -287,7 +297,7 @@ def main() -> int:
         resolved = SkillRuntimeResolver.resolve_version(project=project, name="live-skill")
         check(
             resolved is not None and str(resolved.id) == str(version_id),
-            "T08 运行时按项目+名称解析到活跃版本",
+            "T08 运行时按项目+名称解析（有活跃版本时优先用它）",
             f"resolved={getattr(resolved, 'version', None)}",
         )
 

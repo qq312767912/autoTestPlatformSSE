@@ -138,8 +138,35 @@ Skill Hub 应在一个页面提供：
 ### R13 现有 Skill 迁移
 
 - 当迁移现有 `Skill` 记录时，系统应为每条记录生成初始不可变版本，计算包哈希，并保留原有业务调用兼容。
-- 当旧业务仅传递 `skill_id` 时，运行时应解析该 Skill 的活跃版本；当没有活跃版本时，应明确拒绝执行而不是静默使用未版本化文件。
+- 当旧业务仅传递 `skill_id` 时，运行时应解析该 Skill 的**可运行版本**；当没有任何可运行版本时，应明确拒绝执行而不是静默使用未版本化文件。
 - 迁移过程不得删除原 Skill 文件或改变当前业务结果。
+
+#### R13.1 解析口径修订（2026-10-02，T25）
+
+> 原文（已作废）："运行时应解析该 Skill 的**活跃版本**；当没有活跃版本时，应明确拒绝执行。"
+>
+> **本条真正的意图是"不得静默使用未版本化文件"**——必须落到某个不可变版本包上。这一点不变。
+> "必须活跃"是当初的错误实现：**激活只是可选的钉版手段**（把生产版本钉在某一版），不是可用性前提。
+> 上传 / Git 导入 / 商店导入三条通道在落盘前都已跑过同一套静态校验，
+> 所以"没激活"只意味着"还没人指定生产版本"，**不构成拒绝理由**。
+
+现行判据（**唯一真值** = `skills/models.py::UNRUNNABLE_RELEASE_STATES` + `SkillVersion.is_runnable`）：
+
+```python
+UNRUNNABLE_RELEASE_STATES = ('quarantined', 'rejected')
+
+is_runnable == skill.is_active and package_path != '' and state not in UNRUNNABLE_RELEASE_STATES
+```
+
+- 用**排除法**而不是"枚举所有可用状态"：新增发布状态时不会因为漏列而被静默误拒。
+- `package_path` 空 = 迁移生成的"只留内联 `SKILL.md`"记录（`manifest.needs_package_rebuild`），
+  运行时读不到任何文件，**必须保持不可运行**。
+- 解析优先级（`SkillRuntimeResolver.runnable_version`）：**活跃版本优先（若可运行且阶段匹配），
+  否则取最新可运行版本**。保留"活跃优先"是为了不让派生候选因"更新"自动生效。
+- `resolve_version` / `runnable_version` / `stage_catalog` 全部共用这一处判据，**判据只能有一处定义**。
+
+仍未放宽的部分：**锁定的版本必须来自不可变版本包**（`WorkflowSkillLock` 仍按 `skill_version_id` 落库），
+历史链路依然读锁定版本、不读"当前活跃版本"；自进化派生仍要求**基线是当前活跃版本**。
 
 ## 9. 非功能需求
 

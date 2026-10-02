@@ -3,7 +3,8 @@
 每个用例只证明一件在真实业务里会出错的事：
 
 - 锁有没有真的锁在**用户选中的那个** Skill 上（同名多条时按名字猜会静默用错包）；
-- 登记了 Skill 但没有活跃版本时，任务有没有被**真的拦住**（R13 的实际拦截点）；
+- 上传的包没激活也能不能跑（"未激活"不是拒绝理由），以及包真的不可用
+  （被停用/隔离/驳回）时有没有被**真的拦住**；
 - 根本没登记 Skill 的项目还能不能用（不能因为引入版本管理把功能整个关掉）；
 - 锁定之后有人激活了新版本，跑着的任务会不会被换包；
 - 产出有没有把版本一路带下去（断了的话飞轮后半段全都定位不到版本）；
@@ -107,16 +108,21 @@ class ReviewBindingTests(SkillHubBaseTests):
 
     # ------------------------------------------------------------ 拒绝路径
 
-    def test_registered_skill_without_active_version_refuses_start(self):
-        """登记了 Skill 但没有任何活跃版本 → 必须拒绝，且不留下锁。"""
+    def test_unactivated_skill_is_still_usable(self):
+        """登记了 Skill、还没人激活 → **照跑**，锁落在最新可运行版本上。
+
+        这是"上传即可用"的落地点：把可用性绑在审批动作上，会让每个新项目、
+        每个新包的第一次使用都被卡住，而上传通道落盘前已经跑过同一套静态校验。
+        """
         skill, version = self.make_skill_version(name=DEFAULT_CASE_REVIEW_SKILL_NAME)
         review = self.make_review(skill=skill)
 
-        with self.assertRaises(SkillBindingRefused):
-            TaskSkillBindingService.bind_case_review(review=review, actor=self.lead)
+        binding = TaskSkillBindingService.bind_case_review(review=review, actor=self.lead)
 
-        self.assertFalse(
-            WorkflowSkillLock.objects.filter(workflow_id=str(review.pk)).exists()
+        self.assertTrue(binding["managed"])
+        self.assertEqual(str(binding["skill_version"].pk), str(version.pk))
+        self.assertEqual(
+            WorkflowSkillLock.objects.filter(workflow_id=str(review.pk)).count(), 1,
         )
         version.refresh_from_db()
         self.assertNotEqual(version.state, "active")
@@ -146,7 +152,10 @@ class ReviewBindingTests(SkillHubBaseTests):
         """拒绝启动时任务必须仍停在 pending，不能留下 running 孤儿。"""
         from testcases.review_service import run_testcase_review
 
-        skill, _version = self.make_skill_version(name=DEFAULT_CASE_REVIEW_SKILL_NAME)
+        skill, version = self.make_skill_version(name=DEFAULT_CASE_REVIEW_SKILL_NAME)
+        # 拒绝必须来自"包真的不可用"（隔离），而不是"没人去做激活审批"。
+        SkillVersionService.quarantine(version, actor=self.lead, reason="安全事件")
+        skill.refresh_from_db()
         review = self.make_review(skill=skill)
 
         with self.assertRaises(SkillBindingRefused):

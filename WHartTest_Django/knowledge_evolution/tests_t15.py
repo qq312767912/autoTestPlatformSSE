@@ -4,7 +4,8 @@
 
 - 四个阶段的版本必须在**启动时**一次锁完，否则一条链路有可能横跨四份包；
 - 项目没登记某阶段的 Skill 时要如实报告"无版本溯源"，而不是假装锁上了；
-- 登记了但没活跃版本时必须拒绝启动，而不是跑两小时之后在报告阶段才炸；
+- 登记了但**包不可用**（被隔离/驳回/停用）时必须在启动点就拒绝，
+  而不是跑两小时之后在报告阶段才炸；"没激活"不是拒绝理由；
 - 门禁没通过不能进下一阶段；
 - **门禁通过之后重复登记同一产出不能把门禁打回待测评**（否则重跑一次就再也过不去）；
 - 链路中途激活新版本，历史流水线在页面上仍必须显示它当时用的旧包；
@@ -84,10 +85,37 @@ class StartWorkflowTests(WorkflowBaseTests):
         self.assertEqual(sorted(result["unmanaged_stages"]), sorted(STAGES))
         self.assertFalse(WorkflowSkillLock.objects.filter(workflow_id="wf-empty").exists())
 
-    def test_registered_stage_without_active_version_refuses_start(self):
-        """登记了用例阶段但没激活 → 启动就该失败，而不是跑到一半才炸。"""
-        self._stage_skill("test_plan_generation")
-        self.make_skill_version(name="testcase-skill", stage="testcase_generation")
+    def test_unactivated_stage_skill_is_locked_without_activation(self):
+        """登记了但没人激活 → 照样锁上，不再拒绝启动。
+
+        "上传即可用"落在四阶段上就是这个意思：一条链路的门禁不该被
+        "还没人点激活"卡死。锁里的版本仍是那一份不可变包，溯源不受影响。
+        """
+        _skill, first = self._stage_skill("test_plan_generation")
+        _s, second = self.make_skill_version(
+            name="testcase-skill", stage="testcase_generation",
+        )
+
+        WorkflowGateService.start_workflow(
+            project=self.project, workflow_id="wf-unactivated", actor=self.lead,
+        )
+
+        for stage, version in (
+            ("test_plan_generation", first), ("testcase_generation", second),
+        ):
+            lock = WorkflowSkillLock.objects.get(
+                workflow_id="wf-unactivated", lock_key=f"stage:{stage}",
+            )
+            self.assertEqual(str(lock.skill_version_id), str(version.pk))
+
+    def test_quarantined_stage_skill_refuses_start(self):
+        """包真的不可用（被隔离）时必须在启动点就拦住，而不是跑到一半才炸。"""
+        from skills.versions import SkillVersionService
+
+        _skill, version = self.make_skill_version(
+            name="testcase-skill", stage="testcase_generation",
+        )
+        SkillVersionService.quarantine(version, actor=self.lead, reason="安全事件")
 
         with self.assertRaises(SkillBindingRefused):
             WorkflowGateService.start_workflow(

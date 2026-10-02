@@ -49,7 +49,7 @@ description: nested zip skill
                 self.assertEqual(skill.name, 'nested-skill')
                 self.assertIn('nested zip skill', skill.description)
                 # 文件落在**不可变版本目录**里；skill_path 要等版本被激活后才指向它
-                # （R13：没有活跃版本的 Skill 不可执行，所以旧指针此时仍为空）。
+                # （未激活时这个旧指针保持为空，但包照样能被运行时解析到）。
                 version = skill.versions.get()
                 self.assertTrue(os.path.exists(
                     os.path.join(version.get_full_path(), 'scripts', 'run.py')

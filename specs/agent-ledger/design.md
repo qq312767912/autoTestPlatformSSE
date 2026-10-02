@@ -148,11 +148,20 @@
 
 **结论：四阶段目前全部会落进 `unmanaged_stages`。**
 `bind_stage` 的三分支策略里，`allow_unmanaged=True`（四阶段默认）会放行并标"使用平台默认行为（无版本溯源）"，
-但**登记了却没有可用活跃版本时一律拒绝**——`shadow` 的两条属于"登记了但无 active"，会走拒绝分支。
+但**登记了却没有任何可运行版本时一律拒绝**——`shadow` 的两条属于"登记了但无 active"，会走拒绝分支。
 
 > ⚠️ 这是当前最大的落地阻力：**四阶段链路现在能跑通界面与门禁，但锁不到任何版本**，
 > 于是 §5 断链 ① ② 无法闭环。先把两个 `shadow` 包提升为 `active`、把两个未发布包发出去，
 > 或先接受"四阶段无版本溯源"并在界面显式标灰，二选一。见 `open-questions.md`。
+
+> **修订（2026-10-02，T25）**：本节表格与"拒绝分支"的描述**按当时的 `active`-only 判据成立**，
+> 现已不适用两处：
+> ① `shadow` 的包**不再**落进拒绝分支——它们的包目录是完整的，按新判据**可运行**，
+> 会正常锁定版本（`CapabilityRelease` 停在 `shadow` 只代表"还没走完晋级流程"）；
+> ② 上表的 `CapabilityRelease` 列已过时，四个 `webtest-*` 包在 §9.3 已全部激活为 `active`。
+> 现行判据见 `specs/production-evolution-skill-hub/requirements.md` §R13.1。
+> 真正会走拒绝分支的只剩三类：**没有包目录**（`0.0.0-migrated` 这类 inline-only）、
+> **被隔离**（`quarantined`）、**校验被驳回**（`rejected`）。
 
 ---
 
@@ -423,7 +432,9 @@ buildWorkflowGraph(projectId, workflowId) → { workflow_id, node_count, edge_co
 ### 9.3 四阶段存量包激活（用户指示 3）
 
 四个 `webtest-*` 包**原本就都在库里**、`manifest.stage` 声明也正确，但 `CapabilityRelease`
-全部停在 `shadow`。而 `SkillRuntimeResolver.resolve_version` 只认 `active`，于是出现两种都不想要的结果：
+全部停在 `shadow`。而 `SkillRuntimeResolver.resolve_version` 当时**只认 `active`**
+（该判据已于 2026-10-02 / T25 放宽，见 §R13.1；此后 `shadow` 包的完整版本可直接锁定，
+激活不再是可用前提），于是出现两种都不想要的结果：
 
 - **登记了这些包的项目**（`test`）：`bind_stage` 走「已登记却无活跃版本」的**拒绝**分支，**发起即 400**；
 - **未登记的项目**（`演示项目`）：按 `allow_unmanaged` 放行，但四阶段全部「无版本溯源」。
@@ -630,7 +641,9 @@ buildWorkflowGraph(projectId, workflowId) → { workflow_id, node_count, edge_co
   跨模板使用由人选 + `pins` 明确表达，而不是靠过滤悄悄消掉。
 - `start_workflow(pins={stage: skill_id})`：人选到"声明的是别的阶段"的包允许（`allow_stage_mismatch=True`），
   但必须把 `pinned` / `declared_stage` / `stage_mismatch` 写进流程锁 `detail` 留痕，并在返回里给 `mismatched_stages`。
-- 仍必须 `active` 版本（R13 不放宽）。
+- ~~仍必须 `active` 版本（R13 不放宽）。~~ **已于 2026-10-02（T25）放宽**：
+  可用性由"必须 `active`"改为**排除法**（见 `specs/production-evolution-skill-hub/requirements.md` §R13.1）。
+  未激活的包照样进候选、照样能被锁定；只有"没有包目录 / `quarantined` / `rejected`"三类进不了候选。
 
 ### 11.4 前端两栏 + 向导两步
 

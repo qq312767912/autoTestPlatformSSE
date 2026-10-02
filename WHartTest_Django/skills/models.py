@@ -551,6 +551,18 @@ class Skill(models.Model):
             return created_skills
 
 
+#: 明确"不可运行"的发布状态。运行时可加载的判据是**排除法**，不是"必须已激活"。
+#:
+#: 为什么不是"必须 active"：激活只是可选的钉版手段（把生产版本钉在某一版），
+#: 不是可用性前提。上传通道落盘前已经跑过同一套静态校验，所以"没激活"只意味着
+#: "还没人指定生产版本"。
+#:
+#: 真正排除的只有两种：
+#: - ``quarantined``：人基于安全事件做出的隔离决策，任何时候都不放行；
+#: - ``rejected``：静态校验被驳回，说明落盘包已与入库哈希/校验结论对不上。
+UNRUNNABLE_RELEASE_STATES = ('quarantined', 'rejected')
+
+
 class SkillVersion(models.Model):
     """Skill 的不可变版本包。
 
@@ -666,8 +678,25 @@ class SkillVersion(models.Model):
 
     @property
     def is_runnable(self):
-        """是否允许被运行时加载：必须处于生效状态且未被隔离/驳回。"""
-        return self.state == 'active' and self.skill.is_active
+        """是否允许被运行时加载（``skills.runtime`` 与展示层共用这一处判据）。
+
+        **与"是否已激活"解耦**：``Skill.active_version`` / ``active`` 表示"指定的
+        生产版本"，那是**可选的钉版手段**，不是可用性前提。上传进 Skill 管理的包在
+        落盘前已经跑过同一套静态校验（``validation.scan_package_dir``），未激活只
+        说明"还没人指定生产版本"，不说明"这个包不能跑"。
+
+        被排除的只有两种（见 ``UNRUNNABLE_RELEASE_STATES``）：隔离与校验驳回。
+        另外 ``Skill.is_active=False`` 是"整个 Skill 关掉"的用户开关，同样不可运行。
+        """
+        if not self.skill.is_active:
+            return False
+        # 没有包目录的版本不能跑：迁移生成的"只留内联 SKILL.md"记录
+        # （``manifest.needs_package_rebuild``）``package_path`` 是空的，运行时
+        # 读不到任何文件。这里只看字段、不碰磁盘——解析是热路径，
+        # "包有没有被改写"由 ``verify_integrity`` 显式开关负责。
+        if not self.package_path:
+            return False
+        return self.state not in UNRUNNABLE_RELEASE_STATES
 
     def manifest_stage(self):
         """返回 manifest 中声明的能力阶段（可能为空）。"""

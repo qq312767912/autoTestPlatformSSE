@@ -140,6 +140,7 @@ class WorkflowGateService:
         让人看见"这个包在、但还不能用"，比它凭空消失更好排查。
         """
         from skills.models import Skill, SkillVersion
+        from skills.runtime import SkillRuntimeResolver
 
         project_id = getattr(project, "pk", project)
         targets = list(stages or DEFAULT_WORKFLOW_STAGE_ORDER)
@@ -165,20 +166,18 @@ class WorkflowGateService:
         for skill in (
             Skill.objects
             .filter(project_id=project_id)
-            .select_related("active_version", "active_version__release")
+            .select_related("active_version", "active_version__release", "active_version__skill")
             .order_by("name")
         ):
-            version = skill.active_version
+            # 用运行时同一个解析器取"当前会用哪一版"：判据只能有一处定义，
+            # 否则页面会承诺"选它就能锁上"而实际锁不上（或反过来）。
+            # 注意它优先活跃版本、没有活跃版本时退到最新可运行版本——
+            # 未激活的包同样能跑，激活只是可选的钉版手段。
+            version = SkillRuntimeResolver.runnable_version(skill)
             manifest = (getattr(version, "manifest", None) or {}) if version else {}
             release = getattr(version, "release", None) if version else None
             declared = str(manifest.get("stage") or "") or latest_declared.get(str(skill.pk), "")
-            # 可运行 = 包启用 + 有活跃版本 + 发布单元没否决它。与
-            # ``SkillRuntimeResolver.resolve_version`` 同源，页面才能承诺"选它就能锁上"。
-            runnable = bool(
-                version
-                and skill.is_active
-                and (not version.release_id or (release is not None and release.state == "active"))
-            )
+            runnable = version is not None
             skills.append({
                 "skill_id": str(skill.pk),
                 "skill_name": skill.name,
@@ -634,8 +633,9 @@ class WorkflowGateService:
             pins: ``{stage: skill_id}``——发起流程向导里人**逐阶段选定**的包。
                 给了某阶段的包就以它为准，不再按 manifest 声明去筛阶段（新链路阶段
                 目前还没有包声明过，靠声明筛会一律落到"未登记"）。没给的阶段
-                沿用原有行为：按阶段解析当前活跃版本。
-                无论走哪条路，**绑定不到 active 版本都拒绝**，R13 不放宽。
+                沿用原有行为：按阶段解析当前可运行版本（有活跃版本则优先用它）。
+                无论走哪条路，**绑定不到可运行版本才拒绝**——"没激活"不是拒绝理由，
+                包被停用/隔离/校验驳回才是。
 
         Returns:
             锁定结果；``unmanaged_stages`` 列出没有锁定到 Skill 版本的阶段——
