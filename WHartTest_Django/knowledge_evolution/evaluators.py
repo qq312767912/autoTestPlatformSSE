@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 from django.db import transaction
 
+from .capability_registry import LEGACY_WORKFLOW_STAGES, WORKFLOW_STAGES
 from .evaluation_v2_models import EvaluationRubric, JudgeResult
 from .models import FeedbackEvent, GenerationOutput
 
@@ -330,29 +331,47 @@ class FeedbackOutcomeEvaluator:
 
 class WorkflowOutcomeEvaluator:
     evaluator_type = "workflow_outcome"
-    version = "workflow-v2"
+    #: 版本号随判据一起升：主链路口径从"方案/用例/执行/报告"切成
+    #: "风险识别/用例/执行/问题跟踪"之后，旧结论与新结论不是同一种判据，
+    #: 共用一个版本号会让两次评测看起来可比，实际不可比。
+    version = "workflow-v3"
     level = "l3"
-    STAGES = [
-        "test_plan_generation", "testcase_generation", "test_execution", "report_generation",
-    ]
+    #: 能识别的链路模板（新链路在前）。按上游实际产出的阶段挑一套最贴合的，
+    #: 而不是只看新序列——否则存量流程永远被算成"缺两步"，覆盖率恒为 0.5。
+    STAGE_TEMPLATES = (
+        tuple(WORKFLOW_STAGES),
+        tuple(LEGACY_WORKFLOW_STAGES),
+    )
+
+    @classmethod
+    def template_for(cls, stages: set[str]) -> tuple:
+        """挑与这批产出重合度最高的模板；打平时用新序列（下标小者优先）。"""
+        return max(
+            (len(stages & set(template)), -index, template)
+            for index, template in enumerate(cls.STAGE_TEMPLATES)
+        )[2]
 
     def evaluate(self, context):
         outputs = context.workflow_outputs or [context.output]
         stages = {output.task_type for output in outputs}
-        coverage = len(stages & set(self.STAGES)) / len(self.STAGES)
-        report_outputs = [output for output in outputs if output.task_type == "report_generation"]
-        report_ready = 1.0 if any(output.content.strip() for output in report_outputs) else 0.0
-        score = 0.8 * coverage + 0.2 * report_ready
+        template = self.template_for(stages)
+        coverage = len(stages & set(template)) / len(template)
+        # 收口阶段从模板里取：报告生成与问题跟踪都算"链路最后一段有实质内容"。
+        closing_stage = template[-1]
+        closing_outputs = [output for output in outputs if output.task_type == closing_stage]
+        closing_ready = 1.0 if any((output.content or "").strip() for output in closing_outputs) else 0.0
+        score = 0.8 * coverage + 0.2 * closing_ready
         return EvaluationEvidence(
             level=self.level, evaluator_type=self.evaluator_type, evaluator_version=self.version,
             judge_name="workflow-business-outcome", score=score,
-            passed=coverage == 1.0 and report_ready == 1.0,
-            confidence=1.0 if len(outputs) >= len(self.STAGES) else coverage,
+            passed=coverage == 1.0 and closing_ready == 1.0,
+            confidence=1.0 if len(outputs) >= len(template) else coverage,
             dimensions={
                 "stage_coverage": coverage, "covered_stages": sorted(stages),
-                "report_count": len(report_outputs), "report_ready": bool(report_ready),
+                "stage_template": list(template), "closing_stage": closing_stage,
+                "closing_count": len(closing_outputs), "closing_ready": bool(closing_ready),
             },
-            rationale="全链路测试四阶段覆盖与报告可用性",
+            rationale="全链路测试四阶段覆盖与收口产出可用性",
         )
 
 

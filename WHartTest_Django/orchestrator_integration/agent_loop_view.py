@@ -74,6 +74,16 @@ from requirements.context_limits import (
     context_checker,
     get_context_limit_from_llm,
 )
+from knowledge_evolution.capability_registry import ALL_TASK_TYPES, ALL_WORKFLOW_STAGES
+
+#: 能产生飞轮产出的模块（八类业务能力 + 平台工具）。
+#: 从注册表取而不是在这里抄一份：抄一份的代价不是"多写几行"，而是口径变更后
+#: 新阶段的产出会被静默当成"非飞轮模块"，不落库、不进门禁，排查时毫无线索。
+FLYWHEEL_MODULE_KEYS = frozenset(ALL_TASK_TYPES)
+
+#: 链路型阶段：产出必须携带 ``workflow_id``，且进入前要过阶段门禁。
+#: 取并集（新四阶段 + 历史四阶段），存量流程与新建流程共用同一套判断。
+WORKFLOW_MODULE_KEYS = frozenset(ALL_WORKFLOW_STAGES)
 
 from .auth_state_binding import (
     AuthStateBindingError,
@@ -946,7 +956,7 @@ class AgentLoopStreamAPIView(View):
             adapter = ADAPTERS[module_key]
             workflow_id = (
                 (getattr(request, "_flywheel_workflow_id", "") or session_id)
-                if module_key in {"test_plan_generation", "testcase_generation", "report_generation"}
+                if module_key in WORKFLOW_MODULE_KEYS
                 else ""
             )
             skill_version = await sync_to_async(self._bind_stage_skill)(
@@ -981,9 +991,7 @@ class AgentLoopStreamAPIView(View):
                     "knowledge_enabled": bool(use_knowledge_base and knowledge_base_ids),
                     "knowledge_base_ids": list(knowledge_base_ids or []),
                     "execution_spans": self._tool_execution_spans(all_messages),
-                    "enforce_quality_gate": module_key in {
-                        "test_plan_generation", "testcase_generation", "report_generation",
-                    },
+                    "enforce_quality_gate": module_key in WORKFLOW_MODULE_KEYS,
                 },
             )
             return await sync_to_async(publish_output)(envelope)
@@ -1757,15 +1765,14 @@ class AgentLoopStreamAPIView(View):
 
         user_message = body_data.get("message")
         module_key = str(body_data.get("module_key") or "")
-        flywheel_modules = {
-            "case_review", "knowledge_query", "risk_identification",
-            "test_plan_generation", "testcase_generation", "issue_tracking", "report_generation",
-        }
-        request._flywheel_module_key = module_key if module_key in flywheel_modules else ""
+        request._flywheel_module_key = (
+            module_key if module_key in FLYWHEEL_MODULE_KEYS else ""
+        )
         request._flywheel_workflow_id = str(body_data.get("workflow_id") or "")
-        if request._flywheel_module_key in {
-            "test_plan_generation", "testcase_generation", "report_generation",
-        } and not request._flywheel_workflow_id:
+        if (
+            request._flywheel_module_key in WORKFLOW_MODULE_KEYS
+            and not request._flywheel_workflow_id
+        ):
             request._flywheel_workflow_id = str(body_data.get("session_id") or "")
         parent_ids = body_data.get("parent_output_ids") or []
         request._flywheel_parent_output_ids = [str(item) for item in parent_ids if item]
@@ -1847,9 +1854,9 @@ class AgentLoopStreamAPIView(View):
             logger.info(f"AgentLoopStreamAPI: Generated new session_id: {session_id}")
 
         # 链路型业务在真正调用模型前执行质量门禁，防止先生成后拦截。
-        if request._flywheel_module_key in {
-            "testcase_generation", "report_generation",
-        }:
+        # 首阶段没有前置门禁，检查会直接放行，不必为它写例外——
+        # 写例外反而会在"主链路换序"时把新的首阶段漏在门外。
+        if request._flywheel_module_key in WORKFLOW_MODULE_KEYS:
             workflow_id = request._flywheel_workflow_id or session_id
             try:
                 from knowledge_evolution.operations import WorkflowGateService

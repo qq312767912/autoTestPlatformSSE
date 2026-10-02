@@ -10,7 +10,16 @@ from .capability_models import CapabilityRelease, PromotionDecision, ReleaseObse
 from .evaluation_models import EvaluationResult, EvaluationRun
 from .models import EvaluationCase, EvaluationSuite, GenerationOutput
 from .operations import FlywheelMetricsService, KnowledgeHealthService, WorkflowGraphBuilder
-from .protocol import ADAPTERS, EvaluationMode, OutputStage, publish_output
+from .protocol import ADAPTERS, WORKFLOW_STAGES, EvaluationMode, OutputStage, publish_output
+
+#: ``WORKFLOW_STAGES`` 里装的是枚举成员，而 ``ADAPTERS`` 的键是字符串。
+#: 二者虽然 ``==`` 成立，但 ``str`` 混入枚举的 ``__hash__`` 取的是成员名，
+#: 直接拿字符串去 ``in`` 这个集合会恒为假——必须归一成字符串再比。
+WORKFLOW_STAGE_VALUES = {item.value for item in WORKFLOW_STAGES}
+WORKFLOW_STAGE_CHAIN = [
+    item.value for item in OutputStage
+    if item in WORKFLOW_STAGES and item.value in ADAPTERS
+]
 
 
 class OutputProtocolTest(TestCase):
@@ -48,7 +57,7 @@ class OutputProtocolTest(TestCase):
 
     def test_four_stage_skill_workflow_builds_joint_graph(self):
         parent = None
-        stages = ["test_plan_generation", "testcase_generation", "test_execution", "report_generation"]
+        stages = list(WORKFLOW_STAGE_CHAIN)
         for index, stage in enumerate(stages):
             envelope = ADAPTERS[stage].build(
                 project=self.project, user=self.user, source_id=f"{stage}-{index}",
@@ -57,17 +66,17 @@ class OutputProtocolTest(TestCase):
             )
             _, parent = publish_output(envelope)
         report = WorkflowGraphBuilder().build(self.project.id, "wf-chain")
-        self.assertEqual(report["node_count"], 4)
-        self.assertEqual(report["edge_count"], 3)
+        self.assertEqual(report["node_count"], len(stages))
+        self.assertEqual(report["edge_count"], len(stages) - 1)
 
-    def test_all_eight_business_outputs_create_root_and_validation_spans(self):
+    def test_all_business_outputs_create_root_and_validation_spans(self):
+        # 链路阶段集合从注册表真值来，不在这里抄一份阶段名：
+        # 抄下来的那份在口径变更后会静默把"新链路阶段"当成单次能力去发布，
+        # 于是真正该被拦的 workflow_id 缺失就测不到了。
         for index, (stage, adapter) in enumerate(ADAPTERS.items()):
             envelope = adapter.build(
                 project=self.project, user=self.user, source_id=f"span-{index}",
-                workflow_id="wf-span" if stage in {
-                    "test_plan_generation", "testcase_generation",
-                    "test_execution", "report_generation",
-                } else "",
+                workflow_id="wf-span" if stage in WORKFLOW_STAGE_VALUES else "",
                 input_summary=stage, output={"stage": stage},
                 producer={"model_version": "test-model", "prompt_version": "p1"},
             )

@@ -3,24 +3,31 @@
 需求里出现的分类维度有三套，容易互相打架，这里一次性说清：
 
 1. **可进化能力的形态**（需求 §2.1 / §2.2）
-   - Skill 型：`case_review`、`test_plan_generation`、`testcase_generation`、
-     `test_execution`、`report_generation`（5 个，走 Skill 包 + 版本化运行时）
+   - Skill 型：`case_review`、`risk_identification`、`testcase_generation`、
+     `test_execution`、`issue_tracking`、`test_plan_generation`、`report_generation`
+     （7 个，走 Skill 包 + 版本化运行时）
    - 复合型：`code_review`（走 Prompt/机器规则/CRG/反证/工具配置的子单元聚合发布）
 
-2. **四阶段主链路**（需求 §2.1 唯一真值）
-   ``test_plan_generation -> testcase_generation -> test_execution -> report_generation``
+2. **四阶段主链路**（唯一真值，与 ``operations.DEFAULT_WORKFLOW_STAGE_ORDER`` 一致）
+   ``risk_identification -> testcase_generation -> test_execution -> issue_tracking``
 
-3. **仅作反馈/归因/单次评测数据源**：`risk_identification`、`issue_tracking`、
-   `knowledge_query`。这些不冒充四阶段 Skill 主链路。
+   口径变更（2026-10-02）：主链路原先为
+   ``test_plan_generation -> testcase_generation -> test_execution -> report_generation``。
+   ``test_plan_generation`` 与 ``report_generation`` 并未被删除，只是**降为单次能力**——
+   它们仍是 Skill 型可进化能力，仍能评测、反馈、自进化，只是不再占据链路阶段位。
+   历史流程按自己的阶段序列解释（见 ``operations.stage_order_for``），不受这次变更影响。
+
+3. **平台工具**：`knowledge_query`——知识问答是平台基础能力，不作为业务能力对外呈现。
 
 需求正文写的是"按八类业务能力"组织金标，而平台 ``EvaluationSuite.TASK_TYPE_CHOICES``
 一共 9 项。两者的差在哪里，本模块给出**显式**答案而不是留个悬念：
 
-    八类业务能力 = 5 个 Skill 型 + code_review + risk_identification + issue_tracking
-    平台工具       = knowledge_query（知识问答是平台基础能力，不作为业务能力对外呈现）
+    八类业务能力 = 7 个 Skill 型 + code_review（复合型）
+    平台工具       = knowledge_query
 
-这样"八类"能对上，且不丢掉任何一类任务的归属。金标组织、门禁分区策略、前端目录
-分组都从 ``CAPABILITY_REGISTRY`` 取，避免同一份分类在三个地方各写一遍。
+加总仍是八类、九项任务类型，口径对得上，且不丢掉任何一类任务的归属。金标组织、
+门禁分区策略、前端目录分组都从 ``CAPABILITY_REGISTRY`` 取，避免同一份分类在三个
+地方各写一遍。
 """
 from __future__ import annotations
 
@@ -45,28 +52,50 @@ PARTITION_LABELS = {
 SHADOW_PARTITION = "shadow"
 
 
-#: 四阶段主链路（唯一真值，与 ``operations.WORKFLOW_STAGE_ORDER`` 一致）。
+#: 四阶段主链路（唯一真值，与 ``operations.DEFAULT_WORKFLOW_STAGE_ORDER`` 一致）。
 WORKFLOW_STAGES = (
+    "risk_identification",
+    "testcase_generation",
+    "test_execution",
+    "issue_tracking",
+)
+
+#: 历史主链路（2026-10-02 之前发起的流程用的阶段序列）。
+#: 保留它只为一件事：让存量流程仍能被正确解释、继续推进，而不是变成读不出来的砖。
+#: 新流程**不再**使用这个序列，也不要把新代码往它上面挂。
+LEGACY_WORKFLOW_STAGES = (
     "test_plan_generation",
     "testcase_generation",
     "test_execution",
     "report_generation",
 )
 
-#: Skill 型可进化能力。
+#: 出现过的全部链路阶段（新 + 历史）。判定"某个 stage 是不是链路阶段"必须用它，
+#: 只认 ``WORKFLOW_STAGES`` 会让存量流程的产出被当成旁路产出而丢掉门禁。
+ALL_WORKFLOW_STAGES = tuple(
+    dict.fromkeys(WORKFLOW_STAGES + LEGACY_WORKFLOW_STAGES)
+)
+
+#: Skill 型可进化能力：单次能力 + 主链路四阶段。
+#: 链路阶段必须在这里——它们靠 Skill 包驱动、需要版本锁定与分流回滚。
 SKILL_CAPABILITY_STAGES = (
     "case_review",
-    "test_plan_generation",
+    "risk_identification",
     "testcase_generation",
     "test_execution",
+    "issue_tracking",
+    "test_plan_generation",
     "report_generation",
 )
 
 #: 复合型可进化能力（不得包装成 Skill）。
 COMPOSITE_CAPABILITY_STAGES = ("code_review",)
 
-#: 只作数据源的业务阶段。
-FEEDBACK_SOURCE_STAGES = ("risk_identification", "issue_tracking")
+#: 已无"只作数据源、不可进化"的业务阶段。
+#: `risk_identification` / `issue_tracking` 已升为 Skill 型链路阶段；此处保留空元组
+#: 是为了让 ``BUSINESS_CAPABILITY_STAGES`` 的构成式子仍然显式可读——不加这一项，
+#: "八类"是怎么加出来的就又要靠猜。
+FEEDBACK_SOURCE_STAGES = ()
 
 #: 平台工具阶段：有产出、能反馈，但不作为业务能力对外呈现。
 PLATFORM_UTILITY_STAGES = ("knowledge_query",)
@@ -115,10 +144,11 @@ CAPABILITY_REGISTRY = {
         "partitions": ("gold", "regression", "fresh", "challenge"),
         "findings_based": True,
     },
-    "test_plan_generation": {
-        "label": STAGE_LABELS["test_plan_generation"], "kind": KIND_SKILL, "mode": MODE_WORKFLOW,
+    "risk_identification": {
+        "label": STAGE_LABELS["risk_identification"], "kind": KIND_SKILL, "mode": MODE_WORKFLOW,
         "partitions": ("gold", "regression", "fresh", "challenge", "hidden"),
-        "findings_based": False,
+        # 风险识别产出的是"识别出的高风险点"，误报/漏报对它同样有意义。
+        "findings_based": True,
     },
     "testcase_generation": {
         "label": STAGE_LABELS["testcase_generation"], "kind": KIND_SKILL, "mode": MODE_WORKFLOW,
@@ -130,18 +160,24 @@ CAPABILITY_REGISTRY = {
         "partitions": ("gold", "regression", "fresh", "challenge", "hidden"),
         "findings_based": False,
     },
-    "report_generation": {
-        "label": STAGE_LABELS["report_generation"], "kind": KIND_SKILL, "mode": MODE_WORKFLOW,
+    "issue_tracking": {
+        "label": STAGE_LABELS["issue_tracking"], "kind": KIND_SKILL, "mode": MODE_WORKFLOW,
         "partitions": ("gold", "regression", "fresh", "challenge", "hidden"),
+        # 问题跟踪产出的是"问题清单与闭环状态"，本质也是 findings。
+        "findings_based": True,
+    },
+    # 以下两项**已不在主链路**，但仍是 Skill 型可进化能力：能评测、能反馈、能自进化。
+    # 分区要求随之从五分区降到三分区——单能力闭环不需要凑"隐藏集"，
+    # 否则为了满足一个已无链路意义的门禁去造无意义样本。
+    "test_plan_generation": {
+        "label": STAGE_LABELS["test_plan_generation"], "kind": KIND_SKILL, "mode": MODE_SINGLE,
+        "partitions": ("gold", "regression", "fresh"),
         "findings_based": False,
     },
-    "risk_identification": {
-        "label": STAGE_LABELS["risk_identification"], "kind": KIND_FEEDBACK_SOURCE,
-        "mode": MODE_SINGLE, "partitions": ("gold", "regression"), "findings_based": True,
-    },
-    "issue_tracking": {
-        "label": STAGE_LABELS["issue_tracking"], "kind": KIND_FEEDBACK_SOURCE,
-        "mode": MODE_SINGLE, "partitions": ("gold", "regression"), "findings_based": True,
+    "report_generation": {
+        "label": STAGE_LABELS["report_generation"], "kind": KIND_SKILL, "mode": MODE_SINGLE,
+        "partitions": ("gold", "regression", "fresh"),
+        "findings_based": False,
     },
     "knowledge_query": {
         "label": STAGE_LABELS["knowledge_query"], "kind": KIND_PLATFORM_UTILITY,

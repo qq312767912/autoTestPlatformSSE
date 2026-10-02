@@ -4,18 +4,72 @@ import uuid
 from django.conf import settings
 from django.db import models
 
+from .capability_registry import ALL_WORKFLOW_STAGES, STAGE_LABELS
+
+#: 允许出现门禁记录的阶段 = 新主链路 ∪ 历史主链路（顺序为新链路在前）。
+#:
+#: 为什么必须是并集：``choices`` 在 Django 里不是"随便写写"，它会被
+#: ``full_clean()`` / 表单 / 后台下拉当成硬约束。只列新四阶段会让存量流程的门禁
+#: 在管理端打不开；只列历史四阶段则会让新链路的 ``risk_identification`` /
+#: ``issue_tracking`` 变成"非法取值"——而它们在库里明明有记录。
+#: 真值源在 ``capability_registry.ALL_WORKFLOW_STAGES``，这里引用它而不是再抄一份。
+WORKFLOW_STAGE_CHOICES = [(stage, STAGE_LABELS[stage]) for stage in ALL_WORKFLOW_STAGES]
+
+# ---------------------------------------------------------------- 门禁状态语义真值
+#
+# 这几个集合是**模块级**（不是 ``WorkflowStageGate`` 的类属性）的，原因很实际：
+# 别的模块要写 ``from .workflow_models import GATE_PASSING_STATES``，
+# 而类属性根本导不出来——写成类属性时那句 import 会在运行时抛 ImportError，
+# 而且因为 ``operations`` 是从各 view 里惰性 import 的，
+# ``manage.py check`` 根本碰不到它，问题要等到跑测试/真调接口才炸。
+#
+# 任何"能不能进下一步""能不能打分"的判断都必须读这里，不允许各模块自己写一遍
+# ``{"passed", "overridden"}``——早先这个集合散落在 4 处、2 个模块，加一个
+# ``confirmed`` 就会出现"页面显示可以继续、接口却 400"这种谁都不认账的状态不一致。
+
+#: 门禁**放行**状态集合：上一阶段落在这几个状态里，下一阶段才能进入。
+#:
+#: 三个成员的语义边界（对应 ``WorkflowStageGate.STATUS_CHOICES``）：
+#: - ``passed``：评测算出来的通过，证据是 ``scores``；
+#: - ``confirmed``：人工确认放行——**没有评分也能走**，证据是 ``decided_by``；
+#: - ``overridden``：负责人**在评测失败之后**强制放行，留痕含义比 ``confirmed`` 更重，
+#:   因此保留独立状态，两者不合并。
+GATE_PASSING_STATES = frozenset({"passed", "confirmed", "overridden"})
+
+#: 允许人工确认（→ ``confirmed``）的**起始**状态。
+#:
+#: ``failed`` 刻意不在其中：评测已给出"不达标"结论时，正确动作是修复后重跑，
+#: 或走负责人强制放行（``override``，要填原因、留更重的痕），而不是用一次普通点击
+#: 把"不达标"悄悄变成"已通过"。``passed`` 同样不需要再确认。
+GATE_CONFIRMABLE_STATES = frozenset({"pending", "unscored"})
+
+#: 允许「人工评分」的**起始**状态。
+#:
+#: 尚未评过（``pending``）、自动评测无信号（``unscored``）都可以打分；
+#: 已有结论（``passed`` / ``failed``）也允许**改判**——人打错了分是常事，
+#: 不给人改的路，只会逼人去数据库里改。
+#: ``confirmed`` / ``overridden`` 不在其中：那是已经拍板放行的终态，
+#: 再打分等于把已生效的放行撤回，属于"改判"而非"评分"。
+GATE_SCORABLE_STATES = frozenset({"pending", "unscored", "passed", "failed"})
+
+#: 已由**人**拍板、不可被自动重算推翻的终态。
+#:
+#: 单独列出来是因为 ``is_human_decided()`` 还要认 ``detail.manual_score``——
+#: 人工评分后的状态是 ``passed``/``failed``，光看 status 分不出"机器评的"还是
+#: "人评的"，而这两者的可信度与责任归属完全不同。
+GATE_HUMAN_FINAL_STATES = frozenset({"confirmed", "overridden"})
+
 
 class WorkflowStageGate(models.Model):
-    STAGE_CHOICES = [
-        ("test_plan_generation", "测试方案生成"),
-        ("testcase_generation", "测试用例生成"),
-        ("test_execution", "测试执行"),
-        ("report_generation", "报告生成"),
-    ]
+    STAGE_CHOICES = WORKFLOW_STAGE_CHOICES
+    #: 状态机真值。新增状态时**必须**同时看本文件顶部的 GATE_*_STATES——
+    #: 那些集合决定新状态能否放行、能否打分，漏改就会出现页面与接口两套说法。
     STATUS_CHOICES = [
         ("pending", "待测评"),
+        ("unscored", "无评分"),
         ("passed", "测评通过"),
         ("failed", "测评失败"),
+        ("confirmed", "人工确认"),
         ("overridden", "负责人放行"),
     ]
 

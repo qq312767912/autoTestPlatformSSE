@@ -23,6 +23,7 @@ from knowledge_evolution.capability_models import CapabilityDefinition, Capabili
 from knowledge_evolution.capability_registry import (
     ALL_TASK_TYPES,
     BUSINESS_CAPABILITY_STAGES,
+    WORKFLOW_STAGES,
     capability_info,
     grouped_stages,
     is_evolvable,
@@ -270,9 +271,16 @@ class PartitionRegistryTests(SkillHubBaseTests):
         self.assertIn("knowledge_query", ALL_TASK_TYPES)
 
     def test_workflow_stages_require_all_five_partitions(self):
-        for stage in ("test_plan_generation", "testcase_generation",
-                      "test_execution", "report_generation"):
+        # 遍历真值源而不是抄一份阶段名：主链路口径变更时，
+        # 抄下来的那份会变成"测的还是老四个阶段"，看起来绿其实是空的。
+        for stage in WORKFLOW_STAGES:
             self.assertEqual(len(required_partitions(stage)), 5, stage)
+
+    def test_demoted_stages_only_require_three_partitions(self):
+        """降为单次能力的阶段不再要求五分区：凑"隐藏集"对它们没有链路意义。"""
+        for stage in ("test_plan_generation", "report_generation"):
+            self.assertEqual(len(required_partitions(stage)), 3, stage)
+            self.assertNotIn("hidden", required_partitions(stage))
 
     def test_single_capability_does_not_require_hidden(self):
         self.assertNotIn("hidden", required_partitions("case_review"))
@@ -336,10 +344,14 @@ class MetricsAndPartitionTests(SkillHubBaseTests):
         self.assertEqual(detail["fresh"]["results"], 1)
 
     def test_missing_partitions_reports_absent_ones(self):
-        suite = self.make_suite(task_type="test_plan_generation")
+        # 用**链路阶段**做样本：只有链路阶段要求五分区齐全（含隐藏集）。
+        # 写死某个阶段名会在口径变更后失效——阶段名从"方案生成"换成"风险识别"时，
+        # 这里会静默变成"测一个单能力阶段"，而它本来就不要求隐藏集。
+        stage = WORKFLOW_STAGES[0]
+        suite = self.make_suite(task_type=stage)
         run = self.make_run_with_results(suite=suite, splits={"gold": 1})
         missing = EvaluationPartitionService.missing_partitions(
-            run, required=required_partitions("test_plan_generation"),
+            run, required=required_partitions(stage),
         )
         self.assertIn("hidden", missing)
         self.assertNotIn("gold", missing)

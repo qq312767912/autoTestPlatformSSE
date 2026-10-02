@@ -16,7 +16,13 @@ from .evaluation_models import EvaluationResult, EvaluationRun
 from .models import EvaluationCase, EvaluationSuite, FeedbackEvent, GenerationOutput, RetrievalTrace
 
 
-# workflow 阶段默认权重：越靠近最终业务结果权重越高
+# workflow 阶段默认权重：越靠近最终业务结果权重越高。
+#
+# 这里是一张"两套模板的并集先验表"，不是某一套模板的完整权重表——
+# 之所以可以这样写：``_write_workflow_result`` 里最终分是
+# ``weighted_score / total_weight``，**按实际出现的阶段做了归一化**，
+# 所以这张表加总不等于 1 不影响满分流程拿到满分，只影响阶段间的相对权重。
+# 想改成"每套模板一张表"之前先确认这一点，否则只是把能用的东西改坏。
 DEFAULT_STAGE_WEIGHTS = {
     "risk_identification": 0.15,
     "test_plan_generation": 0.20,

@@ -307,15 +307,18 @@ class ResponsibilityService:
 
     #: 归因类别 → 更可能出问题的阶段提示。仅用于在无确认归因时给出**参考**线索，
     #: 不参与 ``resolved`` 判定。
+    #: ``downstream`` 指向**收口阶段**——主链路口径已从"报告生成"改为
+    #: "问题跟踪"，历史流程仍可能是报告生成，所以这类线索按新口径给，
+    #: 真正的责任阶段永远以 ``trace_upstream_versions`` 的确认归因为准。
     CATEGORY_STAGE_HINTS = {
-        "prompt": "test_plan_generation",
+        "prompt": "risk_identification",
         "instruction": "case_review",
         "knowledge": "testcase_generation",
         "retrieval": "testcase_generation",
         "skill": "testcase_generation",
         "tool": "test_execution",
         "environment": "test_execution",
-        "downstream": "report_generation",
+        "downstream": "issue_tracking",
     }
 
     @classmethod

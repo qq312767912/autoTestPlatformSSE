@@ -1146,12 +1146,31 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
         project_id = int(request.query_params["project"]); self._check(request, project_id)
         return Response(ProjectQualityCockpitService().summarize(project_id))
 
+    @action(detail=False, methods=["get"], url_path="workflow-stage-catalog")
+    def workflow_stage_catalog(self, request):
+        """发起流程向导第一步的数据源：按阶段列出可选的 Skill 包（只读）。
+
+        放在独立接口而不是让前端拼 ``/skills/``：向导要的是"这个阶段有哪些可选项、
+        默认是哪个、选它能不能锁上版本"，这些结论依赖 manifest 声明与发布状态，
+        由前端自己算会变成第二套判断——而它一旦和后端不一致，
+        用户就会遇到"页面明明能选、发起却 400"。
+        """
+        from .operations import WorkflowGateService
+        from projects.models import Project
+
+        project_id = int(request.query_params["project"]); self._check(request, project_id)
+        project = get_object_or_404(Project, pk=project_id)
+        return Response(WorkflowGateService.stage_catalog(project=project))
+
     @action(detail=False, methods=["post"], url_path="start-workflow")
     def start_workflow(self, request):
-        """启动四阶段流水线：锁定四个阶段的 Skill 版本（T15）。
+        """启动四阶段流水线：按阶段锁定 Skill 版本（T15）。
 
         只允许测试负责人启动：启动动作决定了整条链路用哪几个能力包，
         属于发布决策而非日常执行。
+
+        请求可带 ``pins``：``{"阶段": "Skill 的 UUID"}``——向导里人**逐阶段选定**的包。
+        不传则沿用"按 manifest 声明解析活跃版本"的旧行为，两种入口都要能用。
         """
         from django.core.exceptions import ValidationError as DjangoValidationError
         from rest_framework.exceptions import ValidationError
@@ -1162,10 +1181,17 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
         project_id = int(request.data["project"]); self._check(request, project_id)
         _ensure_test_lead(request.user, project_id)
         project = get_object_or_404(Project, pk=project_id)
+        raw_pins = request.data.get("pins")
+        if raw_pins in (None, ""):
+            pins = {}
+        elif isinstance(raw_pins, dict):
+            pins = {str(stage): str(value) for stage, value in raw_pins.items() if value}
+        else:
+            raise ValidationError("pins 必须是「阶段 -> Skill ID」的对象")
         try:
             result = WorkflowGateService.start_workflow(
                 project=project, workflow_id=str(request.data.get("workflow_id") or ""),
-                actor=request.user,
+                actor=request.user, pins=pins,
             )
         except DjangoValidationError as exc:
             raise ValidationError(exc.messages)
@@ -1193,7 +1219,7 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=["post"], url_path="evaluate-workflow-stage")
     def evaluate_workflow_stage(self, request):
         from .operations import WorkflowGateService
-        from .workflow_models import WorkflowStageGate
+        from .workflow_models import GATE_CONFIRMABLE_STATES, GATE_PASSING_STATES, WorkflowStageGate
         project_id = int(request.data["project"]); self._check(request, project_id)
         gate = get_object_or_404(
             WorkflowStageGate, project_id=project_id,
@@ -1203,6 +1229,10 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
         return Response({
             "id": str(gate.id), "status": gate.status, "scores": gate.scores,
             "reason": gate.reason, "decided_by": request.user.username,
+            # 评测后状态可能正好落到 unscored（无信号）——此时页面必须立刻出现
+            # 「人工确认」按钮，所以把准入结论一并回给前端，不让它自己猜。
+            "confirmable": gate.status in GATE_CONFIRMABLE_STATES,
+            "passed": gate.status in GATE_PASSING_STATES,
         })
 
     @action(detail=False, methods=["post"], url_path="override-workflow-stage")
@@ -1219,6 +1249,181 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
         return Response({
             "id": str(gate.id), "status": gate.status, "scores": gate.scores,
             "reason": gate.reason, "decided_by": request.user.username,
+            "confirmable": False, "passed": True,
+        })
+
+    @action(detail=False, methods=["post"], url_path="confirm-workflow-stage")
+    def confirm_workflow_stage(self, request):
+        """人工确认放行：**不要求先有评分**，确认后该阶段即可进入下一阶段。
+
+        权限刻意与 ``evaluate-workflow-stage`` 同一档（项目成员），而**不是**
+        ``override-workflow-stage`` 的测试负责人档：
+
+        - ``confirm`` 处理的是"**尚无结论**"（待测评 / 无评分）。链路卡在
+          "评测还没接通"上，不该要求执行人员先去找负责人签字——那会把
+          "评分挂起"变成"链路停摆"，正是本次要解掉的问题。
+        - ``override`` 处理的是"**已有负面结论**"（评测失败）后的人为推翻，
+          那是发布决策，仍然只允许测试负责人，且必须填原因。
+
+        留痕不因此打折：``decided_by`` / ``decided_at`` / ``reason`` 照写，
+        事后能分清"有人确认过"与"没人管"。
+        """
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+
+        from .operations import WorkflowGateService
+        from .workflow_models import WorkflowStageGate
+
+        project_id = int(request.data["project"]); self._check(request, project_id)
+        gate = get_object_or_404(
+            WorkflowStageGate, project_id=project_id,
+            workflow_id=str(request.data["workflow_id"]), stage=str(request.data["stage"]),
+        )
+        try:
+            gate = WorkflowGateService.confirm(
+                gate, request.user, str(request.data.get("reason") or "")
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response({
+            "id": str(gate.id), "status": gate.status, "scores": gate.scores,
+            "reason": gate.reason, "decided_by": request.user.username,
+            "confirmable": False, "passed": True,
+        })
+
+    @action(detail=False, methods=["post"], url_path="score-workflow-stage")
+    def score_workflow_stage(self, request):
+        """人工评分（百分制）。
+
+        与 ``confirm``（无评分放行）并存而不是二选一：确认回答的是"能不能先过"，
+        评分回答的是"这一阶段到底做得怎么样"。前者让链路不被卡住，后者让质量
+        有据可查——两者都要，所以两个动作都留。
+
+        权限与 ``evaluate-workflow-stage`` 同一档（项目成员）：评分是对本阶段产出的
+        判断，属于执行/评审职责；**推翻负面结论**（``override``）才是发布决策，
+        那一档留给测试负责人。
+        """
+        from .operations import WorkflowGateService
+        from .workflow_models import WorkflowStageGate
+
+        project_id = int(request.data["project"]); self._check(request, project_id)
+        gate = get_object_or_404(
+            WorkflowStageGate, project_id=project_id,
+            workflow_id=str(request.data["workflow_id"]), stage=str(request.data["stage"]),
+        )
+        gate = WorkflowGateService.score(
+            gate, request.user, request.data.get("score"),
+            str(request.data.get("reason") or ""),
+        )
+        return Response({
+            "id": str(gate.id), "status": gate.status, "scores": gate.scores,
+            "threshold": gate.threshold, "reason": gate.reason,
+            "decided_by": request.user.username,
+            "manual_score": (gate.detail or {}).get("manual_score"),
+        })
+
+    @action(detail=False, methods=["post"], url_path="execute-workflow-stage")
+    def execute_workflow_stage(self, request):
+        """「执行本阶段」：前置门禁校验 + 执行参数下发。
+
+        刻意**不**在服务端把阶段跑起来：平台只有 ``test_execution`` 有真实执行器
+        （且必须先由人选好用例套件），方案 / 用例 / 报告三个阶段的产出由 agent 经
+        ``/orchestrator/agent-loop/`` 提交。造一个"点了就在后台跑"的假入口，
+        会让人以为跑起来了而实际什么都没发生。取舍详见
+        ``WorkflowGateService.plan_execution``。
+        """
+        from .operations import WorkflowGateService
+        from projects.models import Project
+
+        project_id = int(request.data["project"]); self._check(request, project_id)
+        project = get_object_or_404(Project, pk=project_id)
+        plan = WorkflowGateService.plan_execution(
+            project=project,
+            workflow_id=str(request.data.get("workflow_id") or ""),
+            stage=str(request.data.get("stage") or ""),
+            actor=request.user,
+        )
+        return Response(plan, status=201)
+
+    @action(detail=False, methods=["get"], url_path="workflow-stage-output")
+    def workflow_stage_output(self, request):
+        """「查看结果」：读取某一阶段产出的正文与溯源信息（只读）。
+
+        定位刻意走 **project + workflow_id + stage 三者一起**，而不是让页面按
+        output id 直接取：否则任何项目成员都能靠猜 id 读到别的项目的产出正文，
+        权限口径就变成"取决于 id 是否被猜中"。这里多一次三元定位，
+        换来的是越权读取在这个接口上不可能发生。
+        """
+        from rest_framework.exceptions import ValidationError
+
+        from .models import GenerationOutput
+        from .operations import ALL_WORKFLOW_STAGE_SET, WorkflowGateService
+        from .workflow_models import WorkflowStageGate
+
+        project_id = int(request.query_params["project"]); self._check(request, project_id)
+        workflow_id = str(request.query_params.get("workflow_id") or "")
+        stage = str(request.query_params.get("stage") or "")
+        # 用**全集**而不是新链路默认序列：存量流程还停在方案/报告阶段，
+        # 只认新序列会让它们的产出在页面上永远"查不到"。
+        if stage not in ALL_WORKFLOW_STAGE_SET:
+            raise ValidationError(f"未知的阶段：{stage}")
+
+        gate = WorkflowStageGate.objects.filter(
+            project_id=project_id, workflow_id=workflow_id, stage=stage
+        ).select_related("output", "output__skill_version").first()
+        output = gate.output if gate is not None and gate.output_id else None
+        if output is None:
+            # 兜底：旁路产出（有产出但门禁还没建）也要能查看，与 workflow-status 的兜底一致。
+            for candidate in GenerationOutput.objects.filter(
+                project_id=project_id
+            ).select_related("skill_version"):
+                protocol = (candidate.metadata or {}).get("protocol") or {}
+                if (
+                    str(protocol.get("workflow_id") or "") == workflow_id
+                    and str(protocol.get("stage") or candidate.task_type) == stage
+                ):
+                    output = candidate
+                    break
+        if output is None:
+            raise ValidationError(
+                f"{WorkflowGateService.STAGE_LABELS.get(stage, stage)}阶段暂无产出可查看；"
+                f"请先执行本阶段"
+            )
+
+        content = output.content or ""
+        # 正文可能很长，接口只回前 4000 字 + 真实长度：页面据此提示"已截断"，
+        # 而不是让人以为报告只有这么长。
+        excerpt = content[:4000]
+        return Response({
+            "stage": stage,
+            "stage_label": WorkflowGateService.STAGE_LABELS.get(stage, stage),
+            "workflow_id": workflow_id,
+            "output_id": str(output.pk),
+            "task_id": output.task_id,
+            "task_type": output.task_type,
+            "created_at": output.created_at.isoformat() if output.created_at else "",
+            "content": excerpt,
+            "content_length": len(content),
+            "truncated": len(content) > len(excerpt),
+            "skill_name": (
+                output.skill_version.skill.name
+                if output.skill_version_id and output.skill_version.skill_id else ""
+            ),
+            "skill_version": output.skill_version.version if output.skill_version_id else "",
+            "package_sha256": output.skill_package_sha256 or "",
+            "gate": ({
+                "status": gate.status,
+                "scores": gate.scores,
+                "threshold": gate.threshold,
+                "reason": gate.reason,
+                "decided_by": (
+                    gate.decided_by.username if gate.decided_by_id else ""
+                ),
+                "decided_at": gate.decided_at.isoformat() if gate.decided_at else "",
+                "manual_score": (gate.detail or {}).get("manual_score"),
+                "report_contract": (gate.detail or {}).get("report_contract"),
+                "evaluation": (gate.detail or {}).get("evaluation"),
+            } if gate is not None else None),
         })
 
     @action(detail=False, methods=["post"], url_path="evaluate-workflow")
@@ -1240,7 +1445,10 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
             payload = WorkflowEvaluationService.evaluate_and_record(
                 project=project,
                 workflow_id=str(request.data.get("workflow_id") or ""),
-                stage=str(request.data.get("stage") or "report_generation"),
+                # 不传 stage 就交给服务层取**该流程的收口阶段**（新流程=问题跟踪，
+                # 存量=报告生成）。写死 report_generation 会让新链路跑完评测
+                # 却落不到任何门禁上，页面看起来"跑了但没变化"。
+                stage=str(request.data.get("stage") or ""),
                 actor=request.user,
             )
         except DjangoValidationError as exc:

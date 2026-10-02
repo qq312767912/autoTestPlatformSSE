@@ -62,6 +62,7 @@ class SkillRuntimeResolver:
     def resolve_version(
         cls, *, project, capability=None, stage: str = "", name: str = "",
         skill=None, verify_integrity: bool = False,
+        allow_stage_mismatch: bool = False,
     ) -> SkillVersion | None:
         """解析当前应当使用的活跃版本；没有可用版本时返回 None。
 
@@ -72,6 +73,11 @@ class SkillRuntimeResolver:
             skill: 直接指定要解析的 Skill（单能力任务通常已经知道自己在用哪个 Skill，
                 例如用例审查会带上用户选中的那个）。给了它就不再按名称/阶段去猜，
                 避免"同名 Skill 有多条时解析到另一条"这种静默错误。
+            allow_stage_mismatch: 显式选择与 manifest 声明不一致时是否放行。
+                默认 False——"声明了别的阶段"是个信号，不该被静默忽略。
+                只有**人明确为某个阶段指定了包**（发起流程向导）时才置 True：
+                此时"人选了它"这件事本身优先于包里的默认声明，但仍须是
+                ``active`` 版本，R13「无活跃版本拒绝执行」不因这条放宽而失效。
         """
         started = time.perf_counter()
         project_id = getattr(project, "pk", project)
@@ -87,7 +93,7 @@ class SkillRuntimeResolver:
             queryset = queryset.filter(name=name)
         if capability is not None:
             queryset = queryset.filter(capability_id=getattr(capability, "pk", capability))
-        if stage:
+        if stage and not (skill is not None and allow_stage_mismatch):
             # 交给数据库过滤：Postgres 会把 manifest->>'stage' 下推到 JSON 索引，
             # 比取回全部活跃 Skill 再在 Python 里筛要稳得多。
             queryset = queryset.filter(active_version__manifest__stage=stage)
@@ -131,6 +137,7 @@ class SkillRuntimeResolver:
         cls, *, project, workflow_id, actor=None, scope: str = "single",
         stage: str = "", capability=None, name: str = "", skill=None,
         verify_integrity: bool = False, allow_missing: bool = False,
+        allow_stage_mismatch: bool = False,
     ) -> WorkflowSkillLock | None:
         """为任务固化 Skill 版本，返回 ``WorkflowSkillLock``。
 
@@ -142,6 +149,8 @@ class SkillRuntimeResolver:
             skill: 直接指定要锁定的 Skill（见 ``resolve_version``）。
             allow_missing: 为 True 时，解析不到活跃版本返回 None 而不是拒绝。
                 只有"该能力本来就可以没有 Skill"的场景才该打开它。
+            allow_stage_mismatch: 见 ``resolve_version``。仅在"人显式指定了包"的
+                入口打开。
         """
         if not workflow_id:
             raise ValidationError("锁定 Skill 版本必须提供 workflow_id")
@@ -160,7 +169,7 @@ class SkillRuntimeResolver:
 
         version = cls.resolve_version(
             project=project, capability=capability, stage=stage, name=name, skill=skill,
-            verify_integrity=verify_integrity,
+            verify_integrity=verify_integrity, allow_stage_mismatch=allow_stage_mismatch,
         )
         if version is None:
             if allow_missing:
@@ -171,6 +180,7 @@ class SkillRuntimeResolver:
                 )
             )
 
+        declared_stage = str((version.manifest or {}).get("stage") or "")
         lock, _ = WorkflowSkillLock.objects.get_or_create(
             project_id=project_id, workflow_id=str(workflow_id), lock_key=lock_key,
             defaults={
@@ -186,6 +196,13 @@ class SkillRuntimeResolver:
                     "resolved_version": version.version,
                     "resolved_state": version.state,
                     "source_type": version.source_type,
+                    # 人显式指定的包若与 manifest 声明不一致，必须留下证据：
+                    # 否则事后只看到"这一阶段用了这个包"，看不出当时是**违反声明**用的。
+                    "pinned": bool(skill is not None),
+                    "declared_stage": declared_stage,
+                    "stage_mismatch": bool(
+                        skill is not None and stage and declared_stage and declared_stage != stage
+                    ),
                 },
             },
         )

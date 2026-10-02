@@ -4,6 +4,7 @@ from rest_framework.test import APIClient
 
 from projects.models import Project, ProjectMember
 
+from .capability_registry import LEGACY_WORKFLOW_STAGES, WORKFLOW_STAGES
 from .models import GenerationOutput, RetrievalTrace
 from .operations import WorkflowGateService
 from .protocol import ADAPTERS, publish_output
@@ -49,6 +50,46 @@ class ProjectQualityCockpitTests(TestCase):
         stages = response.data["workflows"][0]["stages"]
         self.assertEqual(stages[0]["status"], "pending")
         self.assertEqual(stages[1]["status"], "blocked")
+
+    def test_cockpit_workflow_carries_the_metadata_the_version_list_needs(self):
+        """左侧流程版本列表要的四项元信息必须来自后端，不能靠前端从 stages 里猜。
+
+        "何时发起"根本不在 stages 里，前端推不出来；"锁了几个阶段"推得出、但会和
+        门禁口径各写一遍。这里把这四项**逐个断言**，缺任何一项左栏就会退化成
+        一排长得一样的 workflow_id。
+        """
+        self._output(stage=LEGACY_WORKFLOW_STAGES[0], workflow_id="wf-legacy")
+        response = self.client.get(
+            "/api/knowledge-evolution/operations/cockpit/", {"project": self.project.id}
+        )
+        flow = next(
+            item for item in response.data["workflows"] if item["workflow_id"] == "wf-legacy"
+        )
+        # 阶段序列要是这条流程自己的那一套，且被正确标成历史模板——
+        # 标错的话用户会以为它"少了两个阶段"。
+        self.assertEqual(list(flow["stage_order"]), list(LEGACY_WORKFLOW_STAGES))
+        self.assertEqual(flow["stage_template"], "legacy")
+        self.assertEqual(flow["passed_count"], 0)
+        self.assertFalse(flow["completed"])
+        # 刚登记了产出，时间足迹必须有值；为空等于左栏显示"发起 -"。
+        self.assertIsNotNone(flow["created_at"])
+        self.assertIsNotNone(flow["updated_at"])
+        self.assertGreaterEqual(flow["updated_at"], flow["created_at"])
+        # 未发起任何版本锁定 → 0（而不是 None，否则前端要写两套默认值）。
+        self.assertEqual(flow["locked_version_count"], 0)
+
+    def test_cockpit_marks_new_chain_flows_as_current_template(self):
+        """新链路发起的流程必须标成 current，否则"当前/历史"的区分没有区分度。"""
+        self._output(stage=WORKFLOW_STAGES[0], workflow_id="wf-new")
+        response = self.client.get(
+            "/api/knowledge-evolution/operations/cockpit/", {"project": self.project.id}
+        )
+        flow = next(
+            item for item in response.data["workflows"] if item["workflow_id"] == "wf-new"
+        )
+        self.assertEqual(list(flow["stage_order"]), list(WORKFLOW_STAGES))
+        self.assertEqual(flow["stage_template"], "current")
+        self.assertEqual(response.data["stage_order"], list(WORKFLOW_STAGES))
 
     def test_executor_cannot_override_but_owner_can_with_reason(self):
         self._output()

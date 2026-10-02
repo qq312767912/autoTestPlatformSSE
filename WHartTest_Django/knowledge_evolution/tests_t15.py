@@ -352,10 +352,9 @@ class WorkflowAPITests(TestCase):
         )
         self.assertEqual(response.status_code, 200, response.content)
         payload = response.json()["data"]
-        self.assertEqual(
-            [item["stage"] for item in payload["stages"]],
-            ["test_plan_generation", "testcase_generation", "test_execution", "report_generation"],
-        )
+        # 这条流程没有任何留痕，按**新链路默认序列**解释（口径真值见
+        # ``capability_registry.WORKFLOW_STAGES``，不在测试里再抄一遍字面量）。
+        self.assertEqual([item["stage"] for item in payload["stages"]], STAGES)
         self.assertEqual(payload["stages"][0]["state"], "ready")
 
     def test_non_member_cannot_read_status(self):

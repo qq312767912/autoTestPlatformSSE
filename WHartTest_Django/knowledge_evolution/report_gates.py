@@ -35,18 +35,40 @@ from typing import Any
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 
-from .capability_registry import STAGE_LABELS, WORKFLOW_STAGES
+from .capability_registry import (
+    LEGACY_WORKFLOW_STAGES,
+    STAGE_LABELS,
+    WORKFLOW_STAGES,
+)
 from .evaluation_models import EvaluationResult
 from .models import GenerationOutput
+from .workflow_models import GATE_PASSING_STATES
 
 logger = logging.getLogger(__name__)
 
+#: 收口阶段（链路最后一段）的历史名字。**不要**把它当成"唯一的收口阶段"，
+#: 判"是不是收口"请用 ``is_closing_stage``。
 REPORT_STAGE = "report_generation"
 
-#: 报告必须引用的上游阶段（顺序即链路顺序）。
-UPSTREAM_STAGES: tuple[str, ...] = tuple(
-    stage for stage in WORKFLOW_STAGES if stage != REPORT_STAGE
-)
+#: 收口阶段 -> 契约参数。主链路口径变过一次（报告生成 → 问题跟踪），
+#: 两个阶段的"收口内容"本来就不同，用同一套必需字段只会逼出编造的数字：
+#:
+#: - ``report_generation``：完整四件套（覆盖率/通过率/失败分布/未闭环问题）。
+#: - ``issue_tracking``：问题跟踪是"问题清单 + 闭环状态"，没有覆盖率与通过率
+#:   这两个概念，硬要求只会让人填假数——契约的意义是把编造拦在门外，不是逼人编造。
+CLOSING_CONTRACTS: dict[str, dict] = {
+    REPORT_STAGE: {
+        "upstream": tuple(s for s in LEGACY_WORKFLOW_STAGES if s != REPORT_STAGE),
+        "stats": ("coverage", "pass_rate", "failure_distribution", "unclosed_issues"),
+    },
+    "issue_tracking": {
+        "upstream": tuple(s for s in WORKFLOW_STAGES if s != "issue_tracking"),
+        "stats": ("failure_distribution", "unclosed_issues"),
+    },
+}
+
+#: 契约字段别名默认按报告阶段解析；``issue_tracking`` 走同一张表。
+DEFAULT_CLOSING_STAGE = REPORT_STAGE
 
 #: 报告正文契约版本。写进校验结果，便于将来放宽/收紧时区分历史结论。
 REPORT_SCHEMA_VERSION = "workflow-report/v1"
@@ -55,6 +77,7 @@ REPORT_SCHEMA_VERSION = "workflow-report/v1"
 #: 规范来源始终是协议 ``parent_output_ids``；这里的别名只是为了兼容
 #: "把引用内联进正文"的产出风格，不是第二套规范。
 REF_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "risk_identification": ("risk_output_ids", "risk_refs", "risk_identification_output_ids"),
     "test_plan_generation": ("plan_output_ids", "plan_refs", "test_plan_output_ids"),
     "testcase_generation": ("case_output_ids", "case_refs", "testcase_output_ids"),
     "test_execution": ("execution_output_ids", "execution_refs", "test_execution_output_ids"),
@@ -102,7 +125,29 @@ def _matched_type(value: Any, expected: str) -> bool:
 
 
 class ReportGateService:
-    """报告契约校验；结论同时供门禁、页面和端到端评测读取。"""
+    """收口契约校验；结论同时供门禁、页面和端到端评测读取。"""
+
+    @staticmethod
+    def is_closing_stage(stage: str) -> bool:
+        """该阶段是不是链路的收口阶段（需要过契约校验）。
+
+        新流程的收口是「问题跟踪」，存量流程是「报告生成」，两个都要认。
+        """
+        return str(stage or "") in CLOSING_CONTRACTS
+
+    @staticmethod
+    def contract_for(stage: str) -> dict:
+        """取某收口阶段的契约参数（上游阶段集合 + 必需统计项）。
+
+        未知阶段退化成报告契约：宁可多要几项、让人一眼看出"这阶段的契约是按
+        报告那套在要求"，也不要静默放行——契约的意义就是把"没写清结论"挡在门外。
+        """
+        return CLOSING_CONTRACTS.get(str(stage or ""), CLOSING_CONTRACTS[DEFAULT_CLOSING_STAGE])
+
+    @staticmethod
+    def stage_of(output) -> str:
+        protocol = ((getattr(output, "metadata", None) or {}).get("protocol") or {})
+        return str(protocol.get("stage") or getattr(output, "task_type", "") or "")
 
     @staticmethod
     def body(output) -> tuple[dict, bool]:
@@ -119,15 +164,17 @@ class ReportGateService:
         return parsed, True
 
     @staticmethod
-    def _collect_references(output, body: dict) -> dict:
+    def _collect_references(output, body: dict, upstream: tuple[str, ...]) -> dict:
         """汇总引用来源：协议 parent_output_ids ∪ 正文内联引用字段。"""
         protocol = ((output.metadata or {}).get("protocol") or {})
         protocol_ids = [
             str(item) for item in (protocol.get("parent_output_ids") or []) if str(item or "")
         ]
-        by_stage: dict[str, list[str]] = {stage: [] for stage in UPSTREAM_STAGES}
+        by_stage: dict[str, list[str]] = {stage: [] for stage in upstream}
         inline_ids: list[str] = []
         for stage, aliases in REF_FIELD_ALIASES.items():
+            if stage not in by_stage:
+                continue
             key, value = _pick(body, aliases)
             if not key or not isinstance(value, list):
                 continue
@@ -143,16 +190,20 @@ class ReportGateService:
 
     @classmethod
     def validate(cls, output) -> dict:
-        """校验一份报告产出；**不抛异常**，把结论作为数据返回。
+        """校验一份收口产出；**不抛异常**，把结论作为数据返回。
 
         返回结构固定，页面与门禁读同一份：
         ``ok`` / ``upstream`` / ``schema`` / ``errors``。
         """
         output = cls._as_output(output)
+        stage = cls.stage_of(output)
+        contract = cls.contract_for(stage)
+        upstream = tuple(contract["upstream"])
+        required_stats = tuple(contract["stats"])
         protocol = ((output.metadata or {}).get("protocol") or {})
         workflow_id = str(protocol.get("workflow_id") or "")
         body, parsable = cls.body(output)
-        refs = cls._collect_references(output, body)
+        refs = cls._collect_references(output, body, upstream)
         errors: list[str] = []
 
         # ---------------- 上游引用完整性 ----------------
@@ -176,20 +227,20 @@ class ReportGateService:
                 # 同项目但另一条流水线：引用它等于把别条链路的结论挪过来用。
                 foreign.append(item_id)
                 continue
-            if item_stage in UPSTREAM_STAGES:
+            if item_stage in upstream:
                 covered.add(item_stage)
 
-        missing_stages = [stage for stage in UPSTREAM_STAGES if stage not in covered]
+        missing_stages = [name for name in upstream if name not in covered]
         upstream_ok = not missing_stages and not unresolved and not foreign
         if missing_stages:
             errors.append(
-                "报告未引用上游阶段产出："
-                + "、".join(STAGE_LABELS.get(stage, stage) for stage in missing_stages)
+                f"{STAGE_LABELS.get(stage, stage)}未引用上游阶段产出："
+                + "、".join(STAGE_LABELS.get(name, name) for name in missing_stages)
             )
         if unresolved:
-            errors.append(f"报告引用了不存在的产出 ID：{'、'.join(unresolved)}")
+            errors.append(f"引用了不存在的产出 ID：{'、'.join(unresolved)}")
         if foreign:
-            errors.append(f"报告引用了不属于本链路（{workflow_id or '未指定工作流'}）的产出：{'、'.join(foreign)}")
+            errors.append(f"引用了不属于本链路（{workflow_id or '未指定工作流'}）的产出：{'、'.join(foreign)}")
 
         # ---------------- 正文契约 ----------------
         missing_fields: list[str] = []
@@ -197,22 +248,26 @@ class ReportGateService:
         range_errors: list[str] = []
         stats: dict[str, Any] = {}
         if not parsable:
-            errors.append("报告正文不是合法的 JSON 对象，无法校验覆盖率/通过率/失败分布/未闭环问题")
+            errors.append(
+                "产出正文不是合法的 JSON 对象，无法校验"
+                + "/".join(REQUIRED_STATS[item][1] for item in required_stats)
+            )
         else:
-            for canonical, (expected, label, aliases) in REQUIRED_STATS.items():
+            for canonical in required_stats:
+                expected, label, aliases = REQUIRED_STATS[canonical]
                 key, value = _pick(body, (canonical,) + aliases)
                 if not key:
                     missing_fields.append(canonical)
-                    errors.append(f"报告缺少「{label}」（字段名 {canonical}）")
+                    errors.append(f"缺少「{label}」（字段名 {canonical}）")
                     continue
                 if not _matched_type(value, expected):
                     type_errors.append(f"{canonical}:{type(value).__name__}")
-                    errors.append(f"报告「{label}」字段类型不合法：{key}")
+                    errors.append(f"「{label}」字段类型不合法：{key}")
                     continue
                 if canonical in RATE_FIELDS:
                     if not 0.0 <= float(value) <= 1.0:
                         range_errors.append(f"{canonical}={value}")
-                        errors.append(f"报告「{label}」超出 0~1 取值区间：{value}")
+                        errors.append(f"「{label}」超出 0~1 取值区间：{value}")
                         continue
                     stats[canonical] = round(float(value), 6)
                 elif canonical == "failure_distribution":
@@ -234,11 +289,14 @@ class ReportGateService:
             "workflow_id": workflow_id,
             "upstream": {
                 "ok": upstream_ok,
-                "required_stages": list(UPSTREAM_STAGES),
+                # 契约按阶段不同（报告生成 vs 问题跟踪），所以把"这一份按哪套判"也回给页面：
+                # 否则页面看到"缺覆盖率"会以为系统坏了，其实是这一阶段的契约里没有它。
+                "stage": stage,
+                "required_stages": list(upstream),
                 "covered_stages": sorted(covered),
                 "missing_stages": missing_stages,
                 "missing_stage_labels": [
-                    STAGE_LABELS.get(stage, stage) for stage in missing_stages
+                    STAGE_LABELS.get(name, name) for name in missing_stages
                 ],
                 "referenced_output_ids": refs["all_ids"],
                 "from_protocol": refs["protocol_ids"],
@@ -249,7 +307,7 @@ class ReportGateService:
             "schema": {
                 "ok": schema_ok,
                 "parsable": parsable,
-                "required_fields": list(REQUIRED_STATS),
+                "required_fields": list(required_stats),
                 "missing_fields": missing_fields,
                 "type_errors": type_errors,
                 "range_errors": range_errors,
@@ -272,7 +330,7 @@ class ReportGateService:
             return False
         protocol = ((getattr(output, "metadata", None) or {}).get("protocol") or {})
         stage = str(protocol.get("stage") or getattr(output, "task_type", "") or "")
-        return stage == REPORT_STAGE
+        return cls.is_closing_stage(stage)
 
     @staticmethod
     def _as_output(output):
@@ -336,7 +394,7 @@ class WorkflowEvaluationService:
         stats = cls.stage_scores(output, threshold=threshold)
         scores = stats["scores"]
 
-        contract = ReportGateService.validate(output) if stage == REPORT_STAGE else None
+        contract = ReportGateService.validate(output) if ReportGateService.is_closing_stage(stage) else None
         scored_ok = bool(scores) and all(value >= threshold for value in scores.values())
         contract_ok = contract is None or contract["ok"]
         judged = bool(scores) or contract is not None
@@ -377,6 +435,12 @@ class WorkflowEvaluationService:
 
         workflow_id = str(workflow_id or "").strip()
         threshold = cls.DEFAULT_THRESHOLD if threshold is None else threshold
+        # 端到端覆盖率的分母必须是**这条流程自己的阶段数**：口径变更后退化成
+        # 全局默认序列，会让存量流程永远算出"缺风险识别、缺问题跟踪"，
+        # 于是历史链路永远判不通过。
+        from .operations import WorkflowGateService
+
+        stage_order = WorkflowGateService.stage_order_for(project.pk, workflow_id)
         outputs: dict[str, Any] = {}
         for output in GenerationOutput.objects.filter(project_id=project.pk):
             protocol = ((output.metadata or {}).get("protocol") or {})
@@ -401,14 +465,17 @@ class WorkflowEvaluationService:
         missing_stages: list[str] = []
         open_gates: list[str] = []
         version_pins: list[dict] = []
-        for stage in WORKFLOW_STAGES:
+        for stage in stage_order:
             output = outputs.get(stage)
             gate = gates.get(stage)
             lock = locks.get(stage)
             if output is None:
                 missing_stages.append(stage)
             gate_status = gate.status if gate is not None else ("pending" if output else "missing")
-            gate_passed = gate_status in {"passed", "overridden"}
+            # 放行集合必须与 ``WorkflowStageGate.GATE_PASSING_STATES`` 同源：
+            # 端到端覆盖率的"是否放行"若自己写一份，新增 ``confirmed`` 之后
+            # 会出现"页面显示可继续、端到端评测却报 open_gates"的两套结论。
+            gate_passed = gate_status in GATE_PASSING_STATES
             if output is not None and not gate_passed:
                 open_gates.append(stage)
             pin = {
@@ -443,8 +510,10 @@ class WorkflowEvaluationService:
                 "overridden": gate_status == "overridden",
             })
 
-        coverage = round(len(WORKFLOW_STAGES) - len(missing_stages), 6) / len(WORKFLOW_STAGES)
-        report_output = outputs.get(REPORT_STAGE)
+        stage_count = len(stage_order) or 1
+        coverage = round(stage_count - len(missing_stages), 6) / stage_count
+        closing_stage = stage_order[-1] if stage_order else DEFAULT_CLOSING_STAGE
+        report_output = outputs.get(closing_stage)
         report = ReportGateService.validate(report_output) if report_output is not None else None
         report_ok = bool(report and report["ok"])
 
@@ -458,19 +527,23 @@ class WorkflowEvaluationService:
                 "阶段门禁未放行：" + "、".join(STAGE_LABELS.get(s, s) for s in open_gates)
             )
         if report_output is None:
-            failures.append("尚无报告阶段产出，无法判定链路终态")
+            failures.append(
+                f"尚无{STAGE_LABELS.get(closing_stage, closing_stage)}阶段产出，无法判定链路终态"
+            )
         elif not report_ok:
-            failures.append("报告契约校验未通过")
+            failures.append(
+                f"{STAGE_LABELS.get(closing_stage, closing_stage)}阶段的收口契约校验未通过"
+            )
 
         return {
             "scope": cls.SCOPE_END_TO_END,
             "workflow_id": workflow_id,
             "project_id": project.pk,
-            "stage_order": list(WORKFLOW_STAGES),
+            "stage_order": list(stage_order),
             "stages": stages,
             "coverage": coverage,
-            "covered_count": len(WORKFLOW_STAGES) - len(missing_stages),
-            "stage_count": len(WORKFLOW_STAGES),
+            "covered_count": stage_count - len(missing_stages),
+            "stage_count": stage_count,
             "missing_stages": missing_stages,
             "open_gates": open_gates,
             "version_pins": version_pins,
@@ -483,17 +556,25 @@ class WorkflowEvaluationService:
         }
 
     @classmethod
-    def evaluate_and_record(cls, *, project, workflow_id: str, stage: str = REPORT_STAGE,
+    def evaluate_and_record(cls, *, project, workflow_id: str, stage: str = "",
                             actor=None) -> dict:
         """同时生成两份评测，并把结论落到该阶段门禁的 ``detail``（供页面读取）。
 
         刻意不改变门禁状态：状态机只由 ``WorkflowGateService.evaluate`` 推进。
         评测是**输入**，不是放行决定本身——否则"跑一次评测"就等同于"批准进入下一步"。
+
+        Args:
+            stage: 缺省时取**该流程的收口阶段**（新流程=问题跟踪，存量=报告生成），
+                而不是写死报告阶段：写死之后新链路的端到端评测会落不到任何门禁上，
+                页面上表现为"跑了评测但哪里都没变"。
         """
+        from .operations import WorkflowGateService
         from .workflow_models import WorkflowStageGate
 
         workflow_id = str(workflow_id or "").strip()
-        stage = str(stage or REPORT_STAGE)
+        if not stage:
+            order = WorkflowGateService.stage_order_for(project.pk, workflow_id)
+            stage = order[-1] if order else DEFAULT_CLOSING_STAGE
         output = None
         for candidate in GenerationOutput.objects.filter(project_id=project.pk):
             protocol = ((candidate.metadata or {}).get("protocol") or {})

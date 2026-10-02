@@ -26,9 +26,17 @@ class OutputStage(str, Enum):
     REPORT_GENERATION = "report_generation"
 
 
+#: 需要 ``workflow_id`` 的阶段集合 = 新链路四阶段 ∪ 历史链路四阶段。
+#:
+#: 为什么是并集而不是只放新四阶段：存量流程的产出仍会带着
+#: ``test_plan_generation`` / ``report_generation`` 进来，只认新四阶段会让它们
+#: 在发布时因为"没带 workflow_id"被拒——而它们本来是有 workflow_id 的，
+#: 被拒的原因只是口径变了。反过来，``risk_identification`` / ``issue_tracking``
+#: 已升为链路阶段，从此要求带 ``workflow_id`` 才是正确行为。
 WORKFLOW_STAGES = {
-    OutputStage.TEST_PLAN_GENERATION, OutputStage.TESTCASE_GENERATION,
-    OutputStage.TEST_EXECUTION, OutputStage.REPORT_GENERATION,
+    OutputStage.RISK_IDENTIFICATION, OutputStage.TESTCASE_GENERATION,
+    OutputStage.TEST_EXECUTION, OutputStage.ISSUE_TRACKING,
+    OutputStage.TEST_PLAN_GENERATION, OutputStage.REPORT_GENERATION,
 }
 
 

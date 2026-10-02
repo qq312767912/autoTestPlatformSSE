@@ -120,7 +120,8 @@ class TaskSkillBindingService:
 
     @classmethod
     def bind_stage(cls, *, project, workflow_id, stage: str, actor=None,
-                   allow_unmanaged: bool = True) -> dict:
+                   allow_unmanaged: bool = True, skill=None,
+                   allow_stage_mismatch: bool = False) -> dict:
         """锁定四阶段流水线中**某一个阶段**的 Skill 版本。
 
         与 ``bind_case_review`` 用同一套三分支策略（见该方法的说明），只是把
@@ -132,6 +133,13 @@ class TaskSkillBindingService:
                 阶段，硬拒绝会让整条链路不可用，而风险面并没有扩大——它本来就在用
                 平台默认行为。但**登记了却没有可用活跃版本**时一律拒绝，
                 两种情况不能混为一谈。
+            skill: 人在发起流程时**为这个阶段显式选中的包**。给了它就以它为准：
+                - 不再按 manifest 声明去筛阶段（见 ``allow_stage_mismatch``）；
+                - 不再要求"项目登记过声明该阶段的包"——显式选择本身就是登记行为。
+                仍然必须是 ``active`` 版本，绑不到就拒绝，不放行。
+            allow_stage_mismatch: 显式选中的包声明的阶段与所选阶段不一致时是否放行。
+                True 时把"声明了什么"与"实际用在哪个阶段"一起写进锁的 ``detail``，
+                保证事后能看出这是**人主动跨声明使用**，而不是系统静默用错包。
         """
         from django.db.models import Q
 
@@ -140,10 +148,16 @@ class TaskSkillBindingService:
         project_id = getattr(project, "pk", project)
         # "登记过"要按**任意版本**的 manifest 判断，不能只看活跃版本：
         # 只看活跃版本会把"有候选但还没审批"错判成"根本没登记"，于是静默放行。
-        registered = Skill.objects.filter(
-            Q(versions__manifest__stage=stage) | Q(capability__stages__contains=[stage]),
-            project_id=project_id,
-        ).distinct()
+        if skill is not None:
+            # 显式指定了包，就不再按声明挑：否则"新链路阶段还没有包声明它"会把
+            # 人选好的包直接判成"未登记"，回落到无版本溯源的默认行为——
+            # 这与用户的意图正好相反。
+            registered = Skill.objects.filter(project_id=project_id, pk=getattr(skill, "pk", skill))
+        else:
+            registered = Skill.objects.filter(
+                Q(versions__manifest__stage=stage) | Q(capability__stages__contains=[stage]),
+                project_id=project_id,
+            ).distinct()
         if not registered.exists():
             if not allow_unmanaged:
                 raise SkillBindingRefused(
@@ -158,7 +172,8 @@ class TaskSkillBindingService:
             lock = SkillRuntimeResolver.lock_for_task(
                 project=project, workflow_id=str(workflow_id),
                 actor=actor if getattr(actor, "pk", None) else None,
-                scope="workflow", stage=stage,
+                scope="workflow", stage=stage, skill=skill,
+                allow_stage_mismatch=allow_stage_mismatch,
             )
         except SkillRuntimeUnavailable as exc:
             raise SkillBindingRefused(
@@ -166,14 +181,25 @@ class TaskSkillBindingService:
             ) from exc
 
         version = SkillRuntimeResolver.resolve_locked(lock)
+        lock_detail = lock.detail or {}
+        pinned_note = ""
+        if lock_detail.get("stage_mismatch"):
+            # 跨声明使用必须写在返回值里，页面才能提示"这个包声明的是另一个阶段"。
+            pinned_note = (
+                f"⚠ 该包 manifest 声明的阶段是「{lock_detail.get('declared_stage')}」，"
+                f"本次由人工指定用于「{stage}」。"
+            )
         return {
             "lock": lock,
             "skill_version": version,
             "managed": True,
             "stage": stage,
+            "pinned": bool(lock_detail.get("pinned")),
+            "declared_stage": str(lock_detail.get("declared_stage") or ""),
+            "stage_mismatch": bool(lock_detail.get("stage_mismatch")),
             "detail": (
                 f"阶段 {stage} 绑定 Skill「{version.skill.name}」版本 {version.version}"
-                f"（包哈希 {version.package_sha256[:12]}）。"
+                f"（包哈希 {version.package_sha256[:12]}）。{pinned_note}"
             ),
         }
 

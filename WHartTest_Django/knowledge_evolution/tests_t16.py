@@ -22,7 +22,11 @@ from knowledge_evolution.models import (
     EvaluationSuite,
     GenerationOutput,
 )
-from knowledge_evolution.operations import WORKFLOW_STAGE_ORDER, WorkflowGateService
+from knowledge_evolution.operations import (
+    DEFAULT_WORKFLOW_STAGE_ORDER,
+    LEGACY_WORKFLOW_STAGE_ORDER,
+    WorkflowGateService,
+)
 from knowledge_evolution.protocol import ADAPTERS, publish_output
 from knowledge_evolution.report_gates import (
     ReportContractError,
@@ -33,7 +37,11 @@ from knowledge_evolution.tests_t09_t13 import TEST_MEDIA_ROOT
 from knowledge_evolution.tests_t15 import WorkflowBaseTests
 from knowledge_evolution.workflow_models import WorkflowStageGate
 
-STAGES = list(WORKFLOW_STAGE_ORDER)
+# 本文件整体针对**历史链路**（方案 → 用例 → 执行 → 报告）的收口契约。
+# 主链路口径已改为「风险识别 → 用例 → 执行 → 问题跟踪」，但报告契约并没有被删掉：
+# 存量流程仍要靠它收口。所以这组用例继续按历史序列跑，而不是跟着新序列改写——
+# 改写等于把"存量流程的报告还被校验着"这件事测掉。
+STAGES = list(LEGACY_WORKFLOW_STAGE_ORDER)
 UPSTREAM = STAGES[:3]
 REPORT = STAGES[3]
 
@@ -433,7 +441,9 @@ class WorkflowEvaluationTests(T16BaseTests):
         self.assertFalse(result["passed"])
         self.assertEqual(result["missing_stages"], [REPORT])
         self.assertEqual(result["coverage"], 0.75)
-        self.assertIn("尚无报告阶段产出", "；".join(result["failures"]))
+        # 提示必须点名**是哪个**阶段缺产出（收口阶段按模板不同可能是报告生成，
+        # 也可能是问题跟踪），否则存量流程与新流程看到同一句话却缺的是两样东西。
+        self.assertIn("尚无报告生成阶段产出", "；".join(result["failures"]))
 
     def test_end_to_end_fails_when_a_gate_is_still_pending(self):
         plan, cases, execution, report = self._complete_chain(pass_gates=False)
@@ -464,7 +474,7 @@ class WorkflowEvaluationTests(T16BaseTests):
         self.assertFalse(result["passed"])
         self.assertEqual(result["open_gates"], [])
         self.assertFalse(result["report_contract"]["ok"])
-        self.assertIn("报告契约校验未通过", "；".join(result["failures"]))
+        self.assertIn("契约校验未通过", "；".join(result["failures"]))
 
     def test_end_to_end_passes_on_complete_chain(self):
         self._complete_chain()
@@ -538,7 +548,13 @@ class WorkflowEvaluationTests(T16BaseTests):
 
         self.assertFalse(payload["recorded"])
         self.assertFalse(payload["stage"]["judged"])
-        self.assertEqual(payload["end_to_end"]["missing_stages"], STAGES)
+        # 这条流程连一条留痕都没有，没有依据判断它属于哪个模板，于是按**新链路默认序列**
+        # 解释——所以缺的是新四阶段，而不是本文件其他地方用的历史序列。
+        # 存量流程只要锁过版本（``start_workflow`` 当年一次性锁四段），就一定会带上
+        # ``report_generation`` 这类历史标记，从而被正确识别（见 ``stage_order_for``）。
+        self.assertEqual(
+            payload["end_to_end"]["missing_stages"], list(DEFAULT_WORKFLOW_STAGE_ORDER),
+        )
 
 
 class ResponsibilityTests(T16BaseTests):
@@ -678,7 +694,10 @@ class ReportGateAPITests(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         payload = response.json()["data"]
         self.assertEqual(payload["end_to_end"]["workflow_id"], "wf-api")
-        self.assertEqual(payload["end_to_end"]["missing_stages"], STAGES)
+        # 无留痕 → 按新链路默认序列解释（同 ``test_evaluate_and_record_without_output...``）。
+        self.assertEqual(
+            payload["end_to_end"]["missing_stages"], list(DEFAULT_WORKFLOW_STAGE_ORDER),
+        )
 
     def test_non_member_cannot_run_evaluation(self):
         from django.contrib.auth.models import User
