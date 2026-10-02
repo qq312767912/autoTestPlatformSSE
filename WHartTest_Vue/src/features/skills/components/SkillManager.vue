@@ -1,8 +1,7 @@
 <template>
   <div class="skill-manager">
-    <!-- 头部操作栏 -->
+    <!-- 头部操作栏：标题由页面抬头统一给，这里只放动作，避免同一句话出现两次 -->
     <div class="header-bar">
-      <h3>{{ text.title }}</h3>
       <a-space>
         <a-button type="primary" status="success" @click="showStoreModal = true">
           <template #icon><icon-storage /></template>
@@ -179,7 +178,6 @@ const { isEnglish } = useAppI18n()
 const text = computed(() => (
   isEnglish.value
     ? {
-        title: 'Skills Management',
         skillStore: 'Skill Hub',
         importFromGit: 'Import from Git',
         uploadSkill: 'Upload Skill',
@@ -211,7 +209,6 @@ const text = computed(() => (
         importFailed: 'Import failed',
       }
     : {
-        title: 'Skills 管理',
         skillStore: 'Skill 中心',
         importFromGit: '从 Git 导入',
         uploadSkill: '上传 Skill',
@@ -433,16 +430,11 @@ onMounted(() => {
 
 .header-bar {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   margin-bottom: 16px;
   flex-wrap: wrap;
   gap: 12px;
-}
-
-.header-bar h3 {
-  margin: 0;
-  flex-shrink: 0;
 }
 
 .empty-state {

@@ -1,23 +1,19 @@
 <template>
-  <div class="skills-management-view" :class="{ 'skills-management-view--console': mode === 'console' }">
+  <div class="skills-management-view">
     <div class="page-header">
       <div class="page-header__main">
         <h2>{{ pageText.pageTitle }}</h2>
         <p class="page-description">{{ pageText.pageDescription }}</p>
       </div>
-      <a-radio-group v-if="currentProjectId" v-model="mode" type="button" size="small">
-        <a-radio value="console">{{ pageText.consoleTab }}</a-radio>
-        <a-radio value="legacy">{{ pageText.legacyTab }}</a-radio>
-      </a-radio-group>
     </div>
 
-    <div v-if="currentProjectId" class="skills-container" :class="{ 'skills-container--tight': mode === 'console' }">
+    <div v-if="currentProjectId" class="skills-container">
       <!--
-        默认进生产控制台（T18 / R10）。存量管理页保留为第二个页签：商店浏览安装、
-        API Key 确认、启停与删除这些动作只在那边有入口，直接删掉会变成功能回退。
+        这一页只负责"管理项目可用的通用 Skill"：上传、Git 导入、从 Skill 中心安装、
+        启停与删除。Skill 的生产控制台（候选版本、评测门禁、发布治理）不在这一页——
+        它属于数据飞轮，入口在「数据飞轮 → Skill Hub」，避免同一套版本治理两处并存。
       -->
-      <SkillHubConsole v-if="mode === 'console'" :project-id="currentProjectId" :key="`console-${currentProjectId}`" />
-      <SkillManager v-else :project-id="currentProjectId" :key="`legacy-${currentProjectId}`" />
+      <SkillManager :project-id="currentProjectId" :key="`skills-${currentProjectId}`" />
     </div>
     <div v-else class="empty-state">
       <icon-apps style="font-size: 64px; color: #c0c4cc" />
@@ -27,31 +23,26 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { SkillHubConsole, SkillManager } from '@/features/skills'
+import { computed } from 'vue'
+import { SkillManager } from '@/features/skills'
 import { useProjectStore } from '@/store/projectStore'
 import { useAppI18n } from '@/composables/useAppI18n'
 
 const projectStore = useProjectStore()
 const { isEnglish } = useAppI18n()
 const currentProjectId = computed(() => projectStore.currentProjectId)
-const mode = ref<'console' | 'legacy'>('console')
 
 const pageText = computed(() => (
   isEnglish.value
     ? {
-        pageTitle: 'Skill Hub',
-        pageDescription: 'Skill catalog, version diff, evaluation gate and release governance. Candidates cannot go live without passing the gate and lead approval.',
+        pageTitle: 'Skills Management',
+        pageDescription: 'Manage the general Skills available to this project: upload a package, import from Git, install from the Skill Hub, then enable, disable or delete them.',
         selectProjectFirst: 'Select a project from the navigation first',
-        consoleTab: 'Console',
-        legacyTab: 'Inventory',
       }
     : {
-        pageTitle: 'Skill Hub',
-        pageDescription: '能力目录、版本差异、评测门禁与发布治理。候选不可能绕过门禁与测试负责人审批直接生效。',
+        pageTitle: 'Skills 管理',
+        pageDescription: '管理本项目可用的通用 Skill：上传、从 Git 导入、从 Skill 中心安装，以及启停与删除。',
         selectProjectFirst: '请先在导航栏选择一个项目',
-        consoleTab: '生产控制台',
-        legacyTab: '存量管理',
       }
 ))
 </script>
@@ -61,25 +52,13 @@ const pageText = computed(() => (
   padding: 24px;
 }
 
-.skills-management-view--console {
-  /* 控制台是三栏工作区，需要撑满可视高度；页签切换回存量管理时不受影响。 */
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  box-sizing: border-box;
-}
-
 .page-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
-  margin-bottom: 24px;
-}
-
-.skills-management-view--console .page-header {
-  margin-bottom: 12px;
+  margin-bottom: 16px;
 }
 
 .page-header h2 {
@@ -95,14 +74,6 @@ const pageText = computed(() => (
   background: var(--color-bg-2);
   border-radius: 8px;
   min-height: 400px;
-}
-
-.skills-container--tight {
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
 }
 
 .empty-state {
