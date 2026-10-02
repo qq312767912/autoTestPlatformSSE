@@ -13,6 +13,7 @@ from .capability_registry import (
     ALL_WORKFLOW_STAGES,
     LEGACY_WORKFLOW_STAGES,
     WORKFLOW_STAGES,
+    is_evolvable,
 )
 from .evaluation_models import EvaluationResult, EvaluationRun
 from .graph import GraphEdgeSpec, GraphNodeSpec, PostgreSQLGraphSource
@@ -936,6 +937,11 @@ class ProjectQualityCockpitService:
     # 只保留「能力能被 Skill 直接迭代升级」的单次能力：代码审查与知识库问答
     # 属平台基础能力，不进 Agent 台账，也不该在独立能力面板里占位。
     # 口径见 ``capability_registry`` 与 ``specs/agent-ledger/requirements.md`` §3。
+    #
+    # ⚠️ 这是**面板展示范围**这一产品决策，不是口径推导，所以刻意留成字面量：
+    # 注册表里 ``MODE_SINGLE`` 的还有 ``risk_identification`` / ``issue_tracking``，
+    # 但这两者在平台里没有真实调用方，库里只有演练数据，展示出来只会让面板
+    # 看起来比实际热闹。它们哪天接了真实业务流，再加进这里。
     SINGLE_STAGES = ["case_review"]
 
     def summarize(self, project_id):
@@ -979,6 +985,10 @@ class ProjectQualityCockpitService:
                 "feedback": feedback.filter(output__task_type=stage).count(),
                 "failed": stage_outputs.filter(trace__status="failed").count(),
                 "latest_at": stage_outputs.order_by("-created_at").values_list("created_at", flat=True).first(),
+                # 能不能自进化由注册表回答，不在前端另判一次：代码审查是复合能力
+                # （不打包成 Skill），知识库问答是平台工具，两者 ``is_evolvable``
+                # 都是 False，界面据此不显示「发起流程」按钮。
+                "self_evolution": is_evolvable(stage),
             })
 
         workflow_outputs = outputs.filter(

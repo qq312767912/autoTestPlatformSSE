@@ -1120,6 +1120,172 @@ class CapabilityDefinitionViewSet(viewsets.ModelViewSet):
         })
 
 
+class CaseReviewEvolutionViewSet(viewsets.ViewSet):
+    """用例审查的自进化入口（T23）。
+
+    三个动作对应向导的三步：列出可进化的审查项目 → 上传已确认报告做预检 →
+    发起派生并拿到候选版本。派生内核在 ``case_review_evolution``，这里只做
+    权限、参数与错误码的转译。
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def _project(self, request):
+        from projects.models import Project
+
+        project_id = request.query_params.get("project") or request.data.get("project")
+        if not project_id:
+            from rest_framework.exceptions import ValidationError as DRFValidationError
+            raise DRFValidationError({"project": "必须指定 project"})
+        project = get_object_or_404(Project, pk=project_id)
+        _ensure_project_member(request.user, project.id)
+        return project
+
+    @staticmethod
+    def _threshold(request) -> float:
+        raw = request.data.get("threshold")
+        if raw in (None, ""):
+            from .case_review_evolution import DEFAULT_HUMAN_SCORE_THRESHOLD
+            return float(DEFAULT_HUMAN_SCORE_THRESHOLD)
+        return float(raw)
+
+    @action(detail=False, methods=["get"], url_path="candidates")
+    def candidates(self, request):
+        """列出该项目下已跑完、可用于自进化的用例审查项目。"""
+        from .case_review_evolution import CaseReviewEvolutionService
+
+        project = self._project(request)
+        return Response({
+            "threshold": self._threshold(request),
+            "items": CaseReviewEvolutionService.list_candidates(project=project),
+        })
+
+    @action(detail=False, methods=["post"], url_path="preflight")
+    def preflight(self, request):
+        """解析上传的报告并给出全部前置判定——**不落库**。
+
+        预检存在的意义是让"不能进化"在点下按钮之前就可见。把判定放到
+        ``evolve`` 里一次说一条，用户要来回试三次才知道真正卡在哪。
+        """
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        from .case_review_evolution import CaseReviewEvolutionService
+
+        project = self._project(request)
+        review = self._review(request, project)
+        upload = request.FILES.get("file")
+        if upload is None:
+            from rest_framework.exceptions import ValidationError as DRFValidationError
+            raise DRFValidationError({"file": "必须上传已确认的审查报告"})
+
+        threshold = self._threshold(request)
+        score_raw = request.data.get("human_score")
+        try:
+            score = float(score_raw) if score_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            # 打分填了但不是数字属于参数错误，直接回 400；预检的其它问题走 blockers，
+            # 因为那些是"条件还没满足"，用户可以在同一个弹窗里继续改。
+            return Response({"detail": "人工打分必须是数字"}, status=400)
+
+        try:
+            scan = CaseReviewEvolutionService.scan(data=upload.read())
+        except DjangoValidationError as exc:
+            return Response({"detail": _validation_text(exc)}, status=400)
+
+        described = CaseReviewEvolutionService._describe(review)
+        blockers = list(described["blockers"])
+        if score is None:
+            blockers.append("尚未填写人工打分")
+        elif score < threshold:
+            blockers.append(
+                f"人工打分 {score:g}/100 低于门槛 {threshold:g}，本次审查结果不足以作为改进依据"
+            )
+        if not scan.defects:
+            blockers.append(
+                "这份报告里没有人工确认的缺陷（误报，或方向对但被改写的说明），没有可修复的改进点"
+            )
+
+        return Response({
+            "review": described,
+            "threshold": threshold,
+            "human_score": score,
+            "scan": scan.as_dict(),
+            "attribution_preview": [
+                {"category": item.category, "issue_type": item.issue_type, "count": item.count}
+                for item in scan.defects
+            ],
+            "blockers": blockers,
+            "ready": not blockers,
+        })
+
+    @action(detail=False, methods=["post"], url_path="evolve")
+    def evolve(self, request):
+        """从这份已确认报告派生 Skill 候选版本。"""
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        from .case_review_evolution import CaseReviewEvolutionService
+
+        project = self._project(request)
+        review = self._review(request, project)
+        upload = request.FILES.get("file")
+        if upload is None:
+            from rest_framework.exceptions import ValidationError as DRFValidationError
+            raise DRFValidationError({"file": "必须上传已确认的审查报告"})
+        score_raw = request.data.get("human_score")
+        if score_raw in (None, ""):
+            from rest_framework.exceptions import ValidationError as DRFValidationError
+            raise DRFValidationError({"human_score": "必须填写人工打分"})
+
+        try:
+            result = CaseReviewEvolutionService.evolve(
+                review=review,
+                data=upload.read(),
+                human_score=float(score_raw),
+                actor=request.user,
+                threshold=self._threshold(request),
+                change_reason=request.data.get("change_reason", ""),
+                report_name=getattr(upload, "name", "") or "",
+            )
+        except DjangoValidationError as exc:
+            # 可预期的业务拒绝（未达门槛、无缺陷、基线不是活跃版本……）一律 400：
+            # 回 500 会让前端把它当服务端故障弹"系统错误"，把该看的提示吃掉。
+            return Response({"detail": _validation_text(exc)}, status=400)
+
+        return Response(result, status=201)
+
+    def _review(self, request, project):
+        from testcases.models import TestCaseReview
+
+        review_id = request.data.get("review_id") or request.query_params.get("review_id")
+        if not review_id:
+            from rest_framework.exceptions import ValidationError as DRFValidationError
+            raise DRFValidationError({"review_id": "必须指定用例审查项目"})
+        return get_object_or_404(TestCaseReview, pk=review_id, project=project)
+
+
+def _validation_text(exc) -> str:
+    """把 Django ``ValidationError`` 拍成一句话。
+
+    它的 ``messages`` 可能是嵌套结构（字典字段错误），直接 str() 会带出
+    引号与方括号，前端原样显示很难看。
+    """
+    import json
+
+    messages = getattr(exc, "messages", None)
+    if not messages:
+        return str(exc)
+    parts = []
+    for item in messages:
+        if isinstance(item, (list, tuple, dict)):
+            try:
+                parts.append(json.dumps(item, ensure_ascii=False, default=str))
+            except TypeError:  # pragma: no cover - 兜底
+                parts.append(str(item))
+        else:
+            parts.append(str(item))
+    return "；".join(parts)
+
+
 class FlywheelOperationsViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
 

@@ -17,6 +17,7 @@ from .views import (
     RetrievalTraceViewSet,
     CapabilityReleaseViewSet,
     CapabilityDefinitionViewSet,
+    CaseReviewEvolutionViewSet,
     FlywheelOperationsViewSet,
     AnnotationConflictViewSet,
     GoldAnnotationViewSet,
@@ -47,6 +48,7 @@ router.register("knowledge-audit-logs", KnowledgeAuditLogViewSet, basename="know
 router.register("knowledge-retrieval", KnowledgeRetrievalViewSet, basename="knowledge-retrieval")
 router.register("capability-releases", CapabilityReleaseViewSet, basename="capability-release")
 router.register("capability-definitions", CapabilityDefinitionViewSet, basename="capability-definition")
+router.register("case-review-evolution", CaseReviewEvolutionViewSet, basename="case-review-evolution")
 router.register("operations", FlywheelOperationsViewSet, basename="flywheel-operations")
 router.register("gold-datasets", GoldDatasetViewSet, basename="gold-dataset")
 router.register("gold-dataset-versions", GoldDatasetVersionViewSet, basename="gold-dataset-version")
