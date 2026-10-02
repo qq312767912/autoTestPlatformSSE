@@ -11,13 +11,20 @@
 
 ## 1. 基础模型与安全边界
 
-- [x] **T01 修复 Skill 项目隔离与角色授权**（**读侧口径已于 2026-10-02 / T27 修订，见本节末"修订"**）
+- [x] **T01 修复 Skill 项目隔离与角色授权**（**口径已于 2026-10-02 / T27 两次修订，见本节末"修订"**）
   - 依赖：无。
-  - 修改：`WHartTest_Django/skills/views.py`、权限类和序列化器；列表、详情、导入、上传和后续版本接口按 URL 中的 `project_id` 过滤（**"列表、详情按 `project_id` 过滤"这半句已于 2026-10-02 / T27 修订**：读侧改为公共目录，写侧不变）。
+  - 修改：`WHartTest_Django/skills/views.py`、权限类和序列化器；列表、详情、导入、上传和后续版本接口按 URL 中的 `project_id` 过滤（**"列表、详情按 `project_id` 过滤"这半句已于 2026-10-02 / T27 修订**：读侧改为公共目录；**"跨项目写被拒绝"这半句同日第二次修订**：写侧改为按角色判定，不再按 URL 项目）。
   - 角色：测试负责人可以审批、激活、回滚和隔离；测试执行人员可以上传、预检、评测和反馈；基础 Owner/Admin/Member 不在业务界面直接展示。
-  - 验收：跨项目**写**操作（上传、预检、候选、审批、激活、回滚、隔离、下载）、猜测 UUID、状态变更返回 403/404；**跨项目读取（`list`/`retrieve`）改为公共目录，不再返回 403**（2026-10-02 / T27 修订）；同项目授权矩阵测试通过。
+  - 验收：~~跨项目写操作返回 403/404；猜测 UUID 返回 403/404~~ → **已作废（2026-10-02 / T27 第二次修订）**。现在的验收是：公共目录条目**不按 URL 项目过滤**——读（列表/详情/内容/版本史）只要求登录；治理（补填阶段/启停/删除/隔离版本）要求"超管或任一项目测试负责人"；创建类动作（上传/预检/候选/导入）仍要求 URL 项目的执行人员。
   - 对应需求：R10、R12。
-  - **修订（2026-10-02 / T27）**：Skill Hub 是**平台级公共目录**，不分项目 —— `list`/`retrieve` 改为 `IsAuthenticated` + 全量查询集。同名 Skill 在多个项目各存一份时，列表**按名称归并**只展示"正本"（优先有活跃版本，其次版本数多，最后 id 小，保证可复现），以 `copies` 暴露副本数、`stage_source` 暴露阶段来源；`Skill.declared_stage` 供管理员补填 manifest 未声明的阶段（写入口 `POST .../stage/`，权限 `IsTestLeadAnywhere`）。**写侧边界未放宽**：`destroy`/`upload`/`toggle`/`preflight`/`candidate`/`activate`/`rollback`/`quarantine`/`download` 仍锚定 URL 项目。用例：`skills/tests_public_catalogue.py`（22 项）+ `skills/tests_isolation.py`（读侧 4 条改写为公共目录口径，写侧 10 条不变）。
+  - **修订（2026-10-02 / T27）**：Skill Hub 是**平台级公共目录**，不分项目 —— `list`/`retrieve` 改为 `IsAuthenticated` + 全量查询集。同名 Skill 在多个项目各存一份时，列表**按名称归并**只展示"正本"（优先有活跃版本，其次版本数多，最后 id 小，保证可复现），以 `copies` 暴露副本数、`stage_source` 暴露阶段来源；`Skill.declared_stage` 供管理员补填 manifest 未声明的阶段（写入口 `POST .../stage/`，权限 `IsTestLeadAnywhere`）。
+  - **第二次修订（2026-10-02 / T27，同日）**：初版只放开读侧、写侧仍锚定 URL 项目，**当天即发现回归** —— 列表返回全平台 20 张卡，但卡片上的启停 / 查看内容 / 版本列表仍按 URL 项目过滤，**归属项目 ≠ 当前项目的卡一律 404**（实测 URL 项目 1 下 5/20 张死、项目 7 下 15/20、项目 3 下 **20/20 全死**，因为项目 3 名下的 6 行全是被归并掉的副本）。**列表看得见却点不动，比看不到更糟**，于是写侧也改为按角色判定，`project_pk` 只在创建类动作里当"上传出处"：
+    - 读（`list`/`retrieve`/`content`/`versions`/`version-detail`/`version-diff`）→ 任何登录用户；
+    - 执行级（`download-version`/`validate-version`）→ `IsTestExecutorAnywhere`；
+    - 治理（`stage`/`partial_update`/`destroy`/`quarantine-version`）→ `IsTestLeadAnywhere`；
+    - 创建类（`upload`/`preflight`/`candidates`/`import-*`）→ 仍锚定 URL 项目的执行人员。
+    信封同时新增 `meta.can_manage`，前端据此收起会 403 的启停/删除按钮（**凡是会 403/404 的按钮，前端都要先问后端能不能显示**）。
+    用例：`skills/tests_public_catalogue.py`（33 项，含 `PublicCatalogueEntryIsNotProjectBoundTests` 这组回归钉子）+ `skills/tests_isolation.py`（读侧与写侧旧断言均已改写）。
 
 - [x] **T02 建立 SkillVersion 不可变版本模型**
   - 依赖：T01。
@@ -170,7 +177,7 @@ T14 + T15 + T16 + T17 + T18 ----------------------> T19 -> T20
 | 日期 | 任务 | 状态 | 验证证据 | 备注 |
 |---|---|---|---|---|
 | 2026-10-01 | T01 修复 Skill 项目隔离与角色授权 | [x] | `skills/tests_isolation.py` 14 项通过；真实库 DRF 栈复核：项目成员本项目 200 / 他项目 403 / 在自有项目路径猜他项目 UUID 404；非成员全 403；超管可跨项目；未认证 401。**（读侧 4 条已于 2026-10-02 / T27 改写为公共目录口径；写侧 10 条不变）** | 新增 `projects/roles.py` 作为业务角色唯一真值；`skills/views.py` 的 `get_queryset()` 由 `Skill.objects.all()` 改为强制按 `project_pk` 过滤。**（2026-10-02 / T27 修订：`get_queryset()` 拆为读侧全量 + 写侧按 `project_pk`）** |
-| 2026-10-02 | T27 Skill 公共目录与阶段补填 | [x] | `skills/tests_public_catalogue.py` 22 项通过；`skills` + `knowledge_evolution` + `testcases` 合并回归通过；`makemigrations --check` → `No changes detected` | 读侧公共化（`list`/`retrieve` 全量 + 按名称归并正本）；新增 `skills/canonical.py`、`Skill.declared_stage`（迁移 `skills/0005`）、`POST /projects/{id}/skills/{id}/stage/`（`IsTestLeadAnywhere`）；`knowledge_evolution/task_binding.py` 两处阶段查找改为公共池 + 正本 |
+| 2026-10-02 | T27 Skill 公共目录与阶段补填 | [x] | `skills/tests_public_catalogue.py`（33 项）+ `skills/tests_isolation.py` 通过；`skills` + `knowledge_evolution` + `testcases` 合并回归 **698 项 OK**；`makemigrations --check` → `No changes detected` | 读侧公共化（`list`/`retrieve` 全量 + 按名称归并正本）；新增 `skills/canonical.py`、`Skill.declared_stage`（迁移 `skills/0005`）、`POST /projects/{id}/skills/{id}/stage/`；`knowledge_evolution/task_binding.py` 两处阶段查找改为公共池 + 正本。**同日第二次修订**：初版写侧仍锚定 URL 项目导致"列表能看见、按钮全 404"（项目 3 下 20/20 死），改为读写都按角色判定 + 信封 `meta.can_manage`；新增 `IsTestExecutorAnywhere`；`partial_update`/`destroy` 由执行人员门槛提到负责人门槛。复测：URL 项目 1/3/7 下均为 **0/20 打不通** |
 | 2026-10-01 | T02 建立 SkillVersion 不可变版本模型 | [x] | `skills/tests_versioning.py`：`uniq_skill_version` 与 `uniq_skill_version_package` 约束生效；换版本号复投同内容被拒；无 release 时状态回落 draft 且不可运行（**"不可运行"这半句已于 2026-10-02 / T25 修订**：`draft` 现在**可运行**，见 requirements §R13.1） | 迁移 `skills/0003`；`Skill` 新增 `capability`、`active_version`；包哈希权威实现落在 `skills/packaging.py` |
 | 2026-10-01 | T03 统一发布状态机与并发唯一激活约束 | [x] | 非法跳转/可达性/并发唯一激活（数据库部分唯一约束）/回滚/隔离/指针一致性测试通过；`knowledge_evolution` 173 项回归仅剩 1 项既有失败（与任务无关，见第 8 节第 4 条） | 迁移 `knowledge_evolution/0023`；`kind` 增 `composite`，新增状态 `validating`/`quarantined`；新增 `uniq_active_release_per_target` 兜底并发激活 |
 | 2026-10-01 | T04 迁移存量 Skill 为初始版本 | [x] | 本地库迁移输出：16 条 Skill 全部生成 `0.0.0-migrated` 版本（包完整 13 条 `active`、仅内联 3 条 `draft`）；重跑幂等（复用 16 条，总数不变）；`migrate skills 0003` 回滚后原 Skill 记录与文件完好 | 迁移 `skills/0004`；迁移前备份 `backups/wharttest_pre_skillhub_20261001_162935.dump` |

@@ -13,8 +13,9 @@ from rest_framework.response import Response
 from wharttest_django.viewsets import BaseModelViewSet
 from projects.models import Project
 from projects.roles import (
-    IsProjectScoped, IsTestExecutor, IsTestLead, IsTestLeadAnywhere,
-    business_role, is_test_executor, is_test_lead, visible_project_ids,
+    IsProjectScoped, IsTestExecutor, IsTestExecutorAnywhere, IsTestLead,
+    IsTestLeadAnywhere, business_role, is_test_executor, is_test_lead,
+    is_test_lead_anywhere, visible_project_ids,
 )
 from .canonical import canonical_skills
 from .exporter import SkillPackageExporter
@@ -57,15 +58,21 @@ class SkillViewSet(BaseModelViewSet):
 
     支持：
     - GET /projects/{project_id}/skills/ - 列表（**公共目录**：不按项目过滤，同名归并成一条正本）
-    - POST /projects/{project_id}/skills/upload/ - 上传
-    - POST /projects/{project_id}/skills/import-git/ - 从 Git 导入
-    - GET /projects/{project_id}/skills/{id}/ - 详情
-    - PATCH /projects/{project_id}/skills/{id}/ - 更新（仅 is_active）
-    - DELETE /projects/{project_id}/skills/{id}/ - 删除
+    - POST /projects/{project_id}/skills/upload/ - 上传（新 Skill 记在该项目名下 = 上传出处）
+    - POST /projects/{project_id}/skills/import-git/ - 从 Git 导入（同上）
+    - GET /projects/{project_id}/skills/{id}/ - 详情（公共可读）
+    - PATCH /projects/{project_id}/skills/{id}/ - 更新（仅 is_active；超管 / 任一项目测试负责人）
+    - DELETE /projects/{project_id}/skills/{id}/ - 删除（超管 / 任一项目测试负责人）
     - POST /projects/{project_id}/skills/{id}/stage/ - 补填能力阶段（超管 / 任一项目测试负责人）
 
-    URL 仍保留嵌套的 ``project_pk``：它在**读**侧不再起过滤作用（列表是公共的），
-    在**写**侧仍是"这份资源算在哪个项目名下"的锚点（上传出处、删除边界）。
+    URL 里的嵌套 ``project_pk`` **不是访问边界**（2026-10-02 修订）：Skill Hub 是平台级
+    公共目录，条目不属于任何单一项目，所以读与写都按角色判定，只有"创建类"动作
+    （upload / preflight / candidates / import-*）把它当"新 Skill 记在哪个项目名下"
+    的上传出处。
+
+    ⚠️ 这一条改过一次：读侧先公共化、写侧仍锚定项目时，列表能返回全平台的卡，
+    但卡片上的启停 / 查看内容 / 版本列表按 URL 项目过滤 → 归属项目 ≠ 当前项目的卡
+    一律 404（实测项目 3 的 URL 下 20/20 张全死）。**列表能看到却点不动，比看不到更糟。**
     """
 
     parser_classes = [JSONParser, MultiPartParser, FormParser]
@@ -75,27 +82,64 @@ class SkillViewSet(BaseModelViewSet):
         'approve', 'reject', 'activate', 'rollback', 'quarantine',
         # 版本维度的治理动作（T07）：隔离是安全事件，必须由测试负责人发起。
         'quarantine_version',
+        # 2026-10-02 追加：启停与删除作用于**公共目录的条目**，一次动作会影响
+        # 所有项目看到的目录，所以从"执行人员"提到"负责人"。
+        'partial_update', 'destroy',
     })
     #: 仅做配置返回或远程代理拉取、不读写 Skill 数据的动作，只要求登录。
     PUBLIC_ACTIONS = frozenset({'store_config', 'store_manifest', 'store_readme'})
     #: 读侧动作：Skill Hub 是公共目录，任何登录用户看到的都是同一份内容。
     #: 去掉这里的项目过滤 = "每个项目看到的 Skill Hub 是一样的"，这是用户明确要求的口径。
     PUBLIC_READ_ACTIONS = frozenset({'list', 'retrieve'})
+
+    # ------------------------------------------------------------------
+    # 公共目录条目的动作分组（2026-10-02 修订：**读写都公共，权限改由角色把关**）
+    #
+    # 背景：读侧公共化之后，列表给的是全平台 20 张卡（同名归并成一条正本），
+    # 但卡片上的启停 / 查看内容 / 版本列表仍按 URL 项目过滤 → 只要这张卡的归属
+    # 项目 ≠ 当前项目就一律 404（实测：URL 项目 1 下 5/20 张死、项目 7 下 15/20、
+    # 项目 3 下 20/20 全死）。列表能看到的卡片却点不动，是比"看不到"更糟的状态。
+    #
+    # 结论：公共目录的条目不属于任何单一项目，"能不能操作它"改按**角色**判定
+    # （在某个项目里有没有这个角色），不再按 URL 里的那个项目判定。
+    # URL 里的 project_pk 只在**创建**类动作里仍是锚点（上传/预检/候选/导入把新
+    # Skill 记在哪个项目名下），它是"上传出处"，不是访问边界。
+    # ------------------------------------------------------------------
+
+    #: 看目录内容与版本史 = 读。与 list/retrieve 同等对待，不再要求项目成员身份。
+    GLOBAL_READ_ACTIONS = frozenset({
+        'content', 'list_versions', 'version_detail', 'version_diff',
+    })
+    #: 比读取重、但不是治理：导出包、重跑静态校验。
+    GLOBAL_EXECUTOR_ACTIONS = frozenset({'download_version', 'validate_version'})
+    #: 会改变目录状态的：补填阶段、启停、删除、隔离版本。权限收敛到负责人。
+    GLOBAL_LEAD_ACTIONS = frozenset({
+        'bind_stage', 'partial_update', 'destroy', 'quarantine_version',
+    })
+
     #: 需要跨项目取对象的动作：作用于**公共池里的一条 Skill**，而不是"URL 那个项目
     #: 名下的 Skill"。所以对象查询不能加项目过滤，否则 A 项目的负责人改不到
     #: A 项目自己上传、但正本落在别的项目名下的那份（同名归并后这是常态）。
-    #: 权限由 ``IsTestLeadAnywhere`` 单独把关，不靠项目过滤兜底。
-    GLOBAL_LOOKUP_ACTIONS = PUBLIC_READ_ACTIONS | frozenset({'bind_stage'})
+    #: 权限由上面三组各自的权限类把关，不靠项目过滤兜底。
+    GLOBAL_LOOKUP_ACTIONS = (
+        PUBLIC_READ_ACTIONS | GLOBAL_READ_ACTIONS
+        | GLOBAL_EXECUTOR_ACTIONS | GLOBAL_LEAD_ACTIONS
+    )
 
     def get_queryset(self):
-        """读侧公共、写侧锚定项目。
+        """公共目录条目不按项目过滤；只有"创建类"动作仍锚定 URL 项目。
 
-        - ``list`` / ``retrieve`` / ``bind_stage``：返回全平台 Skill —— Skill Hub 是
-          公共目录，任何项目进来看到的是同一份内容。
-        - 其余动作（上传、启停、删除、版本治理）：仍按嵌套路由的 ``project_pk``
-          过滤。**这是刻意保留的边界**——不能因为读侧公共了，就让"A 项目的 URL"
-          变成能改到 B 项目 Skill 的后门。
+        - ``GLOBAL_LOOKUP_ACTIONS``（详情、内容、版本史、启停、删除、阶段补填…）：
+          返回全平台 Skill。Skill Hub 是平台级公共目录，一条目录项不属于任何单一
+          项目，所以取对象时不能按 URL 的项目过滤。
+        - 其余动作（``upload`` / ``preflight`` / ``create_candidate`` /
+          ``import_git`` / ``import_zip_url``）：仍按嵌套路由的 ``project_pk`` 解析
+          目标项目。这里 ``project_pk`` 是"新 Skill 记在哪个项目名下"的**上传出处**，
+          与访问边界无关。
           非嵌套场景（权限类反查模型信息、schema 生成）退化为"仅当前用户可见项目"。
+
+        ⚠️ 判据是**动作名**，不是"有没有嵌套 project_pk"——所有路由都嵌套在
+        ``/projects/{project_pk}/`` 下，用后者会让这条分支永不生效。
 
         ``active_version`` 一起预取：列表页要用它作为"展示版本"的优先项，
         不预取就会按 Skill 逐个查版本（N+1）。
@@ -118,12 +162,16 @@ class SkillViewSet(BaseModelViewSet):
         if action in self.PUBLIC_ACTIONS:
             return [IsAuthenticated()]
         # 读侧公共：Skill Hub 的目录内容对所有项目一致，不再要求"是本项目成员"。
-        # 注意这里放开的是**可见性**，不是可改性——写侧仍各自把关。
-        if action in self.PUBLIC_READ_ACTIONS:
+        # 看内容与版本史（content / versions / diff）同属读取，一并只要求登录。
+        if action in self.PUBLIC_READ_ACTIONS or action in self.GLOBAL_READ_ACTIONS:
             return [IsAuthenticated()]
-        # 补填能力阶段作用于公共池里的 Skill（不归属单一项目），所以要求
-        # "超管 或在任一项目里是测试负责人"，而不是 URL 那个项目的负责人。
-        if action == 'bind_stage':
+        # 目录条目的执行级动作（导出包、重校验）：不绑项目，要求"在任一项目里有
+        # 执行人员角色"。注意这不是"所有登录用户"——公共可见不等于公共可动。
+        if action in self.GLOBAL_EXECUTOR_ACTIONS:
+            return [IsAuthenticated(), IsTestExecutorAnywhere()]
+        # 目录条目的治理动作（补填阶段 / 启停 / 删除 / 隔离版本）：不绑项目，
+        # 权限收敛到"超管或任一项目测试负责人"。
+        if action in self.GLOBAL_LEAD_ACTIONS:
             return [IsAuthenticated(), IsTestLeadAnywhere()]
         # hub_access 只回答"调用者在本项目属于哪种业务角色"，供控制台做按钮门控，
         # 不读任何 Skill 数据，因此不绑定具体业务角色：它要求的只是"是本项目成员"。
@@ -205,12 +253,17 @@ class SkillViewSet(BaseModelViewSet):
         )
         from projects.roles import is_test_lead_anywhere
 
+        # 一条目录项的"可管"= 能补填阶段、能启停、能删除、能隔离版本，四者同一门槛。
+        # 前端靠它决定启停开关与删除按钮是否可用 —— 与后端 403 同源，避免出现
+        # "按钮在这、点了必然报错"（2026-10-02 的 404 回归就是这么来的）。
+        can_manage = is_test_lead_anywhere(getattr(request, 'user', None))
         return Response({
             'code': 200,
             'message': '获取成功',
             'data': serializer.data,
             'meta': {
-                'can_bind_stage': is_test_lead_anywhere(getattr(request, 'user', None)),
+                'can_bind_stage': can_manage,
+                'can_manage': can_manage,
                 'stage_options': [
                     {'value': stage, 'label': STAGE_LABELS.get(stage, stage)}
                     for stage in BUSINESS_CAPABILITY_STAGES

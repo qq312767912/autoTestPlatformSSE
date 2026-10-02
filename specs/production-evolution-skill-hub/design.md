@@ -280,8 +280,17 @@ stateDiagram-v2
 
 ## 10. 安全与权限
 
-- ~~修复 `SkillViewSet.get_queryset()` 当前返回全量 Skill 的项目隔离问题，所有 detail action 同样受项目查询集约束。~~ **（2026-10-02 / T27 修订）**：`get_queryset()` 拆两路 —— **读侧**（`list`/`retrieve`）返回全量（Skill Hub 是平台级公共目录，列表按名称归并出正本，`copies` 暴露副本数）；**写侧**（`destroy`/`upload`/`toggle`/`preflight`/`candidate`/`activate`/`rollback`/`quarantine`/`download`）仍按 URL 中的 `project_id` 过滤。
-- **（2026-10-02 / T27 新增）阶段补填**：manifest 未声明阶段的 Skill 由平台管理员或项目测试负责人补填 `Skill.declared_stage`（端点 `POST /projects/{id}/skills/{id}/stage/`，权限 `projects.roles.IsTestLeadAnywhere`）。**不写回版本 manifest** —— 版本包不可变，改写会让包哈希对不上（`package_tampered`）。阶段解析优先级：`manifest.stage` > `declared_stage` > 未声明。
+- ~~修复 `SkillViewSet.get_queryset()` 当前返回全量 Skill 的项目隔离问题，所有 detail action 同样受项目查询集约束。~~ **（2026-10-02 / T27 修订，同日两次）**：`get_queryset()` 按**动作**分组，不是按"读/写"分组 ——
+  - **公共目录条目的动作**（详情、内容、版本史/差异、启停、删除、阶段补填、版本导出与隔离）→ 返回全量，不按 URL 项目过滤。条目不属于任何单一项目，取对象时过滤会让"归属项目 ≠ 当前项目"的卡片全部 404。
+  - **创建类动作**（`upload` / `preflight` / `candidates` / `import-*`）→ 仍按嵌套路由的 `project_pk` 过滤。这里的 `project_pk` 是"新 Skill 记在哪个项目名下"的**上传出处**，不是访问边界。
+  - ⚠️ 初版只把 `list`/`retrieve`/`bind_stage` 放开（"读侧公共、写侧锚定项目"），当天即发现回归：列表返回全平台 20 张卡，卡片上的启停 / 查看内容 / 版本列表对归属别的项目的条目一律 404（URL 项目 1 下 5/20、项目 7 下 15/20、项目 3 下 20/20 全死）。**列表看得见却点不动，比看不到更糟。**
+- **（2026-10-02 / T27 新增）权限按动作分三档，不按 URL 项目判定**（`skills/views.py`）：
+  - `GLOBAL_READ_ACTIONS`（内容、版本史、版本差异）→ `IsAuthenticated()`；
+  - `GLOBAL_EXECUTOR_ACTIONS`（`download_version` / `validate_version`）→ `IsTestExecutorAnywhere()`（超管或任一项目执行人员）；
+  - `GLOBAL_LEAD_ACTIONS`（`bind_stage` / `partial_update` / `destroy` / `quarantine_version`）→ `IsTestLeadAnywhere()`（超管或任一项目测试负责人）。
+  启停与删除从"执行人员"提到"负责人"：它们作用在**公共目录的条目**上，一次动作影响所有项目看到的目录。
+  列表信封新增 `meta.can_manage` 与 `meta.can_bind_stage`（同源），**前端据此收起会 403/404 的按钮** —— 凡是会 403 的按钮，前端都要先问后端能不能显示。
+- **（2026-10-02 / T27 新增）阶段补填**：manifest 未声明阶段的 Skill 由平台管理员或项目测试负责人补填 `Skill.declared_stage`（端点 `POST /projects/{id}/skills/{id}/stage/`）。**不写回版本 manifest** —— 版本包不可变，改写会让包哈希对不上（`package_tampered`）。阶段解析优先级：`manifest.stage` > `declared_stage` > 未声明。
 - 上传和验评允许测试执行人员；审批、激活、回滚、隔离仅允许测试负责人。
 - 下载需项目访问权限，且每次动态生成脱敏包；不提供直接媒体路径。
 - 所有审批类请求要求 reason 和 idempotency key。
@@ -299,7 +308,7 @@ stateDiagram-v2
 
 ### 12.1 后端
 
-- 模型约束：不可变、版本/哈希唯一、单 active、项目隔离（**2026-10-02 / T27 修订**：隔离仅作用于写侧；读侧为公共目录，同名按名称归并正本）。
+- 模型约束：不可变、版本/哈希唯一、单 active、项目隔离（**2026-10-02 / T27 修订，同日两次**：Skill Hub 是平台级公共目录，条目不按项目隔离 —— 读侧公开、写侧按角色（执行级 / 治理级）判定；URL 里的 `project_pk` 只在创建类动作里当"上传出处"。同名按名称归并正本，`copies` 暴露副本数）。
 - 包安全：Zip Slip、符号链接、zip bomb、密钥扫描、确定性导出和重导入。
 - 状态机：非法跳转、未通过门禁发布、并发激活、回滚、隔离。
 - 运行锁：中途发布新版本不影响已运行 workflow。

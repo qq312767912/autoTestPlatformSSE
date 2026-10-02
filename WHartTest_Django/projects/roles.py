@@ -93,6 +93,22 @@ def is_test_lead_anywhere(user) -> bool:
     return ProjectMember.objects.filter(user=user, role__in=TEST_LEAD_ROLES).exists()
 
 
+def is_test_executor_anywhere(user) -> bool:
+    """是否在**任一**项目里是测试执行人员（即任一项目成员；超级用户恒真）。
+
+    与 ``is_test_lead_anywhere`` 同一套理由：公共目录里的条目不属于某一个项目，
+    所以"能不能操作它"按"在某个项目里有没有这个角色"判定，而不是按 URL 里的那个项目。
+
+    ``TEST_EXECUTOR_ROLES`` 包含 owner/admin/member，所以这条实际等价于
+    "至少是某个项目的成员"。非成员（与未登录）仍被挡在外面。
+    """
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    if user.is_superuser:
+        return True
+    return ProjectMember.objects.filter(user=user, role__in=TEST_EXECUTOR_ROLES).exists()
+
+
 def visible_project_ids(user):
     """返回用户可访问的项目 ID 集合；超级用户返回 None 表示不限制。"""
     if not user or not getattr(user, "is_authenticated", False):
@@ -175,3 +191,17 @@ class IsTestLeadAnywhere(permissions.BasePermission):
 
     def has_permission(self, request, view):
         return is_test_lead_anywhere(request.user)
+
+
+class IsTestExecutorAnywhere(permissions.BasePermission):
+    """公共目录（Skill Hub）的执行级动作：超管，或在任一项目里是测试执行人员/负责人。
+
+    用于"不归属任何单一项目、但比纯读取重一点"的动作，例如导出 Skill 包、
+    重跑包校验。纯读取（详情、内容、版本史）不要求这条，见
+    ``skills.views.SkillViewSet.GLOBAL_READ_ACTIONS``。
+    """
+
+    message = "该操作仅允许平台管理员或项目测试执行人员执行"
+
+    def has_permission(self, request, view):
+        return is_test_executor_anywhere(request.user)

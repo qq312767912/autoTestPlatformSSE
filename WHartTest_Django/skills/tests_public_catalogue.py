@@ -11,8 +11,13 @@
    表现是"某个 Skill 突然换了版本来源"，同样不报错。
 3. **补填阶段必须真的改变展示与匹配。** 阶段写在 ``Skill.declared_stage``（版本包
    不可改写），取用时版本 manifest 声明**优先**、它作回落。
-4. **写侧仍然锚定项目。** 读侧公共了，但"在 A 项目的 URL 下改到 B 项目的 Skill"
-   必须仍然 404 —— 这是不能因为公共化而丢掉的边界。
+4. **公共目录条目的读写都不按 URL 项目过滤，改由角色把关。** 读（列表、详情、
+   内容、版本史）只要求登录；治理（补填阶段、启停、删除、隔离版本）要求
+   "超管或任一项目测试负责人"。⚠️ 这条改过一次：初版是"读侧公共、写侧仍锚定
+   项目"，结果是列表返回全平台的卡、卡片上的按钮却一律 404 —— 见
+   ``PublicCatalogueEntryIsNotProjectBoundTests`` 的类注释。
+   创建类动作（upload / preflight / candidates / import-*）仍锚定 URL 项目，
+   因为那里的 ``project_pk`` 是"新 Skill 记在哪个项目名下"的上传出处，不是访问边界。
 
 正本规则与"为什么不做数据层合并"见 ``skills.canonical``。
 """
@@ -24,6 +29,7 @@ from django.urls import reverse
 from rest_framework.test import APITestCase
 
 from knowledge_evolution.capability_models import CapabilityRelease
+from knowledge_evolution.capability_registry import BUSINESS_CAPABILITY_STAGES
 from projects.models import Project, ProjectMember
 from skills.canonical import canonical_skills, pick_canonical
 from skills.models import Skill, SkillVersion
@@ -154,6 +160,38 @@ class PublicSkillListTests(APITestCase):
         rows = [row for row in self._list().data["data"] if row["name"] == "b-only"]
         self.assertEqual(rows[0]["copies"], 1)
 
+    def test_envelope_declares_what_the_caller_may_do(self):
+        """`meta.can_manage` 必须与后端的 403 同源 —— 前端靠它决定按钮是否可用。
+
+        没有它，就会出现"按钮在这、点了必然报错"（2026-10-02 的 404 回归就是这么来的）。
+        这里刻意用两个极端角色各验一次：零成员关系的普通用户不能管，超管能管。
+        """
+        meta = self._list().data["meta"]
+        self.assertFalse(meta["can_manage"])
+        self.assertFalse(meta["can_bind_stage"])
+        self.assertEqual(len(meta["stage_options"]), len(BUSINESS_CAPABILITY_STAGES))
+
+        root = User.objects.create_superuser(username="catalogue-root", password="x")
+        self.client.force_authenticate(user=root)
+        meta = self._list().data["meta"]
+        self.assertTrue(meta["can_manage"])
+        self.assertTrue(meta["can_bind_stage"])
+
+    def test_envelope_says_a_plain_project_member_cannot_manage(self):
+        """执行人员（= 项目成员）能读、不能治理：这正是 `can_manage` 要区分的。"""
+        member = User.objects.create_user(username="public-member", password="x")
+        ProjectMember.objects.create(project=self.project_a, user=member, role="member")
+        self.client.force_authenticate(user=member)
+        meta = self._list().data["meta"]
+        self.assertFalse(meta["can_manage"])
+
+    def test_envelope_says_a_test_lead_can_manage(self):
+        lead = User.objects.create_user(username="public-lead", password="x")
+        ProjectMember.objects.create(project=self.project_a, user=lead, role="admin")
+        self.client.force_authenticate(user=lead)
+        meta = self._list().data["meta"]
+        self.assertTrue(meta["can_manage"])
+
 
 class DeclaredStageTests(APITestCase):
     """阶段补填：写在 Skill 上，manifest 声明优先。"""
@@ -265,31 +303,119 @@ class DeclaredStageTests(APITestCase):
         self.assertEqual((row["stage"], row["stage_label"], row["stage_source"]), ("", "", ""))
 
 
-class WriteSideStaysProjectAnchoredTests(APITestCase):
-    """读侧公共了，但跨项目**写**仍然必须被挡住。"""
+class PublicCatalogueEntryIsNotProjectBoundTests(APITestCase):
+    """**公共目录的条目不属于任何单一项目**：角色够就能跨项目 URL 操作它。
+
+    这是 2026-10-02 那次回归的钉子测试。当时的做法是"读侧公共化、写侧仍按 URL
+    项目过滤"，结果是**列表能返回全平台的卡，但卡片上的启停 / 查看内容 / 版本列表
+    一律 404**（实测：URL 项目 1 下 5/20 张死、项目 7 下 15/20、项目 3 下 20/20 全死
+    —— 项目 3 名下 6 行前后都是被归并掉的副本，没有一条是正本）。
+    列表看得见却点不动，比"看不到"更糟，所以改成读写都按**角色**判定。
+
+    URL 里的 ``project_pk`` 只在创建类动作（upload / preflight / candidates /
+    import-*）里仍是锚点：那是"新 Skill 记在哪个项目名下"的上传出处，不是访问边界。
+
+    正本落在别的项目名下是**常态**（同名归并后 7 个名字里就有 1 个是这样），
+    所以这里刻意让 Skill 归属 ``project_b``，再用 ``project_a`` 的 URL 去打它。
+    """
 
     def setUp(self):
-        self.project_a = Project.objects.create(name="写A")
-        self.project_b = Project.objects.create(name="写B")
-        self.lead = User.objects.create_user(username="write-lead", password="x")
+        self.project_a = Project.objects.create(name="公共目录A")
+        self.project_b = Project.objects.create(name="公共目录B")
+        self.lead = User.objects.create_user(username="catalogue-lead", password="x")
+        self.member = User.objects.create_user(username="catalogue-member", password="x")
+        self.outsider = User.objects.create_user(username="catalogue-outsider", password="x")
+        # lead 只在 A 项目里是负责人；member 只在 A 项目里是执行人员；outsider 哪个都不是。
         ProjectMember.objects.create(project=self.project_a, user=self.lead, role="owner")
-        self.foreign_skill = Skill.objects.create(
-            project=self.project_b, name="b-private", description="B 项目的 Skill",
+        ProjectMember.objects.create(project=self.project_a, user=self.member, role="member")
+        self.skill = Skill.objects.create(
+            project=self.project_b, name="b-canonical", description="正本落在 B 项目",
         )
         self.client.force_authenticate(user=self.lead)
 
-    def _url(self, name):
-        return reverse(name, kwargs={"project_pk": self.project_a.id, "pk": self.foreign_skill.pk})
+    def _url(self, name, **extra):
+        return reverse(
+            name, kwargs={"project_pk": self.project_a.id, "pk": self.skill.pk, **extra},
+        )
 
-    def test_cannot_delete_another_projects_skill_through_own_project_url(self):
-        response = self.client.delete(self._url("project-skills-detail"))
-        self.assertEqual(response.status_code, 404)
-        self.assertTrue(Skill.objects.filter(pk=self.foreign_skill.pk).exists())
+    # ---------------- 负责人：跨项目 URL 也能治理 ----------------
 
-    def test_cannot_patch_another_projects_skill_through_own_project_url(self):
+    def test_lead_of_another_project_can_toggle_the_canonical(self):
+        """A 项目的负责人在 A 的 URL 下能让 B 项目名下的正本启停。"""
         response = self.client.patch(
             self._url("project-skills-detail"), {"is_active": False}, format="json",
         )
-        self.assertEqual(response.status_code, 404)
-        self.foreign_skill.refresh_from_db()
-        self.assertTrue(self.foreign_skill.is_active)
+        self.assertEqual(response.status_code, 200)
+        self.skill.refresh_from_db()
+        self.assertFalse(self.skill.is_active)
+
+    def test_lead_of_another_project_can_read_content_and_versions(self):
+        """这两条正是回归里 404 掉的动作。"""
+        self.assertEqual(self.client.get(self._url("project-skills-content")).status_code, 200)
+        self.assertEqual(
+            self.client.get(self._url("project-skills-list-versions")).status_code, 200,
+        )
+
+    def test_lead_of_another_project_can_delete_the_canonical(self):
+        response = self.client.delete(self._url("project-skills-detail"))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Skill.objects.filter(pk=self.skill.pk).exists())
+
+    # ---------------- 角色门槛：治理需负责人，读只需登录 ----------------
+
+    def test_plain_executor_cannot_govern_the_catalogue(self):
+        """启停 / 删除是治理动作，一次动作影响所有项目看到的目录 → 执行人员不行。"""
+        self.client.force_authenticate(user=self.member)
+        self.assertEqual(
+            self.client.patch(
+                self._url("project-skills-detail"), {"is_active": False}, format="json",
+            ).status_code,
+            403,
+        )
+        self.assertEqual(self.client.delete(self._url("project-skills-detail")).status_code, 403)
+        self.assertTrue(Skill.objects.filter(pk=self.skill.pk).exists())
+
+    def test_executor_can_still_read_content_and_versions(self):
+        """读目录内容与版本史不要求角色，只要求登录。"""
+        self.client.force_authenticate(user=self.member)
+        self.assertEqual(self.client.get(self._url("project-skills-content")).status_code, 200)
+        self.assertEqual(
+            self.client.get(self._url("project-skills-list-versions")).status_code, 200,
+        )
+
+    def test_non_member_without_any_role_cannot_govern(self):
+        self.client.force_authenticate(user=self.outsider)
+        self.assertEqual(
+            self.client.patch(
+                self._url("project-skills-detail"), {"is_active": False}, format="json",
+            ).status_code,
+            403,
+        )
+
+    def test_any_authenticated_user_can_read_the_catalogue_entry(self):
+        """Skill Hub 对每个项目公开：非成员也能读内容与版本史。"""
+        self.client.force_authenticate(user=self.outsider)
+        self.assertEqual(self.client.get(self._url("project-skills-content")).status_code, 200)
+        self.assertEqual(
+            self.client.get(self._url("project-skills-list-versions")).status_code, 200,
+        )
+
+    def test_anonymous_is_refused(self):
+        self.client.force_authenticate(user=None)
+        self.assertIn(self.client.get(self._url("project-skills-content")).status_code, (401, 403))
+
+    # ---------------- 创建类动作仍锚定 URL 项目 ----------------
+
+    def test_upload_is_still_anchored_to_the_url_project(self):
+        """``upload`` 不是"打某条已有 Skill"，而是"新 Skill 记在哪个项目名下" ——
+        它不是公共目录条目的动作，角色门槛也仍是"本项目执行人员"。"""
+        self.client.force_authenticate(user=self.outsider)
+        response = self.client.post(
+            reverse("project-skills-preflight", kwargs={"project_pk": self.project_a.id}),
+            {},
+            format="multipart",
+        )
+        # 非成员：被 IsProjectScoped 挡下（400 是序列化器先报"没传文件"，这里只关心不是 2xx）。
+        self.assertIn(response.status_code, (400, 403))
+        self.assertNotEqual(response.status_code, 200)
+

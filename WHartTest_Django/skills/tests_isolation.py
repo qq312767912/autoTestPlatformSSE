@@ -1,18 +1,22 @@
-"""T01 验收测试：Skill 的业务角色授权与**写侧**项目边界。
+"""T01 验收测试：Skill 的业务角色授权与项目边界（**口径已两次修订**）。
 
 覆盖 tasks.md T01 的验收项，外加 2026-10-02 的口径修订：
 
-- 跨项目**写**（状态变更、删除）全部被拒绝（403/404）。
-- 同项目授权矩阵：项目成员可读，非成员一律 403；测试负责人与测试执行人员的
-  角色判定与 ``knowledge_evolution`` 既有约定一致。
+- 跨项目**读**与跨项目**写**都不再被拒绝 —— Skill Hub 是**平台级公共目录**，
+  条目不属于任何单一项目，所以访问边界改按**角色**判定（见下）。
+- 同项目授权矩阵：项目成员可读，非成员一律 403（``hub-access`` 仍按项目）；
+  测试负责人与测试执行人员的角色判定与 ``knowledge_evolution`` 既有约定一致。
 
-⚠️ **口径已修订（2026-10-02 用户明确）**：Skill 的内容对每个项目都是公开的，
-Skill Hub 是平台公共资源。所以**读侧不再按项目过滤**——列表返回的是公共目录
-（同名副本已归并成一条正本），详情也跨项目可读。原 T01 里"列表不再返回全量
-Skill""跨项目读取被拒绝""猜 UUID 404"三条读侧验收项**已作废**，对应的用例已
-改写为断言公共目录的行为（见 ``SkillProjectIsolationTests``）。
+⚠️ **口径修订一（读侧）**：Skill 的内容对每个项目都是公开的，所以列表与详情都
+不再按项目过滤——列表返回的是公共目录（同名副本已归并成一条正本）。
+原 T01 里"跨项目读取被拒绝""猜 UUID 404"两条读侧验收项**已作废**。
 
-写侧边界**未放宽**：上传、启停、删除、版本治理仍锚定 URL 中的项目。
+⚠️ **口径修订二（写侧，2026-10-02 同日发现回归后）**：初版只放开读侧、写侧仍锚定
+URL 项目，结果**列表能返回全平台的卡、卡片上的按钮却一律 404**（实测 URL 项目 1 下
+5/20 张死、项目 7 下 15/20、项目 3 下 **20/20 全死**）。于是写侧也改为按角色判定：
+治理动作要"超管或任一项目测试负责人"，读只要登录，创建类动作（上传/预检/候选/导入）
+仍锚定 URL 项目（那是"新 Skill 记在哪个项目名下"的上传出处）。
+原 T01 里"跨项目写被拒绝""在自有项目路径猜他项目 UUID 404"两条写侧验收项**亦已作废**。
 """
 from types import SimpleNamespace
 
@@ -97,16 +101,15 @@ class RoleMappingTests(TestCase):
 
 
 class SkillProjectIsolationTests(APITestCase):
-    """**读侧是公共目录，写侧仍锁定 URL 中的项目。**
+    """读侧是公共目录；写侧按**角色**判定（都不是按 URL 项目）。
 
     2026-10-02 用户明确口径：Skill 的内容对每个项目都是公开的 —— Skill Hub 是
-    平台公共资源，不是"某个项目名下的私产"。所以列表与详情不再按项目过滤，
+    平台公共资源，不是"某个项目名下的私产"。所以列表与详情都不按项目过滤，
     任何项目进来看到的是同一份内容。
 
-    但这**不**等于把 URL 里的 ``project_pk`` 变成摆设：写操作（上传、启停、删除、
-    版本治理）仍锚定 URL 中的项目，否则"在 A 项目的路径下改到 B 项目的 Skill"
-    就成了后门。写侧的边界由 ``SkillWritePermissionTests`` 与
-    ``tests_public_catalogue.WriteSideStaysProjectAnchoredTests`` 各自钉住。
+    写侧的边界见 ``SkillWritePermissionTests`` 与
+    ``tests_public_catalogue.PublicCatalogueEntryIsNotProjectBoundTests``：
+    URL 里的 ``project_pk`` 不再是访问边界，只在创建类动作里当"上传出处"。
     """
 
     def setUp(self):
@@ -171,66 +174,83 @@ class SkillProjectIsolationTests(APITestCase):
 
 
 class SkillWritePermissionTests(APITestCase):
-    """写操作同样受项目边界约束。"""
+    """写操作的角色门槛（**不再按 URL 项目判定**，改按"在某个项目里是什么角色"）。
+
+    ⚠️ 口径改过一次。T27 初版是"读侧公共、写侧仍锚定 URL 项目"，于是列表返回
+    全平台的卡、卡片上的启停 / 内容 / 版本列表却按 URL 项目过滤 → 归属项目 ≠ 当前
+    项目的卡一律 404（实测项目 3 的 URL 下 20/20 张全死）。改成读写都按角色判定后，
+    这里的旧断言（"跨项目写 403/404"）语义已经不成立。
+
+    现在的边界是**角色**，不是项目：
+    - 治理动作（启停、删除、补填阶段、隔离版本）→ 超管或任一项目测试负责人；
+    - 读（详情、内容、版本史）→ 任何登录用户；
+    - 创建类动作（上传、预检、候选、导入）→ 仍是 URL 项目的执行人员（那是"新 Skill
+      记在哪个项目名下"的上传出处）。
+    """
 
     def setUp(self):
         self.project = Project.objects.create(name="写权限项目")
         self.other_project = Project.objects.create(name="写权限项目 B")
-        self.executor = grant(
-            User.objects.create_user(username="executor2"), "change_skill", "delete_skill"
-        )
+        self.lead = User.objects.create_user(username="write-lead2")
+        self.executor = User.objects.create_user(username="executor2")
+        # lead 只在 self.project 里是负责人；executor 只在 self.project 里是成员。
+        ProjectMember.objects.create(project=self.project, user=self.lead, role="admin")
         ProjectMember.objects.create(project=self.project, user=self.executor, role="member")
         self.skill = Skill.objects.create(
             project=self.project, name="case-review", description="本项目的 Skill"
         )
+        # 归属别的项目的 Skill：在公共目录里它就是"普通的一条目录项"。
         self.foreign_skill = Skill.objects.create(
             project=self.other_project, name="foreign-skill", description="别的项目"
         )
-        self.client.force_authenticate(user=self.executor)
+        self.client.force_authenticate(user=self.lead)
 
-    def test_cannot_toggle_skill_in_other_project(self):
+    def _detail_url(self, skill, project=None):
+        return reverse(
+            "project-skills-detail",
+            kwargs={"project_pk": (project or self.project).id, "pk": skill.pk},
+        )
+
+    def test_lead_can_toggle_a_skill_through_any_project_url(self):
+        """公共目录条目不属于任何项目：换一个 URL 项目照样能启停。"""
         response = self.client.patch(
-            reverse(
-                "project-skills-detail",
-                kwargs={"project_pk": self.other_project.id, "pk": self.foreign_skill.id},
-            ),
+            self._detail_url(self.foreign_skill, self.other_project),
             {"is_active": False},
             format="json",
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
+        self.foreign_skill.refresh_from_db()
+        self.assertFalse(self.foreign_skill.is_active)
 
-    def test_cannot_delete_skill_in_other_project(self):
-        response = self.client.delete(
-            reverse(
-                "project-skills-detail",
-                kwargs={"project_pk": self.other_project.id, "pk": self.foreign_skill.id},
-            )
-        )
-        self.assertEqual(response.status_code, 403)
-        self.assertTrue(Skill.objects.filter(pk=self.foreign_skill.pk).exists())
-
-    def test_can_toggle_own_skill(self):
+    def test_lead_can_toggle_own_skill(self):
         response = self.client.patch(
-            reverse(
-                "project-skills-detail",
-                kwargs={"project_pk": self.project.id, "pk": self.skill.id},
-            ),
-            {"is_active": False},
-            format="json",
+            self._detail_url(self.skill), {"is_active": False}, format="json",
         )
         self.assertEqual(response.status_code, 200)
         self.skill.refresh_from_db()
         self.assertFalse(self.skill.is_active)
 
-    def test_foreign_uuid_in_own_project_path_is_not_found(self):
-        response = self.client.delete(
-            reverse(
-                "project-skills-detail",
-                kwargs={"project_pk": self.project.id, "pk": self.foreign_skill.id},
-            )
+    def test_executor_cannot_toggle(self):
+        """启停是治理动作：执行人员（哪怕是本项目成员）也不行。"""
+        self.client.force_authenticate(user=self.executor)
+        response = self.client.patch(
+            self._detail_url(self.skill), {"is_active": False}, format="json",
         )
-        self.assertEqual(response.status_code, 404)
-        self.assertTrue(Skill.objects.filter(pk=self.foreign_skill.pk).exists())
+        self.assertEqual(response.status_code, 403)
+        self.skill.refresh_from_db()
+        self.assertTrue(self.skill.is_active)
+
+    def test_executor_cannot_delete(self):
+        self.client.force_authenticate(user=self.executor)
+        response = self.client.delete(self._detail_url(self.skill))
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(Skill.objects.filter(pk=self.skill.pk).exists())
+
+    def test_lead_can_delete_and_the_row_is_gone(self):
+        response = self.client.delete(self._detail_url(self.foreign_skill))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Skill.objects.filter(pk=self.foreign_skill.pk).exists())
+
 
 
 class SkillHubAccessTests(APITestCase):
