@@ -33,7 +33,10 @@ class TestCaseReviewApiTests(TestCase):
     @patch("testcases.views.execute_testcase_review.delay")
     def test_upload_creates_async_review(self, delay):
         delay.return_value.id = "task-1"
-        file = SimpleUploadedFile("cases.xlsx", b"fake", content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        file = self._xlsx_file([
+            ["用例编号", "测试步骤", "预期结果"],
+            ["CASE-001", "点击提交", "显示提交成功"],
+        ])
         response = self.client.post(
             f"/api/projects/{self.project.id}/testcase-reviews/",
             {"source_file": file, "business_context": "仅管理员可审批"},
@@ -93,6 +96,17 @@ class TestCaseReviewApiTests(TestCase):
         self.assertFalse(response.data["usable"])
         self.assertIn("文件无法解析或内容已损坏", response.data["detail"])
 
+    @patch("testcases.views.execute_testcase_review.delay")
+    def test_create_rejects_broken_xlsx_before_scheduling(self, delay):
+        response = self.client.post(
+            f"/api/projects/{self.project.id}/testcase-reviews/",
+            {"source_file": SimpleUploadedFile("broken.xlsx", b"not-an-xlsx")},
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("文件无法解析或内容已损坏", response.data["source_file"][0])
+        delay.assert_not_called()
+
     def test_diagnose_file_rejects_xlsx_without_case_headers(self):
         response = self.client.post(
             f"/api/projects/{self.project.id}/testcase-reviews/diagnose-file/",
@@ -114,7 +128,10 @@ class TestCaseReviewApiTests(TestCase):
         response = self.client.post(
             f"/api/projects/{self.project.id}/testcase-reviews/",
             {
-                "source_file": SimpleUploadedFile("payment.xlsx", b"fake"),
+                "source_file": self._xlsx_file([
+                    ["用例编号", "测试步骤", "预期结果"],
+                    ["PAY-001", "提交支付", "支付成功"],
+                ], name="payment.xlsx"),
                 "review_mode": "specified", "selected_skill": skill.id,
                 "custom_rules": "退款金额必须与原订单一致",
             },
@@ -131,11 +148,49 @@ class TestCaseReviewApiTests(TestCase):
     def test_specified_review_requires_skill(self, delay):
         response = self.client.post(
             f"/api/projects/{self.project.id}/testcase-reviews/",
-            {"source_file": SimpleUploadedFile("cases.xlsx", b"fake"), "review_mode": "specified"},
+            {"source_file": self._xlsx_file([
+                ["用例编号", "测试步骤", "预期结果"],
+                ["CASE-001", "点击提交", "显示提交成功"],
+            ]), "review_mode": "specified"},
             format="multipart",
         )
         self.assertEqual(response.status_code, 400)
         delay.assert_not_called()
+
+    @override_settings(MEDIA_ROOT=tempfile.gettempdir())
+    @patch("testcases.views.execute_testcase_review.delay")
+    def test_retry_rejects_broken_source_and_preserves_existing_report(self, delay):
+        review = TestCaseReview.objects.create(
+            project=self.project, creator=self.user,
+            source_file=SimpleUploadedFile("broken.xlsx", b"not-an-xlsx"),
+            source_name="broken.xlsx", status="failed",
+            report_file=SimpleUploadedFile("previous-report.xlsx", b"previous-report"),
+        )
+        report_name = review.report_file.name
+        response = self.client.post(
+            f"/api/projects/{self.project.id}/testcase-reviews/{review.id}/retry/"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("原始用例文件不可用", response.data["detail"])
+        review.refresh_from_db()
+        self.assertEqual(review.status, "failed")
+        self.assertEqual(review.report_file.name, report_name)
+        self.assertTrue(review.report_file.storage.exists(report_name))
+        delay.assert_not_called()
+        review.delete()
+
+    @override_settings(MEDIA_ROOT=tempfile.gettempdir())
+    def test_missing_report_file_does_not_expose_download_url(self):
+        review = TestCaseReview.objects.create(
+            project=self.project, creator=self.user,
+            source_file=SimpleUploadedFile("source.xlsx", b"source"),
+            source_name="source.xlsx", status="completed",
+            report_file="testcase_reviews/missing-report.xlsx",
+        )
+        response = self.client.get(f"/api/projects/{self.project.id}/testcase-reviews/")
+        item = next(row for row in response.data["results"] if row["id"] == review.id)
+        self.assertIsNone(item["report_url"])
+        review.delete()
 
     @patch("celery.current_app.control.revoke")
     def test_running_review_can_be_cancelled(self, revoke):
@@ -170,10 +225,16 @@ class TestCaseReviewLLMGateTests(TestCase):
         return config
 
     def _upload(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["用例编号", "测试步骤", "预期结果"])
+        sheet.append(["CASE-001", "点击提交", "显示提交成功"])
+        stream = io.BytesIO()
+        workbook.save(stream)
         with override_settings(MEDIA_ROOT=tempfile.gettempdir()):
             return self.client.post(
                 f"/api/projects/{self.project.id}/testcase-reviews/",
-                {"source_file": SimpleUploadedFile("cases.xlsx", b"fake")},
+                {"source_file": SimpleUploadedFile("cases.xlsx", stream.getvalue())},
                 format="multipart",
             )
 

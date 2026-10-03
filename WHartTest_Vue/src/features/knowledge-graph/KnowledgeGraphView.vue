@@ -92,7 +92,8 @@
               <g
                 v-for="node in snapshot.nodes" :key="node.id"
                 :transform="`translate(${position(node.id).x} ${position(node.id).y})`"
-                :class="['graph-node', { selected: selectedNode?.id === node.id }]" @click.stop="selectedNode = node"
+                :class="['graph-node', { selected: selectedNode?.id === node.id, dragging: nodeDrag?.id === node.id }]"
+                @mousedown.stop="startNodeDrag(node, $event)"
               >
                 <circle :r="nodeRadius(node)" :fill="nodeColor(node.kind)" />
                 <circle :r="nodeRadius(node) + 5" class="node-halo" />
@@ -105,7 +106,8 @@
             <a-button size="mini" @click="zoom = Math.min(2.2, zoom + 0.15)"><icon-plus /></a-button>
             <span>{{ Math.round(zoom * 100) }}%</span>
             <a-button size="mini" @click="zoom = Math.max(0.45, zoom - 0.15)"><icon-minus /></a-button>
-            <a-button size="mini" @click="resetViewport"><icon-fullscreen /></a-button>
+            <a-button size="mini" title="复位缩放与平移（不动手工摆放的节点）" @click="resetViewport"><icon-fullscreen /></a-button>
+            <a-button size="mini" title="重排：清除手工摆放的位置，回到自动布局" @click="relayout"><icon-refresh /></a-button>
           </div>
           <div class="graph-legend" v-if="snapshot?.nodes.length">
             <span v-for="kind in displayedKinds" :key="kind"><i :style="{ background: nodeColor(kind) }"></i>{{ nodeLabel(kind) }}</span>
@@ -155,7 +157,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
 import {
@@ -167,7 +169,13 @@ import { useProjectStore } from '@/store/projectStore';
 import { getGraphSnapshot, getGraphSources } from './service';
 import type { GraphEdge, GraphNode, GraphSnapshot, GraphSource, GraphSourceType } from './types';
 
-const props = withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false });
+/**
+ * `focusNode`：让外部（如产出详情里的「内容来源」引用条目）把图谱定位到某个节点。
+ *
+ * 之所以做成 prop 而不是让外部拼 URL：节点能不能定位取决于"当前选中的数据源里
+ * 有没有它"，这个判断只有图谱视图自己知道。外部拼一个自己算不准的链接，坏了也查不出来。
+ */
+const props = withDefaults(defineProps<{ embedded?: boolean; focusNode?: string }>(), { embedded: false, focusNode: '' });
 
 const router = useRouter();
 const projectStore = useProjectStore();
@@ -190,6 +198,14 @@ const dragging = ref(false);
 const dragOrigin = ref({ x: 0, y: 0 });
 const panOrigin = ref({ x: 0, y: 0 });
 const svgRef = ref<SVGSVGElement | null>(null);
+/**
+ * 待落地的聚焦目标。外部可能在数据源还没加载完（甚至组件刚落）时就要求定位，
+ * 那时 `selectedSource` 还是空的——直接丢弃会让"点了看图谱什么都没发生"。
+ * 存下来由 ``loadSources`` 在首次加载完成后再用掉。
+ */
+const pendingFocus = ref(props.focusNode || '');
+/** 手工摆放的节点位置。key = 节点 id。**每次布局重算都要先读它**，否则手工位置会被冲掉。 */
+const nodeOverrides = ref(new Map<string, { x: number; y: number }>());
 
 const filteredSources = computed(() => {
   const keyword = sourceSearch.value.trim().toLowerCase();
@@ -298,7 +314,14 @@ const positions = computed(() => {
   return result;
 });
 
-function position(id: string) { return positions.value.get(id) || { x: 500, y: 340 }; }
+/**
+ * 节点位置：**手工摆放优先**。
+ *
+ * `positions` 每次筛选/展开邻域都会重算。若直接以其为准，用户手工摆好的节点会被
+ * 布局重算冲掉——"我刚摆好的怎么又跳回去了"是这类图最常见的抱怨。
+ * 所以重算只负责"没被摆过的节点"，摆过的一律读覆盖层。
+ */
+function position(id: string) { return nodeOverrides.value.get(id) || positions.value.get(id) || { x: 500, y: 340 }; }
 function nodeColor(kind: string) {
   return ({
     File: '#165DFF', Class: '#0FC6C2', Function: '#FF7D00', Method: '#FF9A2E', Test: '#00B42A', Type: '#F53F3F',
@@ -343,7 +366,16 @@ async function loadSources() {
     if (!selectedSource.value || !sources.value.some(item => item.id === selectedSource.value?.id)) {
       selectedSource.value = sources.value[0] || null;
     }
-    if (selectedSource.value) await loadGraph();
+    if (selectedSource.value) {
+      // 数据源就绪后再落地"聚焦某个节点"的请求。放在这里而不是在外部拼 URL：
+      // 只有图谱自己知道当前数据源里有没有那个节点。
+      const focus = pendingFocus.value;
+      await loadGraph(focus);
+      if (focus) {
+        pendingFocus.value = '';
+        if (!selectedNode.value) Message.warning('该引用节点不在当前数据源中；请切换到它所属的数据源类型后再试');
+      }
+    }
   } catch (error) {
     Message.error(error instanceof Error ? error.message : '图谱数据源加载失败');
   } finally { sourcesLoading.value = false; }
@@ -371,9 +403,96 @@ function startPan(event: MouseEvent) { dragging.value = true; dragOrigin.value =
 function movePan(event: MouseEvent) { if (!dragging.value) return; pan.value = { x: panOrigin.value.x + event.clientX - dragOrigin.value.x, y: panOrigin.value.y + event.clientY - dragOrigin.value.y }; }
 function endPan() { dragging.value = false; }
 
+// ---------------------------------------------------------------- 节点拖拽与聚焦
+/** 位移小于这个像素数就当成一次点击：否则"想选一下节点"会变成"手一抖把它挪走了"。 */
+const CLICK_SLOP = 3;
+const nodeDrag = ref<{ id: string; moved: boolean; startX: number; startY: number; offsetX: number; offsetY: number } | null>(null);
+
+/** client 坐标 → viewBox 坐标 → 反解 pan/zoom，得到节点所在"布局坐标系"里的位置。 */
+function toLayoutPoint(clientX: number, clientY: number) {
+  const svg = svgRef.value;
+  if (!svg) return { x: 0, y: 0 };
+  const rect = svg.getBoundingClientRect();
+  // getBoundingClientRect 可能为 0 宽（元素还没布局），除法会得到 Infinity。
+  if (!rect.width || !rect.height) return { x: 0, y: 0 };
+  const vbX = (clientX - rect.left) * (1000 / rect.width);
+  const vbY = (clientY - rect.top) * (680 / rect.height);
+  return { x: (vbX - pan.value.x) / zoom.value, y: (vbY - pan.value.y) / zoom.value };
+}
+
+/**
+ * 开始拖节点。**必须由模板上的 `@mousedown.stop` 触发**：不阻止冒泡就会同时触发
+ * `<svg>` 的 `startPan`，表现为"拖节点时整张画布跟着跑"。
+ */
+function startNodeDrag(node: GraphNode, event: MouseEvent) {
+  const point = toLayoutPoint(event.clientX, event.clientY);
+  const current = position(node.id);
+  nodeDrag.value = {
+    id: node.id, moved: false,
+    startX: event.clientX, startY: event.clientY,
+    // 记录"按下点相对节点中心"的偏移：否则节点会瞬间跳到鼠标下，手感完全不对。
+    offsetX: current.x - point.x, offsetY: current.y - point.y,
+  };
+  // 监听挂在 window 上：鼠标拖出 SVG 边界时仍要跟手，只绑 svg 会在边缘卡住。
+  window.addEventListener('mousemove', moveNodeDrag);
+  window.addEventListener('mouseup', endNodeDrag);
+}
+
+function moveNodeDrag(event: MouseEvent) {
+  const drag = nodeDrag.value;
+  if (!drag) return;
+  if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < CLICK_SLOP) return;
+  drag.moved = true;
+  const point = toLayoutPoint(event.clientX, event.clientY);
+  // 直接写覆盖层（换一个新的 Map 让 computed 依赖能感知）：拖拽过程中即时可见。
+  const next = new Map(nodeOverrides.value);
+  next.set(drag.id, { x: point.x + drag.offsetX, y: point.y + drag.offsetY });
+  nodeOverrides.value = next;
+}
+
+function endNodeDrag() {
+  const drag = nodeDrag.value;
+  window.removeEventListener('mousemove', moveNodeDrag);
+  window.removeEventListener('mouseup', endNodeDrag);
+  nodeDrag.value = null;
+  // 位移没超过阈值 → 按点击处理，保留"点一下选中"的原有语义。
+  if (drag && !drag.moved) selectedNode.value = snapshot.value?.nodes.find(node => node.id === drag.id) || selectedNode.value;
+}
+
+/**
+ * 「重排」：清空手工位置，回到布局算法的位置，并复位缩放/平移。
+ *
+ * 刻意做成单独按钮而不是让「复位视图」顺带清掉：手工摆位是用户的工作成果，
+ * 一次"把图居中"顺手抹掉它，比不做还要糟。
+ */
+function relayout() { nodeOverrides.value = new Map(); resetViewport(); }
+
+/**
+ * 聚焦到某个节点。
+ *
+ * 数据源还没就绪时先记进 `pendingFocus`，由 `loadSources` 完成后落地 ——
+ * 直接丢弃会让"点了看图谱什么都没发生"，而用户无从知道是"没这个节点"还是"功能坏了"。
+ */
+async function focusOnNode(nodeId: string) {
+  if (!nodeId) return;
+  if (!sources.value.length || !selectedSource.value) { pendingFocus.value = nodeId; return; }
+  await loadGraph(nodeId);
+  if (!selectedNode.value) Message.warning('该引用节点不在当前数据源中；请切换到它所属的数据源类型后再试');
+}
+
+watch(() => props.focusNode, id => { if (id) void focusOnNode(id); });
+onBeforeUnmount(() => {
+  window.removeEventListener('mousemove', moveNodeDrag);
+  window.removeEventListener('mouseup', endNodeDrag);
+});
+
 watch(() => projectStore.currentProjectId, () => loadSources(), { immediate: true });
 </script>
 
 <style scoped>
-.graph-page{min-height:calc(100vh - 58px);padding:22px;background:#f2f4f7;color:#1d2129}.graph-header{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:16px}.eyebrow,.panel-heading span,.section-label,.signature span,.snapshot-commit span{font-size:10px;font-weight:700;letter-spacing:.14em;color:#86909c}.graph-header h1{margin:3px 0 4px;font-size:28px}.graph-header p{margin:0;color:#4e5969}.header-actions{display:flex;gap:10px}.source-strip{display:flex;align-items:stretch;gap:8px;margin-bottom:12px}.source-type{display:flex;align-items:center;gap:9px;padding:9px 14px;border:1px solid #d9e0e9;background:#fff;color:#4e5969;cursor:pointer}.source-type.active{border-color:#165dff;box-shadow:inset 3px 0 #165dff;color:#165dff}.source-type.disabled{opacity:.5;cursor:not-allowed}.source-type small{padding-left:8px;border-left:1px solid #e5e8ef;color:#86909c}.flywheel-note{margin-left:auto;display:flex;align-items:center;gap:7px;padding:0 14px;border:1px dashed #c9d2df;background:#f8fafc;color:#65758b;font-size:12px}.graph-workbench{display:grid;grid-template-columns:248px minmax(520px,1fr) 294px;height:calc(100vh - 190px);min-height:610px;border:1px solid #d9e0e9;background:#fff;box-shadow:0 12px 32px rgba(29,33,41,.07)}.source-panel,.detail-panel{padding:14px;background:#fbfcfe;overflow:auto}.source-panel{border-right:1px solid #e5e8ef}.detail-panel{border-left:1px solid #e5e8ef}.panel-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.panel-heading div{display:flex;flex-direction:column;gap:2px}.panel-heading b{font-size:16px}.panel-state,.detail-empty,.stage-state{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:#86909c;text-align:center}.panel-state{min-height:140px}.panel-state.empty svg{font-size:30px}.source-item{position:relative;display:flex;width:100%;align-items:flex-start;gap:10px;margin-top:8px;padding:11px;border:1px solid transparent;background:transparent;text-align:left;cursor:pointer}.source-item:hover{background:#f2f6ff}.source-item.selected{border-color:#b8cdfb;background:#edf3ff}.source-icon{display:grid;place-items:center;width:30px;height:30px;background:#e8f0ff;color:#165dff}.source-copy{display:flex;min-width:0;flex:1;flex-direction:column;gap:3px}.source-copy b,.source-copy small,.source-copy code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.source-copy small{color:#86909c}.source-copy code{font-size:11px;color:#4e5969}.status-dot{width:7px;height:7px;margin-top:7px;border-radius:50%;background:#00b42a}.source-footer{display:flex;flex-wrap:wrap;gap:6px;margin-top:18px;padding-top:14px;border-top:1px solid #e5e8ef}.source-footer>span{width:100%;font-size:11px;color:#86909c}.canvas-panel{display:flex;min-width:0;flex-direction:column}.canvas-toolbar{display:grid;grid-template-columns:minmax(200px,1fr) 150px 150px auto;gap:8px;padding:12px;border-bottom:1px solid #e5e8ef}.canvas-meta{display:flex;align-items:center;gap:18px;padding:7px 14px;border-bottom:1px solid #edf0f5;font-size:12px;color:#65758b}.canvas-meta b{color:#1d2129}.bounded{color:#ff7d00}.latency{margin-left:auto}.graph-stage{position:relative;flex:1;min-height:0;overflow:hidden;background:#f8fafc}.stage-state{position:absolute;inset:0;z-index:2}.stage-state.error{color:#f53f3f}.graph-svg{width:100%;height:100%;cursor:grab}.graph-svg:active{cursor:grabbing}.graph-edge{stroke:#a9b4c5;stroke-width:1;opacity:.65}.edge-calls{stroke:#ff9a2e}.edge-imports_from{stroke:#4f7fe8}.graph-node{cursor:pointer}.graph-node circle:first-child{stroke:#fff;stroke-width:2}.node-halo{fill:transparent;stroke:transparent;stroke-width:2}.graph-node.selected .node-halo{stroke:#1d2129}.graph-node text{font-size:10px;fill:#4e5969;paint-order:stroke;stroke:#f8fafc;stroke-width:3px;stroke-linejoin:round}.zoom-controls,.graph-legend{position:absolute;display:flex;align-items:center;gap:7px;border:1px solid #d9e0e9;background:rgba(255,255,255,.94);box-shadow:0 4px 14px rgba(29,33,41,.08)}.zoom-controls{right:12px;bottom:12px;padding:5px}.zoom-controls span{min-width:40px;text-align:center;font-size:11px}.graph-legend{left:12px;bottom:12px;flex-wrap:wrap;max-width:70%;padding:8px 10px;font-size:11px}.graph-legend span{display:flex;align-items:center;gap:4px}.graph-legend i{width:7px;height:7px;border-radius:50%}.detail-title{display:flex;align-items:center;justify-content:space-between}.detail-kind{font-size:11px;font-weight:700;letter-spacing:.08em}.node-detail h2,.source-detail h2{margin:7px 0;font-size:18px;word-break:break-word}.node-detail>code{display:block;padding:8px;background:#eef1f5;color:#4e5969;word-break:break-all}.detail-panel dl{margin:16px 0}.detail-panel dl div{display:grid;grid-template-columns:72px 1fr;gap:8px;padding:7px 0;border-bottom:1px solid #edf0f5}.detail-panel dt{color:#86909c}.detail-panel dd{margin:0;word-break:break-word}.signature,.snapshot-commit{margin:12px 0;padding:10px;border-left:3px solid #165dff;background:#edf3ff}.signature code,.snapshot-commit code{display:block;margin-top:5px;word-break:break-all}.node-detail>.arco-btn{margin-top:8px}.relation-list{margin-top:18px}.relation-item{display:grid;grid-template-columns:22px 70px 1fr;gap:5px;padding:7px 0;border-bottom:1px solid #edf0f5}.relation-item span{color:#165dff}.relation-item small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.relation-list p{font-size:12px;color:#86909c}.provenance-box,.future-card{display:flex;gap:9px;margin-top:16px;padding:11px;border:1px solid #d9e0e9;background:#fff}.provenance-box div,.future-card div{display:flex;flex-direction:column;gap:3px}.provenance-box span,.future-card p{margin:0;color:#86909c;font-size:11px}.source-detail>p{color:#65758b}.capabilities{display:flex;flex-wrap:wrap;gap:5px}.capabilities span{padding:3px 6px;background:#e8f0ff;color:#165dff;font-size:10px}.future-card{border-color:#ffd8a8;background:#fff8ed;color:#ff7d00}.detail-empty{height:100%;font-size:13px}.detail-empty svg{font-size:28px}@media(max-width:1200px){.graph-workbench{grid-template-columns:210px minmax(480px,1fr) 250px}.flywheel-note{display:none}.canvas-toolbar{grid-template-columns:1fr 130px 130px auto}}@media(max-width:900px){.graph-workbench{grid-template-columns:1fr;height:auto}.source-panel,.detail-panel{border:0;border-bottom:1px solid #e5e8ef}.source-panel{max-height:260px}.canvas-panel{height:620px}.detail-panel{min-height:300px}.graph-header{align-items:flex-start;gap:12px}.canvas-toolbar{grid-template-columns:1fr 1fr}.canvas-toolbar>*:first-child{grid-column:1/-1}}
+.graph-page{min-height:calc(100vh - 58px);padding:22px;background:#f2f4f7;color:#1d2129}.graph-header{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:16px}.eyebrow,.panel-heading span,.section-label,.signature span,.snapshot-commit span{font-size:10px;font-weight:700;letter-spacing:.14em;color:#86909c}.graph-header h1{margin:3px 0 4px;font-size:28px}.graph-header p{margin:0;color:#4e5969}.header-actions{display:flex;gap:10px}.source-strip{display:flex;align-items:stretch;gap:8px;margin-bottom:12px}.source-type{display:flex;align-items:center;gap:9px;padding:9px 14px;border:1px solid #d9e0e9;background:#fff;color:#4e5969;cursor:pointer}.source-type.active{border-color:#165dff;box-shadow:inset 3px 0 #165dff;color:#165dff}.source-type.disabled{opacity:.5;cursor:not-allowed}.source-type small{padding-left:8px;border-left:1px solid #e5e8ef;color:#86909c}.flywheel-note{margin-left:auto;display:flex;align-items:center;gap:7px;padding:0 14px;border:1px dashed #c9d2df;background:#f8fafc;color:#65758b;font-size:12px}.graph-workbench{display:grid;grid-template-columns:248px minmax(520px,1fr) 294px;height:calc(100vh - 190px);min-height:610px;border:1px solid #d9e0e9;background:#fff;box-shadow:0 12px 32px rgba(29,33,41,.07)}.source-panel,.detail-panel{padding:14px;background:#fbfcfe;overflow:auto}.source-panel{border-right:1px solid #e5e8ef}.detail-panel{border-left:1px solid #e5e8ef}.panel-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.panel-heading div{display:flex;flex-direction:column;gap:2px}.panel-heading b{font-size:16px}.panel-state,.detail-empty,.stage-state{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:#86909c;text-align:center}.panel-state{min-height:140px}.panel-state.empty svg{font-size:30px}.source-item{position:relative;display:flex;width:100%;align-items:flex-start;gap:10px;margin-top:8px;padding:11px;border:1px solid transparent;background:transparent;text-align:left;cursor:pointer}.source-item:hover{background:#f2f6ff}.source-item.selected{border-color:#b8cdfb;background:#edf3ff}.source-icon{display:grid;place-items:center;width:30px;height:30px;background:#e8f0ff;color:#165dff}.source-copy{display:flex;min-width:0;flex:1;flex-direction:column;gap:3px}.source-copy b,.source-copy small,.source-copy code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.source-copy small{color:#86909c}.source-copy code{font-size:11px;color:#4e5969}.status-dot{width:7px;height:7px;margin-top:7px;border-radius:50%;background:#00b42a}.source-footer{display:flex;flex-wrap:wrap;gap:6px;margin-top:18px;padding-top:14px;border-top:1px solid #e5e8ef}.source-footer>span{width:100%;font-size:11px;color:#86909c}.canvas-panel{display:flex;min-width:0;flex-direction:column}.canvas-toolbar{display:grid;grid-template-columns:minmax(200px,1fr) 150px 150px auto;gap:8px;padding:12px;border-bottom:1px solid #e5e8ef}.canvas-meta{display:flex;align-items:center;gap:18px;padding:7px 14px;border-bottom:1px solid #edf0f5;font-size:12px;color:#65758b}.canvas-meta b{color:#1d2129}.bounded{color:#ff7d00}.latency{margin-left:auto}.graph-stage{position:relative;flex:1;min-height:0;overflow:hidden;background:#f8fafc}.stage-state{position:absolute;inset:0;z-index:2}.stage-state.error{color:#f53f3f}.graph-svg{width:100%;height:100%;cursor:grab}.graph-svg:active{cursor:grabbing}.graph-edge{stroke:#a9b4c5;stroke-width:1;opacity:.65}.edge-calls{stroke:#ff9a2e}.edge-imports_from{stroke:#4f7fe8}.graph-node{cursor:grab}
+/* 拖拽中：光标切换 + 屏蔽文本选择。不屏蔽的话拖到文字上会顺带选中标签文字，
+   松手后整张图上都是蓝色高亮。 */
+.graph-node.dragging{cursor:grabbing}
+.graph-node.dragging text{user-select:none}.graph-node circle:first-child{stroke:#fff;stroke-width:2}.node-halo{fill:transparent;stroke:transparent;stroke-width:2}.graph-node.selected .node-halo{stroke:#1d2129}.graph-node text{font-size:10px;fill:#4e5969;paint-order:stroke;stroke:#f8fafc;stroke-width:3px;stroke-linejoin:round}.zoom-controls,.graph-legend{position:absolute;display:flex;align-items:center;gap:7px;border:1px solid #d9e0e9;background:rgba(255,255,255,.94);box-shadow:0 4px 14px rgba(29,33,41,.08)}.zoom-controls{right:12px;bottom:12px;padding:5px}.zoom-controls span{min-width:40px;text-align:center;font-size:11px}.graph-legend{left:12px;bottom:12px;flex-wrap:wrap;max-width:70%;padding:8px 10px;font-size:11px}.graph-legend span{display:flex;align-items:center;gap:4px}.graph-legend i{width:7px;height:7px;border-radius:50%}.detail-title{display:flex;align-items:center;justify-content:space-between}.detail-kind{font-size:11px;font-weight:700;letter-spacing:.08em}.node-detail h2,.source-detail h2{margin:7px 0;font-size:18px;word-break:break-word}.node-detail>code{display:block;padding:8px;background:#eef1f5;color:#4e5969;word-break:break-all}.detail-panel dl{margin:16px 0}.detail-panel dl div{display:grid;grid-template-columns:72px 1fr;gap:8px;padding:7px 0;border-bottom:1px solid #edf0f5}.detail-panel dt{color:#86909c}.detail-panel dd{margin:0;word-break:break-word}.signature,.snapshot-commit{margin:12px 0;padding:10px;border-left:3px solid #165dff;background:#edf3ff}.signature code,.snapshot-commit code{display:block;margin-top:5px;word-break:break-all}.node-detail>.arco-btn{margin-top:8px}.relation-list{margin-top:18px}.relation-item{display:grid;grid-template-columns:22px 70px 1fr;gap:5px;padding:7px 0;border-bottom:1px solid #edf0f5}.relation-item span{color:#165dff}.relation-item small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.relation-list p{font-size:12px;color:#86909c}.provenance-box,.future-card{display:flex;gap:9px;margin-top:16px;padding:11px;border:1px solid #d9e0e9;background:#fff}.provenance-box div,.future-card div{display:flex;flex-direction:column;gap:3px}.provenance-box span,.future-card p{margin:0;color:#86909c;font-size:11px}.source-detail>p{color:#65758b}.capabilities{display:flex;flex-wrap:wrap;gap:5px}.capabilities span{padding:3px 6px;background:#e8f0ff;color:#165dff;font-size:10px}.future-card{border-color:#ffd8a8;background:#fff8ed;color:#ff7d00}.detail-empty{height:100%;font-size:13px}.detail-empty svg{font-size:28px}@media(max-width:1200px){.graph-workbench{grid-template-columns:210px minmax(480px,1fr) 250px}.flywheel-note{display:none}.canvas-toolbar{grid-template-columns:1fr 130px 130px auto}}@media(max-width:900px){.graph-workbench{grid-template-columns:1fr;height:auto}.source-panel,.detail-panel{border:0;border-bottom:1px solid #e5e8ef}.source-panel{max-height:260px}.canvas-panel{height:620px}.detail-panel{min-height:300px}.graph-header{align-items:flex-start;gap:12px}.canvas-toolbar{grid-template-columns:1fr 1fr}.canvas-toolbar>*:first-child{grid-column:1/-1}}
 </style>

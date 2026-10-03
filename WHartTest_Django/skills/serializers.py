@@ -11,21 +11,42 @@ from rest_framework import serializers
 from .models import Skill, SkillVersion
 
 
-class SkillCategoryMixin:
-    """导入类接口的展示分类。
+class SkillCategoryMixin(serializers.Serializer):
+    """导入类接口的展示分类（即「所属阶段」）。
 
     这个值记在 Skill.declared_stage，不改写不可变版本包。
+
+    ⚠️ **必须继承 ``serializers.Serializer``，不能是普通的 ``object`` 混入类。**
+    DRF 的 ``SerializerMetaclass`` 收集字段时只认「自身带 ``_declared_fields``」的基类：
+    普通类用 ``type`` 建，没有这个属性，于是 ``category`` / ``description``
+    **一个都不会进字段表**——既不校验、也不进 ``validated_data``，视图里
+    ``validated_data['category']`` 直接 ``KeyError`` 变成 500。
+    这个坑曾经真实存在（三个导入接口全都拿不到分类），修复见本次提交。
+
+    取值分两种（真值见 ``knowledge_evolution.capability_registry``）：
+
+    * **规范阶段** —— ``SKILL_STAGE_OPTIONS`` 里的标识符，或它在 ``STAGE_LABELS``
+      里的中文名；两种写法都归一化成标识符，避免同一个阶段在库里存在两种拼法；
+    * **自定义阶段** —— 用户在导入表单里自己敲的名称（如「性能测试」），
+      归一化成 ``custom:<名称>``（见 ``CUSTOM_STAGE_PREFIX``）。
+
+    为什么要归一化、而不是原样存用户输入：导入分类字段是**同一套**服务端白名单，
+    直接放行裸字符串会让拼错的规范阶段（``test_executoin``）悄无声息地写进
+    ``declared_stage``——它不报错，也永远匹配不上阶段检索，在页面上和"没填"长得一样。
+    自定义档加了前缀，结构上就不可能冒充规范阶段。
     """
+
     category = serializers.CharField(max_length=64, required=True, allow_blank=False)
     description = serializers.CharField(max_length=200, required=True, allow_blank=False)
 
     def validate_category(self, value):
-        from knowledge_evolution.capability_registry import BUSINESS_CAPABILITY_STAGES
+        from knowledge_evolution.capability_registry import normalize_stage_input
 
-        value = (value or '').strip()
-        if value not in BUSINESS_CAPABILITY_STAGES:
-            raise serializers.ValidationError('请选择有效的所属分类')
-        return value
+        try:
+            # allow_custom=True：上传/导入阶段允许用户自建归属档。
+            return normalize_stage_input(value, allow_custom=True)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
 
 
 class SkillSerializer(serializers.ModelSerializer):
@@ -252,14 +273,23 @@ class SkillListSerializer(serializers.ModelSerializer):
         return stage
 
     def _stage_of(self, obj):
-        """返回 ``(阶段标识符, 来源)``；来源取值 ``manifest`` / ``declared`` / ``''``。"""
+        """返回 ``(阶段标识符, 来源)``；来源取值 ``manifest`` / ``declared`` / ``''``。
+
+        ⚠️ **顺序不能反：版本包 manifest 声明的阶段优先。** 这是 ``get_stage``、
+        ``DeclaredStageTests`` 与本模块共同声明的口径（``manifest.stage`` >
+        ``declared_stage`` > 未声明）。原实现先判 ``declared``，会让管理员的一次补填
+        **静默盖掉包里自己的声明**，与文档和测试都相反 —— 同一个 Skill 上两个来源
+        打架时，包是更硬的事实（版本包不可变），补填只是存量包缺声明时的回落。
+        """
+        version = self._version(obj)
+        declared_in_manifest = str(
+            ((version.manifest if version is not None else None) or {}).get('stage') or ''
+        )
+        if declared_in_manifest:
+            return declared_in_manifest, 'manifest'
         declared = str(getattr(obj, 'declared_stage', '') or '')
         if declared:
             return declared, 'declared'
-        version = self._version(obj)
-        declared_in_manifest = str(((version.manifest if version is not None else None) or {}).get('stage') or '')
-        if declared_in_manifest:
-            return declared_in_manifest, 'manifest'
         return '', ''
 
     def get_stage_source(self, obj):
@@ -270,11 +300,13 @@ class SkillListSerializer(serializers.ModelSerializer):
         stage = self.get_stage(obj)
         if not stage:
             return ''
-        # 阶段中文名真值在 capability_registry；未登记的自定义阶段原样返回，
-        # 不编造标签——"看到裸标识符"比"看到编出来的名字"更好排查。
-        from knowledge_evolution.capability_registry import STAGE_LABELS
+        # 阶段中文名真值在 capability_registry。用户自定义阶段存的是 ``custom:<名称>``，
+        # 展示时要剥掉命名空间前缀、只给名称（``stage_display_label`` 负责这件事）；
+        # 仍未登记的裸标识符原样返回，不编造标签——"看到裸标识符"比"看到编出来的名字"
+        # 更好排查。
+        from knowledge_evolution.capability_registry import stage_display_label
 
-        return STAGE_LABELS.get(stage, stage)
+        return stage_display_label(stage)
 
     def get_version(self, obj):
         version = self._version(obj)
@@ -303,14 +335,21 @@ class SkillToggleSerializer(serializers.ModelSerializer):
 class SkillStageBindingSerializer(serializers.Serializer):
     """给 Skill 补填 / 撤销能力阶段（Skill Hub「阶段未声明」的补救入口）。
 
-    为什么要在服务端卡取值：写进 ``declared_stage`` 的裸标识符会一路走进阶段匹配
+    为什么归一化服务端说了算：写进 ``declared_stage`` 的裸标识符会一路走进阶段匹配
     逻辑（``task_binding`` 的 ``Q(declared_stage=stage)``）。拼错的阶段**不会报错**，
     只会让这个 Skill 永远匹配不上任何阶段——那种问题在页面上看起来和"没填"一样，
-    极难排查。所以只放行登记过的业务能力阶段。
+    极难排查。所以规范阶段只认登记过的那九项。
 
-    取值真值 = ``capability_registry.BUSINESS_CAPABILITY_STAGES``（8 类业务能力）。
-    **不含** ``knowledge_query``：它属 ``PLATFORM_UTILITY_STAGES``（平台工具），
-    不参与业务能力口径，也不该被绑成某个阶段的实现。
+    取值分两类（归一化真值 = ``capability_registry.normalize_stage_input``）：
+
+    * 规范阶段 —— ``SKILL_STAGE_OPTIONS``（8 类业务能力 + 平台基础能力）的标识符或
+      其中文名。**不含** ``knowledge_query``：它属 ``PLATFORM_UTILITY_STAGES``
+      （平台工具），不参与业务能力口径，也不该被绑成某个阶段的实现；
+    * 自定义阶段 —— 用户自己敲的名称，存 ``custom:<名称>``。它与
+      ``platform_base`` 同语义：只是归属标签，**永远匹配不上**
+      ``Q(declared_stage=stage)`` 的阶段检索。上传时允许自建，补填时也必须允许，
+      否则用户在导入环节填错的归属档事后改不回来。
+
     空串表示撤销声明（允许，否则填错了退不回去）。
     """
     description = serializers.CharField(required=False, allow_blank=False, max_length=200)
@@ -318,16 +357,16 @@ class SkillStageBindingSerializer(serializers.Serializer):
     stage = serializers.CharField(required=True, allow_blank=True, max_length=64)
 
     def validate_stage(self, value):
-        from knowledge_evolution.capability_registry import BUSINESS_CAPABILITY_STAGES
+        from knowledge_evolution.capability_registry import normalize_stage_input
 
+        # 先判空：空串是"撤销声明"的语义，不能交给归一化器（它会当成缺失报错）。
         value = (value or '').strip()
         if not value:
             return ''
-        if value not in BUSINESS_CAPABILITY_STAGES:
-            raise serializers.ValidationError(
-                f'未知的能力阶段：{value}；可选值见 capability_registry.BUSINESS_CAPABILITY_STAGES'
-            )
-        return value
+        try:
+            return normalize_stage_input(value, allow_custom=True)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
 
 
 # ---------------------------------------------------------------------------

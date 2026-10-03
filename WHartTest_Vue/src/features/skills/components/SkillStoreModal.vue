@@ -146,8 +146,8 @@
       <!-- 底部操作 -->
       <div class="store-footer" v-if="manifestStates.length > 0">
         <div class="footer-left">
-          <a-select v-model="installCategory" :placeholder="text.categoryPlaceholder" style="width: 190px">
-            <a-option v-for="opt in categoryOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</a-option>
+          <a-select v-model="installCategory" allow-search allow-create :placeholder="text.categoryPlaceholder" style="width: 190px">
+            <a-option v-for="opt in categoryOptions" :key="opt.value" :value="opt.value">{{ stageOptionText(opt) }}</a-option>
           </a-select>
           <a-input v-model="installDescription" placeholder="平台生成的简介，请确认" style="width: 260px" />
           <a-progress
@@ -228,12 +228,13 @@ import type {
 } from '../types'
 import { useAppI18n } from '@/composables/useAppI18n'
 import { isInternalPlatformSkill } from '../utils/internalSkills'
+import { stageOptionText } from '../utils/stages'
 
 const props = defineProps<{
   visible: boolean
   projectId: number
   installedSkills: SkillListItem[]
-  categoryOptions: Array<{ value: string; label: string }>
+  categoryOptions: Array<{ value: string; label: string; custom?: boolean }>
 }>()
 
 const emit = defineEmits<{
@@ -274,7 +275,7 @@ const text = computed(() => (
         batchUninstallDone: (ok: number, fail: number) =>
           `Uninstallation complete: ${ok} succeeded, ${fail} failed`,
         loadConfigFailed: 'Failed to load store config',
-        categoryPlaceholder: 'Category (required)', categoryRequired: 'Select a category before installing',
+        categoryPlaceholder: 'Category (or type to create one)', categoryRequired: 'Select a category before installing',
       }
     : {
         title: 'Skill 商店',
@@ -305,7 +306,7 @@ const text = computed(() => (
         batchUninstallDone: (ok: number, fail: number) =>
           `卸载完成：成功 ${ok}，失败 ${fail}`,
         loadConfigFailed: '获取商店配置失败',
-        categoryPlaceholder: '所属分类（必填）', categoryRequired: '请先选择所属分类',
+        categoryPlaceholder: '选择分类，或直接输入以新增', categoryRequired: '请先选择所属分类',
       }
 ))
 

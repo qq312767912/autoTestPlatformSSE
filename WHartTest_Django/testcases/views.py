@@ -141,14 +141,26 @@ class TestCaseReviewViewSet(viewsets.ModelViewSet):
         is_stale = review.status == "running" and review.updated_at < stale_before
         if review.status in {"pending", "running"} and not is_stale:
             return Response({"detail": "任务仍在执行中"}, status=status.HTTP_409_CONFLICT)
+        # 重跑依赖原始文件。先在同步请求里校验，避免用户看到
+        # “已重新提交”后又收到一次永远无法成功的异步失败。
+        from .review_service import _read_rows
+        try:
+            if not review.source_file or not review.source_file.storage.exists(review.source_file.name):
+                raise FileNotFoundError("原始用例文件已丢失")
+            if not _read_rows(review.source_file.path):
+                raise ValueError("未识别到可审查的用例行")
+        except Exception as exc:
+            return Response(
+                {"detail": f"无法重跑：原始用例文件不可用（{exc}），请重新发起审查并上传有效文件"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         review.status = "pending"
         review.current_step = "等待重试"
         review.progress = 0
         review.error_message = ""
         review.completed_at = None
-        if review.report_file:
-            review.report_file.delete(save=False)
-            review.report_file = None
+        # 保留上一版已成功报告，直到新一轮真正生成新报告。
+        # 否则任何重跑失败都会把原本可下载的产物一并删掉。
         async_result = execute_testcase_review.delay(review.id)
         review.celery_task_id = async_result.id or ""
         review.save()

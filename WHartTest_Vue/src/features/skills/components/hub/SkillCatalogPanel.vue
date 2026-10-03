@@ -16,7 +16,7 @@
         @update:model-value="(value: any) => emit('update:stageFilter', value ?? '')"
       >
         <a-option v-for="item in stageOptions" :key="item.value" :value="item.value">
-          {{ item.label }}
+          {{ stageOptionText(item) }}
         </a-option>
       </a-select>
     </div>
@@ -52,7 +52,7 @@
       <template v-else>
         <div v-for="group in groups" :key="group.key" class="catalog__group">
           <div class="catalog__group-title">
-            <span>{{ group.label }}</span>
+            <span>{{ group.label }}<em v-if="group.custom" class="catalog__group-custom">自定义</em></span>
             <span class="catalog__group-count">{{ group.items.length }}</span>
           </div>
           <button
@@ -98,7 +98,7 @@ import {
 } from '@arco-design/web-vue/es/icon'
 
 import type { SkillCatalogEntry } from '../../types/hub'
-import { STAGE_LABELS, UNSTAGED_KEY, WORKFLOW_STAGES, stageLabel } from '../../utils/stages'
+import { STAGE_LABELS, STAGE_GROUP_ORDER, UNSTAGED_KEY, isCustomStage, stageLabel, stageOptionText } from '../../utils/stages'
 
 const props = defineProps<{
   entries: SkillCatalogEntry[]
@@ -117,8 +117,20 @@ const emit = defineEmits<{
 }>()
 
 const stageOptions = computed(() => {
-  const values = Object.keys(STAGE_LABELS)
-  return values.map((value) => ({ value, label: STAGE_LABELS[value] }))
+  // 规范阶段按固定顺序在前；**库里已在用的自定义阶段**（`custom:<名称>`）追加在后。
+  // 不并进来的话，用户自己加的档在筛选器里根本选不到——上传时能填、筛的时候找不到，
+  // 是同一套数据的两副面孔（这正是前端要向后端问清单、而不是自己抄一份的原因）。
+  const usedCustom: string[] = []
+  for (const entry of props.entries) {
+    const stage = entry.stage
+    if (stage && isCustomStage(stage) && !usedCustom.includes(stage)) usedCustom.push(stage)
+  }
+  usedCustom.sort()
+  return [...Object.keys(STAGE_LABELS), ...usedCustom].map((value) => ({
+    value,
+    label: stageLabel(value),
+    custom: isCustomStage(value),
+  }))
 })
 
 const hasFilter = computed(() => Boolean(props.keyword || props.stageFilter))
@@ -133,8 +145,10 @@ const groups = computed(() => {
     buckets.get(key)!.push(entry)
   }
 
-  // 链路阶段顺序从展示层那份唯一副本取，不在本文件另抄一份字面量。
-  const order = WORKFLOW_STAGES
+  // 分组顺序从展示层那份唯一副本取，不在本文件另抄一份字面量。
+  // 用 STAGE_GROUP_ORDER 而不是 WORKFLOW_STAGES：后者只有主链路四阶段，
+  // 会把「用例审查 / 风险识别 / 平台基础能力」都挤进"未知键"分支去按字典序排。
+  const order = STAGE_GROUP_ORDER
   const keys = [...buckets.keys()].sort((a, b) => {
     const ai = order.indexOf(a)
     const bi = order.indexOf(b)
@@ -149,6 +163,7 @@ const groups = computed(() => {
   return keys.map((key) => ({
     key,
     label: key === UNSTAGED_KEY ? '未声明阶段' : stageLabel(key),
+    custom: key !== UNSTAGED_KEY && isCustomStage(key),
     items: buckets.get(key)!.sort((a, b) => a.name.localeCompare(b.name)),
   }))
 })
@@ -226,6 +241,19 @@ const groups = computed(() => {
 
 .catalog__group-count {
   font-weight: 400;
+}
+
+/* 自定义阶段的角标：与规范任务类型区分开，避免被误读成平台阶段。
+   字号/字重刻意比标题轻，只作提示、不抢分组名。 */
+.catalog__group-custom {
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 400;
+  color: var(--color-text-3);
+  border: 1px solid var(--color-border-2);
+  border-radius: 2px;
 }
 
 .catalog__item {

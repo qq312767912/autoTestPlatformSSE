@@ -281,6 +281,11 @@ export interface WorkflowStageGateView {
    */
   status: 'pending' | 'unscored' | 'passed' | 'failed' | 'confirmed' | 'overridden' | 'ready' | 'blocked' | 'running';
   output_id?: string | null;
+  /**
+   * 该阶段能下载什么（控制台卡片上的「下载报告」按钮读它）。
+   * 与 `workflow-status` 的 `output.artifact` 同源，未产出时为 null。
+   */
+  artifact?: StageArtifactView | null;
   task_id: string;
   gate_id?: string | null;
   scores: Record<string, number>;
@@ -395,6 +400,13 @@ export interface StageOutputView {
   skill_name: string;
   skill_version: string;
   package_sha256: string;
+  /**
+   * 该阶段能下载什么（由后端判定文件是否存在、是登记产物还是回落模板）。
+   * 前端**不自己猜**：猜出来的结果会表现为"有按钮点了 404"。
+   */
+  artifact?: StageArtifactView | null;
+  /** 采纳率按版本横向列出 —— 「采纳率作为版本间对比评分维度」的落地。 */
+  acceptance_history?: AcceptanceHistoryItem[];
   gate: {
     status: string;
     scores: Record<string, number>;
@@ -454,7 +466,10 @@ export interface WorkflowStageStatusView {
   entered: boolean;
   can_enter: boolean;
   execution?: WorkflowStageExecutionView | null;
-  output: { id: string; task_id: string; created_at: string } | null;
+  /** 未产出时为 null；有产出则带 `artifact` 描述「能下载什么」。 */
+  output:
+    | { id: string; task_id: string; created_at: string; artifact?: StageArtifactView | null }
+    | null;
   gate: {
     id: string;
     status: string;
@@ -558,6 +573,11 @@ export interface CaseReviewEvolutionScan {
   defects: CaseReviewEvolutionDefect[];
   warnings: string[];
   source_name: string;
+  /** 报告最后一个 Sheet 里的采纳率（0–1）。 */
+  acceptance_rate: number;
+  /** 采纳率的百分制表示。 */
+  acceptance_score: number;
+  acceptance_sheet: string;
 }
 
 /** 上传报告后的预检结果：**不落库**，只回答"现在能不能发起"。 */
@@ -602,3 +622,167 @@ export interface CaseReviewEvolutionResult {
   active_untouched: boolean;
   download_url: string;
 }
+
+/** 用例审查质量反馈：只记录报告采纳率，不派生 Skill。 */
+export interface CaseReviewReportFeedbackResult {
+  review_id: string;
+  feedback_id: string;
+  human_score: number;
+  threshold: number;
+  scan: CaseReviewEvolutionScan;
+}
+
+// ---------------------------------------------------------------- 阶段报告下载 / 反馈（T03 / T04 / T05）
+
+/**
+ * 「这一阶段能下载什么」的描述（不含文件字节）。
+ *
+ * `source` 必须如实展示：`registered` 是 Skill 产出时登记的真实产物（保留该阶段的
+ * 专业结构），`fallback` 是平台按正文渲染的文本兜底。两者可信度不同，
+ * 按钮上长得一样会让人以为"下到的就是正式报告"。
+ */
+export interface StageArtifactView {
+  /** 恒为 true（回落模板一定会生成）；保留字段是为了将来"某阶段禁止下载"时前端不改结构。 */
+  available: boolean;
+  source: 'registered' | 'fallback' | string;
+  name: string;
+  /** 回落模板时不渲染正文取体积，故为 null；精确长度看 `content_length`。 */
+  size: number | null;
+  sha256: string;
+}
+
+/** 采纳率的历史版本对照项。采纳率是"人对某一版的评价"，只有排成版本序列才读得出趋势。 */
+export interface AcceptanceHistoryItem {
+  version: string;
+  version_id: string;
+  /** 百分制。 */
+  score: number;
+  at: string;
+  reason_code: string;
+}
+
+/** 「上传反馈」的返回：只记反馈，不派生。 */
+export interface StageFeedbackResult {
+  stage: string;
+  stage_label: string;
+  workflow_id: string;
+  output_id: string;
+  feedback_id: string;
+  /** 百分制。 */
+  acceptance_score: number;
+  /**
+   * 低于参考线（**不是**拦截条件）。
+   * skill 是一点点优化出来的，把参考线做成硬阻断等于要求每个中间版本一次跨过同一条线。
+   */
+  below_reference: boolean;
+  acceptance_reference: number;
+  report_name: string;
+  acceptance_sheet: string;
+  skill_version: string;
+  /** false = 这份报告之前上传过（命中幂等键），只是又提交了一次。 */
+  created: boolean;
+}
+
+// ---------------------------------------------------------------- AI 候选优化点（T06 / T07）
+
+/** AI 提出的**候选**优化点。`state` 恒为 `proposed`，人工确认后才进派生。 */
+export interface OptimizationCandidate {
+  attribution_id: string;
+  category: string;
+  issue_type: string;
+  hypothesis: string;
+  /** ≤0.8：AI 假设不得伪装成 `confidence=1.0` 的人工结论。 */
+  confidence: number;
+  state: string;
+  source: string;
+}
+
+/** 「生成候选优化点」的返回。无 LLM 时 `degraded=true`（HTTP 200，不是错误）。 */
+export interface OptimizationProposalResult {
+  degraded: boolean;
+  /** 降级原因编码，目前只有 `llm_unavailable`。 */
+  reason_code?: string;
+  detail?: string;
+  candidates: OptimizationCandidate[];
+  review_id: string;
+  output_id?: string;
+  package?: {
+    version: string;
+    skill_name: string;
+    package_sha256: string;
+    files: Array<{ path: string; chars: number }>;
+  };
+  history_count?: number;
+}
+
+/** 人工确认结果。逐条返回：一条写错不该把其余已经做完的确认全丢掉。 */
+export interface OptimizationDecisionResult {
+  review_id: string;
+  results: Array<{
+    attribution_id: string;
+    state?: string;
+    confidence?: number;
+    /** 该条失败时的原因；成功时为空。 */
+    error?: string;
+  }>;
+  confirmed_count: number;
+  confirmed_ids: string[];
+}
+
+// ---------------------------------------------------------------- 内容来源（T09 / T10）
+
+/** 规范化后的引用条目：四阶段与知识问答同构，前端只渲染一种结构。 */
+export interface LineageCitation {
+  citation_id: string;
+  source_type: 'graph' | 'document' | 'requirement' | 'test_case' | '' | string;
+  source_id: string;
+  node_id: string;
+  document_id: string;
+  chunk_index: number | null;
+  rank: number;
+  title: string;
+}
+
+/** 引用里出现的图谱节点。`resolved=false` 表示节点已被清理（图谱重建），但仍报出来。 */
+export interface LineageGraphNode {
+  node_id: string;
+  kind: string;
+  label: string;
+  resolved: boolean;
+}
+
+/** 这条产出参考了这版 Skill 的哪些文件（清单 + 哈希，不落正文）。 */
+export interface LineageSkillContent {
+  skill_version_id: string;
+  version?: string;
+  package_sha256: string;
+  files: Array<{ path: string; sha256: string; size: number }>;
+  truncated: boolean;
+}
+
+export interface LineageSources {
+  /** 检索通道实况：哪个通道跑了、命中几条、为什么被跳过。 */
+  channels: Record<string, unknown>;
+  citations: LineageCitation[];
+  graph_nodes: LineageGraphNode[];
+  skill_content: LineageSkillContent;
+}
+
+/** 产出血缘：闭环七段（`stages`）+ 内容来源（`sources`）分两段返回。 */
+export interface OutputLineageView {
+  output: {
+    id: string;
+    task_type: string;
+    task_id: string;
+    model_version: string;
+    prompt_version: string;
+    created_at: string;
+    project_id: number;
+  };
+  skill: Record<string, unknown>;
+  stages: Record<string, { ok: boolean; count: number } & Record<string, unknown>>;
+  broken_at: string;
+  closed_loop: boolean;
+  sources: LineageSources;
+}
+

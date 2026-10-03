@@ -16,8 +16,9 @@
 
       <a-tabs v-model:active-key="tab" size="small">
         <a-form-item label="所属分类（展示阶段）" required>
-          <a-select v-model="category" placeholder="请选择分类">
-            <a-option v-for="opt in categoryOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</a-option>
+          <!-- allow-create：找不到合适的阶段时直接敲一个名称新建（后端归一化成 custom:<名称>） -->
+          <a-select v-model="category" allow-search allow-create placeholder="选择分类，或直接输入以新增">
+            <a-option v-for="opt in categoryOptions" :key="opt.value" :value="opt.value">{{ stageOptionText(opt) }}</a-option>
           </a-select>
         </a-form-item>
         <a-form-item label="功能简介（平台生成）" required>
@@ -75,6 +76,7 @@ import { Message } from '@arco-design/web-vue'
 import { SkillService } from '../../services/skillService'
 import { toErrorMessage } from '../../services/skillHubService'
 import type { Skill } from '../../types'
+import { stageOptionText } from '../../utils/stages'
 
 const props = defineProps<{
   visible: boolean
@@ -95,7 +97,7 @@ const storeForm = ref({ zip_url: '', sha256: '' })
 const category = ref('')
 const description = ref('')
 const suggested = ref(false)
-const categoryOptions = ref<Array<{ value: string; label: string }>>([])
+const categoryOptions = ref<Array<{ value: string; label: string; custom?: boolean }>>([])
 
 watch(
   () => props.visible,

@@ -172,7 +172,17 @@ def record_knowledge_query(*, knowledge_base, user, query: str, answer: str,
                         "sparse" in (item.get("fusion_detail") or {}).get("sources", [])
                         for item in candidates
                     )},
-                    "graph": {"enabled": False, "reason": "phase_0_observability"},
+                    # 图谱通道按**实际是否命中图谱来源**记，不再写死 False。
+                    # 写死会让"图谱确实参与了、但渠道记录说没有"永久成立，
+                    # 于是溯源断链永远查不出来 —— 页面上只表现为"引不到东西"。
+                    # 这里是**观测值**（跑完看到什么），不是配置声明。
+                    "graph": {
+                        "enabled": any(
+                            "graph" in (item.get("fusion_detail") or {}).get("sources", [])
+                            for item in candidates
+                        ),
+                        "observed": True,
+                    },
                 },
                 candidates=candidates,
                 citations=citations,

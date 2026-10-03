@@ -301,27 +301,56 @@ class RetrievalOrchestrator:
         )
 
     @staticmethod
-    def _should_use_graph(request: RetrievalRequest, config: dict, direct_scores: List[float]) -> bool:
+    def _graph_decision(
+        request: RetrievalRequest, config: dict, direct_scores: List[float],
+    ) -> tuple[bool, str, dict]:
+        """图谱通道要不要跑、**不跑的首要原因**、以及附带的判断依据。
+
+        为什么要把"原因"也返回：原先无论因为什么被摘掉，状态里都写
+        ``direct_recall_confident``。于是一个"该任务类型不在图谱白名单里"的配置问题，
+        在溯源里表现为"直连召回已经很确定了" —— 顺着这句话排查，方向必然跑到
+        召回质量上去，而真正要改的是检索策略里那一行白名单。
+
+        ``conditional`` 下的两级判断是**有顺序**的，原因要跟着顺序走：
+
+        1. 任务类型在白名单里 → 必用图谱，不受直连分数影响（这是四阶段的保障）。
+        2. 不在白名单里 → 图谱退化为"直连召回信心不足时补一次"。
+           此时**首要原因是"该任务类型不适用"**，因为如果它在白名单里，
+           这次就不会被跳过 —— 这才是可操作的那一条。
+           直连分数高只作为附带依据（``detail["direct_recall_confident"]``）报出来，
+           两者都保留，但主因不能被次因盖住。
+        """
         policy = request.graph_policy or config.get("graph_policy", "conditional")
         if policy == "never":
-            return False
+            return False, "policy_never", {}
         if policy == "always":
-            return True
-        # conditional：代码影响/需求覆盖/缺陷根因/来源追溯 必用；直接召回信心不足时用
+            return True, "", {}
         if request.task_type in config.get("graph_task_types", []):
-            return True
-        if direct_scores:
-            top = max(direct_scores)
-            return top < 0.6
-        return True
+            return True, "", {}
+        confident = bool(direct_scores) and max(direct_scores) >= 0.6
+        if confident:
+            return False, "not_applicable_task_type", {"direct_recall_confident": True}
+        return True, "", {}
+
+    @staticmethod
+    def _should_use_graph(request: RetrievalRequest, config: dict, direct_scores: List[float]) -> bool:
+        """兼容入口：只要结论。原因见 :meth:`_graph_decision`。"""
+        return RetrievalOrchestrator._graph_decision(request, config, direct_scores)[0]
 
     def _collect_candidates(
         self, request: RetrievalRequest, config: dict, budget: dict
-    ) -> Dict[str, List[RetrievalCandidate]]:
-        """按源并发召回；超预算时跳过可选源。"""
+    ) -> tuple[Dict[str, List[RetrievalCandidate]], Dict[str, dict]]:
+        """按源并发召回；超预算时跳过可选源。
+
+        返回值多带一个 ``status``：每个候选源的**实际执行结果**。之所以必须记下来 ——
+        图谱通道会在"直连召回已经很确定"时被主动摘掉（见 ``_should_use_graph``），
+        而摘掉之后产出里看不出任何异常。事后想回答"这条产出为什么没有溯源"，
+        没有这份状态就只能靠猜。状态里带 ``reason``，把"没跑"与"跑了没命中"分开。
+        """
         query = request.query_rewrite or request.query
         source_cfg = config.get("sources", {})
         per_source: Dict[str, List[RetrievalCandidate]] = {}
+        status: Dict[str, dict] = {}
         direct_scores: List[float] = []
         start = time.perf_counter()
 
@@ -335,28 +364,47 @@ class RetrievalOrchestrator:
 
         for name, cfg, mandatory in ordered_sources:
             if request.selected_sources and name not in request.selected_sources:
+                status[name] = {"enabled": False, "reason": "not_selected"}
                 continue
             if not cfg.get("enabled", name in ("dense", "sparse", "structured")):
+                status[name] = {"enabled": False, "reason": "disabled_by_config"}
                 continue
             elapsed_ms = (time.perf_counter() - start) * 1000
             if not mandatory and elapsed_ms > budget["time_ms"] * 0.6:
+                status[name] = {"enabled": False, "reason": "budget_skipped"}
                 continue
             retriever = self.retrievers.get(name)
             if not retriever:
+                status[name] = {"enabled": False, "reason": "no_retriever"}
                 continue
             try:
                 candidates = retriever.search(request, query, config)
                 per_source[name] = candidates
+                status[name] = {"enabled": True, "hits": len(candidates)}
                 if name in ("dense", "sparse"):
                     direct_scores.extend([c.score for c in candidates[:5]])
             except Exception:
                 per_source[name] = []
+                status[name] = {"enabled": True, "hits": 0, "error": "retriever_failed"}
 
-        # graph 路由决策
-        if "graph" in per_source and not self._should_use_graph(request, config, direct_scores):
-            per_source.pop("graph", None)
+        # graph 路由决策。被摘掉时记下**原因与当时的策略**：
+        # 只写 enabled=False 会让人误以为图谱被全局关停，而实际是这一次的路由结论；
+        # 原因必须区分"策略关停"与"任务类型不适用" ——
+        # 它们指向两个完全不同的排查方向（改策略开关 vs 改白名单）。
+        if "graph" in per_source:
+            use_graph, skip_reason, detail = self._graph_decision(
+                request, config, direct_scores,
+            )
+            if not use_graph:
+                per_source.pop("graph", None)
+                status["graph"] = {
+                    "enabled": False,
+                    "reason": skip_reason or "not_applicable_task_type",
+                    "policy": request.graph_policy or config.get("graph_policy", "conditional"),
+                    **detail,
+                }
 
-        return per_source
+        return per_source, status
 
     @staticmethod
     def _weighted_rrf(
@@ -494,7 +542,7 @@ class RetrievalOrchestrator:
         budget = config.get("budget", {})
         top_k = request.top_k or config.get("mmr", {}).get("final_k", 10)
 
-        per_source = self._collect_candidates(request, config, budget)
+        per_source, channel_status = self._collect_candidates(request, config, budget)
 
         weights = {
             name: cfg.get("weight", 0.2)
@@ -529,6 +577,9 @@ class RetrievalOrchestrator:
             "task_type": request.task_type,
             "evidence_package": [c.to_evidence() for c in fused[:top_k]],
             "candidates_count": {k: len(v) for k, v in per_source.items()},
+            # 通道实况：谁跑了、谁被跳过、为什么。落 RetrievalTrace.channels 的就是它，
+            # 用来回答"这条产出为什么没有/有图谱溯源"。
+            "channels": channel_status,
             "fusion_count": len(fused),
             "latency_ms": round(elapsed_ms, 3),
             "token_estimate": token_estimate,

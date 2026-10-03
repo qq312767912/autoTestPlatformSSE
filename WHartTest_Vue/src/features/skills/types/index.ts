@@ -81,7 +81,12 @@ export interface SkillGitImportResponse {
 export interface SkillListMeta {
   can_bind_stage: boolean
   can_manage: boolean
-  stage_options: Array<{ value: string; label: string }>
+  /**
+   * 可选的「所属阶段」：先是规范任务类型，之后是**库里已在用的用户自定义阶段**
+   * （`value` 形如 `custom:<名称>`，`custom` 为 true）。前端据此把两类在下拉里区分开，
+   * 但**不自己做归一化**——能不能提交、怎么归一化一律以后端返回为准。
+   */
+  stage_options: Array<{ value: string; label: string; custom?: boolean }>
 }
 
 export interface SkillListResponse {

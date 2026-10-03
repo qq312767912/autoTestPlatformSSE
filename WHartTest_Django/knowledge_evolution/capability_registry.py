@@ -112,6 +112,26 @@ BUSINESS_CAPABILITY_STAGES = (
 #: 平台支持的全部任务类型。
 ALL_TASK_TYPES = BUSINESS_CAPABILITY_STAGES + PLATFORM_UTILITY_STAGES
 
+#: Skill 可声明的「平台基础能力」档。
+#:
+#: 有些 Skill 是**跨阶段的公共手段**，不属于任何单一测试阶段：平台自带的测试管理工具
+#: （`whart-test` / `api-automation` / `ui-automation`）、浏览器自动化（`playwright-skill` /
+#: `playwright-cli` / `browser-use` / `agent-browser-skill`）、视觉识别（`vision-analysis`）、
+#: 知识库检索（`weknora-kb`）、URL 解析与画图等。硬塞进八类里任何一类都是错的。
+#:
+#: 它**不是业务能力**：不进 ``BUSINESS_CAPABILITY_STAGES``（八类的构成式子与金标分组口径
+#: 一个字都不动），也不进 ``ALL_TASK_TYPES``（它不是任务类型，没有产出、没有门禁分区）。
+#: 只用于 Skill Hub 的「所属阶段」分类与分组展示。
+#:
+#: 副作用是它永远匹配不上 ``Q(declared_stage=stage)`` 的阶段检索——这正是想要的语义：
+#: 平台基础能力不该被某个阶段独占绑定。
+PLATFORM_BASE_STAGE = "platform_base"
+
+#: ``Skill.declared_stage`` 的取值真值（也是 Skill Hub 阶段下拉的顺序）。
+#: 八类业务能力在前，平台基础能力垫底——它是"不绑单一阶段"的兜底归属，不该抢在
+#: 真实阶段前面。
+SKILL_STAGE_OPTIONS = BUSINESS_CAPABILITY_STAGES + (PLATFORM_BASE_STAGE,)
+
 STAGE_LABELS = {
     "case_review": "用例审查",
     "code_review": "代码审查",
@@ -122,7 +142,118 @@ STAGE_LABELS = {
     "risk_identification": "风险识别",
     "issue_tracking": "问题跟踪",
     "knowledge_query": "知识问答",
+    # 非任务类型，仅作 Skill 的归属标签（见 ``PLATFORM_BASE_STAGE``）。
+    PLATFORM_BASE_STAGE: "平台基础能力",
 }
+
+#: 中文标签 -> 规范标识符的反查表（供 :func:`normalize_stage_input` 归一化用户输入）。
+#:
+#: ⚠️ 只收 ``SKILL_STAGE_OPTIONS`` 里**可声明**的阶段。``STAGE_LABELS`` 还登记了
+#: ``knowledge_query``（平台工具），但它是 ``PLATFORM_UTILITY_STAGES``、不是可绑定的
+#: 归属档——不把它排除掉，"知识问答"就会被当成规范阶段放行，`knowledge_query`
+#: 会顺着 ``declared_stage`` 混进阶段匹配。这个坑有存量测试兜着
+#: （``DeclaredStageTests.test_platform_utility_stage_is_rejected``）。
+_LABEL_TO_STAGE = {
+    label: stage for stage, label in STAGE_LABELS.items()
+    if stage in SKILL_STAGE_OPTIONS
+}
+
+#: 登记在 ``STAGE_LABELS``、但**刻意不放进** ``SKILL_STAGE_OPTIONS`` 的阶段
+#: （当前只有平台工具 ``knowledge_query``）。既不能当规范阶段放行，也不该被当作
+#: 用户自定义档收进 ``custom:`` 命名空间——那会凭空造出一个与平台工具同名的假自定义档，
+#: 比直接报错更难排查。标识符与中文名两种写法都要拦住。
+_NON_BINDABLE_NAMES = frozenset(
+    name
+    for stage in STAGE_LABELS
+    if stage not in SKILL_STAGE_OPTIONS
+    for name in (stage, STAGE_LABELS[stage])
+)
+
+
+# ---------------------------------------------------------------------------
+# 用户自定义阶段（上传 / 导入 / 补填时用户自己敲的归属档）
+# ---------------------------------------------------------------------------
+#
+# 「所属阶段」的**规范取值**只有 :data:`SKILL_STAGE_OPTIONS` 那九项——它们是任务类型
+# 的真值，背后各有门禁分区与评测模板。用户导入 Skill 时想自己加一档（例如「性能测试」
+# 「安全测试」）是合理诉求，但**不能**往任务类型真值里塞：真值一旦被用户输入污染，
+# ``Q(declared_stage=stage)`` 的阶段匹配、金标分组、评测模板都会跟着漂。
+#
+# 所以自定义阶段走**带前缀的独立命名空间**，一律存成 ``custom:<名称>``：
+#
+# * 结构上不可能冒充规范阶段——用户把 ``test_execution`` 敲成 ``test_executoin`` 时，
+#   它与规范标识符撞不上，页面会如实显示"自定义阶段：test_executoin"，而不是像没填
+#   一样悄无声息（那正是无前缀方案最难排查的失败模式）；
+# * 与 :data:`PLATFORM_BASE_STAGE` 同语义：永远是"不绑单一阶段"的归属标签，
+#   不会被任何阶段的 ``Q(declared_stage=stage)`` 检索命中；
+# * 不新增数据表、不新增迁移：在用集合由 ``Skill.declared_stage`` 前缀反查得出，
+#   依旧是单一真值来源。
+
+#: 自定义阶段在 ``Skill.declared_stage`` 里的存储前缀。
+CUSTOM_STAGE_PREFIX = "custom:"
+
+#: 自定义阶段名称的长度上限。``Skill.declared_stage`` 是 64 字符、前缀占 7，
+#: 留足余量后定 32——再长在卡片标签上也放不下。
+CUSTOM_STAGE_LABEL_MAX_LENGTH = 32
+
+
+def is_custom_stage(value) -> bool:
+    """判断 ``declared_stage`` 里的值是否是自定义阶段（而不是规范任务类型）。"""
+    return str(value or '').startswith(CUSTOM_STAGE_PREFIX)
+
+
+def make_custom_stage(label, max_length=CUSTOM_STAGE_LABEL_MAX_LENGTH) -> str:
+    """把用户敲的名称包成 ``custom:<名称>``；散落的空白先收拢，免得"性能测试"与
+    "性能 测试"在库里裂成两档。调用方需自行保证它不是规范阶段名。"""
+    text = ' '.join(str(label or '').split())
+    if not text:
+        raise ValueError('自定义阶段名称不能为空')
+    if len(text) > max_length:
+        raise ValueError(f'自定义阶段名称不能超过 {max_length} 个字符')
+    return CUSTOM_STAGE_PREFIX + text
+
+
+def stage_display_label(value) -> str:
+    """阶段的展示名。自定义阶段剥掉前缀只显示名称，规范阶段查中文标签，其余原样。"""
+    text = str(value or '')
+    if text.startswith(CUSTOM_STAGE_PREFIX):
+        return text[len(CUSTOM_STAGE_PREFIX):] or text
+    return STAGE_LABELS.get(text, text)
+
+
+def normalize_stage_input(value, allow_custom=True) -> str:
+    """把用户输入归一化成 ``Skill.declared_stage`` 的存储值。
+
+    接受的三种写法（统一收敛成一个存储值）：
+
+    1. 规范标识符（``test_execution``）——原样返回；
+    2. 规范阶段的中文名（``测试执行``）——反查回标识符，避免与标识符并存两份；
+    3. 其它自由文本——包成 ``custom:<名称>``（``allow_custom=False`` 时直接报错）。
+
+    空串一律报错：本函数服务于"有值"的入口（导入分类、补填阶段），撤销声明由调用方
+    在进来之前就拦掉（见 ``SkillStageBindingSerializer.validate_stage``）。
+
+    失败抛 :class:`ValueError`，消息可直接展示给用户——具体框架的异常类型由调用方转换。
+    """
+    text = str(value or '').strip()
+    if not text:
+        raise ValueError('所属阶段不能为空')
+    if text in SKILL_STAGE_OPTIONS:
+        return text
+    canonical = _LABEL_TO_STAGE.get(text)
+    if canonical:
+        return canonical
+    if text in _NON_BINDABLE_NAMES:
+        # 平台工具阶段（如 knowledge_query）不参与业务能力口径，也不是可声明的归属档。
+        raise ValueError(
+            f'「{STAGE_LABELS.get(text, text)}」是平台工具阶段，不能作为 Skill 的所属阶段'
+        )
+    if text.startswith(CUSTOM_STAGE_PREFIX):
+        # 幂等：前端回显的就是库里的值，二次提交不该再套一层前缀。
+        return make_custom_stage(text[len(CUSTOM_STAGE_PREFIX):])
+    if not allow_custom:
+        raise ValueError(f'未知的能力阶段：{text}；可选值见 SKILL_STAGE_OPTIONS')
+    return make_custom_stage(text)
 
 #: 能力形态。
 KIND_SKILL = "skill"

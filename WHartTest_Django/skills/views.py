@@ -259,7 +259,7 @@ class SkillViewSet(BaseModelViewSet):
         # 项目名下，按 URL 项目判角色会判错）。可绑定阶段复用后端能力注册表的真值，
         # 免得前端再抄一份阶段清单、两边慢慢漂移。
         from knowledge_evolution.capability_registry import (
-            BUSINESS_CAPABILITY_STAGES, STAGE_LABELS,
+            SKILL_STAGE_OPTIONS, STAGE_LABELS, is_custom_stage, stage_display_label,
         )
         from projects.roles import is_test_lead_anywhere
 
@@ -267,6 +267,24 @@ class SkillViewSet(BaseModelViewSet):
         # 前端靠它决定启停开关与删除按钮是否可用 —— 与后端 403 同源，避免出现
         # "按钮在这、点了必然报错"（2026-10-02 的 404 回归就是这么来的）。
         can_manage = is_test_lead_anywhere(getattr(request, 'user', None))
+        # 自定义阶段（``custom:<名称>``）是用户在导入时自己加的归属档，不属规范任务类型，
+        # 但它们已经在库里用着了：下拉与筛选必须能把它们列出来，否则想复用的用户只能重新
+        # 敲一遍，还容易敲出"性能测试 / 性能 测试"这种近似重名。规范九项在前、自定义项
+        # 按名称排在后面，逐项标 ``custom`` 让前端能区分两档（规范阶段是可匹配的任务类型，
+        # 自定义阶段只是归属标签）。
+        custom_stages = sorted({
+            stage for stage in Skill.objects
+            .values_list('declared_stage', flat=True)
+            .distinct()
+            if is_custom_stage(stage)
+        })
+        stage_options = [
+            {'value': stage, 'label': STAGE_LABELS.get(stage, stage), 'custom': False}
+            for stage in SKILL_STAGE_OPTIONS
+        ] + [
+            {'value': stage, 'label': stage_display_label(stage), 'custom': True}
+            for stage in custom_stages
+        ]
         return Response({
             'code': 200,
             'message': '获取成功',
@@ -274,10 +292,7 @@ class SkillViewSet(BaseModelViewSet):
             'meta': {
                 'can_bind_stage': can_manage,
                 'can_manage': can_manage,
-                'stage_options': [
-                    {'value': stage, 'label': STAGE_LABELS.get(stage, stage)}
-                    for stage in BUSINESS_CAPABILITY_STAGES
-                ],
+                'stage_options': stage_options,
             },
         })
 

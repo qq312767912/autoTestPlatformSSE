@@ -1,5 +1,7 @@
 """任务 17–19：防腐检查、联合链路图和运营指标。"""
 import logging
+import os
+import re
 from collections import Counter
 
 from django.db.models import Avg, Count, Sum
@@ -14,6 +16,7 @@ from .capability_registry import (
     LEGACY_WORKFLOW_STAGES,
     WORKFLOW_STAGES,
     is_evolvable,
+    stage_display_label,
 )
 from .evaluation_models import EvaluationResult, EvaluationRun
 from .graph import GraphEdgeSpec, GraphNodeSpec, PostgreSQLGraphSource
@@ -183,7 +186,11 @@ class WorkflowGateService:
                 "skill_name": skill.name,
                 "description": (skill.description or "").strip(),
                 "declared_stage": declared,
-                "declared_stage_label": cls.STAGE_LABELS.get(declared, declared),
+                # 展示名统一走能力注册表的 :func:`stage_display_label`：它既认得本类那份
+                # 精简标签表之外的全部规范阶段（case_review / platform_base 等），
+                # 也会把用户自定义阶段的 ``custom:`` 前缀剥掉。本类自己的 ``STAGE_LABELS``
+                # 是 agent 侧的阶段命名，只覆盖主链路，不能拿来当 Skill 归属的展示真值。
+                "declared_stage_label": stage_display_label(declared),
                 "runnable": runnable,
                 "skill_version_id": str(version.pk) if version else "",
                 "version": str(version.version) if version else "",
@@ -209,6 +216,208 @@ class WorkflowGateService:
             "all_stage_order": list(ALL_WORKFLOW_STAGES),
             "stages": stages_payload,
             "skills": skills,
+        }
+
+    # ---- 阶段产出的出口：查看 / 下载 / 反馈共用同一套定位与物化 ----
+    #
+    # 这三个动作必须落在**同一条产出**上，否则会出现"页面能看结果、却下不到报告"
+    # 这种自相矛盾的状态。所以定位只实现一次，三个入口都调它。
+
+    #: 产出侧登记报告文件的约定 key。改名等于换协议，Skill 侧与平台须同时改。
+    ARTIFACT_KEY = "report"
+
+    #: 无登记产物时回落渲染的模板后缀。刻意是 markdown 而非 xlsx：
+    #: 平台只认识产出正文与协议元数据，硬凑一份 xlsx 会得到"字段全空的表格"，
+    #: 比直接给文本更误导。详见 ``render_stage_report``。
+    FALLBACK_SUFFIX = ".md"
+
+    @classmethod
+    def locate_stage_output(cls, *, project_id, workflow_id: str, stage: str):
+        """三元定位某阶段的产出，返回 ``(output, gate)``；找不到时 output 为 ``None``。
+
+        定位刻意走 **project + workflow_id + stage 三者一起**，而不是按产出 id 取：
+        产出 id 会出现在页面 URL 与导出的报告里，只按 id 取会让越权读取退化成
+        "取决于 id 是否被猜中"。这里多一次三元定位，
+        换来的是越权读取在这个入口上不可能发生。
+
+        与 ``workflow-stage-output`` 视图的历史行为保持一致：先看门禁上挂的产出，
+        找不到再按协议元数据旁路匹配（有产出但门禁还没建的情况）。
+        """
+        from .models import GenerationOutput
+        from .workflow_models import WorkflowStageGate
+
+        gate = WorkflowStageGate.objects.filter(
+            project_id=project_id, workflow_id=workflow_id, stage=stage
+        ).select_related("output", "output__skill_version").first()
+        output = gate.output if gate is not None and gate.output_id else None
+        if output is not None:
+            return output, gate
+
+        # 兜底：旁路产出（有产出但门禁还没建）也要能定位，与 workflow-status 的兜底一致。
+        for candidate in GenerationOutput.objects.filter(
+            project_id=project_id
+        ).select_related("skill_version"):
+            protocol = (candidate.metadata or {}).get("protocol") or {}
+            if (
+                str(protocol.get("workflow_id") or "") == workflow_id
+                and str(protocol.get("stage") or candidate.task_type) == stage
+            ):
+                return candidate, gate
+        return None, gate
+
+    @staticmethod
+    def _resolve_artifact_path(raw) -> str | None:
+        """把登记的产物路径解析成真实存在的文件路径；找不到返回 ``None``。
+
+        允许三种写法：绝对路径、相对 ``BASE_DIR``（设计约定写 ``media/...``）、
+        相对 ``MEDIA_ROOT``（Django ``FileField`` 的存法）。
+        三种都试不是宽容，而是这三处都可能出现在真实产出里；
+        只认一种会让"登记了却下不到"变成一个查不出原因的现象。
+
+        **文件不存在等价于没有产物**（返回 ``None``），由调用方回落到模板：
+        先给出按钮再报 500 是把"没登记"说成"平台坏了"，与 T23 ``_url`` 同源。
+        """
+        from django.conf import settings
+
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        candidates = []
+        if os.path.isabs(text):
+            candidates.append(text)
+        else:
+            candidates.append(os.path.join(str(settings.BASE_DIR), text))
+            media_root = str(getattr(settings, "MEDIA_ROOT", "") or "")
+            if media_root:
+                candidates.append(os.path.join(media_root, text))
+                candidates.append(os.path.join(media_root, os.path.basename(text)))
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
+    @classmethod
+    def stage_artifact(cls, output, *, key: str = "") -> dict | None:
+        """取该产出登记的报告文件（``metadata.artifacts``）；没有则返回 ``None``。
+
+        约定结构（见 ``specs/evolution-assisted-loop/design.md`` §1.1）::
+
+            [{ "key": "report", "name": "回归-20261003-方案.xlsx",
+               "path": "media/skill_runtime/artifacts/...", "sha256": "...", "size": 15360 }]
+
+        只返回**文件确实存在**的那一条。返回 ``source="registered"`` 让调用方
+        能区分"下发的是 Skill 的真实产物"还是"平台兜底渲染的文本"——
+        这两者对使用者意味着不同的可信度，不该在响应里长得一样。
+        """
+        artifacts = (output.metadata or {}).get("artifacts") or []
+        if not isinstance(artifacts, list):
+            return None
+        wanted = str(key or cls.ARTIFACT_KEY)
+        for item in artifacts:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("key") or cls.ARTIFACT_KEY) != wanted:
+                continue
+            path = cls._resolve_artifact_path(item.get("path"))
+            if path is None:
+                continue
+            size = item.get("size")
+            if not isinstance(size, int) or size <= 0:
+                try:
+                    size = os.path.getsize(path)
+                except OSError:  # pragma: no cover - 竞态：解析后被删
+                    size = 0
+            return {
+                "key": wanted,
+                "name": str(item.get("name") or os.path.basename(path)),
+                "path": path,
+                "sha256": str(item.get("sha256") or ""),
+                "size": size,
+                "source": "registered",
+            }
+        return None
+
+    @classmethod
+    def _fallback_filename(cls, *, output, stage: str) -> str:
+        """回落模板的文件名。与 ``render_stage_report`` 共用一个实现：
+
+        名字只算一次，是为了让"列表里预告的名字"与"实际下载到的名字"必然一致 ——
+        各算一次迟早会因为 sanitize 规则改动而分叉。
+        """
+        label = cls.STAGE_LABELS.get(stage, stage)
+        safe_label = re.sub(r'[/\\:*?"<>|\r\n]+', "_", label).strip(" ._") or "stage"
+        stamp = output.created_at.strftime("%Y%m%d") if output.created_at else "undated"
+        return f"{safe_label}阶段报告_{stamp}{cls.FALLBACK_SUFFIX}"
+
+    @classmethod
+    def render_stage_report(cls, *, output, stage: str) -> tuple[str, bytes]:
+        """按 ``content`` 渲染统一模板，作为「没有登记产物」时的回落。
+
+        返回 ``(文件名, 文件字节)``。
+
+        刻意只做文本包装、不臆造字段。平台能拿到的只有产出正文与协议元数据；
+        把它渲染成 xlsx 会得到一份"看起来像报告、其实字段全空"的文件 ——
+        相比直接给 markdown，后者至少诚实。
+        """
+        label = cls.STAGE_LABELS.get(stage, stage)
+        protocol = (output.metadata or {}).get("protocol") or {}
+        created_at = output.created_at
+        skill_version = ""
+        if output.skill_version_id:
+            try:
+                skill_version = str(output.skill_version.version or "")
+            except Exception:  # pragma: no cover - 版本被清理
+                skill_version = ""
+        lines = [
+            f"# {label}阶段报告",
+            "",
+            f"- 流程：{protocol.get('workflow_id') or '-'}",
+            f"- 阶段：{label}（{stage}）",
+            f"- 产出时间：{created_at.strftime('%Y-%m-%d %H:%M:%S') if created_at else '-'}",
+            f"- Skill 版本：{skill_version or '-'}",
+            f"- 包哈希：{output.skill_package_sha256 or '-'}",
+            "",
+            "> 本文件由平台按阶段产出正文回落生成：该阶段没有登记可下载的产物文件。",
+            "> 如需正式报告格式，请由该阶段的 Skill 在产出时登记 artifacts。",
+            "",
+            "---",
+            "",
+            (output.content or "（本阶段产出正文为空）"),
+            "",
+        ]
+        # BOM 让 Excel / WPS 打开中文不乱码：报告会被人工下载后在办公套件里看。
+        body = ("\ufeff" + "\n".join(lines)).encode("utf-8")
+        return cls._fallback_filename(output=output, stage=stage), body
+
+    @classmethod
+    def stage_artifact_payload(cls, output, *, stage: str, key: str = "") -> dict:
+        """把「该阶段能下载什么」拍成一份给页面看的描述（**不含文件字节**）。
+
+        给 ``workflow-status`` 用：页面据此决定要不要渲染「下载报告」按钮、
+        以及悬浮时提示"下的是登记产物还是平台回落模板"。
+        这两者对使用者意味着不同的可信度，不该在按钮上长得一样。
+
+        刻意**不渲染回落正文**来算体积：那会在每次读流程状态时把每个阶段的
+        全文拼一遍（内容可能上百 KB），只为填一个前端未必展示的数字。
+        回落时 ``size=None``，需要精确体积的调用方看 ``content_length``。
+        """
+        artifact = cls.stage_artifact(output, key=key)
+        if artifact is not None:
+            return {
+                "available": True,
+                "source": "registered",
+                "name": artifact["name"],
+                "size": artifact["size"],
+                "sha256": artifact["sha256"],
+            }
+        return {
+            # 落到这里总是"能下"：回落模板一定会生成。``available`` 因此恒为 True，
+            # 保留这个字段是为了让将来"某阶段禁止下载"时前端不用改结构。
+            "available": True,
+            "source": "fallback",
+            "name": cls._fallback_filename(output=output, stage=stage),
+            "size": None,
+            "sha256": "",
         }
 
     @classmethod
@@ -847,6 +1056,10 @@ class WorkflowGateService:
                 "output": ({
                     "id": str(output.pk), "task_id": output.task_id,
                     "created_at": output.created_at.isoformat() if output.created_at else "",
+                    # 「下载报告」按钮的显示条件与悬浮提示都读这里：
+                    # 未产出时不存在这个字段，页面就不渲染按钮（不显示优于禁用 ——
+                    # 一个禁用按钮只会让人反复点它想知道为什么）。
+                    "artifact": cls.stage_artifact_payload(output, stage=stage),
                 } if output is not None else None),
                 "gate": ({
                     "id": str(gate.pk), "status": gate.status,
@@ -1092,6 +1305,13 @@ class ProjectQualityCockpitService:
                     "stage": stage, "status": status,
                     "output_id": str(output.id) if output else None,
                     "task_id": output.task_id if output else "",
+                    # 与 ``workflow-status`` 同源：「下载报告」按钮的显示条件与悬浮提示
+                    # 都读它。控制台的卡片才是用户真正点下载的地方，缺了这块，
+                    # 卡片上就只能给一个不说清"下到的是登记产物还是回落文本"的按钮。
+                    "artifact": (
+                        WorkflowGateService.stage_artifact_payload(output, stage=stage)
+                        if output is not None else None
+                    ),
                     "gate_id": str(gate.id) if gate else None,
                     "scores": gate.scores if gate else {},
                     "threshold": gate.threshold if gate else 0.7,

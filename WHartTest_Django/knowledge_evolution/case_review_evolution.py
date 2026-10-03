@@ -24,11 +24,18 @@
 - 留空 → **未确认**。必须计数并报出来：人工漏填会让"这份报告已全部确认"
   变成一个没人验证的假设，而派生的护栏小节正是照着这份结论写的。
 
-「人工打分」的语义（与向导第二步的文案一致）：分数是**对本次审查结果可信度的评价**，
-只有达到阈值才允许拿它当进化依据 —— 一份人工自己都不认可的审查结果，
-照着它去改 Skill 包只会把噪声固化进护栏。分数落 ``FeedbackEvent``
-（``signal='accepted'``、``value`` 存百分制归一值、``reason_code='manual_calibration'``），
-带 ``skill_version`` 绑定，可被后续评测直接读。
+「报告打分」与平台导出口径保持一致：从报告最后一个 Sheet 读取「采纳率」，
+不接受页面手工输入的分数。采纳率**只作为不同版本间对比的评分维度**，
+不作为能否上传或能否进化的门槛 —— 门槛做成硬阻断，等于要求每一个中间版本
+都必须一次跨过同一条线，而 skill 本来就是一点点优化出来的。
+分数落 ``FeedbackEvent``（``signal='accepted'``、``value`` 存采纳率、
+``reason_code='report_acceptance_rate'``），带 ``skill_version`` 绑定，
+既可横向对比各版本、也可被后续评测直接读。
+
+改进依据的来源是 **AI 提候选、人工确认**（见 ``report_optimization``）：
+默认路径由 LLM 读四要素（当前 Skill 包 / 本轮缺陷 / 历史归因 / 人工确认报告）
+提出候选归因，人工逐条确认后才进入派生；未配置 LLM 时降级为
+"人工在报告里写下的结论直接落已确认归因"（本模块原有的那条路径）。
 """
 from __future__ import annotations
 
@@ -39,6 +46,14 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 from .models import FeedbackEvent, GenerationOutput
+from .report_parsing import (
+    ACCEPTANCE_LABEL,
+    DEFAULT_ACCEPTANCE_REFERENCE,
+)
+from .report_parsing import cell_text as _cell_text
+from .report_parsing import locate_acceptance
+from .report_parsing import normalize_text as _normalize
+from .report_parsing import read_acceptance_from_workbook
 from .trace_models import FailureAttribution
 
 #: 报告里承载问题明细的页名。改名会让解析直接失败（而不是读错页），这是有意的：
@@ -85,8 +100,10 @@ MAX_EVIDENCE_SAMPLES = 5
 #: 一份报告动辄几十条误报，全量转写等于把报告抄进 SKILL.md，护栏就没人看了。
 MAX_DEFECT_GROUPS = 12
 
-#: 人工打分的默认门槛（百分制）。
-DEFAULT_HUMAN_SCORE_THRESHOLD = 70
+#: 采纳率的**参考线**（百分制）。名字沿用旧称以免打断既有引用，
+#: 但语义已变：它是"低于此值值得看一眼"的提示线，**不是**进化的准入条件。
+#: 数值与 ``report_parsing.DEFAULT_ACCEPTANCE_REFERENCE`` 同源，只有一处真值。
+DEFAULT_HUMAN_SCORE_THRESHOLD = DEFAULT_ACCEPTANCE_REFERENCE
 
 
 @dataclass(frozen=True)
@@ -121,6 +138,12 @@ class ReportScan:
     defects: tuple = ()
     warnings: tuple = ()
     source_name: str = ""
+    acceptance_rate: float = 0.0
+    acceptance_sheet: str = ""
+
+    @property
+    def acceptance_score(self) -> float:
+        return round(self.acceptance_rate * 100, 2)
 
     @property
     def confirmed(self) -> int:
@@ -142,23 +165,10 @@ class ReportScan:
             "defects": [item.as_dict() for item in self.defects],
             "warnings": list(self.warnings),
             "source_name": self.source_name,
+            "acceptance_rate": self.acceptance_rate,
+            "acceptance_score": self.acceptance_score,
+            "acceptance_sheet": self.acceptance_sheet,
         }
-
-
-def _cell_text(value) -> str:
-    """单元格取文本。数字型「行号」要按整数渲染，否则 12 会变成 "12.0"。"""
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return "是" if value else "否"
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value).strip()
-
-
-def _normalize(value) -> str:
-    """归一化人工填写值：去空白、去全角空格、转小写。"""
-    return _cell_text(value).replace("\u3000", "").replace(" ", "").lower()
 
 
 class CaseReviewReportParser:
@@ -185,6 +195,11 @@ class CaseReviewReportParser:
                 f"（现有页：{'、'.join(workbook.sheetnames)}）"
             )
         sheet = workbook[DETAIL_SHEET_NAME]
+        # 采纳率由公共件读：同一套"按标签定位、不绑坐标"的约定，
+        # 四阶段报告也走它，避免两处各写一份解析。
+        acceptance_value, acceptance_sheet_name = read_acceptance_from_workbook(
+            workbook, required=True,
+        )
 
         rows = sheet.iter_rows(values_only=True)
         try:
@@ -252,6 +267,10 @@ class CaseReviewReportParser:
                     ),
                 })
 
+        if acceptance_value is None:
+            # 平台报告的采纳率是 Excel 公式。文件若没有公式缓存值，
+            # 严格按最后页定义的“采纳 ÷ 审查提供意见”口径重算。
+            acceptance_value = affirmative / total if total else 0.0
         workbook.close()
 
         defects = tuple(
@@ -289,7 +308,24 @@ class CaseReviewReportParser:
             unconfirmed=unconfirmed,
             defects=defects[:MAX_DEFECT_GROUPS],
             warnings=tuple(warnings),
+            acceptance_rate=round(acceptance_value, 6),
+            acceptance_sheet=acceptance_sheet_name,
         )
+
+    @staticmethod
+    def _acceptance_value(sheet) -> float | None:
+        """兼容包装：在单个 Sheet 里按标签定位「采纳率」。
+
+        实现已上提到 ``report_parsing.locate_acceptance`` —— 四阶段报告要复用同一套约定。
+        保留本方法是因为既有测试与外部脚本可能直接调它；缺标签仍按原语义抛错。
+        """
+        found, value = locate_acceptance(sheet)
+        if not found:
+            raise ValidationError(
+                f"报告最后一个 Sheet 缺少「{ACCEPTANCE_LABEL}」，"
+                "请上传平台导出并完成人工确认的报告"
+            )
+        return value
 
     @classmethod
     def _hypothesis(cls, *, category: str, issue_type: str, count: int, samples: list) -> str:
@@ -461,27 +497,33 @@ class CaseReviewEvolutionService:
 
     @classmethod
     def evolve(
-        cls, *, review, data: bytes, human_score: float, actor,
+        cls, *, review, data: bytes, actor,
         threshold: float | None = None, change_reason: str = "",
-        report_name: str = "",
+        report_name: str = "", attribution_ids=None,
     ) -> dict:
         """从一份已确认报告派生 Skill 候选版本。
 
-        顺序刻意是"先解析、再打分门禁、再派生"：解析失败或分数不达标时，
-        库里不该留下任何痕迹（连归因都不落），否则用户会看到一批"凭空出现的
-        已确认归因"，却不知道是哪次失败的尝试带进来的。
+        改进依据有两个来源，由 ``attribution_ids`` 决定走哪条：
+
+        - 传了 id 列表 → 用**人工已确认的候选优化点**（AI 提、人确认的主路径）；
+        - 没传 → 降级用**人工在报告里写下的结论**（原路径，未配置 LLM 时走这条）。
+
+        ``threshold`` 现已降级为采纳率的**参考线**：它只影响返回值里的
+        ``below_reference`` 标记，**不影响是否允许派生**。
+        采纳率是版本间对比的评分维度，不是准入门槛 —— 低采纳率意味着
+        "这一版效果还不理想"，而效果不理想恰是进化的理由，不是拒绝进化的理由。
+
+        顺序刻意是"先解析、再校验、再派生"：解析失败或没有可用归因时，
+        库里不该留下痕迹，否则用户会看到一批"凭空出现的已确认归因"，
+        却不知道是哪次失败的尝试带进来的。
         """
         from django.db import transaction
 
         from .skill_evolution import SkillEvolutionService
 
-        threshold = (
+        reference = (
             DEFAULT_HUMAN_SCORE_THRESHOLD if threshold is None else float(threshold)
         )
-        score = float(human_score)
-        if score < 0 or score > 100:
-            raise ValidationError("人工打分必须在 0–100 之间")
-
         if review.status != "completed":
             raise ValidationError(f"该审查当前状态是「{review.get_status_display()}」，只有已完成的审查才能自进化")
 
@@ -499,23 +541,28 @@ class CaseReviewEvolutionService:
                 f"派生基线必须是活跃版本（当前 {skill.active_version.version}）"
             )
 
-        if score < threshold:
-            raise ValidationError(
-                f"人工打分 {score:g}/100 未达到门槛 {threshold:g}。"
-                "本次审查结果的可信度不足以作为改进依据——"
-                "照着一份人工自己都不认可的结果去改 Skill 包，只会把噪声固化进护栏。"
-            )
-
         scan = CaseReviewReportParser.parse(data)
-        if not scan.defects:
+        score = scan.acceptance_score
+        # 采纳率不拦截派生，理由见方法 docstring。
+
+        if not attribution_ids and not scan.defects:
             raise ValidationError(
                 f"这份报告里没有可修复的缺陷：人工确认采纳 {scan.affirmative} 条、"
                 f"标记误报 {scan.negative} 条、未确认 {scan.unconfirmed} 条。"
-                "自进化需要至少一条人工确认的缺陷（误报，或方向对但被改写的说明）。"
+                "自进化需要至少一条可归因到本 Skill 的缺陷。"
             )
 
         with transaction.atomic():
-            attributions = cls._build_attributions(review, output, scan, actor)
+            if attribution_ids:
+                attributions = cls._confirmed_attributions(output=output, ids=attribution_ids)
+                if not attributions:
+                    raise ValidationError(
+                        "所选优化点没有一条处于「已确认」状态，无法作为派生依据；"
+                        "请先在候选优化点列表里逐条确认。"
+                    )
+            else:
+                # 降级路径：未走 AI 候选时，人工在报告里写下的结论直接作为依据。
+                attributions = cls._build_attributions(review, output, scan, actor)
             result = SkillEvolutionService.derive_candidate(
                 skill_version=skill_version,
                 attributions=attributions,
@@ -532,8 +579,9 @@ class CaseReviewEvolutionService:
             )
             feedback = cls._record_human_score(
                 review=review, output=output, skill_version=skill_version,
-                score=score, threshold=threshold, actor=actor, scan=scan,
+                score=score, threshold=reference, actor=actor, scan=scan,
                 report_name=report_name,
+                report_sha256=hashlib.sha256(data).hexdigest(),
             )
 
         candidate = result["candidate"]
@@ -545,7 +593,14 @@ class CaseReviewEvolutionService:
             "baseline_version": skill_version.version,
             "baseline_package_sha256": skill_version.package_sha256,
             "human_score": score,
-            "threshold": threshold,
+            "acceptance_score": score,
+            "threshold": reference,
+            "acceptance_reference": reference,
+            # 采纳率作为**版本间对比的评分维度**：低于参考线只是标记，
+            # 前端据此标黄提示，不构成拦截。
+            "below_reference": score < reference,
+            "version_acceptance": cls.acceptance_history(skill),
+            "attribution_source": "llm+human" if attribution_ids else "human",
             "feedback_id": str(feedback.id) if feedback else "",
             "scan": scan.as_dict(),
             "attribution_ids": [str(item.id) for item in attributions],
@@ -570,8 +625,134 @@ class CaseReviewEvolutionService:
         }
 
     @classmethod
+    def record_report_feedback(
+        cls, *, review, data: bytes, actor, report_name: str = "",
+        threshold: float | None = None,
+    ) -> dict:
+        """上传已确认报告，只记录采纳率反馈，不派生 Skill 版本。"""
+        if review.status != "completed":
+            raise ValidationError("只有已完成的审查才能上传质量反馈")
+        output = cls._output_of(review)
+        if output is None:
+            raise ValidationError("该审查没有飞轮产出记录，无法关联质量反馈")
+        threshold = DEFAULT_HUMAN_SCORE_THRESHOLD if threshold is None else float(threshold)
+        scan = CaseReviewReportParser.parse(data)
+        feedback = cls._record_human_score(
+            review=review,
+            output=output,
+            skill_version=output.skill_version,
+            score=scan.acceptance_score,
+            threshold=threshold,
+            actor=actor,
+            scan=scan,
+            report_name=report_name,
+            report_sha256=hashlib.sha256(data).hexdigest(),
+        )
+        return {
+            "review_id": str(review.pk),
+            "feedback_id": str(feedback.id),
+            "human_score": scan.acceptance_score,
+            "acceptance_score": scan.acceptance_score,
+            "threshold": threshold,
+            "acceptance_reference": threshold,
+            "scan": scan.as_dict(),
+            "version_acceptance": cls.acceptance_history(output.skill_version.skill)
+            if output.skill_version_id and output.skill_version.skill_id else [],
+        }
+
+    @classmethod
+    def propose_optimizations(cls, *, review, data: bytes, actor) -> dict:
+        """四要素 → AI 候选优化点。**只提候选，不派生。**
+
+        与派生分开是刻意的：提候选是"读一份报告、给一堆看法"，派生是"改包"。
+        合并成一个动作，用户就没法"先看看 AI 想改什么、再决定改不改"，
+        而这正是这次要做的改进。
+        """
+        from .report_optimization import ReportOptimizationAdvisor
+
+        if review.status != "completed":
+            raise ValidationError(
+                f"该审查当前状态是「{review.get_status_display()}」，只有已完成的审查才能提优化建议"
+            )
+        output = cls._output_of(review)
+        if output is None:
+            raise ValidationError("该审查没有飞轮产出记录，无法关联到具体产出做归因")
+        if not data:
+            raise ValidationError("必须上传已确认的审查报告")
+
+        scan = CaseReviewReportParser.parse(data)
+        result = ReportOptimizationAdvisor().propose(output=output, scan=scan, actor=actor)
+        return {
+            "review_id": str(review.pk),
+            "scan": scan.as_dict(),
+            "output_id": str(output.pk),
+            **result,
+        }
+
+    @classmethod
+    def decide_optimization(
+        cls, *, review, attribution_id, action: str, actor,
+        hypothesis: str = "", category: str = "",
+    ) -> dict:
+        """人工对一条候选优化点做结论（采纳 / 改写 / 驳回）。"""
+        from .report_optimization import ReportOptimizationAdvisor
+
+        output = cls._output_of(review)
+        if output is None:
+            raise ValidationError("该审查没有飞轮产出记录，无法定位候选优化点")
+        attribution = FailureAttribution.objects.filter(
+            id=str(attribution_id), project_id=review.project_id, output_id=output.pk,
+        ).first()
+        if attribution is None:
+            raise ValidationError("找不到该候选优化点（可能已被重新生成替换）")
+        return ReportOptimizationAdvisor.decide(
+            attribution=attribution, actor=actor, action=action,
+            hypothesis=hypothesis, category=category,
+        )
+
+    @classmethod
+    def acceptance_history(cls, skill, *, limit: int = 12) -> list[dict]:
+        """按版本横向列出采纳率 —— 「采纳率作为版本间对比评分维度」的落地。
+
+        实现在 ``WorkflowStageFeedbackService.acceptance_history``：四阶段与用例审查
+        读的是同一张 ``FeedbackEvent``、同一个 ``reason_code`` 族，**查询只能有一份**。
+        两处各写一遍，一旦口径调整（比如新增一个历史 reason_code），
+        就会有一边漏捞，表现为"某个版本在对比图里凭空消失"。
+        """
+        from .workflow_feedback import WorkflowStageFeedbackService
+
+        return WorkflowStageFeedbackService.acceptance_history(skill, limit=limit)
+
+    @staticmethod
+    def _confirmed_attributions(*, output, ids) -> list:
+        """取人工已确认的候选归因，且必须落在同一项目内。
+
+        归属校验不是为了权限（这里已经是项目成员的路径），而是防止把 A 项目的
+        结论拿去改 B 项目所依赖的包：归因 id 虽然是 UUID，但它会出现在页面 URL
+        与导出的报告里，跨项目复用是可能发生的误操作。
+        """
+        normalized = [str(item) for item in (ids or []) if str(item).strip()]
+        if not normalized:
+            return []
+        rows = list(
+            FailureAttribution.objects.filter(
+                id__in=normalized,
+                project_id=output.project_id,
+                state="confirmed",
+            ).order_by("created_at")
+        )
+        return rows
+
+    @classmethod
     def _build_attributions(cls, review, output, scan: ReportScan, actor) -> list:
-        """把解析出的缺陷落成 ``confirmed`` 归因（同指纹复用，不重复落库）。"""
+        """把解析出的缺陷落成 ``confirmed`` 归因（同指纹复用，不重复落库）。
+
+        ⚠️ 这是**降级路径**：直接采信人工在报告里写下的结论。
+        主路径是 AI 提候选、人工确认（``report_optimization``）。
+        两条路径都落 ``confirmed``，但 ``source`` 不同：
+        这里落 ``human``（结论确实由人给出），主路径落 ``llm`` + 确认人留痕。
+        区分开才能事后回答"这条护栏究竟是模型猜的还是人写的"。
+        """
         attributions = []
         for defect in scan.defects:
             fingerprint = _attribution_fingerprint(review.pk, defect.category, defect.issue_type)
@@ -613,6 +794,7 @@ class CaseReviewEvolutionService:
     @classmethod
     def _record_human_score(
         cls, *, review, output, skill_version, score, threshold, actor, scan, report_name,
+        report_sha256="",
     ):
         """人工打分落 ``FeedbackEvent``。
 
@@ -623,9 +805,9 @@ class CaseReviewEvolutionService:
         ``signal`` 取 ``accepted``：语义是"人工认可本次审查结果可作为依据"，
         与"分数达到门槛才允许进化"是同一条判断，不另立枚举。
         """
-        report_digest = hashlib.sha256(
+        report_digest = (report_sha256 or hashlib.sha256(
             f"{review.pk}:{score:g}:{report_name}".encode("utf-8")
-        ).hexdigest()[:16]
+        ).hexdigest())[:16]
         event, _created = FeedbackEvent.objects.get_or_create(
             idempotency_key=f"case-review-evolution:{review.pk}:{report_digest}",
             defaults={
@@ -637,9 +819,10 @@ class CaseReviewEvolutionService:
                 "skill_version": skill_version,
                 "signal": "accepted",
                 "value": round(score / 100, 4),
-                "reason_code": "manual_calibration",
+                "reason_code": "report_acceptance_rate",
                 "comment": (
-                    f"人工确认用例审查报告并打分 {score:g}/100（门槛 {threshold:g}）；"
+                    f"用例审查报告最后一个 Sheet 的采纳率为 {score:g}%"
+                    f"（门槛 {threshold:g}%）；"
                     f"确认采纳 {scan.affirmative} 条、误报 {scan.negative} 条、"
                     f"说明被改写 {scan.rewritten} 条、未确认 {scan.unconfirmed} 条"
                 ),

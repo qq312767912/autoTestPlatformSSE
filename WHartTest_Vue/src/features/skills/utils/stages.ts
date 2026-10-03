@@ -14,7 +14,17 @@ export const STAGE_LABELS: Record<string, string> = {
   risk_identification: '风险识别',
   issue_tracking: '问题跟踪',
   knowledge_query: '知识问答',
+  platform_base: '平台基础能力',
 }
+
+/**
+ * 跨阶段的「平台基础能力」档。它不是业务能力阶段（后端 `PLATFORM_BASE_STAGE`），
+ * 只是 Skill 的归属标签：平台自带的公共手段（测试管理工具、浏览器自动化、
+ * 视觉识别、知识库检索等）被多个阶段共用，不专属某一阶段。
+ *
+ * 分组排序里排在主链路之后、未声明之前——它是"不绑单一阶段"的归属，不是缺数据。
+ */
+export const PLATFORM_BASE_STAGE = 'platform_base'
 
 /** 四阶段主链路的顺序。 */
 export const WORKFLOW_STAGES: string[] = [
@@ -24,12 +34,50 @@ export const WORKFLOW_STAGES: string[] = [
   'report_generation',
 ]
 
+/** 阶段分组展示顺序：主链路 → 其余业务能力 → 平台基础能力 → 未声明。 */
+export const STAGE_GROUP_ORDER: string[] = [
+  ...WORKFLOW_STAGES,
+  'case_review',
+  'risk_identification',
+  'issue_tracking',
+  'code_review',
+  PLATFORM_BASE_STAGE,
+]
+
 /** 无可声明阶段时的分组名。 */
 export const UNSTAGED_KEY = '__unstaged__'
 
+/**
+ * 用户自定义阶段在库里的存储前缀（后端 `CUSTOM_STAGE_PREFIX`）。
+ *
+ * 用户在导入 Skill 时可以自己敲一档（如「性能测试」）。这类值不属规范任务类型，
+ * 后端统一存成 `custom:<名称>`：既能与规范阶段隔开命名空间，也让"敲错的标识符"
+ * 变成一个看得见的自定义档、而不是与"没填"长得一样的静默失败。
+ *
+ * 前端只做**展示**：判断是否是自定义（决定标签样式）、显示时剥掉前缀。
+ * 能不能提交、怎么归一化，一律以后端返回为准。
+ */
+export const CUSTOM_STAGE_PREFIX = 'custom:'
+
+export function isCustomStage(stage?: string | null): boolean {
+  return String(stage || '').startsWith(CUSTOM_STAGE_PREFIX)
+}
+
+/** 自定义阶段只显示名称本身（剥掉命名空间前缀）；规范阶段查中文标签；其余原样。 */
 export function stageLabel(stage?: string | null): string {
   if (!stage) return '未声明阶段'
+  if (isCustomStage(stage)) return stage.slice(CUSTOM_STAGE_PREFIX.length) || stage
   return STAGE_LABELS[stage] || stage
+}
+
+/**
+ * 阶段下拉项的文案：自定义档额外标出「（自定义）」。
+ *
+ * 规范阶段是平台任务类型（有门禁分区与评测模板），自定义档只是用户自建的归属标签；
+ * 混在一个下拉里不加区分，会让人误以为后者也是平台阶段。
+ */
+export function stageOptionText(opt: { label: string; custom?: boolean }): string {
+  return opt.custom ? `${opt.label}（自定义）` : opt.label
 }
 
 export function sourceTypeLabel(sourceType?: string | null): string {

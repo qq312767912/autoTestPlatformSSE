@@ -29,7 +29,7 @@ from django.urls import reverse
 from rest_framework.test import APITestCase
 
 from knowledge_evolution.capability_models import CapabilityRelease
-from knowledge_evolution.capability_registry import BUSINESS_CAPABILITY_STAGES
+from knowledge_evolution.capability_registry import SKILL_STAGE_OPTIONS
 from projects.models import Project, ProjectMember
 from skills.canonical import canonical_skills, pick_canonical
 from skills.models import Skill, SkillVersion
@@ -169,7 +169,15 @@ class PublicSkillListTests(APITestCase):
         meta = self._list().data["meta"]
         self.assertFalse(meta["can_manage"])
         self.assertFalse(meta["can_bind_stage"])
-        self.assertEqual(len(meta["stage_options"]), len(BUSINESS_CAPABILITY_STAGES))
+        # 可选值真值 = SKILL_STAGE_OPTIONS（8 类业务能力 + 平台基础能力），不是
+        # BUSINESS_CAPABILITY_STAGES —— 后者是八类业务能力口径，不含跨阶段的
+        # 「平台基础能力」档。
+        self.assertEqual(len(meta["stage_options"]), len(SKILL_STAGE_OPTIONS))
+        self.assertEqual(
+            [opt["value"] for opt in meta["stage_options"]], list(SKILL_STAGE_OPTIONS)
+        )
+        self.assertIn("platform_base", [opt["value"] for opt in meta["stage_options"]])
+        self.assertNotIn("knowledge_query", [opt["value"] for opt in meta["stage_options"]])
 
         root = User.objects.create_superuser(username="catalogue-root", password="x")
         self.client.force_authenticate(user=root)
@@ -255,9 +263,35 @@ class DeclaredStageTests(APITestCase):
         )
         self.assertEqual(response.status_code, 401)
 
-    def test_unknown_stage_is_rejected(self):
-        """拼错的阶段不会报错、只会永远匹配不上，所以必须在入口拦掉。"""
-        response = self._bind("not_a_stage", self.superuser)
+    def test_free_text_is_kept_as_a_namespaced_custom_stage(self):
+        """自由文本不再一律报错，而是收进 ``custom:`` 命名空间。
+
+        用户要能自己加一档（如「性能测试」）。但**不能**原样裸存：裸字符串里的拼写
+        错误会混进 ``Q(declared_stage=stage)`` 的阶段检索，既不报错、也永远匹配不上，
+        页面上和"没填"长得一样。加前缀后它至少是一个可辨识的"自定义阶段"，
+        而不是疑似规范阶段的野值。
+        """
+        response = self._bind("性能测试", self.superuser)
+        self.assertEqual(response.status_code, 200)
+        self.skill.refresh_from_db()
+        self.assertEqual(self.skill.declared_stage, "custom:性能测试")
+
+    def test_a_misspelled_identifier_cannot_impersonate_a_canonical_stage(self):
+        """``test_execution`` 敲成 ``test_executoin`` 时，它不会变成"另一个规范阶段"。"""
+        response = self._bind("test_executoin", self.superuser)
+        self.assertEqual(response.status_code, 200)
+        self.skill.refresh_from_db()
+        self.assertEqual(self.skill.declared_stage, "custom:test_executoin")
+
+    def test_canonical_chinese_label_is_normalised_to_its_identifier(self):
+        """前端 allow-create 会把中文名当值提交，必须归一化，不能与标识符并存两份。"""
+        response = self._bind("测试执行", self.superuser)
+        self.assertEqual(response.status_code, 200)
+        self.skill.refresh_from_db()
+        self.assertEqual(self.skill.declared_stage, "test_execution")
+
+    def test_overlong_custom_label_is_rejected(self):
+        response = self._bind("测" * 33, self.superuser)
         self.assertEqual(response.status_code, 400)
         self.skill.refresh_from_db()
         self.assertEqual(self.skill.declared_stage, "")
@@ -418,4 +452,165 @@ class PublicCatalogueEntryIsNotProjectBoundTests(APITestCase):
         # 非成员：被 IsProjectScoped 挡下（400 是序列化器先报"没传文件"，这里只关心不是 2xx）。
         self.assertIn(response.status_code, (400, 403))
         self.assertNotEqual(response.status_code, 200)
+
+
+class CustomStageTests(APITestCase):
+    """用户自定义阶段：导入 / 补填时自己敲一档（如「性能测试」），不止固定九项。
+
+    需求方原话："用户在上传 skill 的时候也支持自己添加阶段类型"。
+
+    实现边界（这条是刻意的，不是偷懒）：自定义值一律存 ``custom:<名称>``，与任务类型
+    真值 ``SKILL_STAGE_OPTIONS`` **命名空间隔开**。原因有两条——
+
+    * 规范阶段是任务类型：背后有门禁分区、评测模板、``Q(declared_stage=stage)``
+      的阶段匹配。真值一旦被用户输入污染，这些都会跟着漂（口径真值只有一处）。
+    * 自定义档只是**归属标签**，与 ``platform_base`` 同语义：能让目录分好组、
+      能让卡片挂上标签，但**不会**被任何阶段的检索命中。
+
+    归一化只有一处实现（``capability_registry.normalize_stage_input``），下面既钉
+    纯函数行为，也钉两个真实入口（导入分类字段、补填接口）与列表信封。
+    """
+
+    def setUp(self):
+        self.project = Project.objects.create(name="自定义阶段项目")
+        self.superuser = User.objects.create_superuser(
+            username="custom-stage-admin", password="x", email="custom@example.com",
+        )
+
+    # ---------------- 归一化（纯函数） ----------------
+
+    def test_canonical_identifier_passes_through(self):
+        from knowledge_evolution.capability_registry import normalize_stage_input
+
+        self.assertEqual(normalize_stage_input("test_execution"), "test_execution")
+
+    def test_canonical_chinese_label_maps_back_to_the_identifier(self):
+        from knowledge_evolution.capability_registry import normalize_stage_input
+
+        self.assertEqual(normalize_stage_input("测试执行"), "test_execution")
+
+    def test_platform_utility_stage_is_never_accepted_as_a_custom_one(self):
+        """``knowledge_query`` 不是可声明的归属档，也不能"降级"成 ``custom:知识问答``。
+
+        它登记在 ``STAGE_LABELS`` 里（所以看起来像个规范阶段），但属
+        ``PLATFORM_UTILITY_STAGES``（平台工具）。两条路都得堵死：既不能当规范阶段
+        放行，也不能被当成自定义档收进命名空间——否则会凭空造出一个与平台工具同名的
+        假自定义档，排查时比报错更难。
+        """
+        from knowledge_evolution.capability_registry import normalize_stage_input
+
+        for raw in ("knowledge_query", "知识问答"):
+            with self.assertRaises(ValueError):
+                normalize_stage_input(raw)
+
+    def test_free_text_lands_in_the_custom_namespace(self):
+        from knowledge_evolution.capability_registry import normalize_stage_input
+
+        self.assertEqual(normalize_stage_input("性能测试"), "custom:性能测试")
+
+    def test_normalisation_is_idempotent(self):
+        """前端回显的就是库里的值，二次提交不该再套一层前缀。"""
+        from knowledge_evolution.capability_registry import normalize_stage_input
+
+        self.assertEqual(normalize_stage_input("custom:性能测试"), "custom:性能测试")
+
+    def test_scattered_whitespace_is_collapsed(self):
+        """「性能  测试」与「性能 测试」不该在库里裂成两档。"""
+        from knowledge_evolution.capability_registry import normalize_stage_input
+
+        self.assertEqual(normalize_stage_input("  性能  测试 "), "custom:性能 测试")
+
+    def test_blank_is_rejected(self):
+        from knowledge_evolution.capability_registry import normalize_stage_input
+
+        with self.assertRaises(ValueError):
+            normalize_stage_input("   ")
+
+    def test_overlong_label_is_rejected(self):
+        from knowledge_evolution.capability_registry import normalize_stage_input
+
+        with self.assertRaises(ValueError):
+            normalize_stage_input("测" * 33)
+
+    def test_display_label_strips_the_namespace(self):
+        from knowledge_evolution.capability_registry import stage_display_label
+
+        self.assertEqual(stage_display_label("custom:性能测试"), "性能测试")
+        self.assertEqual(stage_display_label("test_execution"), "测试执行")
+        self.assertEqual(stage_display_label(""), "")
+
+    # ---------------- 真实入口：导入分类字段 ----------------
+
+    def test_import_category_field_accepts_free_text(self):
+        from skills.serializers import SkillUploadSerializer
+
+        self.assertEqual(
+            SkillUploadSerializer().validate_category("性能测试"), "custom:性能测试",
+        )
+
+    def test_import_category_field_normalises_a_canonical_label(self):
+        from skills.serializers import SkillUploadSerializer
+
+        self.assertEqual(
+            SkillUploadSerializer().validate_category("测试执行"), "test_execution",
+        )
+
+    def test_import_serializers_really_carry_the_category_field(self):
+        """导入序列化器必须真的把 ``category`` / ``description`` 收进字段表。
+
+        这条是给一个真实踩过的坑立的桩：``SkillCategoryMixin`` 起初是普通的 ``object``
+        混入类，而 DRF 的字段收集**只认自身带 ``_declared_fields`` 的基类**——普通类
+        没有这个属性，于是两个字段一个都没进字段表：既不校验、也不进 ``validated_data``，
+        视图里 ``validated_data['category']`` 直接 ``KeyError``，上传接口整体 500。
+
+        断言必须落在"字段表里有它"上：光断言 ``validate_category`` 返回什么没用——
+        方法写得再对，字段没被收集就永远不会被调用。
+        """
+        from skills.serializers import (
+            SkillGitImportSerializer, SkillUploadSerializer, SkillZipUrlImportSerializer,
+        )
+
+        for serializer_cls in (
+            SkillUploadSerializer, SkillGitImportSerializer, SkillZipUrlImportSerializer,
+        ):
+            fields = serializer_cls().fields
+            self.assertIn("category", fields, serializer_cls.__name__)
+            self.assertIn("description", fields, serializer_cls.__name__)
+
+    # ---------------- 真实入口：列表信封与行 ----------------
+
+    def _list(self):
+        self.client.force_authenticate(user=self.superuser)
+        return self.client.get(
+            reverse("project-skills-list", kwargs={"project_pk": self.project.id}),
+        )
+
+    def test_envelope_offers_custom_stages_already_in_use(self):
+        """下拉要能列出库里已在用的自定义档，否则复用时只能重新敲、还容易敲出近似重名。"""
+        Skill.objects.create(
+            project=self.project, name="perf-skill", description="性能压测",
+            declared_stage="custom:性能测试",
+        )
+        options = self._list().data["meta"]["stage_options"]
+
+        # 规范九项在前、顺序不变，且逐项标 custom=False。
+        head = options[:len(SKILL_STAGE_OPTIONS)]
+        self.assertEqual([opt["value"] for opt in head], list(SKILL_STAGE_OPTIONS))
+        self.assertFalse(any(opt["custom"] for opt in head))
+
+        # 自定义项追加在后，带剥了前缀的展示名。
+        self.assertEqual(
+            [(opt["value"], opt["label"]) for opt in options if opt["custom"]],
+            [("custom:性能测试", "性能测试")],
+        )
+
+    def test_row_shows_the_custom_name_without_the_namespace(self):
+        Skill.objects.create(
+            project=self.project, name="perf-skill", description="性能压测",
+            declared_stage="custom:性能测试",
+        )
+        row = next(r for r in self._list().data["data"] if r["name"] == "perf-skill")
+        self.assertEqual(row["stage"], "custom:性能测试")
+        self.assertEqual(row["stage_label"], "性能测试")
+        self.assertEqual(row["stage_source"], "declared")
 

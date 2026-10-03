@@ -8,6 +8,32 @@ from django.conf import settings
 from django.db import models
 
 
+def _default_graph_task_types() -> list[str]:
+    """默认必用图谱召回的 task_type。
+
+    四阶段（方案 / 用例 / 执行 / 报告）必须在这里 —— 它们恰恰是
+    "要参考需求、既有用例与知识"的典型场景：生成方案要覆盖需求点，
+    生成用例要参考需求模块与既有用例，报告要能追到"这条结论依据哪条需求"。
+
+    漏掉它们的表现是**通道被静默摘掉**（``_should_use_graph`` 判否后
+    ``per_source.pop("graph")``）：产出里看不出任何异常，只是"没有溯源"。
+    页面上表现为"图谱明明有数据、产出却引不到"，排查时容易被误判成图谱侧没建好。
+
+    从注册表取而不是抄字面量：阶段名只有一处真值，复制一份到检索配置里，
+    改阶段名时必然漏改。
+    """
+    from .capability_registry import ALL_WORKFLOW_STAGES
+
+    base = [
+        "code_review",           # 代码影响面
+        "defect_root_cause",     # 缺陷根因
+        "requirement_coverage",  # 需求覆盖
+        "impact_analysis",       # 影响分析
+        "case_review",           # 用例审查：要对照需求与既有用例
+    ]
+    return list(dict.fromkeys([*base, *ALL_WORKFLOW_STAGES]))
+
+
 class RetrievalPolicy(models.Model):
     """检索策略（版本化配置）。
 
@@ -65,7 +91,7 @@ class RetrievalPolicy(models.Model):
                 "historical": {"enabled": False, "k": 10, "weight": 0.05},
             },
             "graph_policy": "conditional",  # always / conditional / never
-            "graph_task_types": ["code_review", "defect_root_cause", "requirement_coverage", "impact_analysis"],
+            "graph_task_types": _default_graph_task_types(),
             "rrf_k": 60,
             "rerank": {"enabled": False, "top_k": 30},
             "mmr": {"enabled": True, "lambda_param": 0.7, "final_k": 10},
@@ -80,4 +106,19 @@ class RetrievalPolicy(models.Model):
         config = {**default, **(self.config or {})}
         if overrides:
             config.update(overrides)
+        # 四阶段**不允许**被配置排除在图谱白名单外。
+        #
+        # 这里刻意取并集而不是"配置说了算"：本项配置的作用是"哪些任务需要图谱"，
+        # 而排除阶段的后果是**静默断链** —— 通道被摘掉（``per_source.pop("graph")``），
+        # 产出里没有任何异常，只是"引不到需求与既有用例"。页面上表现为
+        # "图谱里明明有数据、产出却溯源为空"，排查方向会被带到图谱侧去。
+        # 而错误地多跑一次图谱的后果只是多一点 token —— 两者的代价不对称。
+        #
+        # 真正想关掉图谱的项目有两个明确出口：``sources.graph.enabled=False``
+        # 或 ``graph_policy="never"``。它们都在"通道"一层，语义清楚且可观测。
+        merged = list(config.get("graph_task_types") or [])
+        for task_type in _default_graph_task_types():
+            if task_type not in merged:
+                merged.append(task_type)
+        config["graph_task_types"] = merged
         return config

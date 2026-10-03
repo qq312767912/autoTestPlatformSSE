@@ -892,6 +892,65 @@ class AgentLoopStreamAPIView(View):
                 item["error_message"] = "工具调用未返回结果"
         return ordered
 
+    #: 检索类工具的识别关键字。命中即视为"这条产出可能参考了外部知识"。
+    _RETRIEVAL_TOOL_HINTS = (
+        "knowledge", "graph", "retrieval", "retrieve", "search", "query", "recall",
+    )
+
+    @classmethod
+    def _retrieval_channel(cls, messages) -> dict:
+        """从消息链抽取"检索通道实际用没用"。
+
+        agent 生成的产出，其"参考了什么"只有 agent 自己知道；平台能做的是
+        **如实记录它有没有调检索工具、调了哪些**。只存工具名与参数摘要，
+        不存参数全文与返回正文 —— 目标是回答"这条产出参考了外部知识吗、走的哪条路"，
+        不是把 agent 的上下文再存一份。
+
+        不写死成 ``enabled: False`` 的用处在于：产出"没有溯源"从此**可解释** ——
+        是 agent 压根没检索，还是检索了但没引用。这两种情况的修复动作完全不同。
+        """
+        calls = []
+        for message in messages or []:
+            if not isinstance(message, AIMessage):
+                continue
+            for call in getattr(message, "tool_calls", None) or []:
+                name = (
+                    str(call.get("name") or "")
+                    if isinstance(call, dict)
+                    else str(getattr(call, "name", "") or "")
+                )
+                if not name:
+                    continue
+                if not any(hint in name.lower() for hint in cls._RETRIEVAL_TOOL_HINTS):
+                    continue
+                args = (
+                    call.get("args", call.get("arguments", {}))
+                    if isinstance(call, dict)
+                    else getattr(call, "args", {})
+                )
+                calls.append({"tool": name, "args": cls._summarize_tool_args(args)})
+        return {
+            "enabled": bool(calls),
+            "hits": len(calls),
+            "tools": calls[:10],
+        }
+
+    @staticmethod
+    def _summarize_tool_args(args) -> dict:
+        """工具参数摘要：只留标量键的前 200 字，避免把大 payload 复制进飞轮。"""
+        if not isinstance(args, dict):
+            return {}
+        summary = {}
+        for key, value in list(args.items())[:8]:
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                text = str(value)
+                summary[str(key)] = text[:200]
+            elif isinstance(value, list):
+                summary[str(key)] = f"[{len(value)} 项]"
+            elif isinstance(value, dict):
+                summary[str(key)] = f"{{{len(value)} 键}}"
+        return summary
+
     @staticmethod
     def _bind_stage_skill(*, project, workflow_id, stage, actor=None):
         """取（必要时锁定）该阶段应使用的 Skill 版本（T15）。
@@ -980,6 +1039,10 @@ class AgentLoopStreamAPIView(View):
                         "enabled": bool(use_knowledge_base and knowledge_base_ids),
                         "knowledge_base_ids": list(knowledge_base_ids or []),
                     },
+                    # 检索通道实况：agent 是否真的调了检索/图谱工具。
+                    # 见 ``_retrieval_channel`` —— 产出"没有溯源"要能解释成
+                    # "没调"还是"调了没引用"，否则这个问题永远只能靠猜。
+                    "retrieval": self._retrieval_channel(all_messages),
                 },
                 producer={
                     "policy_version": f"{module_key}-agent-v1",

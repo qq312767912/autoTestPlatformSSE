@@ -497,6 +497,23 @@ class GenerationOutputViewSet(ProjectScopedReadOnlyViewSet):
     def get_queryset(self):
         return self.scoped(GenerationOutput.objects.select_related("project", "trace"))
 
+    @action(detail=True, methods=["get"], url_path="lineage")
+    def lineage(self, request, pk=None):
+        """`「这条产出是怎么来的」：闭环七段 + 内容来源（只读）。
+
+        走 ``detail=True`` 复用 ``get_queryset()`` 的项目收口 ——
+        越权读取在这个接口上不可能发生，而不是靠"id 猜不到"。
+
+        两个问题一次答完，但**分两段返回**（``stages`` 与 ``sources``）：
+        "闭环走到哪一步"与"内容参考了什么"是不同性质的事实。
+        合并成一段会让页面把"链路已闭环"读成"内容已被验证"，
+        而后者恰恰是这份产出能不能被信任的关键，不该被前者的绿灯盖过去。
+        """
+        from .lineage import OutputLineageService
+
+        output = self.get_object()
+        return Response(OutputLineageService.trace(output))
+
 
 class FeedbackEventViewSet(
     mixins.CreateModelMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin,
@@ -1166,6 +1183,11 @@ class CaseReviewEvolutionViewSet(viewsets.ViewSet):
 
         预检存在的意义是让"不能进化"在点下按钮之前就可见。把判定放到
         ``evolve`` 里一次说一条，用户要来回试三次才知道真正卡在哪。
+
+        ⚠️ 采纳率**不在 blockers 里**：它已降级为版本间对比的评分维度，
+        低于参考线只回 ``below_reference`` 供页面标黄。
+        真正的硬阻断只有一条 —— 报告里没有任何人工确认的缺陷，
+        此时派生无从下手（不是"质量不够"，而是"没有可改的东西"）。
         """
         from django.core.exceptions import ValidationError as DjangoValidationError
 
@@ -1179,27 +1201,15 @@ class CaseReviewEvolutionViewSet(viewsets.ViewSet):
             raise DRFValidationError({"file": "必须上传已确认的审查报告"})
 
         threshold = self._threshold(request)
-        score_raw = request.data.get("human_score")
-        try:
-            score = float(score_raw) if score_raw not in (None, "") else None
-        except (TypeError, ValueError):
-            # 打分填了但不是数字属于参数错误，直接回 400；预检的其它问题走 blockers，
-            # 因为那些是"条件还没满足"，用户可以在同一个弹窗里继续改。
-            return Response({"detail": "人工打分必须是数字"}, status=400)
 
         try:
             scan = CaseReviewEvolutionService.scan(data=upload.read())
         except DjangoValidationError as exc:
             return Response({"detail": _validation_text(exc)}, status=400)
+        score = scan.acceptance_score
 
         described = CaseReviewEvolutionService._describe(review)
         blockers = list(described["blockers"])
-        if score is None:
-            blockers.append("尚未填写人工打分")
-        elif score < threshold:
-            blockers.append(
-                f"人工打分 {score:g}/100 低于门槛 {threshold:g}，本次审查结果不足以作为改进依据"
-            )
         if not scan.defects:
             blockers.append(
                 "这份报告里没有人工确认的缺陷（误报，或方向对但被改写的说明），没有可修复的改进点"
@@ -1209,6 +1219,8 @@ class CaseReviewEvolutionViewSet(viewsets.ViewSet):
             "review": described,
             "threshold": threshold,
             "human_score": score,
+            # 参考线只用于展示与标黄：低于它仍然可以继续进化。
+            "below_reference": score < threshold,
             "scan": scan.as_dict(),
             "attribution_preview": [
                 {"category": item.category, "issue_type": item.issue_type, "count": item.count}
@@ -1220,7 +1232,12 @@ class CaseReviewEvolutionViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=["post"], url_path="evolve")
     def evolve(self, request):
-        """从这份已确认报告派生 Skill 候选版本。"""
+        """从这份已确认报告派生 Skill 候选版本。
+
+        可带 ``attribution_ids``（重复字段或 JSON 数组）：给了就只拿这些**已确认**
+        的候选优化点当依据（三步向导的主路径）；不给则降级为"直接采信人工在报告里
+        写下的结论"。两条路径都要能用 —— 未配置 LLM 的环境只有后者。
+        """
         from django.core.exceptions import ValidationError as DjangoValidationError
 
         from .case_review_evolution import CaseReviewEvolutionService
@@ -1231,27 +1248,189 @@ class CaseReviewEvolutionViewSet(viewsets.ViewSet):
         if upload is None:
             from rest_framework.exceptions import ValidationError as DRFValidationError
             raise DRFValidationError({"file": "必须上传已确认的审查报告"})
-        score_raw = request.data.get("human_score")
-        if score_raw in (None, ""):
-            from rest_framework.exceptions import ValidationError as DRFValidationError
-            raise DRFValidationError({"human_score": "必须填写人工打分"})
-
         try:
             result = CaseReviewEvolutionService.evolve(
                 review=review,
                 data=upload.read(),
-                human_score=float(score_raw),
                 actor=request.user,
                 threshold=self._threshold(request),
                 change_reason=request.data.get("change_reason", ""),
                 report_name=getattr(upload, "name", "") or "",
+                attribution_ids=self._attribution_ids(request),
             )
         except DjangoValidationError as exc:
-            # 可预期的业务拒绝（未达门槛、无缺陷、基线不是活跃版本……）一律 400：
-            # 回 500 会让前端把它当服务端故障弹"系统错误"，把该看的提示吃掉。
+            # 可预期的业务拒绝（无缺陷、基线不是活跃版本、所选优化点未确认……）
+            # 一律 400：回 500 会让前端把它当服务端故障弹"系统错误"，把该看的提示吃掉。
             return Response({"detail": _validation_text(exc)}, status=400)
 
         return Response(result, status=201)
+
+    @staticmethod
+    def _attribution_ids(request) -> list:
+        """从请求里取 ``attribution_ids``。multipart / JSON / 重复字段三种形态都认。
+
+        三种都认不是宽容：前端在"确认候选"那一步拿到的是一组 id，
+        用 ``getlist`` 追加还是拼一个 JSON 数组取决于它怎么封装 FormData；
+        只认一种就会出现"确认了 3 条、派生却说没给依据"。
+        """
+        import json
+
+        raw = request.data.get("attribution_ids")
+        if raw in (None, ""):
+            values = request.data.getlist("attribution_ids") if hasattr(request.data, "getlist") else []
+        elif isinstance(raw, str):
+            text = raw.strip()
+            if text.startswith("["):
+                try:
+                    values = [str(item) for item in json.loads(text)]
+                except ValueError:
+                    values = [text]
+            else:
+                values = [text]
+        elif isinstance(raw, (list, tuple)):
+            values = [str(item) for item in raw]
+        else:
+            values = [str(raw)]
+        seen = []
+        for value in values:
+            text = str(value or "").strip()
+            if text and text not in seen:
+                seen.append(text)
+        return seen
+
+    @action(detail=False, methods=["post"], url_path="feedback")
+    def feedback(self, request):
+        """上传已确认报告，以最后一个 Sheet 的采纳率记录质量反馈。"""
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+
+        from .case_review_evolution import CaseReviewEvolutionService
+
+        project = self._project(request)
+        review = self._review(request, project)
+        upload = request.FILES.get("file")
+        if upload is None:
+            raise DRFValidationError({"file": "必须上传已确认的审查报告"})
+        try:
+            result = CaseReviewEvolutionService.record_report_feedback(
+                review=review,
+                data=upload.read(),
+                actor=request.user,
+                report_name=getattr(upload, "name", "") or "",
+                threshold=self._threshold(request),
+            )
+        except DjangoValidationError as exc:
+            return Response({"detail": _validation_text(exc)}, status=400)
+        return Response(result, status=201)
+
+    @action(detail=False, methods=["post"], url_path="attributions")
+    def attributions(self, request):
+        """第 ③ 步：AI 读四要素，提出**候选**优化点。**只提候选，不派生。**
+
+        为什么与 ``evolve`` 分开：提候选是"读一份报告、给一堆看法"，
+        派生是"改包"。合并成一个动作，用户就没法"先看看 AI 想改什么、
+        再决定改不改"—— 而这正是这次要做的事。
+
+        **无 LLM 时返回可识别的降级信号（HTTP 200，``degraded=true``）而不是报错**：
+        未配置模型不是"服务坏了"，而是一条合法的降级路径 ——
+        人工在报告里写下的结论仍然可以直接作为派生依据（走 ``evolve`` 不带
+        ``attribution_ids`` 的那条路）。回 500 会让这条路径在页面上变成"系统错误"，
+        用户只会反复重试而看不到真正该做的事。
+        """
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+
+        from .case_review_evolution import CaseReviewEvolutionService
+        from .report_optimization import LLMUnavailable
+
+        project = self._project(request)
+        review = self._review(request, project)
+        upload = request.FILES.get("file")
+        if upload is None:
+            raise ValidationError({"file": "必须上传已确认的审查报告"})
+
+        try:
+            result = CaseReviewEvolutionService.propose_optimizations(
+                review=review, data=upload.read(), actor=request.user,
+            )
+        except LLMUnavailable as exc:
+            return Response({
+                "degraded": True,
+                "reason_code": "llm_unavailable",
+                "detail": str(exc),
+                "candidates": [],
+                "review_id": str(review.pk),
+            })
+        except DjangoValidationError as exc:
+            return Response({"degraded": False, "detail": _validation_text(exc)}, status=400)
+
+        return Response({"degraded": False, **result})
+
+    @action(detail=False, methods=["post"], url_path="attributions/confirm")
+    def attributions_confirm(self, request):
+        """第 ③ 步的后半：人工逐条「采纳 / 改写 / 驳回」。
+
+        入参 ``decisions``：``[{"attribution_id": "...", "action": "accept|edit|reject",
+        "hypothesis": "...", "category": "..."}]``。
+
+        为什么用 ``attribution_id`` 而不是候选列表里的下标 ``idx``：
+        ``idx`` 只在**某一次** ``attributions`` 响应里有意义。用户中途刷新页面、
+        或重新生成一批候选之后，同一个 ``idx`` 指向的是另一条结论 ——
+        那会让"我明明驳回了这条"变成驳回另一条，且不留任何痕迹。
+        id 是稳定的，下标不是。
+
+        采纳/改写一律落 ``confirmed``，且**不抬高置信度**：AI 假设在确认后写成
+        ``confidence=1.0`` 会让人事后分不清"模型猜对了"与"人确认过"。
+        """
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+
+        from .case_review_evolution import CaseReviewEvolutionService
+
+        project = self._project(request)
+        review = self._review(request, project)
+        decisions = request.data.get("decisions")
+        if isinstance(decisions, str):  # multipart 里会是字符串
+            import json
+
+            try:
+                decisions = json.loads(decisions)
+            except ValueError as exc:
+                raise ValidationError({"decisions": f"decisions 不是合法 JSON：{exc}"})
+        if not isinstance(decisions, list) or not decisions:
+            raise ValidationError({"decisions": "必须给出至少一条确认决定"})
+
+        results = []
+        for index, item in enumerate(decisions):
+            if not isinstance(item, dict):
+                raise ValidationError({"decisions": f"第 {index + 1} 条不是对象"})
+            attribution_id = str(item.get("attribution_id") or "").strip()
+            if not attribution_id:
+                raise ValidationError({
+                    "decisions": f"第 {index + 1} 条缺少 attribution_id；请带上候选优化点的 id"
+                })
+            try:
+                results.append(CaseReviewEvolutionService.decide_optimization(
+                    review=review, attribution_id=attribution_id,
+                    action=str(item.get("action") or ""), actor=request.user,
+                    hypothesis=str(item.get("hypothesis") or ""),
+                    category=str(item.get("category") or ""),
+                ))
+            except DjangoValidationError as exc:
+                # 逐条返回而不是整批失败：一次提交里有一条写错（比如 id 已被重新生成
+                # 替换），不该把其余 9 条人已经做完的确认全部丢掉。
+                results.append({
+                    "attribution_id": attribution_id,
+                    "error": _validation_text(exc),
+                })
+
+        confirmed = [item for item in results if item.get("state") == "confirmed"]
+        return Response({
+            "review_id": str(review.pk),
+            "results": results,
+            "confirmed_count": len(confirmed),
+            "confirmed_ids": [item["attribution_id"] for item in confirmed],
+        })
 
     def _review(self, request, project):
         from testcases.models import TestCaseReview
@@ -1515,16 +1694,14 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
     def workflow_stage_output(self, request):
         """「查看结果」：读取某一阶段产出的正文与溯源信息（只读）。
 
-        定位刻意走 **project + workflow_id + stage 三者一起**，而不是让页面按
-        output id 直接取：否则任何项目成员都能靠猜 id 读到别的项目的产出正文，
-        权限口径就变成"取决于 id 是否被猜中"。这里多一次三元定位，
-        换来的是越权读取在这个接口上不可能发生。
+        定位走 ``WorkflowGateService.locate_stage_output``（project + workflow_id
+        + stage 三元）。**不按产出 id 取**，否则任何项目成员都能靠猜 id 读到别的
+        项目的产出正文，权限口径就变成"取决于 id 是否被猜中"。
         """
         from rest_framework.exceptions import ValidationError
 
-        from .models import GenerationOutput
         from .operations import ALL_WORKFLOW_STAGE_SET, WorkflowGateService
-        from .workflow_models import WorkflowStageGate
+        from .workflow_feedback import WorkflowStageFeedbackService
 
         project_id = int(request.query_params["project"]); self._check(request, project_id)
         workflow_id = str(request.query_params.get("workflow_id") or "")
@@ -1534,22 +1711,9 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
         if stage not in ALL_WORKFLOW_STAGE_SET:
             raise ValidationError(f"未知的阶段：{stage}")
 
-        gate = WorkflowStageGate.objects.filter(
-            project_id=project_id, workflow_id=workflow_id, stage=stage
-        ).select_related("output", "output__skill_version").first()
-        output = gate.output if gate is not None and gate.output_id else None
-        if output is None:
-            # 兜底：旁路产出（有产出但门禁还没建）也要能查看，与 workflow-status 的兜底一致。
-            for candidate in GenerationOutput.objects.filter(
-                project_id=project_id
-            ).select_related("skill_version"):
-                protocol = (candidate.metadata or {}).get("protocol") or {}
-                if (
-                    str(protocol.get("workflow_id") or "") == workflow_id
-                    and str(protocol.get("stage") or candidate.task_type) == stage
-                ):
-                    output = candidate
-                    break
+        output, gate = WorkflowGateService.locate_stage_output(
+            project_id=project_id, workflow_id=workflow_id, stage=stage,
+        )
         if output is None:
             raise ValidationError(
                 f"{WorkflowGateService.STAGE_LABELS.get(stage, stage)}阶段暂无产出可查看；"
@@ -1577,6 +1741,15 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
             ),
             "skill_version": output.skill_version.version if output.skill_version_id else "",
             "package_sha256": output.skill_package_sha256 or "",
+            # 能不能下载报告由后端说了算：文件是否存在、是登记产物还是回落模板，
+            # 前端无从判断。给结论而不是让它自己猜，才不会出现"有按钮点了 404"。
+            "artifact": WorkflowGateService.stage_artifact_payload(output, stage=stage),
+            # 采纳率按版本横向列出：采纳率是"人对这一版的评价"，只有放到版本序列里
+            # 才读得出"skill 是一点点优化出来的"。
+            "acceptance_history": (
+                WorkflowStageFeedbackService.acceptance_history(output.skill_version.skill)
+                if output.skill_version_id and output.skill_version.skill_id else []
+            ),
             "gate": ({
                 "status": gate.status,
                 "scores": gate.scores,
@@ -1591,6 +1764,137 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
                 "evaluation": (gate.detail or {}).get("evaluation"),
             } if gate is not None else None),
         })
+
+    @action(detail=False, methods=["get"], url_path="workflow-stage-artifact")
+    def workflow_stage_artifact(self, request):
+        """「下载报告」：下发某一阶段已产出的报告文件。
+
+        与「查看结果」是**两个不同的动作**，不合并：
+        查看结果回正文摘要（看内容），下载报告回附件（拿走文件）。
+        合并成一个接口要么让"只想看一眼"被迫下载文件，要么让"要文件"拿到
+        一段被截断的文本 —— 而截断的报告拿去做人工确认，是最坏的一种错。
+
+        产物优先级：**登记产物优先，模板回落兜底**。
+        - 登记产物 = Skill 产出时写进 ``metadata.artifacts`` 的真实文件，
+          保留该阶段的专业结构（多 Sheet、图表等）。
+        - 无登记产物（或文件已不在盘上）→ 按正文渲染统一 markdown。
+          回落是刻意的：没有它，"下不到报告"就变成链路断点；
+          有它，最差也能拿到一份可读的文本。
+        """
+        from urllib.parse import quote
+
+        from django.http import HttpResponse
+        from rest_framework.exceptions import ValidationError
+
+        from .operations import ALL_WORKFLOW_STAGE_SET, WorkflowGateService
+
+        project_id = int(request.query_params["project"]); self._check(request, project_id)
+        workflow_id = str(request.query_params.get("workflow_id") or "")
+        stage = str(request.query_params.get("stage") or "")
+        if stage not in ALL_WORKFLOW_STAGE_SET:
+            raise ValidationError(f"未知的阶段：{stage}")
+
+        output, _gate = WorkflowGateService.locate_stage_output(
+            project_id=project_id, workflow_id=workflow_id, stage=stage,
+        )
+        if output is None:
+            # 明确"无产出"，而不是回一个 0 字节附件：空文件会被当成"报告是空的"，
+            # 而真相是"这一阶段还没跑"。
+            raise ValidationError(
+                f"{WorkflowGateService.STAGE_LABELS.get(stage, stage)}阶段暂无产出可下载；"
+                f"请先执行本阶段"
+            )
+
+        artifact = WorkflowGateService.stage_artifact(output)
+        if artifact is not None:
+            try:
+                with open(artifact["path"], "rb") as handle:
+                    body = handle.read()
+            except OSError as exc:
+                # 登记了但读不到（权限/竞态）→ 回落而不是 500："给不出这个文件"
+                # 是这条链路能自己处理的情况，不该让整个下载动作失败。
+                artifact = None
+            else:
+                filename = artifact["name"]
+                content_type = "application/octet-stream"
+
+        if artifact is None:
+            filename, body = WorkflowGateService.render_stage_report(output=output, stage=stage)
+            content_type = "text/markdown; charset=utf-8"
+
+        response = HttpResponse(body, content_type=content_type)
+        # 中文文件名必须带 ``filename*=UTF-8''``：只给 ``filename=`` 时
+        # 浏览器会按 latin-1 解，中文名变成乱码文件。ascii 兜底名保证老客户端可用。
+        response["Content-Disposition"] = (
+            f'attachment; filename="stage-report{WorkflowGateService.FALLBACK_SUFFIX}"; '
+            f"filename*=UTF-8''{quote(filename)}"
+        )
+        # 让前端能核验"下的就是给的那个文件"：登记的 sha256 有值时才带。
+        if artifact is not None and artifact.get("sha256"):
+            response["X-Artifact-Sha256"] = artifact["sha256"]
+        response["X-Artifact-Source"] = (
+            "registered" if artifact is not None else "fallback"
+        )
+        return response
+
+    @action(detail=False, methods=["post"], url_path="workflow-stage-feedback")
+    def workflow_stage_feedback(self, request):
+        """「上传反馈」：上传该阶段已人工确认的报告，记录采纳率。**不派生。**
+
+        multipart：``project`` / ``workflow_id`` / ``stage`` / ``file``。
+
+        与派生的关系：反馈只写 ``FeedbackEvent``，一个字节都不动 Skill 包。
+        想让这一版变好，走「用 AI 提候选优化点 → 人工确认 → 派生」那条路 ——
+        那是一条会被明确点下确认的动作，不该被"记录一次评审"顺带触发。
+
+        采纳率的角色：**只作为版本间对比的评分维度**，不是上传门槛。
+        低于参考线照常入库，响应里标 ``below_reference`` 供页面标黄。
+        """
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+
+        from .operations import ALL_WORKFLOW_STAGE_SET, WorkflowGateService
+        from .workflow_feedback import WorkflowStageFeedbackService
+
+        project_id = int(request.data["project"]); self._check(request, project_id)
+        workflow_id = str(request.data.get("workflow_id") or "")
+        stage = str(request.data.get("stage") or "")
+        if stage not in ALL_WORKFLOW_STAGE_SET:
+            raise ValidationError(f"未知的阶段：{stage}")
+
+        upload = request.FILES.get("file")
+        if upload is None:
+            raise ValidationError({"file": "必须上传已完成人工确认的阶段报告"})
+
+        output, _gate = WorkflowGateService.locate_stage_output(
+            project_id=project_id, workflow_id=workflow_id, stage=stage,
+        )
+        if output is None:
+            # 反馈要挂在产出上（版本溯源靠它）。没有产出就没有"这一版"，
+            # 记下来的分数无处可归 —— 说清楚，而不是落一条无主反馈。
+            raise ValidationError(
+                f"{WorkflowGateService.STAGE_LABELS.get(stage, stage)}阶段暂无产出，"
+                f"无法关联质量反馈；请先执行本阶段"
+            )
+
+        reference = request.data.get("reference")
+        try:
+            result = WorkflowStageFeedbackService.record(
+                output=output, stage=stage, data=upload.read(), actor=request.user,
+                report_name=getattr(upload, "name", "") or "",
+                reference=reference if reference not in (None, "") else None,
+            )
+        except DjangoValidationError as exc:
+            # 格式不合约（缺「采纳率」标签、不是 Excel）一律 400：
+            # 回 500 会让前端弹"系统错误"，把该看的那句提示吃掉。
+            return Response({"detail": _validation_text(exc)}, status=400)
+
+        return Response({
+            "stage": stage,
+            "stage_label": WorkflowGateService.STAGE_LABELS.get(stage, stage),
+            "workflow_id": workflow_id,
+            **result,
+        }, status=201)
 
     @action(detail=False, methods=["post"], url_path="evaluate-workflow")
     def evaluate_workflow(self, request):

@@ -213,9 +213,18 @@
     >
       <div class="upload-container">
         <a-form-item :label="text.category" required>
-          <a-select v-model="uploadCategory" :placeholder="text.categoryPlaceholder">
-            <a-option v-for="opt in stageOptionList" :key="`upload-${opt.value}`" :value="opt.value">{{ opt.label }}</a-option>
+          <!-- allow-create：找不到合适的阶段时直接敲一个名称新建（后端归一化成 custom:<名称>） -->
+          <a-select
+            v-model="uploadCategory"
+            allow-search
+            allow-create
+            :placeholder="text.categoryPlaceholder"
+          >
+            <a-option v-for="opt in stageOptionList" :key="`upload-${opt.value}`" :value="opt.value">{{ stageOptionText(opt) }}</a-option>
           </a-select>
+          <template #extra>
+            <span class="form-tip">{{ text.customStageTip }}</span>
+          </template>
         </a-form-item>
         <a-form-item label="功能简介（平台生成）" required>
           <a-textarea v-model="uploadDescription" :max-length="60" show-word-limit placeholder="选择文件后自动生成，请人工确认" />
@@ -271,9 +280,12 @@
     >
       <a-form :model="{ gitUrl, gitBranch }" layout="vertical">
         <a-form-item :label="text.category" required>
-          <a-select v-model="gitCategory" :placeholder="text.categoryPlaceholder">
-            <a-option v-for="opt in stageOptionList" :key="`git-${opt.value}`" :value="opt.value">{{ opt.label }}</a-option>
+          <a-select v-model="gitCategory" allow-search allow-create :placeholder="text.categoryPlaceholder">
+            <a-option v-for="opt in stageOptionList" :key="`git-${opt.value}`" :value="opt.value">{{ stageOptionText(opt) }}</a-option>
           </a-select>
+          <template #extra>
+            <span class="form-tip">{{ text.customStageTip }}</span>
+          </template>
         </a-form-item>
         <a-form-item label="功能简介（平台生成）" required>
           <a-textarea v-model="gitDescription" :max-length="60" show-word-limit placeholder="点击导入后平台先生成，确认后再次点击导入" />
@@ -331,11 +343,13 @@
         <a-select
           v-model="pendingStage"
           allow-clear
+          allow-search
+          allow-create
           :placeholder="text.bindStagePlaceholder"
           style="width: 100%"
         >
           <a-option v-for="opt in stageOptionList" :key="opt.value" :value="opt.value">
-            {{ opt.label }}
+            {{ stageOptionText(opt) }}
           </a-option>
         </a-select>
       </div>
@@ -346,8 +360,8 @@
       <a-alert type="info">以下内容由平台模型生成。请逐项确认，确认后才会写入 Skill Hub。</a-alert>
       <div v-for="item in generatedExisting" :key="item.skill.id" class="generated-row">
         <strong>{{ item.skill.name }}</strong>
-        <a-select v-model="item.category">
-          <a-option v-for="opt in stageOptionList" :key="opt.value" :value="opt.value">{{ opt.label }}</a-option>
+        <a-select v-model="item.category" allow-search allow-create>
+          <a-option v-for="opt in stageOptionList" :key="opt.value" :value="opt.value">{{ stageOptionText(opt) }}</a-option>
         </a-select>
         <a-textarea v-model="item.description" :max-length="60" show-word-limit />
       </div>
@@ -364,6 +378,7 @@ import SkillApiKeyConfirmModal from './SkillApiKeyConfirmModal.vue'
 import type { SkillListItem } from '../types'
 import { useAppI18n } from '@/composables/useAppI18n'
 import { zipNameSuggestsInternalSkill } from '../utils/internalSkills'
+import { stageOptionText } from '../utils/stages'
 
 const props = defineProps<{
   projectId: number
@@ -420,7 +435,8 @@ const text = computed(() => (
         bindStageFailed: 'Failed to update the stage declaration',
         stageFromManifest: 'Declared by the version package manifest. Version packages are immutable — change it by releasing a new version.',
         manageOnly: 'Only a platform admin or a project test lead can enable/disable or delete a Skill.',
-        category: 'Category', categoryPlaceholder: 'Select a category', categoryRequired: 'Select a category',
+        category: 'Category', categoryPlaceholder: 'Select a stage, or type a name to add your own',
+        categoryRequired: 'Select a stage', customStageTip: 'No matching stage? Type a name and it becomes a reusable custom stage (e.g. "Performance").',
       }
     : {
         skillStore: 'Skill 商店',
@@ -448,7 +464,8 @@ const text = computed(() => (
         bindStageFailed: '更新阶段声明失败',
         stageFromManifest: '由版本包 manifest 声明。版本包是不可变产物，改它只能发新版本；这里不提供修改入口。',
         manageOnly: '只有平台管理员或项目测试负责人可以启停 / 删除 Skill。',
-        category: '所属分类', categoryPlaceholder: '请选择展示分类', categoryRequired: '请先选择所属分类',
+        category: '所属分类', categoryPlaceholder: '选择阶段，或直接输入以新增', categoryRequired: '请先选择所属分类',
+        customStageTip: '没有合适的阶段？直接输入名称即可新建自定义阶段（如「性能测试」），之后可复用。',
         importFromGit: '从 Git 导入',
         uploadSkill: '上传 Skill',
         emptyState: '暂无 Skills，点击上方按钮上传',
@@ -600,7 +617,7 @@ const canBindStage = ref(false)
 //: 能不能治理公共目录的条目（启停 / 删除 / 补填阶段）。与 canBindStage 同一门槛，
 //: 分开存只是因为两处调用点读的是不同的业务动作。
 const canManage = ref(false)
-const stageOptionList = ref<Array<{ value: string; label: string }>>([])
+const stageOptionList = ref<Array<{ value: string; label: string; custom?: boolean }>>([])
 const showStageModal = ref(false)
 const stageTarget = ref<SkillListItem | null>(null)
 const pendingStage = ref<string | undefined>(undefined)
@@ -1108,18 +1125,31 @@ onMounted(() => {
 
 .skill-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
-  gap: 16px;
+  width: 100%;
+  grid-template-columns: repeat(auto-fit, minmax(min(270px, 100%), 1fr));
+  gap: 14px;
 }
 
 .skill-card {
   background: var(--color-bg-2);
   border: 1px solid var(--color-border);
   border-radius: 14px;
-  padding: 18px;
+  padding: 16px;
   transition: all 0.2s;
   overflow: hidden;
   min-width: 0;
+}
+
+@media (min-width: 1500px) {
+  .skill-list { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+@media (min-width: 980px) and (max-width: 1499px) {
+  .skill-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+  .skill-list { grid-template-columns: 1fr; }
 }
 
 .skill-card:hover {

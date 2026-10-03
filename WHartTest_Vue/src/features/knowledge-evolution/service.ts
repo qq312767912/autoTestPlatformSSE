@@ -27,6 +27,11 @@ import type {
   CaseReviewEvolutionCandidate,
   CaseReviewEvolutionPreflight,
   CaseReviewEvolutionResult,
+  CaseReviewReportFeedbackResult,
+  OptimizationDecisionResult,
+  OptimizationProposalResult,
+  OutputLineageView,
+  StageFeedbackResult,
 } from './types';
 
 const BASE = '/api/knowledge-evolution';
@@ -365,14 +370,12 @@ export async function preflightCaseReviewEvolution(
   projectId: number,
   reviewId: string,
   file: File,
-  humanScore: number | null,
   threshold?: number,
 ): Promise<CaseReviewEvolutionPreflight> {
   const form = new FormData();
   form.append('project', String(projectId));
   form.append('review_id', reviewId);
   form.append('file', file);
-  if (humanScore !== null && humanScore !== undefined) form.append('human_score', String(humanScore));
   if (threshold !== undefined) form.append('threshold', String(threshold));
   return upload<CaseReviewEvolutionPreflight>('/case-review-evolution/preflight/', form);
 }
@@ -384,41 +387,64 @@ export async function preflightCaseReviewEvolution(
  * 在 Skill 进化工坊走完评测与负责人审批才会切包；未激活的 Skill 本来就在用最新的
  * 可运行版本，但派生候选仍需人工激活才会生效（激活是钉版手段，见 requirements §R13.1）。
  * `active_untouched` 是"派生过程没碰活跃包"的断言，界面上要如实显示。
+ *
+ * `attributionIds`：给人工确认过的候选优化点 id（三步向导的主路径）。
+ * 给了就**只拿这些已确认的**当派生依据；不给则降级为"直接采信人工在报告里写下的
+ * 结论"——未配置 LLM 的环境只有后者。用重复字段提交（后端 multipart/JSON/重复字段三种都认）。
  */
 export async function evolveCaseReview(
   projectId: number,
   reviewId: string,
   file: File,
-  humanScore: number,
-  options?: { threshold?: number; changeReason?: string },
+  options?: { threshold?: number; changeReason?: string; attributionIds?: string[] },
 ): Promise<CaseReviewEvolutionResult> {
   const form = new FormData();
   form.append('project', String(projectId));
   form.append('review_id', reviewId);
   form.append('file', file);
-  form.append('human_score', String(humanScore));
   if (options?.threshold !== undefined) form.append('threshold', String(options.threshold));
   if (options?.changeReason) form.append('change_reason', options.changeReason);
+  (options?.attributionIds || []).forEach(id => form.append('attribution_ids', id));
   return upload<CaseReviewEvolutionResult>('/case-review-evolution/evolve/', form);
 }
 
+/** 用例审查的反馈以已确认 Excel 为唯一入口，分数取最后一个 Sheet 的采纳率。 */
+export async function submitCaseReviewReportFeedback(
+  projectId: number,
+  reviewId: string,
+  file: File,
+): Promise<CaseReviewReportFeedbackResult> {
+  const form = new FormData();
+  form.append('project', String(projectId));
+  form.append('review_id', reviewId);
+  form.append('file', file);
+  return upload<CaseReviewReportFeedbackResult>('/case-review-evolution/feedback/', form);
+}
+
 /**
- * 下载导出后的 Skill 包。
+ * 通用附件下载。
  *
  * 必须走 blob 而不是 `window.open(url)`：下载端点要鉴权，新开标签不会带
  * `Authorization` 头，只会拿到 401 页面（还常常表现为"下载了一个坏 zip"）。
  * 文件名优先用服务端 `Content-Disposition` 给的那个——它才是导出时的正式命名。
  */
-export async function downloadSkillPackage(downloadUrl: string): Promise<string> {
+async function downloadAttachment(
+  url: string,
+  params: Record<string, unknown> | undefined,
+  fallbackName: string,
+): Promise<string> {
   const authStore = useAuthStore();
   const token = authStore.getAccessToken;
-  const res = await axios.get(downloadUrl, {
+  const res = await axios.get(url, {
     responseType: 'blob',
+    params,
     headers: { Authorization: token ? `Bearer ${token}` : '' },
   });
   const disposition = String(res.headers?.['content-disposition'] || '');
+  // 服务端优先给 `filename*=UTF-8''<编码名>`（中文名）。只给 `filename=` 时浏览器
+  // 会按 latin-1 解，中文名变成乱码文件，所以两种写法都要能读出来。
   const matched = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
-  const filename = matched ? decodeURIComponent(matched[1]) : 'skill-package.zip';
+  const filename = matched ? decodeURIComponent(matched[1]) : fallbackName;
   const blobUrl = URL.createObjectURL(res.data as Blob);
   const link = document.createElement('a');
   link.href = blobUrl;
@@ -428,4 +454,103 @@ export async function downloadSkillPackage(downloadUrl: string): Promise<string>
   document.body.removeChild(link);
   URL.revokeObjectURL(blobUrl);
   return filename;
+}
+
+/** 下载导出后的 Skill 包。 */
+export async function downloadSkillPackage(downloadUrl: string): Promise<string> {
+  return downloadAttachment(downloadUrl, undefined, 'skill-package.zip');
+}
+
+// ---------------------------------------------------------------- 阶段报告出口 / 反馈入口（T03 / T04 / T05）
+
+/**
+ * 「下载报告」：下发某一阶段已产出的报告文件。
+ *
+ * 与「查看结果」是两个动作：查看结果回正文摘要（看内容），这里回附件（拿走文件）。
+ * 有登记产物时下的是 Skill 的真实产物（保留该阶段的专业结构）；没有时是平台按正文
+ * 渲染的文本兜底——响应头 `X-Artifact-Source` 会写明是哪一种。
+ */
+export async function downloadStageArtifact(
+  projectId: number,
+  workflowId: string,
+  stage: string,
+): Promise<string> {
+  return downloadAttachment(
+    `${BASE}/operations/workflow-stage-artifact/`,
+    { project: projectId, workflow_id: workflowId, stage },
+    `${stage}-report.md`,
+  );
+}
+
+/**
+ * 「上传反馈」：上传该阶段已人工确认的报告，记录采纳率。**不派生。**
+ *
+ * 采纳率只作为**版本间对比的评分维度**，不是上传门槛：低于参考线照常入库，
+ * 响应里标 `below_reference` 供页面标黄。想改包走「AI 提候选 → 人工确认 → 派生」，
+ * 那是一条会被明确点下确认的动作，不该被"记录一次评审"顺带触发。
+ *
+ * 报告末页必须有「采纳率」标签单元格；缺标签会被 400 拒绝并说明期望格式——
+ * 那是"文件本身不对"，不是"质量不够"，两者混成一句话会让人去查错方向。
+ */
+export async function uploadStageFeedback(
+  projectId: number,
+  workflowId: string,
+  stage: string,
+  file: File,
+  reference?: number,
+): Promise<StageFeedbackResult> {
+  const form = new FormData();
+  form.append('project', String(projectId));
+  form.append('workflow_id', workflowId);
+  form.append('stage', stage);
+  form.append('file', file);
+  if (reference !== undefined) form.append('reference', String(reference));
+  return upload<StageFeedbackResult>('/operations/workflow-stage-feedback/', form);
+}
+
+// ---------------------------------------------------------------- AI 候选优化点 + 人工确认（T06 / T07）
+
+/**
+ * 第 ③ 步：AI 读「当前 Skill 包正文 + 本轮报告缺陷 + 历史归因 + 人工确认结论」，
+ * 提出**候选**优化点。**只提候选，不派生。**
+ *
+ * 无激活 LLM 时返回 `degraded=true`（HTTP 200）而不是报错：未配置模型是一条合法的
+ * 降级路径，人工在报告里写下的结论仍可直接作为派生依据。回 500 会让它变成"系统错误"。
+ */
+export async function proposeCaseReviewOptimizations(
+  projectId: number,
+  reviewId: string,
+  file: File,
+): Promise<OptimizationProposalResult> {
+  const form = new FormData();
+  form.append('project', String(projectId));
+  form.append('review_id', reviewId);
+  form.append('file', file);
+  return upload<OptimizationProposalResult>('/case-review-evolution/attributions/', form);
+}
+
+/**
+ * 第 ③ 步的后半：人工逐条「采纳 / 改写 / 驳回」。
+ *
+ * 用 `attribution_id` 而不是候选列表下标：下标只在**某一次**响应里有意义，
+ * 中途刷新或重新生成后同一个下标指向的是另一条结论——那会让"我明明驳回了这条"
+ * 变成驳回另一条，且不留痕迹。
+ */
+export async function confirmCaseReviewOptimizations(
+  projectId: number,
+  reviewId: string,
+  decisions: Array<{ attribution_id: string; action: 'accept' | 'edit' | 'reject'; hypothesis?: string; category?: string }>,
+): Promise<OptimizationDecisionResult> {
+  return post<OptimizationDecisionResult>('/case-review-evolution/attributions/confirm/', {
+    project: projectId,
+    review_id: reviewId,
+    decisions,
+  });
+}
+
+// ---------------------------------------------------------------- 内容来源（T09 / T10）
+
+/** 「这条产出是怎么来的」：闭环七段（`stages`）+ 内容来源（`sources`）。 */
+export async function getGenerationOutputLineage(outputId: string): Promise<OutputLineageView> {
+  return get<OutputLineageView>(`/generation-outputs/${outputId}/lineage/`);
 }

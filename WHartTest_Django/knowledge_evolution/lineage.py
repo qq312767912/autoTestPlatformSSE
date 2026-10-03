@@ -6,9 +6,16 @@
 断了两段。这个模块把七段一次性查出来，并且显式给出 ``stages`` 徽标与
 ``broken_at``（第一个断点），让"闭环到底通没通"成为一个可以断言的事实。
 
+除闭环之外还回答第二个问题：**产出里的结论是从哪来的**（``sources``）。
+两者并列而不是合并——"链路通了"与"内容可信"是两件事，
+合并会让"闭环已完成"看起来像是"内容已被验证过"。
+
 只读，不写任何业务状态。所有查询都按 ``project`` 收口，避免跨项目串数据。
 """
 from __future__ import annotations
+
+import hashlib
+from pathlib import Path
 
 from .capability_models import CapabilityRelease, PromotionDecision, ReleaseObservation
 from .gold_models import GoldCase
@@ -27,6 +34,24 @@ STAGE_ORDER = (
     ("gate", "评测门禁"),
     ("release", "审批发布"),
 )
+
+#: 引用条目的 ``source_type`` 取值。四阶段与知识问答共用这一套 ——
+#: 前端据此决定"点这条引用该跳到哪"（图谱节点 / 文档 / 需求 / 用例）。
+SOURCE_TYPES = ("graph", "document", "requirement", "test_case")
+
+#: 图谱节点类型 → 引用来源类型。图谱里需求与用例是**不同的节点类型**，
+#: 只按"有没有节点 id"一律归成 ``graph``，页面就无法把点击引到需求或用例详情上。
+_NODE_TYPE_TO_SOURCE = {
+    "requirement_document": "requirement",
+    "requirement_module": "requirement",
+    "test_case": "test_case",
+    "test_step": "test_case",
+    "test_module": "test_case",
+}
+
+#: ``skill_content.files`` 最多列多少个文件。包不可变、哈希即定位，
+#: 列全的必要性低于"响应别因为一个大包变得很慢"。
+MAX_SKILL_FILES = 40
 
 
 class OutputLineageService:
@@ -68,6 +93,7 @@ class OutputLineageService:
         releases = OutputLineageService._releases(
             project_id=project_id, experiments=experiments, bindings=bindings,
         )
+        sources = OutputLineageService._sources(output)
 
         stages = {
             "output": {"ok": True, "count": 1},
@@ -154,9 +180,209 @@ class OutputLineageService:
                 for item in experiments
             ],
             "release": releases,
+            # 内容来源：回答"这个需求点、这条用例是参考什么文件和 Skill 内容生成的"。
+            # 与 stages 并列而不是并进 stages：前者是"链路走到哪"，后者是"内容从哪来"。
+            "sources": sources,
             "stages": stages,
             "broken_at": broken_at,
             "closed_loop": not broken_at,
+        }
+
+    # ------------------------------------------------------------ 内容来源
+
+    @classmethod
+    def _sources(cls, output) -> dict:
+        """产出的内容来源。**永远返回四个键**，没数据时给空值不给缺字段。
+
+        给空值而不是省略：前端要区分"这个接口没返回这一块"与"这条产出确实没有引用"，
+        缺字段会让两种情况长得一样，于是"没有引用"看起来像"功能没上"。
+        """
+        trace = output.trace if output.trace_id else None
+        channels = dict(trace.channels or {}) if trace is not None else {}
+        raw = list(trace.citations or []) if trace is not None else []
+        citations = cls._normalize_citations(raw, project_id=output.project_id)
+        return {
+            "channels": channels,
+            "citations": citations,
+            "graph_nodes": cls._graph_nodes(citations, project_id=output.project_id),
+            "skill_content": cls._skill_content(output),
+        }
+
+    @classmethod
+    def _normalize_citations(cls, raw: list, *, project_id) -> list[dict]:
+        """把两种来源的引用拍成同一套结构。
+
+        现状有两套写法，必须都能读：
+
+        - 知识问答：``{citation_id: "kb:{kb}:{doc}:{chunk}", document_id, chunk_index, rank}``
+        - 四阶段：产出的 ``evidence`` 原样落入 ``citations``，
+          形如 ``{source_type, source_id, node_id, title, ...}``，字段集不固定
+          （协议允许产出方自己带 ``extensions``）。
+
+        统一成 ``{citation_id, source_type, source_id, node_id, document_id,
+        chunk_index, rank, title}`` —— 前端只需要会渲染一种结构。
+        认不出来的条目**不静默丢掉**，而是保留成 ``source_type=""`` 的条目：
+        丢掉会让"引用数对不上"变成一个查不出来的差异。
+        """
+        node_ids = [
+            str(item.get("node_id") or "").strip()
+            for item in raw if isinstance(item, dict)
+        ]
+        node_map = cls._node_map(node_ids, project_id=project_id)
+
+        normalized = []
+        for index, item in enumerate(raw):
+            if isinstance(item, str):
+                # 字符串形态（``evaluation`` / 种子数据里会这么存）：只有一个 id。
+                normalized.append({
+                    "citation_id": item, "source_type": "", "source_id": item,
+                    "node_id": "", "document_id": "", "chunk_index": None,
+                    "rank": index + 1, "title": "",
+                })
+                continue
+            if not isinstance(item, dict):
+                continue
+            node_id = str(item.get("node_id") or "").strip()
+            document_id = str(item.get("document_id") or "").strip()
+            descriptor = node_map.get(node_id) if node_id else None
+            source_type = str(item.get("source_type") or "").strip()
+            if source_type not in SOURCE_TYPES:
+                # 没给或不认识时按证据本身推断，而不是一律记成"未知"：
+                # 推断出来的类型决定了点击这条引用能跳到哪，比留空有用得多。
+                if descriptor is not None:
+                    source_type = _NODE_TYPE_TO_SOURCE.get(descriptor["kind"], "graph")
+                elif node_id:
+                    source_type = "graph"
+                elif document_id:
+                    source_type = "document"
+                else:
+                    source_type = ""
+            source_id = str(item.get("source_id") or "").strip()
+            if not source_id:
+                source_id = node_id or document_id
+            normalized.append({
+                "citation_id": str(item.get("citation_id") or f"cite-{index + 1}"),
+                "source_type": source_type,
+                "source_id": source_id,
+                "node_id": node_id,
+                "document_id": document_id,
+                "chunk_index": item.get("chunk_index"),
+                "rank": item.get("rank") or index + 1,
+                "title": str(item.get("title") or (descriptor or {}).get("label") or ""),
+            })
+        return normalized
+
+    @staticmethod
+    def _node_map(node_ids: list, *, project_id) -> dict:
+        """按引用里给的节点标识批量取图谱节点，返回 ``{标识: 描述}``。
+
+        引用里可能给 ``external_id``（项目级稳定标识）也可能给主键，两种都认 ——
+        只认一种会让"有引用但点不过去"，而这一点在页面上表现为"链接坏了"，
+        排查方向完全被带偏。
+        本项目内查询，杜绝用别项目的节点 id 探到内容。
+        """
+        from django.db.models import Q
+
+        from .graph_models import GraphNode
+
+        wanted = [item for item in dict.fromkeys(node_ids) if item]
+        if not wanted:
+            return {}
+        query = Q(external_id__in=wanted)
+        uuid_like = [item for item in wanted if _looks_like_uuid(item)]
+        if uuid_like:
+            query |= Q(pk__in=uuid_like)
+        result = {}
+        for node in GraphNode.objects.filter(project_id=project_id).filter(query):
+            descriptor = {
+                "node_id": str(node.id),
+                "external_id": node.external_id,
+                "kind": node.node_type,
+                "label": node.name or node.external_id,
+            }
+            result[str(node.id)] = descriptor
+            result[node.external_id] = descriptor
+        return result
+
+    @classmethod
+    def _graph_nodes(cls, citations: list[dict], *, project_id) -> list[dict]:
+        """引用里出现的图谱节点（去重、保序）。
+
+        只列**产出真正引用到的**节点，而不是"项目图谱里有哪些节点"：
+        后者会给出一个与这份产出无关的清单，看着很充实，实际无法回答
+        "这条结论参考了谁"。
+        """
+        ids = []
+        for item in citations:
+            node_id = item.get("node_id") or ""
+            if node_id and node_id not in ids:
+                ids.append(node_id)
+        if not ids:
+            return []
+        node_map = cls._node_map(ids, project_id=project_id)
+        seen = []
+        for node_id in ids:
+            descriptor = node_map.get(node_id)
+            if descriptor is None:
+                # 节点被清理了（图谱重建）：仍然报出来并标 ``resolved=False``，
+                # 而不是抹掉这条引用 —— 抹掉会让人以为产出根本没引用任何东西。
+                seen.append({"node_id": node_id, "kind": "", "label": "", "resolved": False})
+                continue
+            seen.append({
+                "node_id": node_id,
+                "kind": descriptor["kind"],
+                "label": descriptor["label"],
+                "resolved": True,
+            })
+        return seen
+
+    @staticmethod
+    def _skill_content(output) -> dict:
+        """这条产出参考了这版 Skill 的哪些文件（清单 + 哈希，**不落正文**）。
+
+        包是不可变产物，哈希足以定位到"当时那一份"；把正文抄进血缘响应
+        会让同一个文件在系统里存两份，并让"包被改过"变得难以发现。
+        """
+        version = output.skill_version if output.skill_version_id else None
+        if version is None:
+            return {"skill_version_id": "", "package_sha256": "", "files": [], "truncated": False}
+        files: list[dict] = []
+        truncated = False
+        try:
+            root = Path(version.get_full_path() or "")
+        except Exception:  # pragma: no cover - 路径解析异常不该拖垮血缘
+            root = None
+        if root is not None and root.is_dir():
+            from .report_optimization import SkillPackageReader
+
+            candidates = sorted(
+                (
+                    path for path in root.rglob("*")
+                    if path.is_file()
+                    and path.suffix.lower() in SkillPackageReader.TEXT_SUFFIXES
+                    and not any(part in SkillPackageReader.SKIP_DIRS for part in path.parts)
+                ),
+                key=lambda path: (path.name != "SKILL.md", str(path)),
+            )
+            for path in candidates:
+                if len(files) >= MAX_SKILL_FILES:
+                    truncated = True
+                    break
+                try:
+                    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                except OSError:
+                    continue
+                files.append({
+                    "path": str(path.relative_to(root)),
+                    "sha256": digest,
+                    "size": path.stat().st_size,
+                })
+        return {
+            "skill_version_id": str(version.pk),
+            "version": version.version,
+            "package_sha256": output.skill_package_sha256 or version.package_sha256 or "",
+            "files": files,
+            "truncated": truncated,
         }
 
     # ------------------------------------------------------------ 内部
@@ -422,6 +648,21 @@ class ResponsibilityService:
                 if stage:
                     return {"stage": stage, "stage_label": _stage_label(stage)}
         return {"stage": "", "stage_label": ""}
+
+
+def _looks_like_uuid(value: str) -> bool:
+    """判断字符串是不是 UUID。
+
+    先判形状再拿去查主键：把 ``"req-login-01"`` 直接塞进 ``pk__in`` 会让
+    数据库抛"非法 UUID 语法"，一个数据问题变成一次 500。
+    """
+    import uuid as _uuid
+
+    try:
+        _uuid.UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return True
 
 
 def _stage_label(stage: str) -> str:

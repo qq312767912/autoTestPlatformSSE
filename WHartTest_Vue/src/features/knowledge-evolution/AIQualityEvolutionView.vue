@@ -28,27 +28,42 @@
           <span>{{ tabs.find(item=>item.key===workspace)?.label }}</span>
         </div>
         <template v-if="primaryView === 'agents'">
+          <section class="agent-filter-bar">
+            <div>
+              <span>Agent 筛选</span>
+              <a-select
+                v-model="selectedAgentStages"
+                multiple
+                allow-clear
+                allow-search
+                :max-tag-count="3"
+                placeholder="全部 Agent"
+                style="width:420px"
+              >
+                <a-option v-for="stage in AGENT_STAGE_ORDER" :key="stage" :value="stage">{{ taskTypeLabels[stage] || stage }}</a-option>
+              </a-select>
+            </div>
+            <small>已选 {{ selectedAgentStages.length || AGENT_STAGE_ORDER.length }} / {{ AGENT_STAGE_ORDER.length }} 个 Agent · 近 {{ TREND_DAYS }} 天</small>
+          </section>
           <section class="board-kpis">
-            <article v-for="kpi in agentKpis" :key="kpi.key" :class="kpi.tone">
+            <button v-for="kpi in agentKpis" :key="kpi.key" type="button" :class="[kpi.tone,{active:selectedAgentMetric===kpi.key}]" @click="selectedAgentMetric=kpi.key">
               <span>{{ kpi.label }}</span>
               <div class="kpi-value"><b>{{ kpi.value }}</b><em v-if="kpi.delta!==null" :class="kpi.invert?(kpi.delta>=0?'down':'up'):(kpi.delta>=0?'up':'down')">{{ kpi.delta>=0?'+':'' }}{{ kpi.delta }}%</em></div>
               <small>{{ kpi.hint }}</small>
               <div class="kpi-spark" aria-hidden="true"><i v-for="(height,index) in kpi.spark" :key="index" :style="{height:`${height}%`}"/></div>
-            </article>
+            </button>
           </section>
           <section class="panel board-chart">
-            <div class="section-head"><div><span>调用趋势</span><h2>会话数与 Token 消耗</h2></div><small>近 14 天 · 共 {{ allTraces.length }} 次会话</small></div>
+            <div class="section-head chart-title"><div><span>指标大图</span><h2>{{ activeAgentKpi.label }}趋势</h2><p>{{ activeAgentKpi.hint }} · 点击上方指标卡可切换</p></div><div class="chart-total"><small>{{ activeAgentKpi.summaryLabel }}</small><b>{{ activeAgentKpi.value }}</b></div></div>
             <div v-if="hasTrendData" class="chart-body">
-              <div class="chart-legend"><span><i class="dot session"/>会话数</span><span><i class="dot token"/>Token 消耗</span></div>
               <div class="chart-bars">
-                <div v-for="point in agentTrend" :key="point.date" class="bar-col">
-                  <div class="bar-stack">
-                    <i class="bar session" :style="{height:`${point.sessionPct}%`}" :title="`${point.date} · ${point.sessions} 次会话`"/>
-                    <i class="bar token" :style="{height:`${point.tokenPct}%`}" :title="`${point.date} · ${point.tokens} tokens`"/>
-                  </div>
+                <div v-for="point in activeAgentTrend" :key="point.date" class="bar-col">
+                  <b>{{ point.label }}</b>
+                  <div class="bar-stack"><i :class="['bar',selectedAgentMetric]" :style="{height:`${point.pct}%`}" :title="`${point.date} · ${point.label}`"/></div>
                   <small>{{ point.date }}</small>
                 </div>
               </div>
+              <div class="chart-axis-note"><span>{{ activeAgentKpi.label }}</span><span>{{ activeAgentTrend.length }} 个数据点</span></div>
             </div>
             <a-empty v-else description="近 14 天暂无会话数据"/>
           </section>
@@ -81,7 +96,9 @@
         </template>
 
         <section v-else-if="primaryView === 'graph'" class="knowledge-graph-embed">
-          <KnowledgeGraphView embedded />
+          <!-- focus-node：产出详情的「内容来源」里点某条引用节点，就定位到它。
+               定位能力归图谱视图（只有它知道当前数据源里有没有这个节点），这里只递 id。 -->
+          <KnowledgeGraphView embedded :focus-node="graphFocusNode" />
         </section>
 
         <section v-else-if="quickMode === 'skills'" class="skill-hub-embed">
@@ -160,9 +177,9 @@
                 <em>基线 {{ (reviewEvolutionResult.baseline_package_sha256||'').slice(0,16) }}</em>
               </article>
               <article>
-                <small>人工打分</small>
-                <b>{{ reviewEvolutionResult.human_score }}/100</b>
-                <em>门槛 {{ reviewEvolutionResult.threshold }}</em>
+                <small>报告采纳率</small>
+                <b>{{ reviewEvolutionResult.scan.acceptance_score }}%</b>
+                <em>门槛 {{ reviewEvolutionResult.threshold }}%</em>
               </article>
               <article>
                 <small>活跃包</small>
@@ -280,6 +297,26 @@
                       <a-button v-if="step.output_id" size="small" @click="openStageOutput(activeFlow.workflow_id,step.stage)">
                         <template #icon><icon-file/></template>查看结果
                       </a-button>
+                      <!-- R1/R2 入口：两个按钮只在**已产出**时渲染（不显示优于禁用——
+                           一个禁用按钮只会让人反复点它想知道为什么）。
+                           产物是登记文件还是平台回落模板由后端判定，按钮悬浮提示如实标出。 -->
+                      <a-button
+                        v-if="step.output_id"
+                        size="small"
+                        :title="step.artifact?.source==='registered' ? `下载该阶段登记的报告产物：${step.artifact?.name}` : '该阶段没有登记产物，将下载平台按产出正文渲染的文本报告'"
+                        :loading="stageArtifactBusy===`${activeFlow.workflow_id}:${step.stage}`"
+                        @click="downloadStageReport(activeFlow.workflow_id,step.stage)"
+                      >
+                        <template #icon><icon-download/></template>下载报告
+                      </a-button>
+                      <a-button
+                        v-if="step.output_id"
+                        size="small"
+                        :loading="stageFeedbackBusy===`${activeFlow.workflow_id}:${step.stage}`"
+                        @click="pickStageFeedback(activeFlow.workflow_id,step.stage)"
+                      >
+                        <template #icon><icon-upload/></template>上传反馈
+                      </a-button>
                       <a-button v-if="!step.output_id" size="small" type="primary" :disabled="!['ready','running'].includes(step.status)" :loading="executeBusy===`${activeFlow.workflow_id}:${step.stage}`" @click="executeStage(activeFlow.workflow_id,step.stage)">
                         <template #icon><icon-play-arrow/></template>执行本阶段
                       </a-button>
@@ -290,6 +327,16 @@
                       <a-button v-if="step.output_id && step.confirmable" size="small" type="primary" status="success" :loading="gateBusy===`${activeFlow.workflow_id}:${step.stage}`" @click="confirmStage(activeFlow.workflow_id,step.stage)">确认进入下一阶段</a-button>
                       <a-button v-if="step.status==='failed'" size="small" status="warning" @click="openOverride(activeFlow.workflow_id,step.stage)">负责人放行</a-button>
                     </footer>
+                    <!-- 上传成功后就地回显，不弹 toast 了事：采纳率是拿来和别的版本比的，
+                         一闪而过的提示等于没记录。低于参考线只标黄，**不构成拦截**。 -->
+                    <p v-if="stageFeedbackOf(activeFlow.workflow_id,step.stage)" class="wf-feedback-echo">
+                      <b>采纳率 {{ stageFeedbackOf(activeFlow.workflow_id,step.stage)!.acceptance_score }}%</b>
+                      · 参考线 {{ stageFeedbackOf(activeFlow.workflow_id,step.stage)!.acceptance_reference }}%
+                      <a-tag v-if="stageFeedbackOf(activeFlow.workflow_id,step.stage)!.below_reference" size="small" color="gold">低于参考线（仅作版本对比，不影响记录）</a-tag>
+                      <a-tag v-else size="small" color="green">达参考线</a-tag>
+                      <a-tag v-if="!stageFeedbackOf(activeFlow.workflow_id,step.stage)!.created" size="small">同一份报告已记录过</a-tag>
+                      <small>取自「{{ stageFeedbackOf(activeFlow.workflow_id,step.stage)!.acceptance_sheet }}」页</small>
+                    </p>
                   </article>
                 </div>
               </template>
@@ -424,13 +471,15 @@
         </a-form>
       </template>
     </a-modal>
-    <!-- 用例审查自进化向导：① 选跑完的审查项目 ② 上传已确认报告 + 人工打分 ③ 确认 Skill 并发起。
-         三步而不是一屏：这三件事各有各的前置条件，挤在一屏会让"为什么按钮是灰的"变成一个谜。 -->
+    <!-- 用例审查自进化向导：① 选跑完的审查项目 ② 上传已确认报告（预检）
+         ③ AI 候选优化点逐条定夺 ④ 确认 Skill 并发起。
+         四步而不是一屏：这四件事各有各的前置条件，挤在一屏会让"为什么按钮是灰的"变成一个谜。
+         第 ③ 步可降级跳过（未配置 LLM 时），但**必须明示**降级，不静默走人工路径。 -->
     <a-modal
       v-model:visible="showReviewEvolutionModal"
       :title="reviewEvolutionTitle"
       :ok-text="reviewEvolutionOkText"
-      :ok-loading="reviewEvolutionSubmitting"
+      :ok-loading="reviewEvolutionSubmitting || reviewEvolutionProposing || reviewEvolutionConfirming"
       :ok-button-props="{disabled: !reviewEvolutionCanAdvance}"
       :on-before-ok="onReviewEvolutionOk"
       :mask-closable="false"
@@ -481,31 +530,22 @@
               :auto-upload="false"
               :limit="1"
               accept=".xlsx"
+              :show-retry-button="false"
               :file-list="reviewEvolutionFileList"
               @change="onReviewReportChange"
               @before-remove="onReviewReportRemove"
             />
           </a-form-item>
-          <a-form-item
-            :label="`人工打分（0–100，门槛 ${reviewEvolutionThreshold}）`"
-            required
-            extra="分数是对本次审查结果可信度的评价。未达门槛不允许发起进化——照着一份人工自己都不认可的结果去改 Skill 包，只会把噪声固化进护栏。"
-          >
-            <a-slider v-model="reviewEvolutionScore" :min="0" :max="100" :step="1"/>
-            <a-input-number v-model="reviewEvolutionScore" :min="0" :max="100" :step="1" style="width:140px;margin-top:8px"/>
-            <span :class="['score-preview',reviewEvolutionScore>=reviewEvolutionThreshold?'ok':'bad']" style="margin-left:12px">
-              {{ reviewEvolutionScore }} 分 · {{ reviewEvolutionScore>=reviewEvolutionThreshold ? '达门槛' : '未达门槛' }}
-            </span>
-          </a-form-item>
         </a-form>
         <a-button long :loading="reviewEvolutionPreflighting" :disabled="!reviewEvolutionFile" @click="runReviewEvolutionPreflight">
-          <template #icon><icon-experiment/></template>解析报告并预检
+          <template #icon><icon-experiment/></template>重新解析报告
         </a-button>
 
         <!-- 预检结果：把"能不能发起"的所有条件一次性摊开。只报一条，
              用户要来回试三次才知道真正卡在哪。 -->
         <div v-if="preflightReady || preflightBlockers.length" class="preflight">
           <div class="preflight-scan">
+            <span><b>{{ reviewEvolutionPreflight?.scan.acceptance_score ?? 0 }}%</b><small>报告采纳率</small></span>
             <span><b>{{ reviewEvolutionPreflight?.scan.total_rows || 0 }}</b><small>问题行</small></span>
             <span><b>{{ reviewEvolutionPreflight?.scan.affirmative || 0 }}</b><small>人工确认</small></span>
             <span><b>{{ reviewEvolutionPreflight?.scan.negative || 0 }}</b><small>误报</small></span>
@@ -520,6 +560,69 @@
           <p v-for="text in reviewEvolutionPreflight?.scan.warnings || []" :key="text" class="warn-line">⚠ {{ text }}</p>
           <p v-for="text in preflightBlockers" :key="text" class="warn-line">✕ {{ text }}</p>
         </div>
+      </template>
+
+      <template v-else-if="reviewEvolutionStep===3">
+        <!-- 第 ③ 步：AI 读四要素提候选优化点，人逐条定夺。
+             把这步单列而不是并进"上传报告"里：AI 给的是**假设**，人要能看到
+             "它凭什么这么猜"（置信度 / 类别 / 原话）再决定采纳，合并等于默认接受。 -->
+        <div class="review-target">
+          <b>{{ selectedReview?.source_name }}</b>
+          <span>{{ selectedReview?.skill_name }} · {{ selectedReview?.skill_version }}</span>
+          <span v-if="selectedReview?.package_sha256" class="sha">sha {{ selectedReview.package_sha256.slice(0,12) }}</span>
+        </div>
+
+        <!-- 降级必须**明说**：静默降级会让人以为"AI 看过了、没问题"，
+             而真相是这一步根本没跑。 -->
+        <a-alert v-if="reviewEvolutionDegraded" type="warning" style="margin-top:12px">
+          未配置 LLM，已降级为人工标注：跳过 AI 候选生成，直接按报告里人工写下的结论派生。
+          <template v-if="reviewEvolutionDegradedDetail">（{{ reviewEvolutionDegradedDetail }}）</template>
+        </a-alert>
+
+        <template v-else>
+          <div class="proposal-head">
+            <span>候选优化点 <b>{{ reviewEvolutionCandidates.length }}</b> 条</span>
+            <span v-if="reviewEvolutionProposalPackage" class="sha">
+              读的是 {{ reviewEvolutionProposalPackage.skill_name }} · {{ reviewEvolutionProposalPackage.version }}
+              （{{ reviewEvolutionProposalPackage.files.length }} 个文件）
+            </span>
+            <a-button size="mini" :loading="reviewEvolutionProposing" @click="runReviewProposal">
+              {{ reviewEvolutionCandidates.length ? '重新生成' : '生成候选优化点' }}
+            </a-button>
+          </div>
+
+          <div v-if="reviewEvolutionCandidates.length" class="candidate-list">
+            <article v-for="item in reviewEvolutionCandidates" :key="item.attribution_id" :class="['candidate-item',reviewEvolutionDecisions[item.attribution_id]?.action||'']">
+              <header>
+                <a-tag size="small" color="orange">{{ attributionCategoryText(item.category) }}</a-tag>
+                <b>{{ item.issue_type || '未命名问题类型' }}</b>
+                <span>置信度 {{ Math.round((item.confidence||0)*100) }}%</span>
+                <a-tag v-if="reviewEvolutionDecisions[item.attribution_id]?.action==='accept'" size="small" color="green">已采纳</a-tag>
+                <a-tag v-else-if="reviewEvolutionDecisions[item.attribution_id]?.action==='edit'" size="small" color="blue">已改写</a-tag>
+                <a-tag v-else-if="reviewEvolutionDecisions[item.attribution_id]?.action==='reject'" size="small" color="gray">已驳回</a-tag>
+              </header>
+              <p class="candidate-hypothesis">{{ item.hypothesis }}</p>
+              <!-- 改写要能在原话上改，而不是让人对着空白框重写。
+                   给候选原文做初始值，改完提交的是这一条的新措辞。 -->
+              <a-textarea
+                v-if="reviewEvolutionDecisions[item.attribution_id]?.action==='edit'"
+                v-model="reviewEvolutionDecisions[item.attribution_id]!.hypothesis"
+                :auto-size="{minRows:2,maxRows:5}"
+                placeholder="改写这条优化点"
+              />
+              <div class="candidate-actions">
+                <a-button size="mini" status="success" @click="decideCandidate(item,'accept')">采纳</a-button>
+                <a-button size="mini" @click="decideCandidate(item,'edit')">改写</a-button>
+                <a-button size="mini" status="danger" @click="decideCandidate(item,'reject')">驳回</a-button>
+              </div>
+            </article>
+          </div>
+          <p v-else-if="!reviewEvolutionProposing" class="detail-note">
+            还没有候选优化点。点「生成候选优化点」让 AI 读当前 Skill 包、本轮报告缺陷与历史归因提一轮假设；
+            生成后逐条「采纳 / 改写 / 驳回」，只有采纳与改写的才会进入派生。
+          </p>
+          <p v-if="reviewEvolutionConfirmHint" class="warn-line">✕ {{ reviewEvolutionConfirmHint }}</p>
+        </template>
       </template>
 
       <template v-else>
@@ -537,12 +640,18 @@
             <small class="sha">{{ (selectedReview?.package_sha256||'').slice(0,12) }}</small>
           </article>
           <article>
-            <b>人工打分</b>
-            <small>{{ reviewEvolutionScore }}/100</small>
+            <b>报告采纳率</b>
+            <small>{{ reviewEvolutionPreflight?.scan.acceptance_score ?? 0 }}%</small>
           </article>
         </div>
-        <a-alert type="warning" style="margin-top:16px">
-          发起后会按报告里人工确认的缺陷，在<strong>基线的副本</strong>上生成新候选版本，
+        <!-- 派生的依据必须在这里说清楚：降级路径用的是"人工在报告里写的结论"，
+             主路径用的是"人工确认过的 AI 候选"。两者产出的包不一样，混着说没人能复核。 -->
+        <p class="detail-note" style="margin-top:12px">
+          <template v-if="reviewEvolutionDegraded">本次走<strong>降级路径</strong>：以报告里人工写下的缺陷结论为派生依据。</template>
+          <template v-else>本次派生依据：已确认的候选优化点 <strong>{{ reviewEvolutionConfirmedIds.length }}</strong> 条（已驳回 {{ reviewEvolutionRejectedCount }} 条不参与）。</template>
+        </p>
+        <a-alert type="warning" style="margin-top:12px">
+          发起后会按这些结论，在<strong>基线的副本</strong>上生成新候选版本，
           并把每条结论写成新包 <code>SKILL.md</code> 里的受管护栏。候选是<strong>草稿</strong>：
           不会自动顶掉正在使用的版本。
         </a-alert>
@@ -565,7 +674,7 @@
         </a-form-item>
       </a-form>
     </a-modal>
-    <a-modal v-model:visible="showStageOutputModal" title="阶段结果" :footer="false" width="760px">
+    <a-modal v-model:visible="showStageOutputModal" title="阶段结果" :footer="false" width="820px">
       <a-spin :loading="stageOutputLoading" style="width:100%">
         <template v-if="stageOutput">
           <div class="output-meta">
@@ -573,6 +682,9 @@
             <span v-if="stageOutput.skill_name">{{ stageOutput.skill_name }}<template v-if="stageOutput.skill_version"> · {{ stageOutput.skill_version }}</template></span>
             <span v-if="stageOutput.package_sha256" class="sha">sha {{ stageOutput.package_sha256.slice(0,12) }}</span>
             <span>{{ formatDate(stageOutput.created_at) }}</span>
+            <a-button size="mini" :loading="stageArtifactBusy===`modal:${stageOutput.output_id}`" @click="downloadStageReportByOutput(stageOutput)">
+              <template #icon><icon-download/></template>下载报告
+            </a-button>
           </div>
           <div v-if="stageOutput.gate" class="output-gate">
             <a-tag :color="gateColor(stageOutput.gate.status)">{{ gateText(stageOutput.gate.status) }}</a-tag>
@@ -581,9 +693,78 @@
           </div>
           <pre class="output-content">{{ stageOutput.content || '（本阶段产出正文为空）' }}</pre>
           <p v-if="stageOutput.truncated" class="detail-note">正文共 {{ stageOutput.content_length }} 字，此处只展示前 4000 字。</p>
+
+          <!-- 采纳率按版本横向列出：单看一个当前值回答不了"这一版比上一版好了没有"，
+               而 skill 是一点点优化出来的，这个趋势才是采纳率的用处。 -->
+          <section v-if="stageOutput.acceptance_history?.length" class="acceptance-strip">
+            <h4>采纳率 · 按版本对照</h4>
+            <div class="acceptance-bars">
+              <div v-for="item in [...stageOutput.acceptance_history].reverse()" :key="item.version_id || item.at" class="acceptance-col">
+                <b>{{ item.score }}%</b>
+                <i :style="{height:`${Math.max(6,Math.min(100,item.score))}%`}"/>
+                <small>{{ item.version || '未命名版本' }}</small>
+              </div>
+            </div>
+            <p class="detail-note">采纳率是版本间对比的评分维度，不是上传门槛；低于参考线的版本照常入库。</p>
+          </section>
+
+          <!-- 内容来源（T10）：通道实况 + 引用条目 + Skill 包摘要。
+               与"闭环走到哪一步"分开呈现——把两者合成一段，会让人把"链路已闭环"
+               误读成"内容已被验证"，而后者才是这份产出能不能被信任的关键。 -->
+          <section class="sources-panel">
+            <div class="section-head"><div><span>内容来源</span><h4>这份产出参考了什么</h4></div>
+              <a-button size="mini" :loading="lineageLoading" @click="loadLineageForOutput(stageOutput.output_id)">{{ lineage ? '重新读取' : '读取来源' }}</a-button>
+            </div>
+            <template v-if="lineage">
+              <div class="source-channel-row">
+                <a-tag v-for="(detail,key) in lineage.sources.channels" :key="key" :color="channelColor(detail)">
+                  {{ channelLabel(key) }} · {{ channelSummary(detail) }}
+                </a-tag>
+                <small v-if="!Object.keys(lineage.sources.channels).length">该产出未记录检索通道实况</small>
+              </div>
+              <div v-if="lineage.sources.citations.length" class="citation-list">
+                <article v-for="cite in lineage.sources.citations" :key="cite.citation_id">
+                  <a-tag size="small" color="arcoblue">{{ sourceTypeText(cite.source_type) }}</a-tag>
+                  <div><b>{{ cite.title || cite.source_id || cite.citation_id }}</b>
+                    <small v-if="cite.document_id">文档 {{ cite.document_id }}<template v-if="cite.chunk_index!==null"> · 分块 {{ cite.chunk_index }}</template></small>
+                    <small v-else-if="cite.node_id">节点 {{ cite.node_id }}</small>
+                  </div>
+                  <span v-if="cite.rank">#{{ cite.rank }}</span>
+                  <!-- 有节点 id 才能跳。跳不了的条目给不出链接就不给——一个点了没反应的
+                       链接比一句"该引用没有可跳转的节点"更让人困惑。 -->
+                  <a-button v-if="cite.node_id" size="mini" @click="jumpToGraphNode(cite.node_id)">看图谱</a-button>
+                </article>
+              </div>
+              <p v-else class="detail-note">该产出没有记录引用条目。</p>
+              <div v-if="lineage.sources.graph_nodes.length" class="graph-node-row">
+                <span>涉及图谱节点：</span>
+                <button v-for="node in lineage.sources.graph_nodes" :key="node.node_id" type="button" :class="['node-chip',{unresolved:!node.resolved}]" @click="jumpToGraphNode(node.node_id)">
+                  {{ node.resolved ? `${node.label || node.node_id}` : `${node.node_id.slice(0,8)}（节点已清理）` }}
+                </button>
+              </div>
+              <div class="skill-content-note">
+                <b>Skill 包摘要</b>
+                <small v-if="lineage.sources.skill_content.skill_version_id">
+                  {{ lineage.sources.skill_content.version || '未命名版本' }} · sha {{ (lineage.sources.skill_content.package_sha256||'').slice(0,12) }}
+                  · {{ lineage.sources.skill_content.files.length }} 个文本文件<template v-if="lineage.sources.skill_content.truncated">（已截断）</template>
+                </small>
+                <small v-else>该产出没有绑定 Skill 版本，无从追溯包内容</small>
+                <ul>
+                  <li v-for="file in lineage.sources.skill_content.files.slice(0,8)" :key="file.path">
+                    <code>{{ file.path }}</code><span>sha {{ (file.sha256||'').slice(0,10) }}</span>
+                  </li>
+                </ul>
+              </div>
+            </template>
+            <p v-else class="detail-note">尚未读取；点「读取来源」查看这份产出的检索通道、引用条目与 Skill 包摘要。</p>
+          </section>
         </template>
       </a-spin>
     </a-modal>
+
+    <!-- 「上传反馈」的取文件入口。用隐藏 input 而不是 a-upload：反馈是**就地**动作、
+         不弹窗，往四张卡片里各塞一个完整上传组件会把卡片挤乱。 -->
+    <input ref="stageFeedbackInput" type="file" accept=".xlsx,.xlsm" class="hidden-file-input" @change="onStageFeedbackPicked"/>
   </div>
 </template>
 
@@ -591,13 +772,14 @@
 import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
-import { IconBranch, IconDashboard, IconDownload, IconEdit, IconExperiment, IconFile, IconMessage, IconPlayArrow, IconPlus, IconRefresh, IconRight, IconRobot, IconSafe, IconStorage, IconUser } from '@arco-design/web-vue/es/icon';
+import type { FileItem } from '@arco-design/web-vue/es/upload/interfaces';
+import { IconBranch, IconDashboard, IconDownload, IconEdit, IconExperiment, IconFile, IconMessage, IconPlayArrow, IconPlus, IconRefresh, IconRight, IconRobot, IconSafe, IconStorage, IconUpload, IconUser } from '@arco-design/web-vue/es/icon';
 import { useProjectStore } from '@/store/projectStore';
 import { SkillHubConsole, SkillManager } from '@/features/skills';
 import KnowledgeGraphView from '@/features/knowledge-graph/KnowledgeGraphView.vue';
 import { WORKFLOW_STAGES as DEFAULT_WORKFLOW_STAGES } from '@/features/skills/utils/stages';
-import { confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, downloadSkillPackage, evaluateWorkflowStage, evolveCaseReview, executeWorkflowStage, generateCandidatesFromRun, getProjectQualityCockpit, getStageOutput, getWorkflowStageCatalog, getWorkflowStatus, listCapabilityReleases, listCaseReviewEvolutionCandidates, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, overrideWorkflowStage, preflightCaseReviewEvolution, scoreWorkflowStage, startWorkflow, updateCandidateState } from './service';
-import type { CapabilityRelease, CaseReviewEvolutionCandidate, CaseReviewEvolutionPreflight, CaseReviewEvolutionResult, EvaluationResult, EvaluationRun, EvaluationSuite, ExecutionSpan, FailureAttribution, FeedbackEvent, GoldDataset, KnowledgeCandidate, OptimizationProposal, ProjectQualityCockpit, ProjectQualityPerson, ProjectWorkflowView, RetrievalTrace, StageExecutionPlan, StageOutputView, StartWorkflowResult, WorkflowCatalogSkill, WorkflowStageCatalog, WorkflowStageGateView } from './types';
+import { confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, downloadSkillPackage, downloadStageArtifact, evaluateWorkflowStage, evolveCaseReview, executeWorkflowStage, generateCandidatesFromRun, getGenerationOutputLineage, getProjectQualityCockpit, getStageOutput, getWorkflowStageCatalog, getWorkflowStatus, listCapabilityReleases, listCaseReviewEvolutionCandidates, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, overrideWorkflowStage, preflightCaseReviewEvolution, proposeCaseReviewOptimizations, confirmCaseReviewOptimizations, scoreWorkflowStage, startWorkflow, updateCandidateState, uploadStageFeedback } from './service';
+import type { CapabilityRelease, CaseReviewEvolutionCandidate, CaseReviewEvolutionPreflight, CaseReviewEvolutionResult, EvaluationResult, EvaluationRun, EvaluationSuite, ExecutionSpan, FailureAttribution, FeedbackEvent, GoldDataset, KnowledgeCandidate, OptimizationCandidate, OptimizationProposal, OptimizationProposalResult, OutputLineageView, ProjectQualityCockpit, ProjectQualityPerson, ProjectWorkflowView, RetrievalTrace, StageExecutionPlan, StageFeedbackResult, StageOutputView, StartWorkflowResult, WorkflowCatalogSkill, WorkflowStageCatalog, WorkflowStageGateView } from './types';
 
 type Workspace='overview'|'single'|'workflow'|'gold'|'evaluation'|'attribution'|'optimization';
 type PrimaryView='agents'|'data'|'graph';
@@ -734,10 +916,106 @@ async function executeStage(workflowId:string,stage:string){
 async function openStageOutput(workflowId:string,stage:string){
   if(!projectStore.currentProjectId)return;
   showStageOutputModal.value=true;stageOutputLoading.value=true;stageOutput.value=null;
-  try{stageOutput.value=await getStageOutput(projectStore.currentProjectId,workflowId,stage)}
-  catch{Message.error('读取阶段结果失败')}
+  // 换了产出就把上一次的来源清掉：留着它会让 B 的页面显示 A 的引用条目。
+  lineage.value=null;
+  try{
+    stageOutput.value=await getStageOutput(projectStore.currentProjectId,workflowId,stage);
+    // 顺手把来源预取回来：这一块在弹窗底部，等用户滚下去再点一次「读取来源」才出现，
+    // 等于把"这份产出参考了什么"藏在一个没人会点的按钮后面。
+    const outputId=stageOutput.value?.output_id;
+    if(outputId)void loadLineageForOutput(outputId,true);
+  }
+  catch(error:any){Message.error(errorText(error,'读取阶段结果失败'))}
   finally{stageOutputLoading.value=false}
 }
+// ---- 阶段报告出口 / 反馈入口（R1/R2）：两个动作都**挂在产出上**，没有产出就没有"这一版"
+const stageArtifactBusy=ref(''),stageFeedbackBusy=ref('');
+const stageFeedback=ref<Record<string,StageFeedbackResult>>({});
+/** 采纳率就地回显的读法：按 `workflowId:stage` 取，避免四张卡片互相串台。 */
+const stageFeedbackOf=(workflowId:string,stage:string)=>stageFeedback.value[`${workflowId}:${stage}`];
+async function downloadStageReport(workflowId:string,stage:string){
+  const flow=cockpit.value.workflows.find(v=>v.workflow_id===workflowId);
+  const step=flow?.stages.find(v=>v.stage===stage);
+  await downloadStageReportByOutput({workflow_id:workflowId,stage,output_id:step?.output_id||''});
+}
+/** 弹窗里下载时只有产出 id，没有 workflow_id；stage 由当前产出自己带上。 */
+async function downloadStageReportByOutput(view:{workflow_id:string;stage:string;output_id:string}){
+  if(!projectStore.currentProjectId||!view.output_id)return;
+  const key=view.workflow_id?`${view.workflow_id}:${view.stage}`:`modal:${view.output_id}`;
+  stageArtifactBusy.value=key;
+  try{
+    const filename=await downloadStageArtifact(projectStore.currentProjectId,view.workflow_id,view.stage);
+    Message.success(`已下载 ${filename}`);
+  }catch(error:any){
+    // 后端的"暂无产出可下载"是业务拒绝（400），不是服务故障——原文照显才查得下去。
+    Message.error(errorText(error,'下载阶段报告失败'));
+  }finally{stageArtifactBusy.value=''}
+}
+const stageFeedbackInput=ref<HTMLInputElement|null>(null);
+const stageFeedbackTarget=ref<{workflowId:string;stage:string}|null>(null);
+function pickStageFeedback(workflowId:string,stage:string){
+  stageFeedbackTarget.value={workflowId,stage};
+  // 同一个 input 反复选同一份文件不会触发 change，必须先清空 value。
+  if(stageFeedbackInput.value){stageFeedbackInput.value.value='';stageFeedbackInput.value.click()}
+}
+async function onStageFeedbackPicked(){
+  const input=stageFeedbackInput.value,target=stageFeedbackTarget.value,file=input?.files?.[0];
+  if(!projectStore.currentProjectId||!input||!target||!file)return;
+  const key=`${target.workflowId}:${target.stage}`;
+  stageFeedbackBusy.value=key;
+  try{
+    const result=await uploadStageFeedback(projectStore.currentProjectId,target.workflowId,target.stage,file);
+    stageFeedback.value={...stageFeedback.value,[key]:result};
+    // 低于参考线只提示、不改结论：skill 是一点点优化出来的，把它做成硬阻断
+    // 等于要求每个中间版本一次跨过同一条线。
+    if(result.created===false)Message.info(`已记录过同一份报告，采纳率 ${result.acceptance_score}%`);
+    else if(result.below_reference)Message.warning(`已记录反馈：采纳率 ${result.acceptance_score}%，低于参考线 ${result.acceptance_reference}%（仅作版本对比，不影响记录）`);
+    else Message.success(`已记录反馈：采纳率 ${result.acceptance_score}%`);
+  }catch(error:any){
+    Message.error(errorText(error,'上传阶段反馈失败'));
+  }finally{
+    stageFeedbackBusy.value='';
+    if(input.value)input.value='';
+    stageFeedbackTarget.value=null;
+  }
+}
+// ---- 内容来源（T10）：与"闭环走到哪一步"分开呈现，不合成一段
+const lineage=ref<OutputLineageView|null>(null),lineageLoading=ref(false);
+/** `silent`：打开结果时顺手预取。预取失败不该对着只想看结果正文的人弹错误提示。 */
+async function loadLineageForOutput(outputId:string,silent=false){
+  if(!outputId)return;
+  lineageLoading.value=true;
+  try{lineage.value=await getGenerationOutputLineage(outputId)}
+  catch(error:any){lineage.value=null;if(!silent)Message.error(errorText(error,'读取产出内容来源失败'))}
+  finally{lineageLoading.value=false}
+}
+/** 跳图谱：把 `focusNode` 交给图谱视图聚焦，而不是在这边拼一个自己都算不准的 URL。 */
+const graphFocusNode=ref('');
+function jumpToGraphNode(nodeId:string){
+  if(!nodeId)return;
+  graphFocusNode.value=nodeId;
+  primaryView.value='graph';
+  router.replace({path:'/knowledge-evolution',query:{view:'graph',node:nodeId}});
+}
+const sourceTypeText=(v:string)=>({graph:'图谱节点',document:'知识文档',requirement:'需求',test_case:'测试用例'} as Record<string,string>)[v]||'未标注来源';
+const channelLabel=(v:string)=>({dense:'向量',sparse:'关键词',graph:'图谱',structured:'结构化',historical:'历史'} as Record<string,string>)[v]||v;
+/** 通道实况一句话：说清"跑没跑、命中几条、为什么没跑"。只说"关闭"会让人去查配置。 */
+function channelSummary(detail:unknown):string{
+  if(!detail||typeof detail!=='object')return String(detail??'—');
+  const item=detail as Record<string,unknown>;
+  const enabled=item.enabled===true;
+  const hits=item.hits??item.count;
+  if(!enabled){
+    const reason=(item.reason as string)||'';
+    const reasonText=({policy_never:'策略关闭',not_applicable_task_type:'不适用该任务类型',direct_recall_confident:'直连检索已足够',disabled_by_config:'配置关闭',not_selected:'未选中'} as Record<string,string>)[reason]||reason||'未启用';
+    return `未启用 · ${reasonText}`;
+  }
+  return typeof hits==='number'?`命中 ${hits} 条`:'已启用';
+}
+const channelColor=(detail:unknown)=>{
+  if(!detail||typeof detail!=='object')return 'gray';
+  return (detail as Record<string,unknown>).enabled===true?'green':'gray';
+};
 // ---- 全链路测试：发起流程（入口固定在 数据飞轮 → 控制台 → 全链路测试）
 // 两步向导：① 逐阶段选 Skill 包（选完才能下一步）② 填 workflow_id 并发起。
 const showWorkflowStartModal=ref(false),workflowStarting=ref(false),workflowStartResult=ref<StartWorkflowResult|null>(null);
@@ -834,31 +1112,46 @@ async function confirmWorkflowStart():Promise<boolean>{
   }catch{Message.error('发起流程失败：该操作仅限测试负责人');return false}
   finally{workflowStarting.value=false}
 }
-// ---- 用例审查自进化（T23）：独立能力面板 → 用例审查 → 发起流程
-// 三步而不是一屏：选项目、传报告打分、确认 Skill 各有各的前置条件，
+// ---- 用例审查自进化（T23 + T08）：独立能力面板 → 用例审查 → 发起流程
+// 四步而不是一屏：选项目、传报告预检、定夺 AI 候选、确认 Skill 各有各的前置条件，
 // 挤在一屏会让"按钮为什么是灰的"变成一个谜。
-const showReviewEvolutionModal=ref(false),reviewEvolutionStep=ref<1|2|3>(1);
+const showReviewEvolutionModal=ref(false),reviewEvolutionStep=ref<1|2|3|4>(1);
 const reviewEvolutionLoading=ref(false),reviewEvolutionPreflighting=ref(false),reviewEvolutionSubmitting=ref(false),reviewEvolutionDownloading=ref(false);
 const reviewEvolutionItems=ref<CaseReviewEvolutionCandidate[]>([]);
-const reviewEvolutionThreshold=ref(70),reviewEvolutionSelected=ref(''),reviewEvolutionScore=ref(90);
-const reviewEvolutionFileList=ref<any[]>([]);
+const reviewEvolutionThreshold=ref(70),reviewEvolutionSelected=ref('');
+const reviewEvolutionFileList=ref<FileItem[]>([]);
 const reviewEvolutionPreflight=ref<CaseReviewEvolutionPreflight|null>(null);
 const reviewEvolutionResult=ref<CaseReviewEvolutionResult|null>(null);
 const selectedReview=computed(()=>reviewEvolutionItems.value.find(v=>v.review_id===reviewEvolutionSelected.value));
 const reviewEvolutionFile=computed<File|null>(()=>reviewEvolutionFileList.value[0]?.file||null);
 const preflightBlockers=computed(()=>reviewEvolutionPreflight.value?.blockers||[]);
 const preflightReady=computed(()=>reviewEvolutionPreflight.value?.ready===true);
+// ---- 第 ③ 步：AI 候选优化点 + 人工逐条确认
+const reviewEvolutionProposing=ref(false),reviewEvolutionConfirming=ref(false);
+const reviewEvolutionCandidates=ref<OptimizationCandidate[]>([]);
+const reviewEvolutionDegraded=ref(false),reviewEvolutionDegradedDetail=ref('');
+const reviewEvolutionProposalPackage=ref<OptimizationProposalResult['package']|null>(null);
+/** 逐条决定，按 attribution_id 存（不用下标：下标只在某一次响应里有意义）。 */
+const reviewEvolutionDecisions=ref<Record<string,{action:'accept'|'edit'|'reject';hypothesis:string}>>({});
+const reviewEvolutionConfirmedIds=ref<string[]>([]);
+const reviewEvolutionConfirmHint=ref('');
+const reviewEvolutionRejectedCount=computed(()=>Object.values(reviewEvolutionDecisions.value).filter(v=>v.action==='reject').length);
+/** 有候选但一条都没定夺时不许下一步——那等于把 AI 的假设当结论直接送进派生。 */
+const reviewEvolutionUndecidedCount=computed(()=>reviewEvolutionCandidates.value.filter(v=>!reviewEvolutionDecisions.value[v.attribution_id]).length);
 const reviewEvolutionTitle=computed(()=>{
-  if(reviewEvolutionStep.value===1)return '发起自进化 · 1/3 选择已跑完的审查项目';
-  if(reviewEvolutionStep.value===2)return '发起自进化 · 2/3 上传已确认报告并打分';
-  return '发起自进化 · 3/3 确认当前使用的 Skill';
+  if(reviewEvolutionStep.value===1)return '发起自进化 · 1/4 选择已跑完的审查项目';
+  if(reviewEvolutionStep.value===2)return '发起自进化 · 2/4 上传已确认报告（预检）';
+  if(reviewEvolutionStep.value===3)return '发起自进化 · 3/4 AI 候选优化点（人工逐条确认）';
+  return '发起自进化 · 4/4 确认 Skill 并派生';
 });
-const reviewEvolutionOkText=computed(()=>reviewEvolutionStep.value===1?'下一步：上传已确认报告':reviewEvolutionStep.value===2?'下一步：确认 Skill 版本':'发起自进化');
+const reviewEvolutionOkText=computed(()=>reviewEvolutionStep.value===1?'下一步：上传已确认报告':reviewEvolutionStep.value===2?'下一步：查看 AI 优化建议':reviewEvolutionStep.value===3?'下一步：确认 Skill 版本':'发起自进化');
 const reviewEvolutionCanAdvance=computed(()=>{
   if(reviewEvolutionStep.value===1)return !!reviewEvolutionSelected.value;
   // 第二步必须预检通过才放行：让"报告里没有可修复缺陷"这类结论在提交前就暴露，
   // 而不是等用户点完「发起」再吃一个 400。
   if(reviewEvolutionStep.value===2)return preflightReady.value;
+  // 第三步：降级路径直接过；有候选时必须逐条定夺完。
+  if(reviewEvolutionStep.value===3)return reviewEvolutionDegraded.value||!reviewEvolutionCandidates.value.length||reviewEvolutionUndecidedCount.value===0;
   return true;
 });
 /** diff 预览只取**第一个**被改的文本文件：派生通常只动 SKILL.md，
@@ -883,10 +1176,21 @@ async function openReviewEvolution(){
   reviewEvolutionSelected.value='';
   reviewEvolutionFileList.value=[];
   reviewEvolutionPreflight.value=null;
-  reviewEvolutionScore.value=90;
   reviewEvolutionResult.value=null;
+  resetReviewProposal();
   showReviewEvolutionModal.value=true;
   await loadReviewEvolutionItems();
+}
+/** 清空第 ③ 步的候选与决定。换报告/换项目时必须清：留着上一轮的结论去派生，
+ *  派生的依据就是另一份报告的东西。 */
+function resetReviewProposal(){
+  reviewEvolutionCandidates.value=[];
+  reviewEvolutionDecisions.value={};
+  reviewEvolutionDegraded.value=false;
+  reviewEvolutionDegradedDetail.value='';
+  reviewEvolutionProposalPackage.value=null;
+  reviewEvolutionConfirmedIds.value=[];
+  reviewEvolutionConfirmHint.value='';
 }
 async function loadReviewEvolutionItems(){
   if(!projectStore.currentProjectId)return;
@@ -902,12 +1206,21 @@ async function loadReviewEvolutionItems(){
   }catch(error:any){Message.error(errorText(error,'加载用例审查项目失败'))}
   finally{reviewEvolutionLoading.value=false}
 }
-function onReviewReportChange(fileList:any[]){
+async function onReviewReportChange(fileList:FileItem[]){
   reviewEvolutionFileList.value=(fileList||[]).slice(-1);
   // 换了文件，之前的预检结论就不成立了——留着它会让人拿着 A 的解析结果去提交 B。
   reviewEvolutionPreflight.value=null;
+  // 同理，上一份报告生成的 AI 候选也不能留：它读的是那份报告的缺陷。
+  resetReviewProposal();
+  if(reviewEvolutionFile.value)await runReviewEvolutionPreflight();
 }
-function onReviewReportRemove(){reviewEvolutionPreflight.value=null;return true}
+function onReviewReportRemove(){reviewEvolutionPreflight.value=null;resetReviewProposal();return true}
+// 换审查项目同样要清：候选与决定都是绑在"某一次审查的产出"上的。
+watch(reviewEvolutionSelected,()=>{
+  reviewEvolutionPreflight.value=null;
+  reviewEvolutionFileList.value=[];
+  resetReviewProposal();
+});
 async function runReviewEvolutionPreflight(){
   const file=reviewEvolutionFile.value;
   if(!projectStore.currentProjectId||!file||!reviewEvolutionSelected.value)return;
@@ -915,7 +1228,7 @@ async function runReviewEvolutionPreflight(){
   try{
     reviewEvolutionPreflight.value=await preflightCaseReviewEvolution(
       projectStore.currentProjectId,reviewEvolutionSelected.value,file,
-      reviewEvolutionScore.value,reviewEvolutionThreshold.value,
+      reviewEvolutionThreshold.value,
     );
   }catch(error:any){
     reviewEvolutionPreflight.value=null;
@@ -929,7 +1242,19 @@ async function onReviewEvolutionOk():Promise<boolean>{
   }
   if(reviewEvolutionStep.value===2){
     if(!reviewEvolutionReadyOrWarn())return false;
-    reviewEvolutionStep.value=3;return false;
+    // 进第 ③ 步就把候选拉下来：让"AI 想改什么"和"派生什么"两件事在时间上分开，
+    // 用户才有机会在两屏之间想一遍。
+    reviewEvolutionStep.value=3;
+    await runReviewProposal();
+    return false;
+  }
+  if(reviewEvolutionStep.value===3){
+    if(!reviewEvolutionDegraded.value&&reviewEvolutionUndecidedCount.value>0){
+      Message.warning(`还有 ${reviewEvolutionUndecidedCount.value} 条候选没有定夺；请逐条选择「采纳 / 改写 / 驳回」`);
+      return false;
+    }
+    if(!(await confirmReviewDecisions()))return false;
+    reviewEvolutionStep.value=4;return false;
   }
   return submitReviewEvolution();
 }
@@ -938,17 +1263,87 @@ function reviewEvolutionReadyOrWarn():boolean{
   Message.warning('请先点「解析报告并预检」，预检通过后才能进入下一步');
   return false;
 }
+/** 第 ③ 步入口：生成候选。无 LLM 时后端回 `degraded=true`（不是错误），
+ *  这里如实把降级告诉用户，并允许直接跳到第 ④ 步。 */
+async function runReviewProposal(){
+  const file=reviewEvolutionFile.value;
+  if(!projectStore.currentProjectId||!file||!reviewEvolutionSelected.value)return;
+  reviewEvolutionProposing.value=true;
+  try{
+    const result=await proposeCaseReviewOptimizations(projectStore.currentProjectId,reviewEvolutionSelected.value,file);
+    reviewEvolutionDegraded.value=result.degraded===true;
+    reviewEvolutionDegradedDetail.value=result.detail||'';
+    reviewEvolutionCandidates.value=result.candidates||[];
+    reviewEvolutionProposalPackage.value=result.package||null;
+    // 重新生成会换掉候选 id，旧决定不能再留——它指向的条目已经不存在了。
+    reviewEvolutionDecisions.value={};
+    reviewEvolutionConfirmHint.value='';
+    if(result.degraded)Message.warning('未配置 LLM，已降级为人工标注：将直接按报告里的结论派生');
+    else if(!reviewEvolutionCandidates.value.length)Message.info('AI 没有给出候选优化点：报告里可能没有可归因到本 Skill 的问题');
+  }catch(error:any){
+    reviewEvolutionCandidates.value=[];
+    reviewEvolutionProposalPackage.value=null;
+    Message.error(errorText(error,'生成候选优化点失败'));
+  }finally{reviewEvolutionProposing.value=false}
+}
+function decideCandidate(item:OptimizationCandidate,action:'accept'|'edit'|'reject'){
+  const current=reviewEvolutionDecisions.value[item.attribution_id];
+  // 再点一次同一个动作 = 取消决定，回到"未定夺"：误点后没有退路，人就只能刷新页面。
+  if(current&&current.action===action){
+    const next={...reviewEvolutionDecisions.value};delete next[item.attribution_id];
+    reviewEvolutionDecisions.value=next;return;
+  }
+  reviewEvolutionDecisions.value={
+    ...reviewEvolutionDecisions.value,
+    [item.attribution_id]:{action,hypothesis:action==='edit'?(current?.hypothesis||item.hypothesis):item.hypothesis},
+  };
+}
+/** 第 ③ → ④：把人工决定落库（accept/edit → confirmed，reject → rejected）。
+ *  逐条返回错误不整批失败——一条 id 失效不该把其余已做完的确认全丢掉。 */
+async function confirmReviewDecisions():Promise<boolean>{
+  reviewEvolutionConfirmHint.value='';
+  if(reviewEvolutionDegraded.value)return true;
+  if(!projectStore.currentProjectId||!reviewEvolutionSelected.value)return false;
+  const decisions=Object.entries(reviewEvolutionDecisions.value).map(([attribution_id,value])=>({
+    attribution_id,action:value.action,
+    ...(value.action==='edit'?{hypothesis:value.hypothesis}:{}),
+  }));
+  if(!decisions.length)return true;
+  reviewEvolutionConfirming.value=true;
+  try{
+    const result=await confirmCaseReviewOptimizations(projectStore.currentProjectId,reviewEvolutionSelected.value,decisions);
+    reviewEvolutionConfirmedIds.value=result.confirmed_ids||[];
+    const failed=result.results.filter(v=>v.error);
+    if(failed.length){
+      reviewEvolutionConfirmHint.value=`${failed.length} 条未能落库（可能已被重新生成替换），请重新生成候选后再确认`;
+      return false;
+    }
+    if(!reviewEvolutionConfirmedIds.value.length){
+      Message.warning('没有采纳或改写的候选优化点；请至少保留一条，或重新生成候选');
+      return false;
+    }
+    return true;
+  }catch(error:any){
+    Message.error(errorText(error,'确认候选优化点失败'));
+    return false;
+  }finally{reviewEvolutionConfirming.value=false}
+}
 async function submitReviewEvolution():Promise<boolean>{
   const file=reviewEvolutionFile.value;
   if(!projectStore.currentProjectId||!file||!reviewEvolutionSelected.value)return false;
   reviewEvolutionSubmitting.value=true;
   try{
     reviewEvolutionResult.value=await evolveCaseReview(
-      projectStore.currentProjectId,reviewEvolutionSelected.value,file,reviewEvolutionScore.value,
-      {threshold:reviewEvolutionThreshold.value},
+      projectStore.currentProjectId,reviewEvolutionSelected.value,file,
+      {
+        threshold:reviewEvolutionThreshold.value,
+        // 主路径只拿人工确认过的候选当依据；降级路径不传，后端会回落到"采信报告里的结论"。
+        attributionIds:reviewEvolutionDegraded.value?undefined:reviewEvolutionConfirmedIds.value,
+      },
     );
     showReviewEvolutionModal.value=false;
     reviewEvolutionStep.value=1;
+    resetReviewProposal();
     await loadCockpit();
     Message.success(`已派生候选版本 ${reviewEvolutionResult.value.candidate.version}（草稿，待评测与审批）`);
     return true;
@@ -967,9 +1362,6 @@ async function downloadReviewCandidate(){
   }catch(error:any){Message.error(errorText(error,'下载 Skill 包失败'))}
   finally{reviewEvolutionDownloading.value=false}
 }
-// 分数改了就作废预检：门槛判定是预检结论的一部分，留着旧结论等于用旧分数去提交。
-watch(reviewEvolutionScore,()=>{reviewEvolutionPreflight.value=null});
-
 const suiteForm=ref({name:'',description:'',suite_type:'regression',task_type:'code_review'}),candidateForm=ref({threshold:.5,minFailureCount:1});
 const suiteTypeLabels:Record<string,string>={seed:'种子集',gold:'金标集',regression:'回归集',fresh:'新鲜集',challenge:'挑战集'};
 /** 阶段中文名的**短标签**（质量飞轮页面专用）。四阶段的叫法按用户口径：
@@ -998,9 +1390,17 @@ const businessSources=computed(()=>sourceDefinitions.map(source=>({...source,con
 // 全部指标由 RetrievalTrace 现场聚合，不新增接口；评分按已定口径暂不纳入。
 const AGENT_STAGE_ORDER:string[]=['case_review','test_plan_generation','testcase_generation','test_execution','report_generation'];
 const DAY_MS=86400000,TREND_DAYS=14;
+type AgentMetricKey='sessions'|'users'|'tokens'|'latency'|'failed';
+interface AgentKpi{key:AgentMetricKey;label:string;value:string;summaryLabel:string;hint:string;delta:number|null;spark:number[];tone:string;invert?:boolean}
+const selectedAgentStages=ref<string[]>([]),selectedAgentMetric=ref<AgentMetricKey>('sessions');
+const filteredAgentTraces=computed(()=>selectedAgentStages.value.length
+  ?allTraces.value.filter(trace=>selectedAgentStages.value.includes(trace.task_type))
+  :allTraces.value,
+);
 function traceLatencyMs(v:RetrievalTrace):number{const values=Object.entries(v.timings||{}).filter(([,n])=>typeof n==='number') as [string,number][];return values.reduce((sum,[,n])=>sum+n,0)}
 function dayLabel(v:Date):string{return `${String(v.getMonth()+1).padStart(2,'0')}-${String(v.getDate()).padStart(2,'0')}`}
 function formatLatency(ms:number):string{if(ms<=0)return'-';return ms>=1000?`${(ms/1000).toFixed(2)}s`:`${Math.round(ms)}ms`}
+function formatCompact(v:number):string{return new Intl.NumberFormat('zh-CN',{notation:'compact',maximumFractionDigits:1}).format(v)}
 function sparkHeights(values:number[]):number[]{const max=Math.max(...values,1);return values.map(v=>v>0?Math.max(14,Math.round(v/max*100)):3)}
 interface DailyBucket{sessions:number;tokens:number;users:Set<number>;latencySum:number;latencyCount:number;failed:number}
 const agentDaily=computed(()=>{
@@ -1008,7 +1408,7 @@ const agentDaily=computed(()=>{
   for(let i=TREND_DAYS-1;i>=0;i-=1){const d=new Date(now);d.setDate(now.getDate()-i);days.push(dayLabel(d))}
   const buckets=new Map<string,DailyBucket>();
   days.forEach(day=>buckets.set(day,{sessions:0,tokens:0,users:new Set<number>(),latencySum:0,latencyCount:0,failed:0}));
-  allTraces.value.forEach(trace=>{
+  filteredAgentTraces.value.forEach(trace=>{
     const slot=buckets.get(dayLabel(new Date(trace.created_at)));if(!slot)return;
     slot.sessions+=1;slot.tokens+=trace.token_usage||0;
     if(trace.status!=='completed')slot.failed+=1;
@@ -1017,22 +1417,17 @@ const agentDaily=computed(()=>{
   });
   return days.map(day=>({date:day,...buckets.get(day)!}));
 });
-const agentTrend=computed(()=>{
-  const sessions=agentDaily.value.map(d=>d.sessions),tokens=agentDaily.value.map(d=>d.tokens);
-  const maxSessions=Math.max(...sessions,1),maxTokens=Math.max(...tokens,1);
-  return agentDaily.value.map((d,index)=>({date:d.date,sessions:d.sessions,tokens:d.tokens,sessionPct:Math.round(sessions[index]/maxSessions*100),tokenPct:Math.round(tokens[index]/maxTokens*100)}));
-});
 const hasTrendData=computed(()=>agentDaily.value.some(d=>d.sessions>0||d.tokens>0));
 /** 环比取「近 7 天 vs 前 7 天」。前一周没有数据时返回 null——不编一个 0%。 */
 function weekDelta(pick:(list:RetrievalTrace[])=>number):number|null{
   const now=Date.now();
-  const recent=allTraces.value.filter(v=>now-new Date(v.created_at).getTime()<=7*DAY_MS);
-  const previous=allTraces.value.filter(v=>{const age=now-new Date(v.created_at).getTime();return age>7*DAY_MS&&age<=14*DAY_MS});
+  const recent=filteredAgentTraces.value.filter(v=>now-new Date(v.created_at).getTime()<=7*DAY_MS);
+  const previous=filteredAgentTraces.value.filter(v=>{const age=now-new Date(v.created_at).getTime();return age>7*DAY_MS&&age<=14*DAY_MS});
   const base=pick(previous);if(!base)return null;
   return Math.round((pick(recent)-base)/base*1000)/10;
 }
-const agentKpis=computed(()=>{
-  const list=allTraces.value;
+const agentKpis=computed<AgentKpi[]>(()=>{
+  const list=filteredAgentTraces.value;
   const sessionsOf=(items:RetrievalTrace[])=>items.length;
   const usersOf=(items:RetrievalTrace[])=>new Set(items.map(v=>v.user).filter((v):v is number=>v!=null)).size;
   const tokensOf=(items:RetrievalTrace[])=>items.reduce((sum,v)=>sum+(v.token_usage||0),0);
@@ -1040,17 +1435,37 @@ const agentKpis=computed(()=>{
   const failRateOf=(items:RetrievalTrace[])=>items.length?items.filter(v=>v.status!=='completed').length/items.length*100:0;
   const tokens=tokensOf(list);
   return [
-    {key:'sessions',label:'会话数',value:sessionsOf(list).toLocaleString(),hint:`${new Set(list.map(v=>v.task_id)).size} 个任务`  ,delta:weekDelta(sessionsOf),spark:sparkHeights(agentDaily.value.map(d=>d.sessions)),tone:''},
-    {key:'users',label:'活跃用户',value:usersOf(list).toLocaleString(),hint:'按轨迹去重',delta:weekDelta(usersOf),spark:sparkHeights(agentDaily.value.map(d=>d.users.size)),tone:''},
-    {key:'tokens',label:'Token 消耗',value:tokens.toLocaleString(),hint:tokens?'已回传用量':'调用未回传用量',delta:weekDelta(tokensOf),spark:sparkHeights(agentDaily.value.map(d=>d.tokens)),tone:'blue'},
-    {key:'latency',label:'平均耗时',value:formatLatency(avgLatencyOf(list)),hint:`${list.filter(v=>traceLatencyMs(v)>0).length} 条有时长`,delta:weekDelta(avgLatencyOf),spark:sparkHeights(agentDaily.value.map(d=>d.latencyCount?d.latencySum/d.latencyCount:0)),tone:''},
-    {key:'failed',label:'失败率',value:`${failRateOf(list).toFixed(1)}%`,hint:`${list.filter(v=>v.status!=='completed').length} 条未完成`,delta:weekDelta(failRateOf),spark:sparkHeights(agentDaily.value.map(d=>d.sessions?d.failed/d.sessions*100:0)),tone:'warn',invert:true},
+    {key:'sessions',label:'会话数',value:sessionsOf(list).toLocaleString(),summaryLabel:'筛选范围内总会话',hint:`${new Set(list.map(v=>v.task_id)).size} 个任务`,delta:weekDelta(sessionsOf),spark:sparkHeights(agentDaily.value.map(d=>d.sessions)),tone:''},
+    {key:'users',label:'活跃用户',value:usersOf(list).toLocaleString(),summaryLabel:'筛选范围内去重用户',hint:'按轨迹用户去重',delta:weekDelta(usersOf),spark:sparkHeights(agentDaily.value.map(d=>d.users.size)),tone:''},
+    {key:'tokens',label:'Token 消耗',value:tokens.toLocaleString(),summaryLabel:'筛选范围内 Token 总量',hint:tokens?'已回传用量':'调用未回传用量',delta:weekDelta(tokensOf),spark:sparkHeights(agentDaily.value.map(d=>d.tokens)),tone:'blue'},
+    {key:'latency',label:'平均耗时',value:formatLatency(avgLatencyOf(list)),summaryLabel:'筛选范围内平均耗时',hint:`${list.filter(v=>traceLatencyMs(v)>0).length} 条有时长`,delta:weekDelta(avgLatencyOf),spark:sparkHeights(agentDaily.value.map(d=>d.latencyCount?d.latencySum/d.latencyCount:0)),tone:''},
+    {key:'failed',label:'失败率',value:`${failRateOf(list).toFixed(1)}%`,summaryLabel:'筛选范围内失败率',hint:`${list.filter(v=>v.status!=='completed').length} 条未完成`,delta:weekDelta(failRateOf),spark:sparkHeights(agentDaily.value.map(d=>d.sessions?d.failed/d.sessions*100:0)),tone:'warn',invert:true},
   ];
+});
+const activeAgentKpi=computed(()=>agentKpis.value.find(item=>item.key===selectedAgentMetric.value)??agentKpis.value[0]);
+const activeAgentTrend=computed(()=>{
+  const raw=agentDaily.value.map(day=>{
+    if(selectedAgentMetric.value==='sessions')return day.sessions;
+    if(selectedAgentMetric.value==='users')return day.users.size;
+    if(selectedAgentMetric.value==='tokens')return day.tokens;
+    if(selectedAgentMetric.value==='latency')return day.latencyCount?day.latencySum/day.latencyCount:0;
+    return day.sessions?day.failed/day.sessions*100:0;
+  });
+  const max=Math.max(...raw,1);
+  return agentDaily.value.map((day,index)=>({
+    date:day.date,
+    pct:raw[index]>0?Math.max(4,Math.round(raw[index]/max*100)):1,
+    label:selectedAgentMetric.value==='latency'?formatLatency(raw[index])
+      :selectedAgentMetric.value==='failed'?`${raw[index].toFixed(1)}%`
+      :selectedAgentMetric.value==='tokens'?formatCompact(raw[index])
+      :raw[index].toLocaleString(),
+  }));
 });
 /** Agent 台账：5 个阶段各一行，按会话数 / 用户数 / Token / 耗时 / 失败率聚合。 */
 const agentRows=computed(()=>{
-  const rows=AGENT_STAGE_ORDER.map(stage=>{
-    const items=allTraces.value.filter(v=>v.task_type===stage);
+  const visibleStages=selectedAgentStages.value.length?AGENT_STAGE_ORDER.filter(stage=>selectedAgentStages.value.includes(stage)):AGENT_STAGE_ORDER;
+  const rows=visibleStages.map(stage=>{
+    const items=filteredAgentTraces.value.filter(v=>v.task_type===stage);
     const valid=items.map(traceLatencyMs).filter(v=>v>0);
     const latency=valid.length?valid.reduce((a,b)=>a+b,0)/valid.length:0;
     const failed=items.filter(v=>v.status!=='completed').length;
@@ -1180,7 +1595,7 @@ watch(()=>projectStore.currentProjectId,async id=>{if(id)await bootstrap()},{imm
 .hero{display:flex;margin:0 0 14px;padding:24px 28px;border:0;border-radius:18px;color:#fff;background:linear-gradient(125deg,#102a43 0%,#176b87 62%,#1b8f8a 100%);box-shadow:0 14px 40px rgb(16 42 67/18%)}
 /* （2026-10-03 曾短暂加过 .hero--compact：横幅只留右侧动作时收窄。
    最终改为横幅始终完整展示、标题按页签切换，该样式不再需要，已移除。） */
-.hero:before{display:none}.hero-copy{min-width:0}.hero h1{display:block;margin:5px 0 4px;font-size:26px}.hero p{display:block;margin:0;color:#d8edf0;font-size:13px}.hero-actions{margin-left:auto}.hero-actions :deep(.arco-btn){color:#526273;border-color:rgb(255 255 255/50%);background:rgb(255 255 255/94%)}
+.hero:before{display:none}.hero-copy{min-width:0}.hero h1{display:block;margin:5px 0 4px;font-size:26px}.hero p{display:block;margin:0;color:#d8edf0;font-size:13px}.hero-actions{margin-left:auto}.hero-actions :deep(.arco-tag),.hero-actions :deep(.arco-btn){display:inline-flex;height:36px;box-sizing:border-box;align-items:center;justify-content:center;gap:6px;padding:0 15px;border-radius:6px;font-size:14px;line-height:34px;white-space:nowrap}.hero-actions :deep(.arco-btn){color:#526273;border-color:rgb(255 255 255/50%);background:rgb(255 255 255/94%)}
 .workspace-tabs{display:flex;gap:3px;margin:14px 0;padding:4px;overflow-x:auto;border:1px solid #e5e6eb;border-radius:10px;background:#fff}
 .workspace-tabs button{display:flex;height:38px;flex:none;align-items:center;gap:7px;padding:0 13px;border:0;border-radius:7px;color:#4e5969;background:transparent;cursor:pointer;font-size:13px;transition:background .16s ease,color .16s ease,box-shadow .16s ease}
 .workspace-tabs button:hover{color:#165dff;background:#f2f3f5}.workspace-tabs button.active{color:#1d2129;background:#f2f3f5;box-shadow:inset 0 0 0 1px #c9cdd4}.workspace-tabs button svg{font-size:15px}.workspace-tabs em{min-width:19px;padding:1px 5px;border-radius:9px;color:#86909c;background:#e5e6eb;font-size:10px;font-style:normal;text-align:center}.workspace-tabs button.active em{color:#165dff;background:#e8f3ff}
@@ -1200,6 +1615,12 @@ watch(()=>projectStore.currentProjectId,async id=>{if(id)await bootstrap()},{imm
 @media(max-width:1320px){.launch-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:720px){.primary-tabs{gap:16px;margin-right:-10px;margin-left:-10px;padding:0 12px}.quick-tabs{width:100%}.quick-tabs button{flex:1}.launch-grid{grid-template-columns:1fr}.launch-console{padding:16px}}
 .board-kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:12px}.board-kpis article{position:relative;padding:16px 18px 34px;overflow:hidden;border:1px solid var(--color-border-2);border-radius:10px;background:var(--color-bg-2)}.board-kpis article:before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--teal)}.board-kpis .warn:before{background:var(--orange)}.board-kpis .blue:before{background:var(--blue)}.board-kpis span{display:block;font-size:12px;color:var(--color-text-3)}.kpi-value{display:flex;align-items:baseline;gap:8px;margin:6px 0 2px}.kpi-value b{font-size:22px;line-height:1.1}.kpi-value em{font-size:12px;font-style:normal}.kpi-value em.up{color:rgb(var(--green-6))}.kpi-value em.down{color:rgb(var(--red-6))}.board-kpis small{display:block;font-size:12px;color:var(--color-text-3)}.kpi-spark{position:absolute;left:18px;right:18px;bottom:12px;display:flex;align-items:flex-end;gap:2px;height:18px}.kpi-spark i{flex:1;min-height:2px;border-radius:1px;background:rgb(var(--arcoblue-3));opacity:.6}.board-kpis .warn .kpi-spark i{background:rgb(var(--orange-3))}.chart-body{margin-top:6px}.chart-legend{display:flex;gap:16px;font-size:12px;color:var(--color-text-3)}.chart-legend span{display:flex;align-items:center;gap:6px}.chart-legend .dot{display:inline-block;width:8px;height:8px;border-radius:2px}.chart-legend .dot.session{background:rgb(var(--arcoblue-5))}.chart-legend .dot.token{background:var(--teal)}.chart-bars{display:flex;align-items:flex-end;gap:6px;height:180px;margin-top:12px}.bar-col{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;height:100%}.bar-stack{display:flex;align-items:flex-end;gap:2px;width:100%;height:100%}.bar{flex:1;min-height:2px;border-radius:2px 2px 0 0}.bar.session{background:rgb(var(--arcoblue-5))}.bar.token{background:var(--teal)}.bar-col small{font-size:10px;color:var(--color-text-3)}.board-table .agent-head,.board-table .agent-rows article{display:grid;grid-template-columns:1.6fr .8fr .8fr 1fr .9fr .7fr;gap:12px;align-items:center}.agent-head{padding:8px 14px;border-bottom:1px solid var(--color-border-2);font-size:12px;color:var(--color-text-3)}.agent-rows article{padding:12px 14px;border-bottom:1px solid var(--color-border-1)}.agent-rows article:last-child{border-bottom:0}.agent-rows article.idle{opacity:.55}.agent-name b{display:block;font-size:14px}.agent-name small{display:block;font-size:12px;color:var(--color-text-3)}.cell{display:flex;flex-direction:column;gap:5px}.cell b{font-size:13px}.meter{display:block;height:4px;overflow:hidden;border-radius:2px;background:var(--color-fill-2)}.meter u{display:block;height:100%;border-radius:2px;background:rgb(var(--arcoblue-6));text-decoration:none}.start-result{margin-bottom:12px;padding:14px 16px;border:1px solid var(--color-border-2);border-radius:10px;background:var(--color-bg-2)}.start-result-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.start-result-head b{font-size:14px}.start-result-head small{display:block;font-size:12px;color:var(--color-text-3)}.binding-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.binding{padding:10px 12px;border:1px solid var(--color-border-2);border-radius:8px;background:var(--color-fill-1)}.binding.locked{border-color:rgb(var(--green-6));background:rgb(var(--green-1))}.binding.unmanaged{border-color:rgb(var(--orange-6));background:rgb(var(--orange-1))}.binding b{display:block;margin-bottom:4px;font-size:13px}.binding small{display:block;font-size:12px;color:var(--color-text-2);word-break:break-all}.binding .sha{color:var(--color-text-3)}.warn-line{margin:10px 0 0;font-size:12px;color:rgb(var(--orange-6))}
+.agent-filter-bar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:12px;padding:13px 16px;border:1px solid #e5e6eb;border-radius:10px;background:#fff}.agent-filter-bar>div{display:flex;align-items:center;gap:12px}.agent-filter-bar>div>span{font-size:13px;font-weight:600;white-space:nowrap}.agent-filter-bar>small{color:#86909c;font-size:12px;white-space:nowrap}
+.board-table>.section-head{margin:0;padding:18px 22px 16px;border-bottom:1px solid #f0f1f2}.board-table>.section-head h2{margin-top:5px}.board-table>.section-head>small{padding-top:3px}.board-table .agent-head,.board-table .agent-rows article{padding-right:22px;padding-left:22px}
+.board-kpis button{position:relative;min-width:0;padding:16px 18px 34px;overflow:hidden;border:1px solid #e5e6eb;border-radius:10px;color:inherit;background:#fff;font-family:inherit;text-align:left;cursor:pointer;transition:border-color .16s ease,box-shadow .16s ease,transform .16s ease}.board-kpis button:before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:#14b8a6}.board-kpis button.warn:before{background:#f59e0b}.board-kpis button.blue:before{background:#165dff}.board-kpis button:hover{border-color:#94bfff;transform:translateY(-1px)}.board-kpis button.active{border-color:#165dff;box-shadow:0 0 0 2px rgb(22 93 255/10%),0 8px 22px rgb(22 93 255/8%)}.board-kpis button.active:after{content:"";position:absolute;top:10px;right:10px;width:6px;height:6px;border-radius:50%;background:#165dff}
+.board-chart{margin-bottom:12px;padding:20px 22px}.chart-title{align-items:flex-start}.chart-title p{margin:5px 0 0;color:#86909c;font-size:12px}.chart-total{min-width:150px;padding-left:18px;text-align:right;border-left:1px solid #e5e6eb}.chart-total small,.chart-total b{display:block}.chart-total small{color:#86909c;font-size:11px}.chart-total b{margin-top:3px;font-size:25px;letter-spacing:-.02em}.chart-bars{height:250px;margin-top:20px;padding:18px 12px 0;border-top:1px solid #f0f1f2;border-bottom:1px solid #e5e6eb;background:repeating-linear-gradient(to bottom,transparent 0,transparent 59px,#f2f3f5 60px)}.bar-col{position:relative;gap:7px}.bar-col>b{min-height:16px;color:#4e5969;font-size:10px;font-weight:500}.bar-stack{justify-content:center}.bar-stack .bar{width:min(38px,76%);flex:none;background:#165dff;opacity:.82;transition:opacity .16s ease,height .25s ease}.bar-stack .bar.users{background:#14b8a6}.bar-stack .bar.tokens{background:#0f6b78}.bar-stack .bar.latency{background:#f59e0b}.bar-stack .bar.failed{background:#f53f3f}.bar-col:hover .bar{opacity:1}.chart-axis-note{display:flex;justify-content:space-between;padding-top:10px;color:#86909c;font-size:11px}
+@media(max-width:1100px){.board-kpis{grid-template-columns:repeat(3,1fr)}.agent-filter-bar{align-items:flex-start}.agent-filter-bar>div{align-items:flex-start;flex-direction:column}.agent-filter-bar :deep(.arco-select){width:340px!important}}
+@media(max-width:720px){.agent-filter-bar{align-items:stretch;flex-direction:column}.agent-filter-bar :deep(.arco-select){width:100%!important}.board-kpis{grid-template-columns:1fr 1fr}.board-chart{padding:16px}.chart-bars{gap:3px;overflow-x:auto}.bar-col{min-width:34px}.chart-title{gap:12px}.chart-total{min-width:110px}.board-table>.section-head,.board-table .agent-head,.board-table .agent-rows article{padding-right:16px;padding-left:16px}}
 /* ---- 全链路测试：流程版本列表 + 四阶段时间线；右侧团队栏另有「AI 专家团队」 */
 .wf-shell{display:grid;grid-template-columns:236px minmax(0,1fr);gap:14px;align-items:start}
 .wf-flows{display:grid;gap:8px;align-content:start;max-height:680px;overflow:auto;padding:12px;border:1px solid #e5e6eb;border-radius:9px;background:#fafafa}
@@ -1296,5 +1717,57 @@ watch(()=>projectStore.currentProjectId,async id=>{if(id)await bootstrap()},{imm
 .evolution-defects header{display:flex;align-items:center;gap:8px;margin-bottom:5px;font-size:12px}
 .evolution-defects header span{color:var(--color-text-3)}
 .evolution-defects p{margin:0;color:var(--color-text-2);font-size:12px;line-height:1.65}
+/* ---- 阶段报告出口 / 反馈入口（T05）
+   「上传反馈」的取文件入口：藏在卡片外的隐藏 input，卡片里只留一个按钮。 */
+.hidden-file-input{display:none}
+.wf-feedback-echo{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:10px 0 0;padding:8px 10px;border-radius:7px;color:#4e5969;background:#f6fffb;border:1px solid #d9f2e6;font-size:12px}
+.wf-feedback-echo b{color:#0f766e;font-size:13px}
+.wf-feedback-echo small{color:#86909c}
+/* ---- 采纳率按版本对照（采纳率 = 版本间对比的评分维度，不是门槛） */
+.acceptance-strip{margin-top:14px;padding-top:12px;border-top:1px solid var(--color-border-2)}
+.acceptance-strip h4{margin:0 0 10px;font-size:13px;color:var(--color-text-1)}
+.acceptance-bars{display:flex;align-items:flex-end;gap:10px;height:110px;padding:0 4px}
+.acceptance-col{display:flex;flex:1 1 0;min-width:0;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:4px}
+.acceptance-col b{font-size:12px;color:var(--color-text-1)}
+.acceptance-col i{display:block;width:100%;max-width:44px;border-radius:4px 4px 0 0;background:linear-gradient(180deg,#4080ff,#165dff)}
+.acceptance-col small{overflow:hidden;max-width:100%;color:var(--color-text-3);font-size:10px;text-overflow:ellipsis;white-space:nowrap}
+/* ---- 内容来源（T10）：通道实况 + 引用条目 + Skill 包摘要 */
+.sources-panel{margin-top:14px;padding-top:12px;border-top:1px solid var(--color-border-2)}
+.sources-panel .section-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.sources-panel h4{margin:3px 0 0;font-size:13px}
+.source-channel-row{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.source-channel-row small{color:var(--color-text-3);font-size:11px}
+.citation-list{display:grid;gap:6px}
+.citation-list article{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:9px;padding:8px 10px;border:1px solid var(--color-border-2);border-radius:7px;background:var(--color-fill-1)}
+.citation-list b,.citation-list small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.citation-list b{font-size:12px}
+.citation-list small{margin-top:2px;color:var(--color-text-3);font-size:10px}
+.citation-list article>span{color:var(--color-text-3);font-size:11px}
+.graph-node-row{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-top:10px;color:var(--color-text-3);font-size:11px}
+.node-chip{padding:3px 9px;border:1px solid rgb(var(--arcoblue-3));border-radius:12px;color:var(--blue);background:rgb(var(--arcoblue-1));font-family:inherit;font-size:11px;cursor:pointer}
+.node-chip:hover{border-color:var(--blue)}
+.node-chip.unresolved{border-color:var(--color-border-3);color:var(--color-text-3);background:var(--color-fill-2)}
+.skill-content-note{margin-top:10px;padding:9px 11px;border-radius:7px;background:var(--color-fill-1)}
+.skill-content-note b,.skill-content-note small{display:block}
+.skill-content-note b{font-size:12px}
+.skill-content-note small{margin-top:3px;color:var(--color-text-3);font-size:11px}
+.skill-content-note ul{margin:7px 0 0;padding-left:16px}
+.skill-content-note li{display:flex;gap:8px;color:var(--color-text-2);font-size:11px;line-height:1.7}
+.skill-content-note li code{font-family:ui-monospace,MENLO,monospace}
+.skill-content-note li span{color:var(--color-text-3);font-family:ui-monospace,MENLO,monospace}
+/* ---- 第 ③ 步：AI 候选优化点 */
+.proposal-head{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:12px;font-size:12px}
+.proposal-head .sha{overflow:hidden;color:var(--color-text-3);font-size:11px;text-overflow:ellipsis;white-space:nowrap}
+.proposal-head .arco-btn{margin-left:auto}
+.candidate-list{display:grid;gap:8px;max-height:340px;margin-top:10px;overflow:auto}
+.candidate-item{padding:10px 12px;border:1px solid var(--color-border-2);border-left:3px solid var(--color-border-3);border-radius:8px;background:var(--color-bg-2)}
+.candidate-item.accept{border-left-color:#16a34a}
+.candidate-item.edit{border-left-color:#165dff}
+.candidate-item.reject{opacity:.6;border-left-color:#86909c}
+.candidate-item header{display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:12px}
+.candidate-item header b{font-size:12px}
+.candidate-item header span{margin-left:auto;color:var(--color-text-3);font-size:11px}
+.candidate-hypothesis{margin:6px 0 0;color:var(--color-text-2);font-size:12px;line-height:1.7;white-space:pre-wrap}
+.candidate-actions{display:flex;gap:8px;margin-top:8px}
 @media(max-width:1080px){.wf-shell{grid-template-columns:1fr}.wf-flows{max-height:240px}.wf-stage-bar{grid-template-columns:repeat(2,minmax(0,1fr))}.wf-card-body,.pin-grid,.pin-summary{grid-template-columns:1fr}}
 </style>

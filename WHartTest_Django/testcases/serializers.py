@@ -15,6 +15,7 @@ from projects.models import Project  # 确保导入Project模型以便进行校�
 from accounts.serializers import UserDetailSerializer  # 用于显示创建者信息
 from django.db import transaction
 import os
+import tempfile
 from skills.models import Skill
 
 
@@ -782,6 +783,32 @@ class TestCaseReviewSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("目前支持 .xlsx 和 .csv 测试用例文件")
         if value.size > 50 * 1024 * 1024:
             raise serializers.ValidationError("文件不能超过 50MB")
+        # 不能只信任扩展名。历史上伪造或截断的 .xlsx 会先入库，
+        # 直到 Celery 任务才报 ``File is not a zip file``，此后无论如何重跑
+        # 都不可能成功。入库前使用与审查任务相同的解析器做一次校验。
+        from .review_service import _read_rows
+
+        temp_path = ""
+        try:
+            value.seek(0)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as handle:
+                for chunk in value.chunks():
+                    handle.write(chunk)
+                temp_path = handle.name
+            if not _read_rows(temp_path):
+                raise serializers.ValidationError(
+                    "未识别到包含“测试步骤”和“预期结果”的用例表头，或表头下没有有效用例行"
+                )
+        except serializers.ValidationError:
+            raise
+        except Exception as exc:
+            raise serializers.ValidationError(
+                f"文件无法解析或内容已损坏（{type(exc).__name__}）"
+            ) from exc
+        finally:
+            value.seek(0)
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
         return value
 
     def create(self, validated_data):
@@ -818,6 +845,13 @@ class TestCaseReviewSerializer(serializers.ModelSerializer):
     @staticmethod
     def _url(request, field):
         if not field:
+            return None
+        # 数据库可能来自备份，而媒体文件未同步。这种记录不应继续
+        # 向前端暴露一个必然 404 的“下载报告”按钮。
+        try:
+            if not field.storage.exists(field.name):
+                return None
+        except (OSError, ValueError):
             return None
         # 保持同源相对地址；反向代理常只传主机名而不传外部端口，
         # build_absolute_uri 会在 8913 部署下生成错误的 80 端口链接。

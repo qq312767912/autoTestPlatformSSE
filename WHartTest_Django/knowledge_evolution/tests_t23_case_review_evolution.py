@@ -41,7 +41,10 @@ REPORT_HEADERS = [
 ]
 
 
-def make_report(rows, *, headers=None, sheet_name="问题明细", extra_sheets=True) -> bytes:
+def make_report(
+    rows, *, headers=None, sheet_name="问题明细", extra_sheets=True,
+    acceptance_rate=None,
+) -> bytes:
     """造一份平台格式的审查报告。
 
     刻意用 openpyxl 真写一个 xlsx 而不是塞字典给解析器：这一层的风险恰恰在
@@ -57,7 +60,14 @@ def make_report(rows, *, headers=None, sheet_name="问题明细", extra_sheets=T
         sheet.append([row.get(name, "") for name in (headers or REPORT_HEADERS)])
     if extra_sheets and sheet_name == "问题明细":
         workbook.create_sheet("审查摘要")
-        workbook.create_sheet("测试确认处理结果")
+        confirmation = workbook.create_sheet("测试确认处理结果")
+        if acceptance_rate is None:
+            accepted = sum(
+                1 for row in rows if str(row.get("问题确认", "")).strip().lower()
+                in {"是", "y", "yes", "true", "1", "成立", "采纳"}
+            )
+            acceptance_rate = accepted / len(rows) if rows else 0
+        confirmation.append(["采纳率", acceptance_rate])
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
@@ -180,6 +190,33 @@ class ReportParserTests(TestCase):
         self.assertEqual(scan.defects[0].count, 2)
         self.assertEqual(scan.defect_total, 3)
 
+    def test_acceptance_score_comes_from_the_last_sheet(self):
+        data = make_report(
+            [{"问题类型": "A", "问题确认": "否"}],
+            acceptance_rate=0.84,
+        )
+
+        scan = CaseReviewReportParser.parse(data)
+
+        self.assertEqual(scan.acceptance_score, 84.0)
+        self.assertEqual(scan.acceptance_sheet, "测试确认处理结果")
+
+    def test_last_sheet_without_acceptance_rate_is_refused(self):
+        from openpyxl import Workbook
+
+        workbook = Workbook()
+        detail = workbook.active
+        detail.title = "问题明细"
+        detail.append(REPORT_HEADERS)
+        workbook.create_sheet("最后一页")
+        buffer = BytesIO()
+        workbook.save(buffer)
+
+        with self.assertRaises(ValidationError) as ctx:
+            CaseReviewReportParser.parse(buffer.getvalue())
+
+        self.assertIn("采纳率", str(ctx.exception))
+
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
 class EvolutionFlowTests(SkillHubBaseTests):
@@ -225,10 +262,10 @@ class EvolutionFlowTests(SkillHubBaseTests):
         data = make_report([
             {"问题类型": "措辞问题", "问题确认": "否", "不采纳原因": "原文已含等价表述",
              "行号": 3, "用例编号/名称": "TC-003"},
-        ])
+        ], acceptance_rate=0.90)
 
         result = CaseReviewEvolutionService.evolve(
-            review=review, data=data, human_score=90, actor=self.lead,
+            review=review, data=data, actor=self.lead,
             report_name="用例-已确认.xlsx",
         )
 
@@ -260,10 +297,10 @@ class EvolutionFlowTests(SkillHubBaseTests):
             {"问题类型": "措辞冗余", "问题确认": "否", "不采纳原因": "原文已含等价表述", "行号": 1},
             {"问题类型": "预期结果不可验收", "问题确认": "是", "问题描述": "预期结果不可验收",
              "修改点": "改为：返回码 0000 且回报报文含 userId", "行号": 2},
-        ])
+        ], acceptance_rate=0.90)
 
         result = CaseReviewEvolutionService.evolve(
-            review=review, data=data, human_score=90, actor=self.lead,
+            review=review, data=data, actor=self.lead,
         )
 
         signals = {
@@ -296,10 +333,10 @@ class EvolutionFlowTests(SkillHubBaseTests):
         self._activate(version)
         review, _output = self.make_completed_review(skill_version=version)
         baseline_sha = version.package_sha256
-        data = make_report([{"问题类型": "A", "问题确认": "否"}])
+        data = make_report([{"问题类型": "A", "问题确认": "否"}], acceptance_rate=0.88)
 
         CaseReviewEvolutionService.evolve(
-            review=review, data=data, human_score=88, actor=self.lead,
+            review=review, data=data, actor=self.lead,
         )
 
         skill.refresh_from_db()
@@ -307,36 +344,42 @@ class EvolutionFlowTests(SkillHubBaseTests):
         version.refresh_from_db()
         self.assertEqual(version.package_sha256, baseline_sha)
 
-    def test_score_below_threshold_blocks_and_leaves_no_attribution(self):
-        """未达门槛时**连归因都不该落**。
+    def test_low_acceptance_rate_does_not_block_evolution(self):
+        """采纳率低**不再**阻断派生，只作为版本间对比的评分维度。
 
-        落了归因又不派生，库里会凭空多出一批没人认领的"已确认归因"——
-        下一次派生会拿它们去改包，而那次改进的依据是谁、为什么，已经查不到了。
+        「skill 都是一点点优化出来的」：把参考线做成硬阻断，等于要求每一个中间
+        版本都必须一次跨过同一条线。所以低于参考线要照常派生 ——
+        但必须在结果里把 ``below_reference`` 标出来，
+        低分要可见，不能变成静默通过。
         """
         skill, version = self.make_skill_version(name=DEFAULT_CASE_REVIEW_SKILL_NAME)
         self._activate(version)
         review, _output = self.make_completed_review(skill_version=version)
-        data = make_report([{"问题类型": "A", "问题确认": "否"}])
+        data = make_report([{"问题类型": "A", "问题确认": "否"}], acceptance_rate=0.59)
 
-        with self.assertRaises(ValidationError) as ctx:
-            CaseReviewEvolutionService.evolve(
-                review=review, data=data, human_score=59, actor=self.lead,
-            )
+        result = CaseReviewEvolutionService.evolve(
+            review=review, data=data, actor=self.lead,
+        )
 
-        self.assertIn("未达到门槛", str(ctx.exception))
-        self.assertFalse(FailureAttribution.objects.filter(project=self.project).exists())
-        self.assertFalse(FeedbackEvent.objects.filter(project=self.project).exists())
-        self.assertEqual(skill.versions.filter(source_type="evolution").count(), 0)
+        self.assertEqual(result["acceptance_score"], 59.0)
+        self.assertEqual(result["acceptance_reference"], float(DEFAULT_HUMAN_SCORE_THRESHOLD))
+        self.assertTrue(result["below_reference"])
+        # 派生照常发生：归因、反馈、候选版本三样都落。
+        self.assertTrue(FailureAttribution.objects.filter(project=self.project).exists())
+        self.assertTrue(FeedbackEvent.objects.filter(project=self.project).exists())
+        self.assertEqual(skill.versions.filter(source_type="evolution").count(), 1)
 
     def test_threshold_is_inclusive(self):
         skill, version = self.make_skill_version(name=DEFAULT_CASE_REVIEW_SKILL_NAME)
         self._activate(version)
         review, _output = self.make_completed_review(skill_version=version)
-        data = make_report([{"问题类型": "A", "问题确认": "否"}])
+        data = make_report(
+            [{"问题类型": "A", "问题确认": "否"}],
+            acceptance_rate=DEFAULT_HUMAN_SCORE_THRESHOLD / 100,
+        )
 
         result = CaseReviewEvolutionService.evolve(
             review=review, data=data, actor=self.lead,
-            human_score=DEFAULT_HUMAN_SCORE_THRESHOLD,
         )
 
         self.assertEqual(result["human_score"], float(DEFAULT_HUMAN_SCORE_THRESHOLD))
@@ -349,7 +392,7 @@ class EvolutionFlowTests(SkillHubBaseTests):
 
         with self.assertRaises(ValidationError) as ctx:
             CaseReviewEvolutionService.evolve(
-                review=review, data=data, human_score=95, actor=self.lead,
+                review=review, data=data, actor=self.lead,
             )
 
         self.assertIn("没有可修复的缺陷", str(ctx.exception))
@@ -359,14 +402,14 @@ class EvolutionFlowTests(SkillHubBaseTests):
         skill, version = self.make_skill_version(name=DEFAULT_CASE_REVIEW_SKILL_NAME)
         self._activate(version)
         review, _output = self.make_completed_review(skill_version=version)
-        data = make_report([{"问题类型": "A", "问题确认": "否"}])
+        data = make_report([{"问题类型": "A", "问题确认": "否"}], acceptance_rate=0.90)
 
         CaseReviewEvolutionService.evolve(
-            review=review, data=data, human_score=90, actor=self.lead,
+            review=review, data=data, actor=self.lead,
         )
         with self.assertRaises(ValidationError):
             CaseReviewEvolutionService.evolve(
-                review=review, data=data, human_score=90, actor=self.lead,
+                review=review, data=data, actor=self.lead,
             )
 
         self.assertEqual(skill.versions.filter(source_type="evolution").count(), 1)
@@ -383,10 +426,13 @@ class EvolutionFlowTests(SkillHubBaseTests):
         )
         self._activate(second)
 
-        data = make_report([{"问题类型": "A", "问题确认": "否"}])
+        data = make_report(
+            [{"问题类型": "A", "问题确认": "否"}],
+            acceptance_rate=0.40,
+        )
         with self.assertRaises(ValidationError) as ctx:
             CaseReviewEvolutionService.evolve(
-                review=review, data=data, human_score=95, actor=self.lead,
+                review=review, data=data, actor=self.lead,
             )
 
         self.assertIn("已不是当前活跃版本", str(ctx.exception))
@@ -401,7 +447,7 @@ class EvolutionFlowTests(SkillHubBaseTests):
         data = make_report([{"问题类型": "A", "问题确认": "否"}])
         with self.assertRaises(ValidationError) as ctx:
             CaseReviewEvolutionService.evolve(
-                review=review, data=data, human_score=95, actor=self.lead,
+                review=review, data=data, actor=self.lead,
             )
 
         self.assertIn("只有已完成的审查", str(ctx.exception))
@@ -412,7 +458,7 @@ class EvolutionFlowTests(SkillHubBaseTests):
         data = make_report([{"问题类型": "A", "问题确认": "否"}])
         with self.assertRaises(ValidationError) as ctx:
             CaseReviewEvolutionService.evolve(
-                review=review, data=data, human_score=95, actor=self.lead,
+                review=review, data=data, actor=self.lead,
             )
 
         self.assertIn("未锁定 Skill 版本", str(ctx.exception))
@@ -422,21 +468,21 @@ class EvolutionFlowTests(SkillHubBaseTests):
         skill, version = self.make_skill_version(name=DEFAULT_CASE_REVIEW_SKILL_NAME)
         self._activate(version)
         review, output = self.make_completed_review(skill_version=version)
-        data = make_report([{"问题类型": "A", "问题确认": "否"}])
+        data = make_report([{"问题类型": "A", "问题确认": "否"}], acceptance_rate=0.72)
 
         result = CaseReviewEvolutionService.evolve(
-            review=review, data=data, human_score=72, actor=self.lead,
+            review=review, data=data, actor=self.lead,
             report_name="报告.xlsx",
         )
 
         event = FeedbackEvent.objects.get(pk=result["feedback_id"])
         self.assertEqual(event.signal, "accepted")
-        self.assertEqual(event.reason_code, "manual_calibration")
+        self.assertEqual(event.reason_code, "report_acceptance_rate")
         self.assertAlmostEqual(event.value, 0.72, places=4)
         self.assertEqual(str(event.skill_version_id), str(version.pk))
         self.assertEqual(str(event.output_id), str(output.id))
         self.assertEqual(event.actor_id, self.lead.id)
-        self.assertIn("72/100", event.comment)
+        self.assertIn("72%", event.comment)
 
     def test_failed_retry_leaves_no_orphan_score(self):
         """派生被拦时，归因与打分必须**整笔一起回滚**。
@@ -447,19 +493,19 @@ class EvolutionFlowTests(SkillHubBaseTests):
         skill, version = self.make_skill_version(name=DEFAULT_CASE_REVIEW_SKILL_NAME)
         self._activate(version)
         review, _output = self.make_completed_review(skill_version=version)
-        data = make_report([{"问题类型": "A", "问题确认": "否"}])
+        data = make_report([{"问题类型": "A", "问题确认": "否"}], acceptance_rate=0.90)
 
         first = CaseReviewEvolutionService.evolve(
-            review=review, data=data, human_score=90, actor=self.lead, report_name="r.xlsx",
+            review=review, data=data, actor=self.lead, report_name="r.xlsx",
         )
-        counted = FeedbackEvent.objects.filter(reason_code="manual_calibration")
+        counted = FeedbackEvent.objects.filter(reason_code="report_acceptance_rate")
         self.assertEqual(counted.count(), 1)
 
-        # 同分重传与改分重传都会撞上"重复派生"，两次都不该多留打分。
-        for score in (90, 80):
+        # 同一报告重传会撞上"重复派生"，不该多留反馈。
+        for _attempt in range(2):
             with self.assertRaises(ValidationError):
                 CaseReviewEvolutionService.evolve(
-                    review=review, data=data, human_score=score, actor=self.lead,
+                    review=review, data=data, actor=self.lead,
                     report_name="r.xlsx",
                 )
         self.assertEqual(counted.count(), 1)
@@ -553,8 +599,13 @@ class CandidateListingTests(SkillHubBaseTests):
 
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
-class EvolutionApiTests(SkillHubBaseTests):
-    """接口层：权限、参数与错误码。"""
+class CaseReviewApiBase(SkillHubBaseTests):
+    """用例审查接口测试的**夹具基类**：只有 setUp 与构造 helper，不含用例。
+
+    单独拆出来是为了让后续的接口测试（R4 的候选优化点、确认、派生）
+    能继承同一套夹具而**不重复跑一遍这里的行为用例** ——
+    继承一个含用例的类会让子类的用例数凭空翻倍，且失败信息指向父类文件，很难查。
+    """
 
     def _activate(self, version):
         from knowledge_evolution.capabilities import CapabilityReleaseService
@@ -600,6 +651,11 @@ class EvolutionApiTests(SkillHubBaseTests):
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
+
+@override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)
+class EvolutionApiTests(CaseReviewApiBase):
+    """接口层：权限、参数与错误码。"""
+
     def test_candidates_endpoint_returns_listing_and_threshold(self):
         response = self.client.get(
             "/api/knowledge-evolution/case-review-evolution/candidates/",
@@ -622,31 +678,64 @@ class EvolutionApiTests(SkillHubBaseTests):
 
         self.assertEqual(response.status_code, 403)
 
-    def test_preflight_reports_every_blocker_without_writing_anything(self):
-        data = make_report([{"问题类型": "A", "问题确认": "否"}])
+    def test_preflight_reports_blockers_without_writing_anything(self):
+        """预检要一次说清"能不能进化"，且**不落库**。
+
+        硬阻断只有一条：报告里没有被人工确认的缺陷（全留空）——
+        此时派生无从下手。采纳率低**不是**阻断，见下一条用例。
+        """
+        data = make_report([{"问题类型": "A", "问题确认": ""}])
 
         response = self.client.post(
             "/api/knowledge-evolution/case-review-evolution/preflight/",
             {"project": self.project.id, "review_id": str(self.review.pk),
-             "human_score": "40", "file": self._upload(data)},
+             "file": self._upload(data)},
             format="multipart",
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.data["ready"])
-        self.assertTrue(any("低于门槛" in text for text in response.data["blockers"]))
-        self.assertEqual(response.data["scan"]["negative"], 1)
+        self.assertTrue(
+            any("没有可修复的改进点" in text for text in response.data["blockers"])
+        )
         # 预检不落库：归因、反馈、候选一个都不该出现。
         self.assertFalse(FailureAttribution.objects.filter(project=self.project).exists())
         self.assertFalse(FeedbackEvent.objects.filter(project=self.project).exists())
 
-    def test_preflight_marks_ready_when_all_conditions_hold(self):
+    def test_preflight_does_not_block_on_low_acceptance_rate(self):
+        """低采纳率只标 ``below_reference``，**不进 blockers**。
+
+        「skill 是一点点优化出来的」：把参考线做成硬阻断，等于要求每个中间版本
+        一次跨过同一条线。低分要可见（below_reference），但不能拦住派生。
+        """
+        # 采纳率由「问题确认」列自动算出：全是「否」→ 0%。
         data = make_report([{"问题类型": "A", "问题确认": "否"}])
 
         response = self.client.post(
             "/api/knowledge-evolution/case-review-evolution/preflight/",
             {"project": self.project.id, "review_id": str(self.review.pk),
-             "human_score": "90", "file": self._upload(data)},
+             "file": self._upload(data)},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["ready"])
+        self.assertEqual(response.data["blockers"], [])
+        self.assertTrue(response.data["below_reference"])
+        self.assertEqual(response.data["scan"]["negative"], 1)
+        self.assertFalse(FailureAttribution.objects.filter(project=self.project).exists())
+        self.assertFalse(FeedbackEvent.objects.filter(project=self.project).exists())
+
+    def test_preflight_marks_ready_when_all_conditions_hold(self):
+        data = make_report(
+            [{"问题类型": "A", "问题确认": "否"}],
+            acceptance_rate=0.90,
+        )
+
+        response = self.client.post(
+            "/api/knowledge-evolution/case-review-evolution/preflight/",
+            {"project": self.project.id, "review_id": str(self.review.pk),
+             "file": self._upload(data)},
             format="multipart",
         )
 
@@ -654,12 +743,15 @@ class EvolutionApiTests(SkillHubBaseTests):
         self.assertEqual(response.data["blockers"], [])
 
     def test_evolve_endpoint_returns_candidate_and_download_url(self):
-        data = make_report([{"问题类型": "措辞问题", "问题确认": "否"}])
+        data = make_report(
+            [{"问题类型": "措辞问题", "问题确认": "否"}],
+            acceptance_rate=0.90,
+        )
 
         response = self.client.post(
             "/api/knowledge-evolution/case-review-evolution/evolve/",
             {"project": self.project.id, "review_id": str(self.review.pk),
-             "human_score": "90", "file": self._upload(data)},
+             "file": self._upload(data)},
             format="multipart",
         )
 
@@ -668,23 +760,29 @@ class EvolutionApiTests(SkillHubBaseTests):
         self.assertIn(f"/api/projects/{self.project.id}/skills/{self.skill.id}/", response.data["download_url"])
 
     def test_business_refusal_is_400_not_500(self):
-        """业务拒绝必须是 400。回 500 会被前端当"系统错误"弹掉，把该看的提示吃掉。"""
-        data = make_report([{"问题类型": "A", "问题确认": "否"}])
+        """业务拒绝必须是 400。回 500 会被前端当"系统错误"弹掉，把该看的提示吃掉。
+
+        选"没有可修复的缺陷"作为触发条件（而不是低采纳率）：采纳率已降级为
+        版本对比的评分维度，不再拒绝派生；真正的业务拒绝是"这份报告没有被确认
+        的问题"，此时派生无从下手。
+        """
+        # 「问题确认」留空 → 没有任何人工确认的缺陷 → 派生无从下手，应被拒。
+        data = make_report([{"问题类型": "A", "问题确认": ""}], acceptance_rate=0.10)
 
         response = self.client.post(
             "/api/knowledge-evolution/case-review-evolution/evolve/",
             {"project": self.project.id, "review_id": str(self.review.pk),
-             "human_score": "10", "file": self._upload(data)},
+             "file": self._upload(data)},
             format="multipart",
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("门槛", response.data["detail"])
+        self.assertIn("没有可修复的缺陷", response.data["detail"])
 
     def test_missing_file_is_rejected_as_bad_request(self):
         response = self.client.post(
             "/api/knowledge-evolution/case-review-evolution/evolve/",
-            {"project": self.project.id, "review_id": str(self.review.pk), "human_score": "90"},
+            {"project": self.project.id, "review_id": str(self.review.pk)},
             format="multipart",
         )
 
@@ -698,8 +796,27 @@ class EvolutionApiTests(SkillHubBaseTests):
         response = outsider.post(
             "/api/knowledge-evolution/case-review-evolution/evolve/",
             {"project": self.other_project.id, "review_id": str(self.review.pk),
-             "human_score": "90", "file": self._upload(make_report([]))},
+             "file": self._upload(make_report([]))},
             format="multipart",
         )
 
         self.assertEqual(response.status_code, 404)
+
+    def test_feedback_endpoint_records_score_from_report(self):
+        data = make_report(
+            [{"问题类型": "A", "问题确认": "否"}],
+            acceptance_rate=0.84,
+        )
+
+        response = self.client.post(
+            "/api/knowledge-evolution/case-review-evolution/feedback/",
+            {"project": self.project.id, "review_id": str(self.review.pk),
+             "file": self._upload(data)},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["human_score"], 84.0)
+        event = FeedbackEvent.objects.get(pk=response.data["feedback_id"])
+        self.assertEqual(event.reason_code, "report_acceptance_rate")
+        self.assertEqual(event.value, 0.84)

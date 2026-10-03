@@ -388,7 +388,17 @@ async function submit() {
   }
   finally { submitting.value = false; }
 }
-async function retry(item: TestCaseReview) { if (!projectId.value) return; await retryReview(projectId.value, item.id); Message.success('已重新提交'); await load(); }
+async function retry(item: TestCaseReview) {
+  if (!projectId.value) return;
+  try {
+    await retryReview(projectId.value, item.id);
+    Message.success('已重新提交');
+    await load();
+  } catch (error: any) {
+    const detail = error?.response?.data?.detail;
+    Message.error((typeof detail === 'string' ? detail : '') || error?.message || '重跑失败');
+  }
+}
 async function cancel(item: TestCaseReview) { if (!projectId.value) return; await cancelReview(projectId.value, item.id); Message.success('任务已取消'); await load(); }
 async function remove(item: TestCaseReview) { if (!projectId.value) return; await deleteReview(projectId.value, item.id); Message.success('已删除'); await load(); }
 function download(url: string) { const link = document.createElement('a'); link.href = url; link.download = ''; document.body.appendChild(link); link.click(); link.remove(); }
