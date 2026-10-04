@@ -205,7 +205,7 @@ class SkillRuntimeResolver:
     @transaction.atomic
     def lock_for_task(
         cls, *, project, workflow_id, actor=None, scope: str = "single",
-        stage: str = "", capability=None, name: str = "", skill=None,
+        stage: str = "", capability=None, name: str = "", skill=None, skill_version=None,
         verify_integrity: bool = False, allow_missing: bool = False,
         allow_stage_mismatch: bool = False,
     ) -> WorkflowSkillLock | None:
@@ -217,6 +217,8 @@ class SkillRuntimeResolver:
 
         Args:
             skill: 直接指定要锁定的 Skill（见 ``resolve_version``）。
+            skill_version: 从公开 Skill Hub 显式选择的具体版本。给出后不再解析
+                Skill 的活跃/最新版本；项目边界由 ``WorkflowSkillLock.project`` 表达。
             allow_missing: 为 True 时，解析不到可运行版本返回 None 而不是拒绝。
                 只有"该能力本来就可以没有 Skill"的场景才该打开它。
             allow_stage_mismatch: 见 ``resolve_version``。仅在"人显式指定了包"的
@@ -237,10 +239,29 @@ class SkillRuntimeResolver:
         if existing is not None:
             return existing
 
-        version = cls.resolve_version(
-            project=project, capability=capability, stage=stage, name=name, skill=skill,
-            verify_integrity=verify_integrity, allow_stage_mismatch=allow_stage_mismatch,
-        )
+        version = None
+        if skill_version is not None:
+            version = (
+                SkillVersion.objects
+                .select_related("skill", "release")
+                .filter(pk=getattr(skill_version, "pk", skill_version))
+                .first()
+            )
+            if version is None:
+                raise SkillRuntimeUnavailable("所选 Skill 版本不存在")
+            if skill is not None and version.skill_id != getattr(skill, "pk", skill):
+                raise SkillRuntimeUnavailable("所选 Skill 版本不属于指定 Skill")
+            if not version.is_runnable:
+                raise SkillRuntimeUnavailable("所选 Skill 版本当前不可运行")
+            if stage and not allow_stage_mismatch and not cls._matches_stage(version, stage):
+                raise SkillRuntimeUnavailable("所选 Skill 版本声明的阶段与目标阶段不一致")
+            if verify_integrity:
+                cls._assert_integrity(version)
+        else:
+            version = cls.resolve_version(
+                project=project, capability=capability, stage=stage, name=name, skill=skill,
+                verify_integrity=verify_integrity, allow_stage_mismatch=allow_stage_mismatch,
+            )
         if version is None:
             if allow_missing:
                 return None
@@ -268,10 +289,12 @@ class SkillRuntimeResolver:
                     "source_type": version.source_type,
                     # 人显式指定的包若与 manifest 声明不一致，必须留下证据：
                     # 否则事后只看到"这一阶段用了这个包"，看不出当时是**违反声明**用的。
-                    "pinned": bool(skill is not None),
+                    "pinned": bool(skill is not None or skill_version is not None),
+                    "explicit_version": bool(skill_version is not None),
                     "declared_stage": declared_stage,
                     "stage_mismatch": bool(
-                        skill is not None and stage and declared_stage and declared_stage != stage
+                        (skill is not None or skill_version is not None)
+                        and stage and declared_stage and declared_stage != stage
                     ),
                 },
             },
@@ -289,7 +312,7 @@ class SkillRuntimeResolver:
         """取回锁定版本；**不重新解析活跃版本**。
 
         容忍该版本已被取代（``retired``）——运行中的任务继续跑完比中途换包更安全。
-        拒绝的情形只有三种：版本记录被清理、跨项目、以及被隔离。
+        拒绝的情形只有三种：版本记录被清理、被隔离，或包哈希不一致。
 
         这里刻意**重新查库**而不是直接用 ``lock.skill_version``：那把锁可能在任务
         更早的阶段就被取出并缓存，而版本随后被隔离（安全事件）——读缓存对象会看到
@@ -305,8 +328,6 @@ class SkillRuntimeResolver:
             )
         if version is None:
             raise SkillRuntimeUnavailable("锁定的 Skill 版本已被清理，任务无法继续")
-        if version.skill.project_id != lock.project_id:
-            raise SkillRuntimeUnavailable("锁定的 Skill 版本不属于当前项目")
         # 隔离是安全事件，必须让任务停下来；retired 不属于此列。
         if version.state == "quarantined":
             raise SkillRuntimeUnavailable("锁定的 Skill 版本已被隔离，任务必须终止并重建")

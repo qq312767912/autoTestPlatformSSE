@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "workflow_id",
+    "plan_output_id",
+    "test_plan_artifact",
+    "output_root"
+  ],
+  "properties": {
+    "workflow_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "plan_output_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "test_plan_artifact": {
+      "type": "string",
+      "minLength": 1
+    },
+    "historical_cases_artifact": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "output_root": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": true
+}

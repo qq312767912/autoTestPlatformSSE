@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from .models import (
+    AssetCandidateEvent,
     EvaluationCase,
     EvaluationResult,
     EvaluationRun,
@@ -19,10 +20,16 @@ from .gold_models import (
     GoldCase,
     GoldDataset,
     GoldDatasetVersion,
+    TestAssetTaxonomy,
 )
 from .evaluation_v2_models import EvaluationRubric, JudgeResult
 from .trace_models import ExecutionSpan, FailureAttribution
 from .optimization_models import OptimizationExperiment, OptimizationProposal
+from .workflow_models import FlywheelRun
+from .history_models import (
+    HistoryImportBatch, HistoryImportItem, HistoryReplay,
+    HistoryReplayDifference, ProjectFlywheelSetting,
+)
 from .knowledge_models import (
     KnowledgeAsset,
     KnowledgeAuditLog,
@@ -38,6 +45,67 @@ class PromotionDecisionSerializer(serializers.ModelSerializer):
         model = PromotionDecision
         fields = "__all__"
         read_only_fields = [f.name for f in model._meta.get_fields() if getattr(f, "name", None)]
+
+
+class FlywheelRunSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FlywheelRun
+        fields = [
+            "id", "project", "workflow_id", "entry_type", "intent",
+            "requirement_document_ids", "status", "created_by", "metadata",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = ["created_by", "created_at", "updated_at"]
+
+    def validate_requirement_document_ids(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError("requirement_document_ids 必须是数组")
+        return [str(item) for item in value]
+
+
+class ProjectFlywheelSettingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProjectFlywheelSetting
+        fields = ["project", "enabled", "rollout_note", "updated_by", "updated_at"]
+        read_only_fields = ["updated_by", "updated_at"]
+
+
+class HistoryImportItemSerializer(serializers.ModelSerializer):
+    file_name = serializers.CharField(source="file.original_name", read_only=True)
+
+    class Meta:
+        model = HistoryImportItem
+        fields = ["id", "role", "file", "file_name", "file_hash", "metadata"]
+        read_only_fields = fields
+
+
+class HistoryImportBatchSerializer(serializers.ModelSerializer):
+    items = HistoryImportItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = HistoryImportBatch
+        fields = ["id", "project", "name", "status", "manifest_hash", "preflight",
+                  "candidate_count", "created_by", "confirmed_by", "confirmed_at",
+                  "created_at", "updated_at", "items"]
+        read_only_fields = fields
+
+
+class HistoryReplayDifferenceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = HistoryReplayDifference
+        fields = "__all__"
+        read_only_fields = [field.name for field in model._meta.fields]
+
+
+class HistoryReplaySerializer(serializers.ModelSerializer):
+    differences = HistoryReplayDifferenceSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = HistoryReplay
+        fields = ["id", "project", "batch", "flywheel_run", "gold_version", "status",
+                  "execution_lock", "config_hash", "stage_scores", "summary", "gate_report",
+                  "created_by", "created_at", "updated_at", "differences"]
+        read_only_fields = fields
 
 
 class ReleaseObservationSerializer(serializers.ModelSerializer):
@@ -108,8 +176,33 @@ class GoldDatasetSerializer(serializers.ModelSerializer):
         model = GoldDataset
         fields = [
             "id", "project", "name", "task_type", "description", "status",
+            "scope_type", "scope_key", "governance", "taxonomy_version", "approver",
             "owner", "created_by", "version_count", "created_at", "updated_at",
         ]
+
+
+class TestAssetTaxonomySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TestAssetTaxonomy
+        fields = [
+            "id", "project", "scope_key", "version", "state", "categories",
+            "critical_scenarios", "maintained_by", "approved_by", "approved_at",
+            "content_hash", "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "state", "maintained_by", "approved_by", "approved_at", "content_hash",
+            "created_at", "updated_at",
+        ]
+
+    def validate_categories(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError("categories 必须是数组")
+        return value
+
+    def validate_critical_scenarios(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError("critical_scenarios 必须是数组")
+        return value
         read_only_fields = ["created_by", "version_count", "created_at", "updated_at"]
 
 
@@ -120,12 +213,13 @@ class GoldDatasetVersionSerializer(serializers.ModelSerializer):
         model = GoldDatasetVersion
         fields = [
             "id", "dataset", "version", "state", "content_hash", "sample_stats",
-            "parent_version", "created_by", "frozen_by", "frozen_at", "case_count",
-            "created_at", "updated_at",
+            "governance_snapshot", "parent_version", "created_by", "frozen_by",
+            "frozen_at", "case_count", "created_at", "updated_at",
         ]
         read_only_fields = [
-            "state", "content_hash", "sample_stats", "created_by", "frozen_by",
-            "frozen_at", "case_count", "created_at", "updated_at",
+            "state", "content_hash", "sample_stats", "governance_snapshot",
+            "created_by", "frozen_by", "frozen_at", "case_count", "created_at",
+            "updated_at",
         ]
 
 
@@ -136,7 +230,8 @@ class GoldAnnotationSerializer(serializers.ModelSerializer):
         model = GoldAnnotation
         fields = [
             "id", "case", "round", "answer", "rubric_scores", "evidence",
-            "conclusion", "comment", "annotator", "annotator_name", "created_at",
+            "conclusion", "comment", "tags", "split", "category", "review_snapshot",
+            "annotator", "annotator_name", "created_at",
         ]
         read_only_fields = fields
 
@@ -151,11 +246,33 @@ class GoldCaseSerializer(serializers.ModelSerializer):
             "input_snapshot", "expected_output", "rubric", "required_items",
             "forbidden_items", "evidence", "tags", "split", "state", "difficulty",
             "risk_level", "privacy_level", "allow_optimization", "source_hash",
+            "candidate_origin", "candidate_score", "recommended_split",
+            "recommended_tags", "dedup_fingerprint", "review_checklist",
             "created_by", "annotations", "created_at", "updated_at",
         ]
         read_only_fields = [
             "source_hash", "created_by", "annotations", "created_at", "updated_at",
         ]
+
+
+class AssetCandidateEventSerializer(serializers.ModelSerializer):
+    """候选沉淀事件（T04）。
+
+    只读：入队由业务入口写入、处理由统一服务驱动，任何"客户端直接改状态"的入口
+    都会绕过预检与死信阈值——需要干预时走 ``retry`` 动作。
+    """
+
+    source_type_label = serializers.CharField(source="get_source_type_display", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+
+    class Meta:
+        model = AssetCandidateEvent
+        fields = [
+            "id", "project", "source_type", "source_type_label", "source_id", "signal",
+            "status", "status_label", "attempts", "max_attempts", "last_error",
+            "payload", "preflight", "candidate", "processed_at", "created_at", "updated_at",
+        ]
+        read_only_fields = fields
 
 
 class AnnotationConflictSerializer(serializers.ModelSerializer):

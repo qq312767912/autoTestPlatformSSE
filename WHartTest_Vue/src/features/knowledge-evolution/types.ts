@@ -177,8 +177,138 @@ export interface GoldDataset {
   task_type: string;
   description: string;
   status: 'active' | 'archived';
+  scope_type?: 'general' | 'domain';
+  scope_key?: string;
+  governance?: Record<string, unknown>;
+  taxonomy_version?: string | null;
+  approver?: number | null;
   version_count?: number;
   created_at: string;
+}
+
+export interface AssetCandidateEvent {
+  id: string;
+  project: number;
+  source_type: string;
+  source_type_label: string;
+  source_id: string;
+  signal: string;
+  status: 'pending' | 'processing' | 'needs_review' | 'completed' | 'failed' | 'dead_letter';
+  status_label: string;
+  attempts: number;
+  max_attempts: number;
+  last_error: string;
+  payload: Record<string, unknown>;
+  preflight: Record<string, unknown>;
+  candidate?: string | null;
+  processed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AssetCandidateStats {
+  total: number;
+  pending: number;
+  processing: number;
+  needs_review: number;
+  completed: number;
+  failed: number;
+  dead_letter: number;
+}
+
+export interface GoldAnnotation {
+  id: string;
+  case: string;
+  round: 'primary' | 'review' | 'arbitration';
+  answer: Record<string, unknown>;
+  evidence: unknown[];
+  conclusion: 'accepted' | 'rejected' | 'needs_changes';
+  comment: string;
+  tags: string[];
+  split: string;
+  category: string;
+  review_snapshot: Record<string, unknown>;
+  annotator_name: string;
+  created_at: string;
+}
+
+export interface GoldCase {
+  id: string;
+  version: string;
+  task_type: string;
+  title: string;
+  input_snapshot: Record<string, unknown>;
+  expected_output: Record<string, unknown>;
+  evidence: unknown[];
+  tags: string[];
+  split: string;
+  state: 'candidate' | 'labeling' | 'conflict' | 'confirmed' | 'rejected';
+  privacy_level: 'internal' | 'restricted' | 'prohibited';
+  allow_optimization: boolean;
+  recommended_split: string;
+  recommended_tags: string[];
+  review_checklist: Record<string, unknown>;
+  annotations: GoldAnnotation[];
+  created_at: string;
+}
+
+export interface GoldDatasetVersion {
+  id: string;
+  dataset: string;
+  version: string;
+  state: 'draft' | 'labeling' | 'review' | 'frozen' | 'retired';
+  content_hash: string;
+  sample_stats: Record<string, number>;
+  governance_snapshot: Record<string, unknown>;
+  case_count: number;
+  frozen_at?: string | null;
+  created_at: string;
+}
+
+export interface TestAssetTaxonomy {
+  id: string;
+  project: number;
+  scope_key: string;
+  version: string;
+  state: 'draft' | 'review' | 'published' | 'retired';
+  categories: string[];
+  critical_scenarios: string[];
+  content_hash: string;
+  approved_at?: string | null;
+}
+
+export interface AnnotationConflict {
+  id: string;
+  case: string;
+  differing_fields: string[];
+  state: 'open' | 'resolved';
+  resolution: Record<string, unknown>;
+  primary_annotation: GoldAnnotation;
+  review_annotation: GoldAnnotation;
+}
+
+export interface HistoryImportBatch {
+  id: string;
+  project: number;
+  name: string;
+  status: string;
+  manifest_hash: string;
+  candidate_count: number;
+  items: Array<{id:string;role:string;file:number;file_name:string;file_hash:string}>;
+  created_at: string;
+}
+
+export interface HistoryReplayDifference {
+  id: string; stage: string; case_key: string;
+  category: 'missing'|'extra'|'conflict'|'equivalent'|'uncertain';
+  critical: boolean; human_decision: string; decision_note: string;
+  expected: Record<string, unknown>; actual: Record<string, unknown>;
+}
+
+export interface HistoryReplay {
+  id: string; project: number; batch: string; status: string;
+  config_hash: string; summary: Record<string, unknown>; gate_report: Record<string, unknown>;
+  differences: HistoryReplayDifference[]; created_at: string;
 }
 
 export interface ExecutionSpan {
@@ -341,7 +471,7 @@ export interface WorkflowCatalogSkill {
   skill_id: string;
   skill_name: string;
   description: string;
-  /** 包自己声明的阶段。与所选阶段不同即为跨声明选用，会写进流程锁的留痕。 */
+  /** 包自己声明的阶段。发起向导据此把版本严格归入对应阶段的下拉列表。 */
   declared_stage: string;
   declared_stage_label: string;
   /** 包处于启用 且 版本可运行（未被隔离/驳回、且有包目录）。与"已激活"无关。 */
@@ -785,4 +915,3 @@ export interface OutputLineageView {
   closed_loop: boolean;
   sources: LineageSources;
 }
-

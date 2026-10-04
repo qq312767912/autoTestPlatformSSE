@@ -30,6 +30,12 @@ from .views import (
     FailureAttributionViewSet,
     OptimizationExperimentViewSet,
     OptimizationProposalViewSet,
+    FlywheelRunViewSet,
+    TestAssetTaxonomyViewSet,
+    AssetCandidateViewSet,
+    HistoryImportViewSet,
+    HistoryReplayViewSet,
+    ProjectFlywheelSettingViewSet,
 )
 
 router = DefaultRouter()
@@ -61,5 +67,12 @@ router.register("execution-spans", ExecutionSpanViewSet, basename="execution-spa
 router.register("failure-attributions", FailureAttributionViewSet, basename="failure-attribution")
 router.register("optimization-proposals", OptimizationProposalViewSet, basename="optimization-proposal")
 router.register("optimization-experiments", OptimizationExperimentViewSet, basename="optimization-experiment")
+router.register("flywheel-runs", FlywheelRunViewSet, basename="flywheel-run")
+router.register("test-asset-taxonomies", TestAssetTaxonomyViewSet, basename="test-asset-taxonomy")
+# 设计 §6.2 的 ``/asset-candidates/retry/``：候选事件队列 + 失败补偿入口（T04）。
+router.register("asset-candidates", AssetCandidateViewSet, basename="asset-candidate")
+router.register("history-imports", HistoryImportViewSet, basename="history-import")
+router.register("history-replays", HistoryReplayViewSet, basename="history-replay")
+router.register("flywheel-settings", ProjectFlywheelSettingViewSet, basename="flywheel-setting")
 
 urlpatterns = [path("", include(router.urls))]

@@ -178,6 +178,89 @@ class FeedbackEvent(models.Model):
             raise ValidationError("反馈与关联输出必须属于同一项目")
 
 
+class AssetCandidateEvent(models.Model):
+    """候选沉淀的幂等事件与失败补偿记录（T04 / P5、R10）。
+
+    要解决的问题：候选发现过去挂在"调用方记得调一次服务"上——正式阶段产出、
+    确认稿上传、缺陷确认、漏测、误报、失败、回滚、编辑分散在五六个入口，
+    谁漏调一次就没有候选，而且**没有任何地方能看出漏了**。
+
+    这里把"要不要沉淀"与"沉淀成什么"拆开：
+
+    * 业务入口只负责把信号写成一条**幂等**事件（``idempotency_key`` 唯一，
+      同一信号重放不会重复建候选），写事件与业务写库在同一事务里，
+      失败不会回滚业务结果；
+    * 统一处理器做预检、去重、推荐归属，并且**只**产出
+      ``GoldCase(state=candidate)``——自动化永远不产生"已确认"。
+
+    失败不是"记条日志就完事"（R9）：``attempts`` 累加、``last_error`` 留痕，
+    超过 ``max_attempts`` 落到 ``dead_letter`` 并由控制台告警，可人工重试。
+
+    状态语义（刻意不含"已确认"这一档）：
+
+    * ``pending``：已入队待处理；
+    * ``processing``：正在处理；
+    * ``needs_review``：已处理且**预检无阻断项**，已进入人工审核队列；
+    * ``completed``：已处理但缺件（如缺陷类信号缺证据），候选保留、
+      缺件清单在 ``preflight.missing``，**不进**审核队列直到补齐；
+    * ``failed``：本次处理失败，未达死信阈值，可重试；
+    * ``dead_letter``：连续失败超阈值，需人工介入。
+    """
+
+    SOURCE_TYPE_CHOICES = [
+        ("stage_output", "正式阶段产出"),
+        ("feedback", "人工反馈"),
+        ("history_import", "历史资料导入"),
+    ]
+    STATUS_CHOICES = [
+        ("pending", "待处理"),
+        ("processing", "处理中"),
+        ("needs_review", "待人工审核"),
+        ("completed", "已处理"),
+        ("failed", "处理失败"),
+        ("dead_letter", "死信"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        "projects.Project", on_delete=models.CASCADE, related_name="asset_candidate_events",
+    )
+    source_type = models.CharField(max_length=24, choices=SOURCE_TYPE_CHOICES, db_index=True)
+    #: 触发来源的业务对象标识（GenerationOutput / FeedbackEvent 的主键）。存字符串而不是
+    #: 外键：来源可能是尚未入库的历史导入包，硬外键会让"先入队再落库"的路径写不进去。
+    source_id = models.CharField(max_length=64, db_index=True)
+    #: 触发信号：阶段产出记 ``stage_output``，其余为 ``FeedbackEvent.signal``。
+    signal = models.CharField(max_length=32, blank=True, db_index=True)
+    idempotency_key = models.CharField(max_length=160, unique=True)
+    status = models.CharField(
+        max_length=16, choices=STATUS_CHOICES, default="pending", db_index=True,
+    )
+    attempts = models.PositiveIntegerField(default=0)
+    max_attempts = models.PositiveIntegerField(default=3)
+    last_error = models.TextField(blank=True)
+    #: 处理输入快照：只放标识与哈希，不放业务正文，避免把敏感内容复制进队列表。
+    payload = models.JSONField(default=dict, blank=True)
+    #: 预检结果：完整性清单、去重/冲突结论、推荐归属与优先级，供页面下钻。
+    preflight = models.JSONField(default=dict, blank=True)
+    candidate = models.ForeignKey(
+        "knowledge_evolution.GoldCase", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="candidate_events",
+    )
+    processed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["project", "status", "created_at"]),
+            models.Index(fields=["project", "source_type", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.source_type}:{self.source_id} -> {self.status}"
+
+
 # ------------------------------------------------------------------- 4. 评测集
 # 任务 3：种子评测集放在 models.py 而非 knowledge_models.py，避免循环引用
 # RetrievalTrace / GenerationOutput。
@@ -305,6 +388,7 @@ from .gold_models import (  # noqa: E402,F401
     GoldCase,
     GoldDataset,
     GoldDatasetVersion,
+    TestAssetTaxonomy,
 )
 
 
@@ -341,7 +425,12 @@ from .trace_models import ExecutionSpan, FailureAttribution  # noqa: E402,F401
 # 项目级四阶段 Skill 质量门禁 + 任务级 Skill 版本锁（T08/T15）。
 # 两个都显式导入：模型注册靠"应用加载时被 import 到"，若只靠别处顺手 import，
 # 一旦那个模块被重构掉，模型就会从 Django 的应用注册表里消失（表现为迁移生成不出、表查不到）。
-from .workflow_models import WorkflowSkillLock, WorkflowStageGate  # noqa: E402,F401
+from .workflow_models import FlywheelRun, WorkflowSkillLock, WorkflowStageGate  # noqa: E402,F401
+
+from .history_models import (  # noqa: E402,F401
+    HistoryImportBatch, HistoryImportItem, HistoryReplay,
+    HistoryReplayDifference, ProjectFlywheelSetting,
+)
 
 # T09：能力评测门禁的不可变快照。
 from .gate_models import EvaluationGateSnapshot  # noqa: E402,F401

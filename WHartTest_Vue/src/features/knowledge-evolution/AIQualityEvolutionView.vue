@@ -346,12 +346,30 @@
         </section>
 
         <section v-else-if="workspace === 'gold'" class="panel content-panel">
-          <div class="section-head toolbar"><div><span>第一环 · 金标资产</span><h2>真实业务 Badcase 与人工判断</h2><p>将采纳、误报、漏报和缺陷确认沉淀为评测资产。</p></div><div class="actions"><a-select v-model="feedbackSignal" allow-clear placeholder="全部信号" style="width:160px" @change="loadFeedback"><a-option value="">全部信号</a-option><a-option v-for="(label,key) in signalLabels" :key="key" :value="key">{{ label }}</a-option></a-select><a-button type="primary" @click="showSuiteModal=true"><template #icon><icon-plus/></template>新建评测集</a-button></div></div>
+          <div class="section-head toolbar"><div><span>第一环 · 金标资产</span><h2>资产审核与数据集治理</h2><p>自动化只生成候选；进入回归集、专用集或冻结版本前必须经过人工审核。</p></div><div class="actions"><a-select v-if="goldMode==='feedback'" v-model="feedbackSignal" allow-clear placeholder="全部信号" style="width:160px" @change="loadFeedback"><a-option value="">全部信号</a-option><a-option v-for="(label,key) in signalLabels" :key="key" :value="key">{{ label }}</a-option></a-select><a-select v-if="goldMode==='review'" v-model="assetCandidateStatus" allow-clear placeholder="全部状态" style="width:150px" @change="loadAssetCandidates"><a-option value="">全部状态</a-option><a-option value="pending">待处理</a-option><a-option value="needs_review">待人工审核</a-option><a-option value="completed">已处理待补件</a-option><a-option value="failed">处理失败</a-option><a-option value="dead_letter">死信</a-option></a-select><a-button v-if="goldMode==='review' && assetCandidateStats.failed+assetCandidateStats.dead_letter" status="warning" :loading="assetRetryBusy" @click="retryAllAssetCandidates">重试失败项</a-button><a-button type="primary" @click="showSuiteModal=true"><template #icon><icon-plus/></template>新建评测集</a-button></div></div>
+          <div class="asset-mode-tabs"><button type="button" :class="{active:goldMode==='review'}" @click="goldMode='review'">候选审核 <b>{{ assetCandidateStats.needs_review }}</b></button><button type="button" :class="{active:goldMode==='datasets'}" @click="goldMode='datasets';loadDatasetGovernance()">数据集版本 <b>{{ goldDatasets.length }}</b></button><button type="button" :class="{active:goldMode==='history'}" @click="goldMode='history';loadHistoryWorkspace()">历史回放 <b>{{ historyImports.length }}</b></button><button type="button" :class="{active:goldMode==='feedback'}" @click="goldMode='feedback'">原始反馈 <b>{{ feedbackEvents.length }}</b></button></div>
+          <template v-if="goldMode==='review'">
+            <div class="asset-queue-kpis"><article><small>待处理</small><b>{{ assetCandidateStats.pending + assetCandidateStats.processing }}</b></article><article><small>待人工审核</small><b>{{ assetCandidateStats.needs_review }}</b></article><article :class="{warn:assetCandidateStats.failed}"><small>失败</small><b>{{ assetCandidateStats.failed }}</b></article><article :class="{bad:assetCandidateStats.dead_letter}"><small>死信</small><b>{{ assetCandidateStats.dead_letter }}</b></article></div>
+            <div class="asset-event-head"><span>来源</span><span>候选与预检</span><span>状态</span><span>时间</span><span>操作</span></div>
+            <div v-if="assetCandidateEvents.length" class="asset-events"><article v-for="item in assetCandidateEvents" :key="item.id"><div><b>{{ item.source_type_label || item.source_type }}</b><small>{{ item.source_id }}</small></div><div><b>{{ assetCandidateTitle(item) }}</b><small>{{ assetCandidatePreflight(item) }}</small><p v-if="item.last_error">{{ item.last_error }}</p></div><a-tag :color="assetCandidateStatusColor(item.status)">{{ item.status_label || item.status }}</a-tag><time>{{ formatDate(item.created_at) }}</time><a-button v-if="['failed','dead_letter'].includes(item.status)" size="mini" :loading="assetRetryId===item.id" @click="retryOneAssetCandidate(item.id)">重试</a-button><a-button v-else-if="item.candidate" size="mini" type="primary" @click="openAssetReview(item.candidate)">人工审核</a-button><span v-else class="asset-event-result">—</span></article></div>
+            <a-empty v-else description="当前筛选条件下没有候选事件"/>
+          </template>
+          <template v-else-if="goldMode==='datasets'">
           <div class="gold-type-nav"><button type="button" :class="{active:!goldTaskType}" @click="goldTaskType=''">全部 <b>{{ goldDatasets.length }}</b></button><button v-for="(label,key) in taskTypeLabels" :key="key" type="button" :class="{active:goldTaskType===key}" @click="goldTaskType=key">{{ label }} <b>{{ (cockpit.gold_by_type[key] || []).length }}</b></button></div>
-          <div class="asset-strip"><article v-for="dataset in filteredGoldDatasets" :key="dataset.id"><div><b>{{ dataset.name }}</b><small>{{ taskTypeLabels[dataset.task_type] || dataset.task_type }} · {{ dataset.version_count || 0 }} 个版本</small></div><a-tag :color="dataset.status==='active'?'green':'gray'">{{ dataset.status==='active'?'启用':'已归档' }}</a-tag></article><a-empty v-if="!filteredGoldDatasets.length" description="当前类型暂无金标集，可从下方反馈中筛选 Badcase" /></div>
+          <div class="governance-columns"><section><h3>数据集与版本</h3><div class="asset-strip"><article v-for="dataset in filteredGoldDatasets" :key="dataset.id" class="clickable" @click="selectGoldDataset(dataset.id)"><div><b>{{ dataset.name }}</b><small>{{ taskTypeLabels[dataset.task_type] || dataset.task_type }} · {{ dataset.version_count || 0 }} 个版本 · {{ dataset.scope_type==='domain'?'项目专用':'通用' }}</small></div><a-tag :color="dataset.status==='active'?'green':'gray'">{{ dataset.status==='active'?'启用':'已归档' }}</a-tag></article><a-empty v-if="!filteredGoldDatasets.length" description="当前类型暂无金标集" /></div><div class="governance-list"><article v-for="version in goldVersions" :key="version.id"><div><b>{{ version.version }}</b><small>{{ version.case_count }} 条 · {{ version.content_hash?`sha ${version.content_hash.slice(0,10)}`:'尚未冻结' }}</small></div><a-tag :color="version.state==='frozen'?'green':'blue'">{{ version.state }}</a-tag><a-button v-if="version.state!=='frozen'&&version.state!=='retired'" size="mini" status="warning" @click="freezeVersion(version.id)">冻结</a-button></article></div></section><section><div class="section-inline"><h3>分类与关键场景</h3><a-button size="mini" type="primary" @click="showTaxonomyModal=true">新建版本</a-button></div><div class="governance-list"><article v-for="item in taxonomies" :key="item.id"><div><b>{{ item.scope_key }} · {{ item.version }}</b><small>{{ item.categories.length }} 个分类 · {{ item.critical_scenarios.length }} 个关键场景</small></div><a-tag :color="item.state==='published'?'green':item.state==='review'?'orange':'gray'">{{ item.state }}</a-tag><a-button v-if="item.state==='draft'" size="mini" @click="submitTaxonomy(item.id)">送审</a-button><a-button v-if="item.state==='review'" size="mini" type="primary" @click="publishTaxonomy(item.id)">批准发布</a-button></article></div><h3>待仲裁冲突</h3><div class="governance-list"><article v-for="item in annotationConflicts" :key="item.id"><div><b>案例 {{ item.case.slice(0,8) }}</b><small>差异：{{ item.differing_fields.join('、') }}</small></div><a-tag color="red">待仲裁</a-tag><a-button size="mini" type="primary" @click="arbitrateConflict(item)">采用复核结论</a-button></article><a-empty v-if="!annotationConflicts.length" description="没有待仲裁冲突"/></div></section></div>
+          </template>
+          <template v-else-if="goldMode==='history'">
+            <a-alert type="info">预检只校验当前项目文件映射、哈希、缺失项和冲突，不写业务数据；确认导入后也只生成候选，仍需人工审核。</a-alert>
+            <div class="history-entry"><a-input v-model="historyForm.name" placeholder="历史包名称"/><a-input v-model="historyForm.requirement" placeholder="需求文件 ID（必填）"/><a-input v-model="historyForm.plan" placeholder="真实方案文件 ID（必填）"/><a-input v-model="historyForm.caseFile" placeholder="真实用例文件 ID（必填）"/><a-button type="primary" :loading="historyBusy" @click="preflightHistory">预检</a-button></div>
+            <div v-if="historyPreflight" class="preflight-card"><b>{{ historyPreflight.ok?'预检通过':'预检未通过' }}</b><span>预计生成 {{ historyPreflight.estimated_candidates||0 }} 个候选</span><span>清单哈希 {{ String(historyPreflight.manifest_hash||'').slice(0,12) }}</span><a-button v-if="historyPreflight.ok" type="primary" :loading="historyBusy" @click="confirmHistory">人工确认导入</a-button><pre v-if="Array.isArray(historyPreflight.errors)&&historyPreflight.errors.length">{{ JSON.stringify(historyPreflight.errors,null,2) }}</pre></div>
+            <div class="governance-list"><article v-for="item in historyImports" :key="item.id"><div><b>{{ item.name }}</b><small>{{ item.items.length }} 个文件 · {{ item.candidate_count }} 个候选 · sha {{ item.manifest_hash.slice(0,10) }}</small></div><a-tag color="green">{{ item.status }}</a-tag><a-button size="mini" type="primary" @click="startReplay(item.id)">启动隔离回放</a-button></article></div>
+            <div class="governance-list replay-list"><article v-for="item in historyReplays" :key="item.id"><div><b>回放 {{ item.id.slice(0,8) }}</b><small>配置 sha {{ item.config_hash.slice(0,10) }} · 未判定 {{ Number(item.summary?.unresolved||0) }}</small></div><a-tag :color="item.status==='passed'?'green':item.status==='blocked'?'red':'orange'">{{ item.status }}</a-tag></article></div>
+          </template>
+          <template v-else>
           <h3 class="subheading">待沉淀的真实反馈</h3><div class="table-head"><span>信号</span><span>反馈内容</span><span>操作人</span><span>发生时间</span></div>
           <div v-if="feedbackEvents.length" class="rows"><article v-for="item in feedbackEvents" :key="item.id"><a-tag :color="signalColor(item.signal)">{{ signalText(item.signal) }}</a-tag><div><b>{{ feedbackSummary(item) }}</b><small>{{ item.reason_code || '未填写原因编码' }}</small></div><span>{{ feedbackActor(item) }}</span><time>{{ formatDate(item.created_at) }}</time></article></div>
           <a-empty v-else description="暂无反馈信号"/>
+          </template>
         </section>
 
         <div v-else-if="workspace === 'evaluation'" class="split-view">
@@ -414,6 +432,10 @@
 
     <a-modal v-model:visible="showSuiteModal" title="新建评测集" ok-text="创建" @ok="confirmCreateSuite"><a-form :model="suiteForm" layout="vertical"><a-form-item label="名称" required><a-input v-model="suiteForm.name" placeholder="例如：代码审查回归集"/></a-form-item><a-form-item label="评测集类型"><a-select v-model="suiteForm.suite_type"><a-option v-for="(label,key) in suiteTypeLabels" :key="key" :value="key">{{ label }}</a-option></a-select></a-form-item><a-form-item label="任务类型"><a-select v-model="suiteForm.task_type"><a-option v-for="(label,key) in taskTypeLabels" :key="key" :value="key">{{ label }}</a-option></a-select></a-form-item><a-form-item label="描述"><a-textarea v-model="suiteForm.description"/></a-form-item></a-form></a-modal>
     <a-modal v-model:visible="showCandidateModal" title="从失败样本生成改进候选" ok-text="生成候选" @ok="confirmCreateCandidates"><a-form :model="candidateForm" layout="vertical"><a-form-item label="失败阈值"><a-slider v-model="candidateForm.threshold" :min="0" :max="1" :step="0.05"/></a-form-item><a-form-item label="最小失败样本数"><a-input-number v-model="candidateForm.minFailureCount" :min="1" :max="100"/></a-form-item></a-form></a-modal>
+    <a-modal v-model:visible="showAssetReviewModal" title="人工审核候选资产" width="760px" ok-text="提交审核" :ok-loading="assetReviewBusy" @ok="submitAssetReview">
+      <a-spin :loading="assetReviewLoading" style="width:100%"><template v-if="activeGoldCase"><a-alert type="warning">系统推荐仅供参考。本次人工结论、分区、分类和证据快照会写入审计；复核通过后才可进入冻结版本。</a-alert><div class="asset-review-facts"><article><small>候选</small><b>{{ activeGoldCase.title }}</b></article><article><small>当前状态</small><b>{{ activeGoldCase.state }}</b></article><article><small>推荐分区</small><b>{{ activeGoldCase.recommended_split || '未推荐' }}</b></article><article><small>隐私级别</small><b>{{ activeGoldCase.privacy_level }}</b></article></div><a-form layout="vertical"><a-form-item label="审核轮次"><a-radio-group v-model="assetReviewForm.round"><a-radio value="primary">初标</a-radio><a-radio value="review">负责人复核</a-radio></a-radio-group></a-form-item><a-form-item label="结论"><a-select v-model="assetReviewForm.conclusion"><a-option value="accepted">通过</a-option><a-option value="needs_changes">修改后通过</a-option><a-option value="rejected">驳回</a-option></a-select></a-form-item><a-form-item label="最终分区"><a-select v-model="assetReviewForm.split"><a-option value="gold">主集</a-option><a-option value="regression">回归集</a-option><a-option value="fresh">新鲜集</a-option><a-option value="challenge">专项挑战集</a-option></a-select></a-form-item><a-form-item label="业务分类"><a-input v-model="assetReviewForm.category" placeholder="例如 vote_submit"/></a-form-item><a-form-item label="标签（逗号分隔）"><a-input v-model="assetReviewForm.tagsText"/></a-form-item><a-form-item label="审核理由" required><a-textarea v-model="assetReviewForm.comment" :max-length="500" show-word-limit/></a-form-item></a-form><details class="asset-evidence"><summary>查看输入、期望与证据</summary><pre>{{ JSON.stringify({input:activeGoldCase.input_snapshot,expected:activeGoldCase.expected_output,evidence:activeGoldCase.evidence},null,2) }}</pre></details></template></a-spin>
+    </a-modal>
+    <a-modal v-model:visible="showTaxonomyModal" title="新建业务分类版本" ok-text="创建草稿" @ok="createTaxonomy"><a-alert type="warning">分类和关键场景由测试负责人维护；创建后需送审，再由测试负责人批准发布。</a-alert><a-form layout="vertical" style="margin-top:12px"><a-form-item label="业务范围"><a-input v-model="taxonomyForm.scope_key" placeholder="sse-evote"/></a-form-item><a-form-item label="版本"><a-input v-model="taxonomyForm.version" placeholder="1.0.0"/></a-form-item><a-form-item label="分类（每行一项）"><a-textarea v-model="taxonomyForm.categories"/></a-form-item><a-form-item label="关键场景（每行一项）"><a-textarea v-model="taxonomyForm.scenarios"/></a-form-item></a-form></a-modal>
     <a-modal v-model:visible="showGateOverrideModal" title="负责人强制放行" ok-text="确认放行" @ok="confirmGateOverride"><a-alert type="warning">放行会允许进入下一阶段，操作人和原因将被永久记录。</a-alert><a-form layout="vertical" style="margin-top:16px"><a-form-item label="放行原因" required><a-textarea v-model="gateOverride.reason" :max-length="500" show-word-limit placeholder="请说明风险、业务依据与后续补救措施"/></a-form-item></a-form></a-modal>
     <a-modal
       v-model:visible="showWorkflowStartModal"
@@ -434,22 +456,31 @@
         <a-spin :loading="catalogLoading" style="width:100%">
           <div class="pin-grid">
             <section v-for="item in catalog.stages" :key="item.stage" class="pin-block">
-              <header>
-                <b>{{ taskTypeLabels[item.stage] || item.label }}</b>
-                <small v-if="pinnedSkill(item.stage)">{{ pinnedSkill(item.stage)!.skill_name }} · {{ pinnedSkill(item.stage)!.version }}</small>
-                <small v-else class="missing">未选定</small>
-              </header>
-              <a-input v-model="pinSearch[item.stage]" size="small" allow-clear placeholder="搜索 Skill 包名或说明"/>
-              <div class="pin-list">
-                <button v-for="skill in pinCandidates(item.stage)" :key="skill.skill_id" type="button" :class="['pin-item',{selected:pins[item.stage]===skill.skill_id,blocked:!skill.runnable}]" @click="pins[item.stage]=skill.skill_id">
-                  <div>
-                    <b>{{ skill.skill_name }}</b>
-                    <a-tag v-if="skill.declared_stage && skill.declared_stage!==item.stage" size="small" color="orange">声明 {{ skill.declared_stage_label }}</a-tag>
-                    <a-tag v-if="!skill.runnable" size="small" color="gray">不可运行</a-tag>
+              <header><b>{{ taskTypeLabels[item.stage] || item.label }}</b><small>{{ pinCandidates(item.stage).length }} 个匹配版本</small></header>
+              <a-select
+                v-model="pins[item.stage]"
+                allow-search
+                allow-clear
+                :placeholder="`选择${taskTypeLabels[item.stage] || item.label} Skill 及版本`"
+                class="pin-select"
+                :not-found-content="`没有声明为${taskTypeLabels[item.stage] || item.label}的可用 Skill`"
+              >
+                <a-option
+                  v-for="skill in pinCandidates(item.stage)"
+                  :key="skill.skill_version_id"
+                  :value="skill.skill_version_id"
+                  :label="`${skill.skill_name} ${skill.version}`"
+                  :disabled="!skill.runnable"
+                >
+                  <div class="pin-option">
+                    <div class="pin-option-name"><b>{{ skill.skill_name }}</b><a-tag v-if="!skill.runnable" size="small" color="gray">不可运行</a-tag></div>
+                    <small class="pin-option-meta">{{ skill.version || '无版本' }}<template v-if="skill.package_sha256"> · sha {{ skill.package_sha256.slice(0,10) }}</template></small>
                   </div>
-                  <small>{{ skill.version || '无可用版本' }}<template v-if="skill.package_sha256"> · sha {{ skill.package_sha256.slice(0,10) }}</template></small>
-                </button>
-                <p v-if="!pinCandidates(item.stage).length" class="pin-empty">没有匹配的 Skill 包</p>
+                </a-option>
+              </a-select>
+              <div v-if="pinnedSkill(item.stage)" class="pin-selected">
+                <span>已选 {{ pinnedSkill(item.stage)!.skill_name }} · {{ pinnedSkill(item.stage)!.version }}</span>
+                <code>sha {{ pinnedSkill(item.stage)!.package_sha256.slice(0,10) }}</code>
               </div>
             </section>
           </div>
@@ -465,8 +496,8 @@
           </article>
         </div>
         <a-form layout="vertical" style="margin-top:16px">
-          <a-form-item label="流程标识 workflow_id" required extra="建议用可读标识，例如「交易网关-回归-20261002-01」。它会出现在流程列表、门禁留痕与链路图节点名上，UUID 不便人工核对。">
-            <a-input v-model="workflowForm.workflowId" placeholder="交易网关-回归-20261002-01" allow-clear/>
+          <a-form-item label="流程标识 workflow_id（可选）" extra="留空即由当前项目自动派生一个可读标识（如「fly:20261004-1330-a1b2」），无需手工编造或复制上下文 ID。也可以自己填一个便于人工核对的标识，例如「交易网关-回归-20261002-01」。">
+            <a-input v-model="workflowForm.workflowId" placeholder="留空自动派生" allow-clear/>
           </a-form-item>
         </a-form>
       </template>
@@ -778,8 +809,8 @@ import { useProjectStore } from '@/store/projectStore';
 import { SkillHubConsole, SkillManager } from '@/features/skills';
 import KnowledgeGraphView from '@/features/knowledge-graph/KnowledgeGraphView.vue';
 import { WORKFLOW_STAGES as DEFAULT_WORKFLOW_STAGES } from '@/features/skills/utils/stages';
-import { confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, downloadSkillPackage, downloadStageArtifact, evaluateWorkflowStage, evolveCaseReview, executeWorkflowStage, generateCandidatesFromRun, getGenerationOutputLineage, getProjectQualityCockpit, getStageOutput, getWorkflowStageCatalog, getWorkflowStatus, listCapabilityReleases, listCaseReviewEvolutionCandidates, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, overrideWorkflowStage, preflightCaseReviewEvolution, proposeCaseReviewOptimizations, confirmCaseReviewOptimizations, scoreWorkflowStage, startWorkflow, updateCandidateState, uploadStageFeedback } from './service';
-import type { CapabilityRelease, CaseReviewEvolutionCandidate, CaseReviewEvolutionPreflight, CaseReviewEvolutionResult, EvaluationResult, EvaluationRun, EvaluationSuite, ExecutionSpan, FailureAttribution, FeedbackEvent, GoldDataset, KnowledgeCandidate, OptimizationCandidate, OptimizationProposal, OptimizationProposalResult, OutputLineageView, ProjectQualityCockpit, ProjectQualityPerson, ProjectWorkflowView, RetrievalTrace, StageExecutionPlan, StageFeedbackResult, StageOutputView, StartWorkflowResult, WorkflowCatalogSkill, WorkflowStageCatalog, WorkflowStageGateView } from './types';
+import { annotateGoldCase, confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, createTestAssetTaxonomy, confirmHistoryImport, downloadSkillPackage, downloadStageArtifact, evaluateWorkflowStage, evolveCaseReview, executeWorkflowStage, freezeGoldDatasetVersion, generateCandidatesFromRun, getAssetCandidateStats, getGenerationOutputLineage, getGoldCase, getProjectQualityCockpit, getStageOutput, getWorkflowStageCatalog, getWorkflowStatus, listAnnotationConflicts, listAssetCandidateEvents, listCapabilityReleases, listCaseReviewEvolutionCandidates, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listGoldDatasetVersions, listHistoryImports, listHistoryReplays, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, listTestAssetTaxonomies, openFlywheelRun, overrideWorkflowStage, preflightCaseReviewEvolution, preflightHistoryImport, proposeCaseReviewOptimizations, publishTestAssetTaxonomy, confirmCaseReviewOptimizations, resolveAnnotationConflict, retryAssetCandidate, retryFailedAssetCandidates, scoreWorkflowStage, startHistoryReplay, startWorkflow, submitTestAssetTaxonomy, updateCandidateState, uploadStageFeedback } from './service';
+import type { AnnotationConflict, AssetCandidateEvent, AssetCandidateStats, CapabilityRelease, CaseReviewEvolutionCandidate, CaseReviewEvolutionPreflight, CaseReviewEvolutionResult, EvaluationResult, EvaluationRun, EvaluationSuite, ExecutionSpan, FailureAttribution, FeedbackEvent, GoldCase, GoldDataset, GoldDatasetVersion, HistoryImportBatch, HistoryReplay, KnowledgeCandidate, OptimizationCandidate, OptimizationProposal, OptimizationProposalResult, OutputLineageView, ProjectQualityCockpit, ProjectQualityPerson, ProjectWorkflowView, RetrievalTrace, StageExecutionPlan, StageFeedbackResult, StageOutputView, StartWorkflowResult, TestAssetTaxonomy, WorkflowCatalogSkill, WorkflowStageCatalog, WorkflowStageGateView } from './types';
 
 type Workspace='overview'|'single'|'workflow'|'gold'|'evaluation'|'attribution'|'optimization';
 type PrimaryView='agents'|'data'|'graph';
@@ -806,6 +837,15 @@ watch(()=>route.query.view,()=>{primaryView.value=routeView();workspace.value='o
 async function openData(target:Workspace){primaryView.value='data';quickMode.value='console';await router.replace({path:'/knowledge-evolution',query:{view:'data'}});workspace.value=target}
 const suites=ref<EvaluationSuite[]>([]),runs=ref<EvaluationRun[]>([]),results=ref<EvaluationResult[]>([]),feedbackEvents=ref<FeedbackEvent[]>([]),candidates=ref<KnowledgeCandidate[]>([]),allTraces=ref<RetrievalTrace[]>([]);
 const goldDatasets=ref<GoldDataset[]>([]),selectedSpans=ref<ExecutionSpan[]>([]),attributions=ref<FailureAttribution[]>([]),proposals=ref<OptimizationProposal[]>([]),releases=ref<CapabilityRelease[]>([]);
+const goldMode=ref<'review'|'datasets'|'history'|'feedback'>('review'),assetCandidateEvents=ref<AssetCandidateEvent[]>([]),assetCandidateStatus=ref(''),assetRetryId=ref(''),assetRetryBusy=ref(false);
+const emptyAssetCandidateStats=():AssetCandidateStats=>({total:0,pending:0,processing:0,needs_review:0,completed:0,failed:0,dead_letter:0});
+const assetCandidateStats=ref<AssetCandidateStats>(emptyAssetCandidateStats());
+const showAssetReviewModal=ref(false),assetReviewLoading=ref(false),assetReviewBusy=ref(false),activeGoldCase=ref<GoldCase|null>(null);
+const assetReviewForm=ref<{round:'primary'|'review';conclusion:'accepted'|'rejected'|'needs_changes';split:string;category:string;tagsText:string;comment:string}>({round:'primary',conclusion:'accepted',split:'regression',category:'',tagsText:'',comment:''});
+const goldVersions=ref<GoldDatasetVersion[]>([]),taxonomies=ref<TestAssetTaxonomy[]>([]),annotationConflicts=ref<AnnotationConflict[]>([]);
+const showTaxonomyModal=ref(false),taxonomyForm=ref({scope_key:'sse-evote',version:'1.0.0',categories:'',scenarios:''});
+const historyImports=ref<HistoryImportBatch[]>([]),historyReplays=ref<HistoryReplay[]>([]),historyBusy=ref(false),historyPreflight=ref<Record<string,any>|null>(null);
+const historyForm=ref({name:'',requirement:'',plan:'',caseFile:''});
 const emptyCockpit=():ProjectQualityCockpit=>({people:{leads:[],executors:[]},gold_by_type:{},single_capabilities:[],workflows:[],stage_order:[]});
 const cockpit=ref<ProjectQualityCockpit>(emptyCockpit());
 const suitesLoading=ref(false),selectedSuiteId=ref<string>(),selectedRunId=ref(''),selectedTraceId=ref(''),feedbackSignal=ref(''),candidateState=ref(''),traceTaskType=ref(''),traceStatus=ref(''),goldTaskType=ref(''),showSuiteModal=ref(false),showCandidateModal=ref(false),showGateOverrideModal=ref(false),gateBusy=ref('');
@@ -1023,29 +1063,22 @@ const workflowForm=ref({workflowId:''});
 const workflowStep=ref<1|2>(1),catalogLoading=ref(false);
 const emptyCatalog=():WorkflowStageCatalog=>({stage_order:[],all_stage_order:[],stages:[],skills:[]});
 const catalog=ref<WorkflowStageCatalog>(emptyCatalog());
-/** 阶段 → 选定的 Skill ID。这是发起动作的实质内容，会被原样送进 `pins`。 */
+/** 阶段 → 选定的 SkillVersion ID。这是发起动作的实质内容，会被原样送进 `pins`。 */
 const pins=ref<Record<string,string>>({});
-/** 阶段 → 搜索关键词。逐阶段独立，避免在"风险识别"里输入的词把"问题跟踪"的候选也筛掉。 */
-const pinSearch=ref<Record<string,string>>({});
-const skillById=(skillId:string):WorkflowCatalogSkill|undefined=>catalog.value.skills.find(v=>v.skill_id===skillId);
-const pinnedSkill=(stage:string):WorkflowCatalogSkill|undefined=>skillById(pins.value[stage]||'');
+const versionById=(versionId:string):WorkflowCatalogSkill|undefined=>catalog.value.skills.find(v=>v.skill_version_id===versionId);
+const pinnedSkill=(stage:string):WorkflowCatalogSkill|undefined=>versionById(pins.value[stage]||'');
 /**
- * 阶段候选：**不做声明阶段硬筛**，只把声明了本阶段的排前面。
- *
- * 硬筛会在主链路刚换阶段名时让向导一个候选都给不出来——现存包声明的还是旧阶段。
- * 「人选了它」本来就比「包里写了什么」更强（后端会把跨声明写进流程锁留痕）。
- * 不可运行的包也列出来并标注，让人看见"它在、但还不能用"，比它凭空消失好排查。
+ * 每个下拉框只呈现声明为当前阶段的 Skill 版本，避免方案生成里混入执行、报告等类型。
+ * 同一 Skill 的多个版本分别展示，由项目明确选择具体版本。
  */
 function pinCandidates(stage:string):WorkflowCatalogSkill[]{
-  const keyword=(pinSearch.value[stage]||'').trim().toLowerCase();
   return catalog.value.skills
-    .filter(v=>!keyword||v.skill_name.toLowerCase().includes(keyword)||v.description.toLowerCase().includes(keyword))
+    .filter(v=>v.declared_stage===stage)
     .slice()
     .sort((a,b)=>{
-      // 排序键必须显式标成元组：推断成 (string|number)[] 后 `da-db` 会被 TS 判为非法算术。
-      const rank=(item:WorkflowCatalogSkill):[number,number,string]=>[item.declared_stage===stage?0:1,item.runnable?0:1,item.skill_name];
-      const [da,ra,na]=rank(a),[db,rb,nb]=rank(b);
-      return da-db||ra-rb||na.localeCompare(nb);
+      if(a.runnable!==b.runnable)return a.runnable?-1:1;
+      const byName=a.skill_name.localeCompare(b.skill_name);
+      return byName||b.version.localeCompare(a.version,undefined,{numeric:true});
     });
 }
 /** 四阶段都选到了**可运行**的包才算选完。选了个锁不上的包等于没选——必须在这里拦住。 */
@@ -1053,7 +1086,6 @@ const pinsComplete=computed(()=>{
   const stages=catalog.value.stage_order;
   return stages.length>0&&stages.every(stage=>pinnedSkill(stage)?.runnable===true);
 });
-function suggestWorkflowId(){const d=new Date();return `回归-${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}-01`}
 async function loadStageCatalog(){
   if(!projectStore.currentProjectId)return;
   catalogLoading.value=true;
@@ -1061,17 +1093,18 @@ async function loadStageCatalog(){
     catalog.value=await getWorkflowStageCatalog(projectStore.currentProjectId);
     // 默认项取后端按 manifest 解析的包，不在前端自己挑一个"看起来最像"的：
     // 两处各写一套"哪个包管哪个阶段"，改一处就会出现默认项与实际锁定项不一致。
-    const nextPins:Record<string,string>={},nextSearch:Record<string,string>={};
+    const nextPins:Record<string,string>={};
     catalog.value.stages.forEach(item=>{
-      nextPins[item.stage]=item.default?.skill_id||'';
-      nextSearch[item.stage]='';
+      nextPins[item.stage]=item.default?.skill_version_id||'';
     });
-    pins.value=nextPins;pinSearch.value=nextSearch;
+    pins.value=nextPins;
   }catch{Message.error('加载阶段候选 Skill 失败')}
   finally{catalogLoading.value=false}
 }
 async function openWorkflowStart(){
-  workflowForm.value={workflowId:suggestWorkflowId()};
+  // 默认留空：workflow_id 由后端按「质量飞轮」入口派生（T06）。预填一个建议值会让人
+  // 以为"必须改点什么才能继续"，而这正是要消掉的"手工维护上下文 ID"负担。
+  workflowForm.value={workflowId:''};
   workflowStep.value=1;
   showWorkflowStartModal.value=true;
   await loadStageCatalog();
@@ -1092,11 +1125,16 @@ async function onWorkflowModalOk():Promise<boolean>{
   return confirmWorkflowStart();
 }
 async function confirmWorkflowStart():Promise<boolean>{
-  const workflowId=workflowForm.value.workflowId.trim();
-  if(!workflowId){Message.warning('请填写流程标识');return false}
   if(!projectStore.currentProjectId)return false;
+  let workflowId=workflowForm.value.workflowId.trim();
   workflowStarting.value=true;
   try{
+    if(!workflowId){
+      // 没填就由入口派生：页面不再要求用户先编一个流程标识（T06 / R4）。
+      // 派生规则只在后端一处，跨入口汇入同一条链才成立。
+      const opened=await openFlywheelRun({project:projectStore.currentProjectId,entry_type:'flywheel'});
+      workflowId=opened.workflow_id;
+    }
     workflowStartResult.value=await startWorkflow(projectStore.currentProjectId,workflowId,{...pins.value});
     showWorkflowStartModal.value=false;
     workflowStep.value=1;
@@ -1478,9 +1516,38 @@ async function loadSuites(){if(!projectStore.currentProjectId)return;suitesLoadi
 async function loadRuns(){runs.value=selectedSuiteId.value?await listEvaluationRuns(selectedSuiteId.value):[]}
 async function loadResults(){results.value=selectedRunId.value?await listEvaluationResults(selectedRunId.value):[]}
 async function loadFeedback(){try{feedbackEvents.value=await listFeedbackEvents({project:projectStore.currentProjectId||undefined,signal:feedbackSignal.value||undefined})}catch{Message.error('加载反馈信号失败')}}
+const assetCandidateStatusColor=(status:string)=>['completed','needs_review'].includes(status)?'green':status==='dead_letter'?'red':status==='failed'?'orange':status==='processing'?'blue':'gray';
+const assetCandidateTitle=(item:AssetCandidateEvent)=>String(item.payload?.title||item.payload?.name||item.signal||'待解析候选');
+const assetCandidatePreflight=(item:AssetCandidateEvent)=>{
+  const value=item.preflight||{};
+  if(value.privacy_blocked)return '隐私预检阻断，禁止进入优化资产';
+  if(value.conflict)return '检测到预期冲突，需人工仲裁';
+  if(value.duplicate)return '检测到重复资产，已执行合并预检';
+  return item.candidate?'已生成候选，等待人工初标与复核':'等待完整性、隐私和去重预检';
+};
+async function loadAssetCandidates(){
+  if(!projectStore.currentProjectId)return;
+  try{[assetCandidateEvents.value,assetCandidateStats.value]=await Promise.all([listAssetCandidateEvents(projectStore.currentProjectId,assetCandidateStatus.value||undefined),getAssetCandidateStats(projectStore.currentProjectId)])}
+  catch{Message.error('加载资产候选队列失败')}
+}
+async function retryOneAssetCandidate(id:string){assetRetryId.value=id;try{await retryAssetCandidate(id);await loadAssetCandidates();Message.success('候选事件已重新处理')}catch{Message.error('候选事件重试失败')}finally{assetRetryId.value=''}}
+async function retryAllAssetCandidates(){if(!projectStore.currentProjectId)return;assetRetryBusy.value=true;try{const result=await retryFailedAssetCandidates(projectStore.currentProjectId);await loadAssetCandidates();Message.success(`已重试 ${result.retried} 条候选事件`)}catch{Message.error('批量重试失败')}finally{assetRetryBusy.value=false}}
+async function openAssetReview(id:string){showAssetReviewModal.value=true;assetReviewLoading.value=true;activeGoldCase.value=null;try{const item=await getGoldCase(id);activeGoldCase.value=item;assetReviewForm.value={round:item.annotations.some(v=>v.round==='primary')?'review':'primary',conclusion:'accepted',split:item.recommended_split||item.split||'regression',category:'',tagsText:(item.recommended_tags||item.tags||[]).join(','),comment:''}}catch{Message.error('读取候选资产失败')}finally{assetReviewLoading.value=false}}
+async function submitAssetReview(){const item=activeGoldCase.value;if(!item)return false;if(!assetReviewForm.value.comment.trim()){Message.warning('请填写审核理由');return false}assetReviewBusy.value=true;try{await annotateGoldCase(item.id,{round:assetReviewForm.value.round,answer:item.expected_output,evidence:item.evidence,conclusion:assetReviewForm.value.conclusion,comment:assetReviewForm.value.comment.trim(),tags:assetReviewForm.value.tagsText.split(',').map(v=>v.trim()).filter(Boolean),split:assetReviewForm.value.split,category:assetReviewForm.value.category.trim()});showAssetReviewModal.value=false;await loadAssetCandidates();Message.success(assetReviewForm.value.round==='review'?'负责人复核已记录':'初标已记录，仍需负责人复核');return true}catch{Message.error('提交人工审核失败');return false}finally{assetReviewBusy.value=false}}
+async function loadDatasetGovernance(){if(!projectStore.currentProjectId)return;try{[taxonomies.value,annotationConflicts.value]=await Promise.all([listTestAssetTaxonomies(projectStore.currentProjectId),listAnnotationConflicts({state:'open'})]);if(!goldVersions.value.length&&goldDatasets.value[0])await selectGoldDataset(goldDatasets.value[0].id)}catch{Message.error('加载数据集治理信息失败')}}
+async function selectGoldDataset(id:string){try{goldVersions.value=await listGoldDatasetVersions(id)}catch{Message.error('加载数据集版本失败')}}
+async function freezeVersion(id:string){try{await freezeGoldDatasetVersion(id);await selectGoldDataset(goldVersions.value.find(v=>v.id===id)?.dataset||'');Message.success('数据集版本已冻结')}catch{Message.error('冻结失败：请检查双轮审核、冲突和关键场景覆盖')}}
+async function createTaxonomy(){if(!projectStore.currentProjectId||!taxonomyForm.value.scope_key||!taxonomyForm.value.version){Message.warning('请填写业务范围和版本');return false}try{await createTestAssetTaxonomy({project:projectStore.currentProjectId,scope_key:taxonomyForm.value.scope_key,version:taxonomyForm.value.version,categories:taxonomyForm.value.categories.split('\n').map(v=>v.trim()).filter(Boolean),critical_scenarios:taxonomyForm.value.scenarios.split('\n').map(v=>v.trim()).filter(Boolean)});showTaxonomyModal.value=false;await loadDatasetGovernance();Message.success('分类草稿已创建');return true}catch{Message.error('创建分类版本失败');return false}}
+async function submitTaxonomy(id:string){try{await submitTestAssetTaxonomy(id);await loadDatasetGovernance();Message.success('已送审')}catch{Message.error('送审失败')}}
+async function publishTaxonomy(id:string){try{await publishTestAssetTaxonomy(id);await loadDatasetGovernance();Message.success('分类版本已批准发布')}catch{Message.error('批准发布失败')}}
+async function arbitrateConflict(item:AnnotationConflict){const review=item.review_annotation;try{await resolveAnnotationConflict(item.id,{answer:review.answer,evidence:review.evidence,conclusion:review.conclusion,comment:'测试负责人仲裁：采用复核结论',tags:review.tags,split:review.split,category:review.category});await loadDatasetGovernance();Message.success('冲突已仲裁')}catch{Message.error('冲突仲裁失败')}}
+async function loadHistoryWorkspace(){if(!projectStore.currentProjectId)return;try{[historyImports.value,historyReplays.value]=await Promise.all([listHistoryImports(projectStore.currentProjectId),listHistoryReplays(projectStore.currentProjectId)])}catch{Message.error('加载历史回放工作区失败')}}
+async function preflightHistory(){if(!projectStore.currentProjectId)return;const form=historyForm.value;if(!form.requirement||!form.plan||!form.caseFile){Message.warning('需求、真实方案和真实用例文件均为必填');return}historyBusy.value=true;try{historyPreflight.value=await preflightHistoryImport(projectStore.currentProjectId,{name:form.name||'历史资料包',task_type:'testcase_generation',files:[{role:'requirement',file_id:Number(form.requirement)},{role:'plan',file_id:Number(form.plan)},{role:'case',file_id:Number(form.caseFile)}]})}catch{Message.error('历史包预检失败')}finally{historyBusy.value=false}}
+async function confirmHistory(){if(!projectStore.currentProjectId||!historyPreflight.value?.confirmation_token)return;historyBusy.value=true;try{await confirmHistoryImport(projectStore.currentProjectId,String(historyPreflight.value.confirmation_token));historyPreflight.value=null;await loadHistoryWorkspace();await loadAssetCandidates();Message.success('历史包已导入，候选已进入人工审核队列')}catch{Message.error('历史包确认导入失败')}finally{historyBusy.value=false}}
+async function startReplay(batch:string){if(!projectStore.currentProjectId)return;try{await startHistoryReplay({project:projectStore.currentProjectId,batch,workflow_id:`history-${batch}-${Date.now()}`,config:{mode:'structured_compare'}});await loadHistoryWorkspace();Message.success('隔离回放已启动')}catch{Message.error('启动历史回放失败')}}
 async function loadCandidates(){if(!projectStore.currentProjectId)return;try{candidates.value=await listKnowledgeCandidates({project:projectStore.currentProjectId,state:candidateState.value||undefined})}catch{Message.error('加载改进候选失败')}}
 async function loadTraces(){if(!projectStore.currentProjectId)return;try{allTraces.value=await listRetrievalTraces({project:projectStore.currentProjectId})}catch{Message.error('加载运行轨迹失败')}}
-async function loadGovernance(){if(!projectStore.currentProjectId)return;try{[goldDatasets.value,attributions.value,proposals.value,releases.value]=await Promise.all([listGoldDatasets(projectStore.currentProjectId),listFailureAttributions(projectStore.currentProjectId),listOptimizationProposals(projectStore.currentProjectId),listCapabilityReleases({project:projectStore.currentProjectId})])}catch{Message.error('加载飞轮治理数据失败')}}
+async function loadGovernance(){if(!projectStore.currentProjectId)return;try{[goldDatasets.value,attributions.value,proposals.value,releases.value]=await Promise.all([listGoldDatasets(projectStore.currentProjectId),listFailureAttributions(projectStore.currentProjectId),listOptimizationProposals(projectStore.currentProjectId),listCapabilityReleases({project:projectStore.currentProjectId})]);await loadAssetCandidates()}catch{Message.error('加载飞轮治理数据失败')}}
 async function loadCockpit(){if(!projectStore.currentProjectId)return;try{cockpit.value=await getProjectQualityCockpit(projectStore.currentProjectId)}catch{cockpit.value=emptyCockpit();Message.error('加载项目质量驾驶舱失败')}}
 async function selectTrace(v:RetrievalTrace){selectedTraceId.value=v.id;try{selectedSpans.value=await listExecutionSpans(v.id)}catch{selectedSpans.value=[];Message.error('加载节点轨迹失败')}}
 async function selectSuite(v:EvaluationSuite){selectedSuiteId.value=v.id;await loadRuns();if(runs.value[0])await selectRun(runs.value[0]);else{selectedRunId.value='';results.value=[]}}
@@ -1531,7 +1598,12 @@ const proposalTypeText=(v:string)=>({prompt:'Prompt',knowledge:'知识',retrieva
 function releaseStateColor(v:string){if(v==='active')return'green';if(['rejected','rolled_back'].includes(v))return'red';if(['shadow','awaiting_approval'].includes(v))return'orange';return'blue'}
 function gateSummary(v:CapabilityRelease){const report=v.gate_report||{};if(report.passed===true)return'已通过影子硬门禁';if(report.passed===false)return'未通过影子硬门禁';return'待执行影子对比'}
 const levels=['l0','l1','l2','l3'] as const;function scores(v:EvaluationResult){return levels.map(k=>[k,v[`${k}_score`]] as const).filter((p):p is readonly[typeof levels[number],number]=>typeof p[1]==='number')}function isFailure(v:EvaluationResult){return v.status==='failed'||scores(v).some(([,n])=>n<.5)}function failureSummary(v:EvaluationResult){if(v.error_message)return v.error_message;const s=scores(v);if(!s.length)return'执行失败，暂无评分';const [l,n]=s.reduce((a,b)=>b[1]<a[1]?b:a);return`${l.toUpperCase()} 得分 ${n.toFixed(2)} 低于门槛 0.50`}
-watch(()=>projectStore.currentProjectId,async id=>{if(id)await bootstrap()},{immediate:true});
+watch(()=>projectStore.currentProjectId,async id=>{
+  assetCandidateEvents.value=[];assetCandidateStats.value=emptyAssetCandidateStats();activeGoldCase.value=null;
+  goldVersions.value=[];taxonomies.value=[];annotationConflicts.value=[];historyImports.value=[];historyReplays.value=[];historyPreflight.value=null;
+  selectedSuiteId.value=undefined;selectedRunId.value='';selectedTraceId.value='';
+  if(id)await bootstrap();
+},{immediate:true});
 </script>
 
 <style scoped>
@@ -1542,6 +1614,8 @@ watch(()=>projectStore.currentProjectId,async id=>{if(id)await bootstrap()},{imm
 .toolbar p{max-width:780px;margin:6px 0 0;color:var(--color-text-3)}.trace-head,.trace-rows article{display:grid;grid-template-columns:120px minmax(260px,1fr) 150px 100px 80px 90px;align-items:center;gap:12px}.trace-head{padding:9px 12px;color:var(--color-text-3);background:var(--color-fill-1)}.trace-rows article{padding:13px 12px;border-bottom:1px solid var(--color-border-1)}.trace-rows b,.trace-rows small{display:block}.trace-rows small{margin-top:3px;color:var(--color-text-3)}
 .roadmap{display:flex;align-items:center;gap:12px;margin-top:18px;padding:14px;border:1px dashed rgb(var(--orange-5));border-radius:9px;background:rgb(var(--orange-1))}.roadmap>svg{flex:none;font-size:28px;color:var(--orange)}.roadmap>div{min-width:0;flex:1}.roadmap b,.roadmap small{display:block}.roadmap small{margin-top:4px;color:var(--color-text-3)}
 .subheading{margin:18px 0 10px;font-size:15px}.asset-strip{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-bottom:14px}.asset-strip>article{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px;border:1px solid var(--color-border-2);border-radius:8px;background:var(--color-fill-1)}.asset-strip b,.asset-strip small{display:block}.asset-strip small{margin-top:4px;color:var(--color-text-3)}.trace-rows article{cursor:pointer}.trace-rows article:hover,.trace-rows article.selected{background:rgb(var(--arcoblue-1))}.trace-detail{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(310px,.65fr);gap:14px;margin-top:18px;padding-top:16px;border-top:1px solid var(--color-border-2)}.trace-detail h3{margin:0 0 10px;font-size:15px}.span-line{display:grid;gap:7px}.span-line article{display:grid;grid-template-columns:10px 1fr auto;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--color-border-2);border-radius:8px;background:var(--color-fill-1)}.span-line i{width:8px;height:8px;border-radius:50%;background:var(--color-fill-4)}.span-line i.completed{background:#16a34a}.span-line i.failed{background:#ef4444}.span-line i.running{background:#1677ff}.span-line b,.span-line small{display:block}.span-line small{margin-top:3px;color:var(--color-text-3)}.trace-detail aside>article{margin-bottom:8px;padding:12px;border:1px solid var(--color-border-2);border-radius:8px}.trace-detail aside header{display:flex;justify-content:space-between;margin-bottom:8px}.trace-detail aside p{margin:6px 0;color:var(--color-text-2)}.trace-detail aside small{color:var(--color-text-3)}.governance-board{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}.governance-board>section{padding:14px;border:1px solid var(--color-border-2);border-radius:9px;background:var(--color-fill-1)}.mini-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}.mini-head span{display:grid;min-width:22px;height:22px;place-items:center;border-radius:11px;color:var(--blue);background:rgb(var(--arcoblue-1))}.governance-board section>article{margin-top:8px;padding:11px;border:1px solid var(--color-border-2);border-radius:7px;background:var(--color-bg-2)}.governance-board article>div{display:flex;justify-content:space-between}.governance-board article>b,.governance-board article>small{display:block;margin-top:8px}.governance-board article>p{margin:5px 0;color:var(--color-text-3)}.governance-board article>small{color:var(--color-text-3)}
+.asset-mode-tabs{display:flex;gap:6px;margin:14px 0}.asset-mode-tabs button{padding:8px 13px;border:1px solid var(--color-border-2);border-radius:7px;color:var(--color-text-2);background:var(--color-fill-1);cursor:pointer}.asset-mode-tabs button.active{border-color:var(--blue);color:var(--blue);background:rgb(var(--arcoblue-1))}.asset-mode-tabs b{margin-left:5px}.asset-queue-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-bottom:14px}.asset-queue-kpis article{padding:12px 14px;border-left:3px solid var(--blue);background:var(--color-fill-1)}.asset-queue-kpis article.warn{border-color:#ff7d00}.asset-queue-kpis article.bad{border-color:#f53f3f}.asset-queue-kpis small,.asset-queue-kpis b{display:block}.asset-queue-kpis small{color:var(--color-text-3)}.asset-queue-kpis b{margin-top:4px;font-size:20px}.asset-event-head,.asset-events article{display:grid;grid-template-columns:150px minmax(260px,1fr) 100px 140px 110px;align-items:center;gap:12px}.asset-event-head{padding:9px 12px;color:var(--color-text-3);background:var(--color-fill-1)}.asset-events article{padding:12px;border-bottom:1px solid var(--color-border-1)}.asset-events b,.asset-events small{display:block}.asset-events small{margin-top:3px;color:var(--color-text-3)}.asset-events p{margin:5px 0 0;color:#f53f3f;font-size:11px}.asset-event-result{color:var(--color-text-3);font-size:11px}
+.asset-review-facts{display:grid;grid-template-columns:2fr repeat(3,1fr);gap:8px;margin:14px 0}.asset-review-facts article{padding:10px;border:1px solid var(--color-border-2);border-radius:7px;background:var(--color-fill-1)}.asset-review-facts small,.asset-review-facts b{display:block}.asset-review-facts small{color:var(--color-text-3)}.asset-review-facts b{margin-top:4px}.asset-evidence{margin-top:10px}.asset-evidence summary{cursor:pointer;color:var(--blue)}.asset-evidence pre{max-height:260px;padding:12px;overflow:auto;border-radius:7px;background:#101828;color:#d1e9ff;font-size:11px}
 .rail-roles{margin-top:18px;padding-top:14px;border-top:1px solid var(--color-border-2)}.team-head,.team-head>div,.team-head button,.group-title,.person-main,.person-card footer,.person-card footer small{display:flex;align-items:center}.team-head{justify-content:space-between}.team-head>div{gap:8px}.team-head>div>i{width:4px;height:18px;border-radius:3px;background:var(--blue)}.team-head span{font-size:15px;font-weight:700;color:var(--color-text-1)}.team-head button{gap:4px;padding:4px;border:0;color:var(--blue);background:transparent;cursor:pointer}.team-head button:hover{color:rgb(var(--arcoblue-7))}.people-group{margin-top:16px}.people-group+.people-group{margin-top:20px;padding-top:18px;border-top:1px solid var(--color-border-2)}.group-title{justify-content:space-between;margin-bottom:9px}.group-title b{font-size:13px}.group-title span{padding:2px 7px;border-radius:10px;color:var(--color-text-3);background:var(--color-fill-2);font-size:11px}.person-card{margin-top:8px;padding:12px;border:1px solid var(--color-border-2);border-radius:9px;background:var(--color-fill-1);transition:border-color .16s ease,box-shadow .16s ease,transform .16s ease}.person-card:hover{border-color:rgb(var(--arcoblue-4));box-shadow:0 7px 18px rgb(22 93 255/8%);transform:translateY(-1px)}.person-main{gap:10px}.person-main>i{display:grid;width:38px;height:38px;flex:none;place-items:center;border-radius:50%;color:#fff;background:linear-gradient(145deg,#4080ff,#165dff);font-size:15px;font-style:normal;font-weight:700;box-shadow:0 4px 10px rgb(22 93 255/20%)}.executor-group .person-main>i{background:linear-gradient(145deg,#14c9c9,#0e8a98);box-shadow:0 4px 10px rgb(20 201 201/18%)}.person-main>div{min-width:0;flex:1}.person-main b,.person-main small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.person-main b{font-size:14px}.person-main small{margin-top:2px;color:var(--color-text-3);font-size:11px}.person-main em{flex:none;padding:3px 7px;border:1px solid rgb(var(--arcoblue-3));border-radius:5px;color:var(--blue);background:rgb(var(--arcoblue-1));font-size:10px;font-style:normal}.executor-group .person-main em{border-color:rgb(var(--cyan-3));color:rgb(var(--cyan-7));background:rgb(var(--cyan-1))}.person-card footer{justify-content:space-between;gap:7px;margin-top:10px;padding-top:9px;border-top:1px solid var(--color-border-1)}.person-card footer>span{min-width:0;color:var(--color-text-3);font-size:11px}.person-card footer small{flex:none;gap:4px;color:var(--color-text-3);font-size:10px}.person-card footer small i{width:6px;height:6px;border-radius:50%;background:#00b42a;box-shadow:0 0 0 3px rgb(var(--green-1))}.people-group :deep(.arco-empty){padding:10px 0}.people-group :deep(.arco-empty-image){display:none}.people-group :deep(.arco-empty-description){font-size:11px}
 .single-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.single-grid>article{padding:18px;border:1px solid var(--color-border-2);border-radius:9px;background:var(--color-fill-1)}.single-grid header{display:flex;align-items:flex-start;justify-content:space-between}.single-grid header>div{display:flex;align-items:center;gap:10px}.single-grid header span{display:grid;width:42px;height:42px;place-items:center;border-radius:8px;color:#fff;background:var(--blue);font-size:11px;font-weight:700}.single-grid h3{margin:0;font-size:16px}.single-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:20px 0}.single-stats span{padding:10px;border-radius:7px;text-align:center;background:var(--color-bg-2)}.single-stats b,.single-stats small{display:block}.single-stats b{font-size:21px}.single-stats small,.single-grid footer{color:var(--color-text-3)}
 .workflow-list{display:grid;gap:14px}.workflow-list>article{padding:16px;border:1px solid var(--color-border-2);border-radius:9px;background:var(--color-fill-1)}.workflow-list>article>header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}.workflow-list header b,.workflow-list header small{display:block}.workflow-list header small{margin-top:3px;color:var(--color-text-3)}/* 逐阶段步骤条：done=已放行、active/running/failed=当前步、todo=未轮到的灰步。
@@ -1662,20 +1736,16 @@ watch(()=>projectStore.currentProjectId,async id=>{if(id)await bootstrap()},{imm
 .wf-card-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
 .expert-group .person-main>i{background:linear-gradient(145deg,#7d5cff,#4e3bd6);box-shadow:none}
 .expert-state{color:#86909c}.expert-state.ok{color:#16a34a}.expert-state.bad{color:#ef4444}
-/* 发起向导第一步：四个阶段各一个搜索框，选完才给「下一步」 */
-.pin-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:16px}
-.pin-block{display:grid;gap:8px;padding:12px;border:1px solid #e5e6eb;border-radius:9px;background:#fafafa}
+/* 发起向导第一步：四阶段纵向排列；候选只在下拉框展开时出现 */
+.pin-grid{display:grid;grid-template-columns:1fr;gap:10px;margin-top:16px}
+.pin-block{display:grid;grid-template-columns:minmax(130px,180px) minmax(0,1fr);align-items:center;gap:10px 16px;padding:12px 14px;border:1px solid #e5e6eb;border-radius:9px;background:#fafafa}
 .pin-block header{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
 .pin-block header b{font-size:13px}
 .pin-block header small{overflow:hidden;color:#86909c;font-size:11px;text-overflow:ellipsis;white-space:nowrap}
-.pin-block header small.missing{color:#ff7d00}
-.pin-list{display:grid;gap:6px;max-height:190px;overflow:auto}
-.pin-item{display:grid;gap:3px;padding:8px 10px;border:1px solid #e5e6eb;border-radius:7px;color:inherit;background:#fff;font-family:inherit;text-align:left;cursor:pointer}
-.pin-item:hover{border-color:#94bfff}.pin-item.selected{border-color:#165dff;background:#f7faff}.pin-item.blocked{opacity:.6}
-.pin-item>div{display:flex;align-items:center;gap:6px}
-.pin-item b{overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}
-.pin-item>small{color:#86909c;font-size:10px}
-.pin-empty{margin:0;padding:8px 0;color:#86909c;font-size:11px;text-align:center}
+.pin-select{width:100%}
+.pin-option{display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;padding:2px 0}.pin-option-name{display:flex;min-width:0;align-items:center;gap:6px}.pin-option-name b{overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.pin-option-meta{flex:none;color:#86909c;font-size:10px;white-space:nowrap}
+.pin-selected{grid-column:2;display:flex;align-items:center;justify-content:space-between;gap:10px;color:#4e5969;font-size:11px}
+.pin-selected code{padding:1px 5px;border-radius:4px;color:#86909c;background:#f2f3f5;font-size:10px}
 .pin-warn{margin:12px 0 0;padding:9px 11px;border:1px dashed #ff7d00;border-radius:8px;color:#4e5969;background:#fff7e8;font-size:12px;line-height:1.7}
 .pin-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:16px}
 .pin-summary article{padding:10px;border:1px solid #e5e6eb;border-radius:8px;background:#fafafa}
@@ -1769,5 +1839,7 @@ watch(()=>projectStore.currentProjectId,async id=>{if(id)await bootstrap()},{imm
 .candidate-item header span{margin-left:auto;color:var(--color-text-3);font-size:11px}
 .candidate-hypothesis{margin:6px 0 0;color:var(--color-text-2);font-size:12px;line-height:1.7;white-space:pre-wrap}
 .candidate-actions{display:flex;gap:8px;margin-top:8px}
-@media(max-width:1080px){.wf-shell{grid-template-columns:1fr}.wf-flows{max-height:240px}.wf-stage-bar{grid-template-columns:repeat(2,minmax(0,1fr))}.wf-card-body,.pin-grid,.pin-summary{grid-template-columns:1fr}}
+.governance-columns{display:grid;grid-template-columns:1.1fr .9fr;gap:18px;margin-top:14px}.governance-columns h3{margin:0 0 10px;font-size:14px}.section-inline{display:flex;align-items:center;justify-content:space-between}.asset-strip .clickable{cursor:pointer}.governance-list{display:grid;gap:8px;margin-top:10px}.governance-list>article{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:10px;padding:11px 13px;border:1px solid #e5e6eb;border-radius:8px;background:#fafafa}.governance-list b,.governance-list small{display:block}.governance-list small{margin-top:3px;color:#86909c;font-size:11px}.history-entry{display:grid;grid-template-columns:1fr 1fr 1fr 1fr auto;gap:8px;margin:14px 0}.preflight-card{display:flex;align-items:center;flex-wrap:wrap;gap:14px;padding:13px;border:1px solid #94bfff;border-radius:8px;background:#f7faff}.preflight-card span{color:#4e5969;font-size:12px}.preflight-card pre{width:100%;max-height:180px;overflow:auto}.replay-list{margin-top:18px}
+@media(max-width:1080px){.governance-columns{grid-template-columns:1fr}.history-entry{grid-template-columns:1fr 1fr}.history-entry .arco-btn{grid-column:1/-1}}
+@media(max-width:1080px){.wf-shell{grid-template-columns:1fr}.wf-flows{max-height:240px}.wf-stage-bar{grid-template-columns:repeat(2,minmax(0,1fr))}.wf-card-body,.pin-summary{grid-template-columns:1fr}.pin-block{grid-template-columns:1fr}.pin-selected{grid-column:1}}
 </style>

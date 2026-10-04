@@ -2,6 +2,7 @@
 import logging
 import os
 import re
+import uuid
 from collections import Counter
 
 from django.db.models import Avg, Count, Sum
@@ -132,8 +133,8 @@ class WorkflowGateService:
         1. 每个阶段的**默认包**——沿用平台按 manifest 声明解析的结果，
            让不想逐个挑的人一路「下一步」就能发起。默认包取不到（没有包声明该阶段）
            时为 None，页面要如实显示"没有已声明该阶段的包"，而不是拿别的包顶替。
-        2. 项目里**全部可运行的包**（有一条 active 版本），带上版本号与包哈希；
-           声明了该阶段的排在前面。前端在本地按关键词过滤，不再多打一次接口。
+        2. 公开 Skill Hub 中的**全部版本**，带上版本号与包哈希；声明了该阶段的排在
+           前面。前端在本地按关键词过滤，项目选择具体版本后写入自己的流程锁。
 
         刻意**不按 manifest 声明硬筛候选**：主链路刚把阶段换成风险识别/问题跟踪，
         现存包声明的还是旧阶段，硬筛会让向导在这两个阶段一个候选都给不出来——
@@ -142,10 +143,8 @@ class WorkflowGateService:
         包不可运行（没有 active 版本）时仍然列出来，标 ``runnable=False``：
         让人看见"这个包在、但还不能用"，比它凭空消失更好排查。
         """
-        from skills.models import Skill, SkillVersion
-        from skills.runtime import SkillRuntimeResolver
+        from skills.models import SkillVersion
 
-        project_id = getattr(project, "pk", project)
         targets = list(stages or DEFAULT_WORKFLOW_STAGE_ORDER)
         unknown = [item for item in targets if item not in ALL_WORKFLOW_STAGE_SET]
         if unknown:
@@ -154,33 +153,17 @@ class WorkflowGateService:
         # 声明阶段要**连候选版本一起看**：一个包可能已经声明了阶段、
         # 只是还没激活版本。此时它的声明仍然是有用信息（"这个包本就打算干这件事"），
         # 只读活跃版本会让向导把它算成"没有包声明本阶段"，于是默认项空着。
-        latest_declared: dict[str, str] = {}
-        for skill_id, manifest in (
-            SkillVersion.objects
-            .filter(skill__project_id=project_id)
-            .order_by("created_at")
-            .values_list("skill_id", "manifest")
-        ):
-            stage = str((manifest or {}).get("stage") or "")
-            if stage:
-                latest_declared[str(skill_id)] = stage
-
         skills: list[dict] = []
-        for skill in (
-            Skill.objects
-            .filter(project_id=project_id)
-            .select_related("active_version", "active_version__release", "active_version__skill")
-            .order_by("name")
+        for version in (
+            SkillVersion.objects
+            .select_related("skill", "release")
+            .order_by("skill__name", "-created_at")
         ):
-            # 用运行时同一个解析器取"当前会用哪一版"：判据只能有一处定义，
-            # 否则页面会承诺"选它就能锁上"而实际锁不上（或反过来）。
-            # 注意它优先活跃版本、没有活跃版本时退到最新可运行版本——
-            # 未激活的包同样能跑，激活只是可选的钉版手段。
-            version = SkillRuntimeResolver.runnable_version(skill)
-            manifest = (getattr(version, "manifest", None) or {}) if version else {}
-            release = getattr(version, "release", None) if version else None
-            declared = str(manifest.get("stage") or "") or latest_declared.get(str(skill.pk), "")
-            runnable = version is not None
+            skill = version.skill
+            manifest = version.manifest or {}
+            release = version.release
+            declared = str(manifest.get("stage") or "") or str(skill.declared_stage or "")
+            runnable = bool(version.is_runnable)
             skills.append({
                 "skill_id": str(skill.pk),
                 "skill_name": skill.name,
@@ -192,10 +175,10 @@ class WorkflowGateService:
                 # 是 agent 侧的阶段命名，只覆盖主链路，不能拿来当 Skill 归属的展示真值。
                 "declared_stage_label": stage_display_label(declared),
                 "runnable": runnable,
-                "skill_version_id": str(version.pk) if version else "",
-                "version": str(version.version) if version else "",
+                "skill_version_id": str(version.pk),
+                "version": str(version.version),
                 "release_state": release.state if release is not None else "",
-                "package_sha256": str(version.package_sha256) if version else "",
+                "package_sha256": str(version.package_sha256),
                 "updated_at": skill.updated_at.isoformat() if skill.updated_at else "",
             })
 
@@ -206,7 +189,7 @@ class WorkflowGateService:
                 "stage": stage,
                 "label": cls.STAGE_LABELS.get(stage, stage),
                 "default": next((item for item in declared if item["runnable"]), None),
-                "declared_skill_ids": [item["skill_id"] for item in declared],
+                "declared_skill_ids": list(dict.fromkeys(item["skill_id"] for item in declared)),
                 "runnable_count": sum(1 for item in skills if item["runnable"]),
             })
         return {
@@ -427,6 +410,15 @@ class WorkflowGateService:
         stage = protocol.get("stage") or output.task_type
         if not workflow_id or stage not in ALL_WORKFLOW_STAGE_SET:
             return None
+        # 正式阶段产出是候选沉淀的第一类来源（T04 / P5）。入队幂等，重复登记同一产出
+        # 不会重复建候选；这里**只入队**，预检与建候选在统一处理器里做，
+        # 门禁登记本身不承担任何金标写入副作用。
+        try:
+            from .gold import AssetCandidateService
+
+            AssetCandidateService.enqueue_from_output(output)
+        except Exception:  # noqa: BLE001
+            logger.exception("正式阶段产出入候选队列失败，不影响门禁登记")
         # 无论门禁走到哪一步，都先把这一阶段的版本锁定补上：
         # 流水线若由 ``start_workflow`` 启动，锁在入口就已存在（幂等返回）；
         # 若历史链路或旁路调用直接产出了结果，这里补锁，产出才谈得上版本溯源。
@@ -839,7 +831,7 @@ class WorkflowGateService:
            否则问题要到跑了两小时之后的收口阶段才炸，前面阶段的算力与人工全部白费。
 
         Args:
-            pins: ``{stage: skill_id}``——发起流程向导里人**逐阶段选定**的包。
+            pins: ``{stage: skill_version_id}``——发起流程向导里人**逐阶段选定**的版本。
                 给了某阶段的包就以它为准，不再按 manifest 声明去筛阶段（新链路阶段
                 目前还没有包声明过，靠声明筛会一律落到"未登记"）。没给的阶段
                 沿用原有行为：按阶段解析当前可运行版本（有活跃版本则优先用它）。
@@ -872,11 +864,29 @@ class WorkflowGateService:
         # 按链路顺序遍历（ALL_WORKFLOW_STAGES 已是"新链路在前、历史阶段在后"），
         # 这样即使有人显式指定历史阶段，顺序也仍是确定的。
         for stage in [s for s in ALL_WORKFLOW_STAGES if s in targets]:
-            pinned_skill = requested_pins.get(stage)
+            pinned_ref = requested_pins.get(stage)
+            # 新协议传 SkillVersion ID；兼容存量调用方传 Skill ID。新前端只发送版本 ID，
+            # 因而不会再由运行时替用户猜活跃/最新版本。
+            pinned_version = None
+            pinned_skill = None
+            if pinned_ref:
+                from skills.models import SkillVersion
+
+                try:
+                    version_id = uuid.UUID(str(pinned_ref))
+                except (ValueError, TypeError, AttributeError):
+                    version_id = None
+                if version_id is not None:
+                    pinned_version = (
+                        SkillVersion.objects.filter(pk=version_id).first() or version_id
+                    )
+                else:
+                    pinned_skill = pinned_ref
             binding = TaskSkillBindingService.bind_stage(
                 project=project, workflow_id=workflow_id, stage=stage,
                 actor=actor, allow_unmanaged=allow_unmanaged,
-                skill=pinned_skill, allow_stage_mismatch=bool(pinned_skill),
+                skill=pinned_skill, skill_version=pinned_version,
+                allow_stage_mismatch=bool(pinned_ref),
             )
             bindings[stage] = binding
         return {

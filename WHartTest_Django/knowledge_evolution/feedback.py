@@ -258,7 +258,25 @@ class FeedbackService:
 
                 versions = KnowledgeVersion.objects.filter(id__in=version_ids)
                 event.knowledge_versions.set(versions)
+            self._enqueue_candidate(event)
             return event
+
+    @staticmethod
+    def _enqueue_candidate(event) -> None:
+        """把"该沉淀候选"的信号交给统一候选服务（T04）。
+
+        只入队、不建候选：预检与去重在处理器里做，且**必须**在业务事务提交后
+        才派发——反馈本身回滚了，候选也不该存在。这里同时吞掉异常，
+        理由是飞轮入队失败不能改变原业务反馈的结果（R9）。
+        """
+        try:
+            from .gold import AssetCandidateService
+
+            AssetCandidateService.enqueue_from_feedback(event)
+        except Exception:  # noqa: BLE001
+            import logging
+
+            logging.getLogger(__name__).exception("候选事件入队失败，不影响反馈写入")
 
     def record_accepted(self, reason: str = "") -> FeedbackEvent:
         """人工采纳生成结果。"""

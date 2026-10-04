@@ -9,6 +9,7 @@ from rest_framework.response import Response
 
 from .models import (
     AnnotationConflict,
+    AssetCandidateEvent,
     EvaluationResult,
     EvaluationRun,
     EvaluationSuite,
@@ -18,10 +19,18 @@ from .models import (
     GoldCase,
     GoldDataset,
     GoldDatasetVersion,
+    TestAssetTaxonomy,
+    FlywheelRun,
+    HistoryImportBatch,
+    HistoryReplay,
+    HistoryReplayDifference,
+    ProjectFlywheelSetting,
     KnowledgeCandidate,
     RetrievalTrace,
 )
 from .serializers import (
+    AnnotationConflictSerializer,
+    AssetCandidateEventSerializer,
     EvaluationResultSerializer,
     EvaluationRunSerializer,
     EvaluationSuiteSerializer,
@@ -41,6 +50,12 @@ from .serializers import (
     GoldCaseSerializer,
     GoldDatasetSerializer,
     GoldDatasetVersionSerializer,
+    TestAssetTaxonomySerializer,
+    FlywheelRunSerializer,
+    HistoryImportBatchSerializer,
+    HistoryReplaySerializer,
+    HistoryReplayDifferenceSerializer,
+    ProjectFlywheelSettingSerializer,
     EvaluationRubricSerializer,
     JudgeResultSerializer,
     ExecutionSpanSerializer,
@@ -90,6 +105,295 @@ class ProjectScopedReadOnlyViewSet(viewsets.ReadOnlyModelViewSet):
         if self.request.user.is_superuser:
             return queryset
         return queryset.filter(project_id__in=_project_ids(self.request.user))
+
+
+class ProjectFlywheelSettingViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = ProjectFlywheelSettingSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = ProjectFlywheelSetting.objects.select_related("project", "updated_by")
+        return queryset if self.request.user.is_superuser else queryset.filter(
+            project_id__in=_project_ids(self.request.user)
+        )
+
+    @action(detail=False, methods=["post"], url_path="set")
+    def set_flag(self, request):
+        project = get_object_or_404(__import__("projects.models", fromlist=["Project"]).Project,
+                                    pk=request.data.get("project"))
+        _ensure_test_lead(request.user, project.pk)
+        setting, _ = ProjectFlywheelSetting.objects.update_or_create(
+            project=project, defaults={"enabled": bool(request.data.get("enabled")),
+                                       "rollout_note": str(request.data.get("rollout_note") or ""),
+                                       "updated_by": request.user},
+        )
+        return Response(self.get_serializer(setting).data)
+
+
+class HistoryImportViewSet(ProjectScopedReadOnlyViewSet):
+    serializer_class = HistoryImportBatchSerializer
+    filterset_fields = ["project", "status"]
+
+    def get_queryset(self):
+        queryset = HistoryImportBatch.objects.select_related(
+            "project", "created_by", "confirmed_by",
+        ).prefetch_related("items__file")
+        return self.scoped(queryset)
+
+    @action(detail=False, methods=["post"])
+    def preflight(self, request):
+        from projects.models import Project
+        from .history_ingestion import HistoryIngestionService, flywheel_enabled
+        project = get_object_or_404(Project, pk=request.data.get("project"))
+        _ensure_project_member(request.user, project.pk)
+        if not flywheel_enabled(project):
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("当前项目未开启质量飞轮")
+        return Response(HistoryIngestionService.preflight(
+            project=project, manifest=request.data.get("manifest") or {},
+        ))
+
+    @action(detail=False, methods=["post"])
+    def confirm(self, request):
+        from projects.models import Project
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+        from .history_ingestion import HistoryIngestionService, flywheel_enabled
+        project = get_object_or_404(Project, pk=request.data.get("project"))
+        _ensure_test_lead(request.user, project.pk)
+        if not flywheel_enabled(project):
+            raise ValidationError("当前项目未开启质量飞轮")
+        try:
+            batch, created = HistoryIngestionService.confirm(
+                project=project, token=str(request.data.get("confirmation_token") or ""), actor=request.user,
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(self.get_serializer(batch).data, status=201 if created else 200)
+
+
+class HistoryReplayViewSet(ProjectScopedReadOnlyViewSet):
+    serializer_class = HistoryReplaySerializer
+    filterset_fields = ["project", "batch", "status"]
+
+    def get_queryset(self):
+        queryset = HistoryReplay.objects.select_related(
+            "project", "batch", "flywheel_run", "gold_version", "created_by",
+        ).prefetch_related("differences")
+        return self.scoped(queryset)
+
+    @action(detail=False, methods=["post"])
+    def start(self, request):
+        from projects.models import Project
+        from .history_ingestion import HistoryReplayService, flywheel_enabled
+        from rest_framework.exceptions import ValidationError
+        project = get_object_or_404(Project, pk=request.data.get("project"))
+        _ensure_test_lead(request.user, project.pk)
+        if not flywheel_enabled(project):
+            raise ValidationError("当前项目未开启质量飞轮")
+        batch = get_object_or_404(HistoryImportBatch, pk=request.data.get("batch"), project=project)
+        gold = None
+        if request.data.get("gold_version"):
+            gold = get_object_or_404(GoldDatasetVersion, pk=request.data["gold_version"])
+        replay = HistoryReplayService.create(
+            project=project, batch=batch, actor=request.user,
+            workflow_id=str(request.data.get("workflow_id") or f"history-{batch.pk}"),
+            gold_version=gold, config=request.data.get("config") or {},
+        )
+        return Response(self.get_serializer(replay).data, status=201)
+
+    @action(detail=True, methods=["post"], url_path="record-results")
+    def record_results(self, request, pk=None):
+        from .history_ingestion import HistoryReplayService
+        replay = self.get_object()
+        _ensure_test_lead(request.user, replay.project_id)
+        replay = HistoryReplayService.record(replay=replay, rows=request.data.get("rows") or [])
+        return Response(self.get_serializer(replay).data)
+
+    @action(detail=True, methods=["post"], url_path="decide-difference")
+    def decide_difference(self, request, pk=None):
+        from .history_ingestion import HistoryReplayService
+        replay = self.get_object()
+        _ensure_test_lead(request.user, replay.project_id)
+        difference = get_object_or_404(HistoryReplayDifference, pk=request.data.get("difference"), replay=replay)
+        difference = HistoryReplayService.decide(
+            difference=difference, actor=request.user,
+            decision=str(request.data.get("decision") or ""), note=str(request.data.get("note") or ""),
+        )
+        return Response(HistoryReplayDifferenceSerializer(difference).data)
+
+
+class FlywheelRunViewSet(viewsets.ModelViewSet):
+    serializer_class = FlywheelRunSerializer
+    permission_classes = [IsAuthenticated]
+    filterset_fields = ["project", "entry_type", "intent", "status", "workflow_id"]
+    search_fields = ["workflow_id"]
+
+    def get_queryset(self):
+        queryset = FlywheelRun.objects.select_related("project", "created_by")
+        return queryset if self.request.user.is_superuser else queryset.filter(
+            project_id__in=_project_ids(self.request.user)
+        )
+
+    def perform_create(self, serializer):
+        from .flywheel_context import FlywheelContextService
+
+        project = serializer.validated_data["project"]
+        _ensure_project_member(self.request.user, project.pk)
+        run = FlywheelContextService.create(
+            project=project,
+            workflow_id=serializer.validated_data["workflow_id"],
+            entry_type=serializer.validated_data["entry_type"],
+            actor=self.request.user,
+            intent=serializer.validated_data.get("intent", "production"),
+            requirement_document_ids=serializer.validated_data.get("requirement_document_ids", []),
+            metadata=serializer.validated_data.get("metadata", {}),
+        )
+        serializer.instance = run
+
+    def perform_update(self, serializer):
+        _ensure_project_member(self.request.user, serializer.instance.project_id)
+        if "project" in serializer.validated_data or "workflow_id" in serializer.validated_data:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("运行创建后不能修改 project 或 workflow_id")
+        serializer.save()
+
+    @action(detail=False, methods=["post"], url_path="open")
+    def open_run(self, request):
+        """四类入口统一的「创建或选择流程上下文」（T06 / R1、R2）。
+
+        为什么单独一个动作而不是让各入口自己 POST /flywheel-runs/：入口关心的不是
+        "建一条记录"，而是"在这个项目、这条链上接着干"。派生规则（entry_type+source_id
+        → workflow_id）必须唯一，否则同一份需求从需求页和 Agent 页各发起一次就会开出
+        两条链，四阶段产出再也拼不回一条可追溯链。
+        """
+        from .flywheel_context import FlywheelContextService
+
+        project_id = request.data.get("project")
+        if not project_id:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"project": "必须指定项目"})
+        _ensure_project_member(request.user, int(project_id))
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from projects.models import Project
+        project = get_object_or_404(Project, pk=int(project_id))
+        try:
+            result = FlywheelContextService.open(
+                project=project,
+                entry_type=request.data.get("entry_type", ""),
+                source_id=request.data.get("source_id", ""),
+                workflow_id=request.data.get("workflow_id", ""),
+                actor=request.user,
+                intent=request.data.get("intent", "production"),
+                requirement_document_ids=request.data.get("requirement_document_ids") or [],
+                metadata=request.data.get("metadata") or {},
+            )
+        except DjangoValidationError as exc:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError(exc.messages)
+        return Response(result)
+
+    @action(detail=True, methods=["post"], url_path="resolve-stage")
+    def resolve_stage(self, request, pk=None):
+        from .flywheel_context import FlywheelContextService
+
+        run = self.get_object()
+        _ensure_project_member(request.user, run.project_id)
+        try:
+            result = FlywheelContextService.resolve_stage(
+                run=run,
+                stage=request.data.get("stage"),
+                parent_output_ids=request.data.get("parent_output_ids") or [],
+            )
+        except Exception as exc:
+            from django.core.exceptions import ValidationError as DjangoValidationError
+            from rest_framework.exceptions import ValidationError
+            if isinstance(exc, DjangoValidationError):
+                raise ValidationError(exc.messages)
+            raise
+        return Response(result)
+
+
+class TestAssetTaxonomyViewSet(viewsets.ModelViewSet):
+    serializer_class = TestAssetTaxonomySerializer
+    permission_classes = [IsAuthenticated]
+    filterset_fields = ["project", "scope_key", "state"]
+
+    def get_queryset(self):
+        queryset = TestAssetTaxonomy.objects.select_related(
+            "project", "maintained_by", "approved_by",
+        )
+        return queryset if self.request.user.is_superuser else queryset.filter(
+            project_id__in=_project_ids(self.request.user)
+        )
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data["project"]
+        _ensure_test_lead(self.request.user, project.pk)
+        serializer.save(maintained_by=self.request.user)
+
+    def perform_update(self, serializer):
+        taxonomy = serializer.instance
+        _ensure_test_lead(self.request.user, taxonomy.project_id)
+        if taxonomy.state != "draft":
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("只有草稿分类版本可以编辑")
+        serializer.save()
+
+    @action(detail=True, methods=["post"])
+    def submit(self, request, pk=None):
+        taxonomy = self.get_object()
+        _ensure_test_lead(request.user, taxonomy.project_id)
+        if taxonomy.state != "draft":
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("只有草稿可以送审")
+        taxonomy.state = "review"
+        taxonomy.save(update_fields=["state", "updated_at"])
+        return Response(self.get_serializer(taxonomy).data)
+
+    @action(detail=True, methods=["post"])
+    def publish(self, request, pk=None):
+        import hashlib
+        import json
+
+        from django.utils import timezone
+        from rest_framework.exceptions import ValidationError
+
+        taxonomy = self.get_object()
+        _ensure_test_lead(request.user, taxonomy.project_id)
+        if taxonomy.state != "review":
+            raise ValidationError("只有待审批分类版本可以发布")
+        if not taxonomy.categories or not taxonomy.critical_scenarios:
+            raise ValidationError("发布前必须填写业务分类和关键场景清单")
+        payload = {
+            "scope_key": taxonomy.scope_key,
+            "version": taxonomy.version,
+            "categories": taxonomy.categories,
+            "critical_scenarios": taxonomy.critical_scenarios,
+        }
+        taxonomy.content_hash = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            .encode("utf-8")
+        ).hexdigest()
+        taxonomy.state = "published"
+        taxonomy.approved_by = request.user
+        taxonomy.approved_at = timezone.now()
+        taxonomy.save(update_fields=[
+            "state", "content_hash", "approved_by", "approved_at", "updated_at",
+        ])
+        return Response(self.get_serializer(taxonomy).data)
+
+    @action(detail=True, methods=["post"])
+    def retire(self, request, pk=None):
+        from rest_framework.exceptions import ValidationError
+
+        taxonomy = self.get_object()
+        _ensure_test_lead(request.user, taxonomy.project_id)
+        if taxonomy.state != "published":
+            raise ValidationError("只有已发布分类版本可以退役")
+        taxonomy.state = "retired"
+        taxonomy.save(update_fields=["state", "updated_at"])
+        return Response(self.get_serializer(taxonomy).data)
 
 
 class GoldDatasetViewSet(viewsets.ModelViewSet):
@@ -232,6 +536,12 @@ class GoldCaseViewSet(
                 evidence=request.data.get("evidence", []),
                 conclusion=request.data.get("conclusion", "accepted"),
                 comment=request.data.get("comment", ""),
+                # 治理结论（分区/分类/标签）随审核一起提交：T05 要求"审核动作写入
+                # 最终标签、分区、分类、理由与证据快照"。它们不是事后另一次编辑——
+                # 否则"这个分区是谁定的"就查不到了。
+                tags=request.data.get("tags"),
+                split=request.data.get("split", ""),
+                category=request.data.get("category", ""),
             )
         except DjangoValidationError as exc:
             raise ValidationError(exc.messages)
@@ -279,10 +589,74 @@ class AnnotationConflictViewSet(ProjectScopedReadOnlyViewSet):
                 evidence=request.data.get("evidence", []),
                 conclusion=request.data.get("conclusion", "accepted"),
                 comment=request.data.get("comment", ""),
+                tags=request.data.get("tags"),
+                split=request.data.get("split", ""),
+                category=request.data.get("category", ""),
             )
         except DjangoValidationError as exc:
             raise ValidationError(exc.messages)
         return Response(GoldAnnotationSerializer(annotation).data)
+
+
+class AssetCandidateViewSet(ProjectScopedReadOnlyViewSet):
+    """候选沉淀事件队列与失败补偿入口（T04）。
+
+    刻意**只读 + 显式重试**：事件状态由 ``AssetCandidateService`` 依据预检结果与
+    失败阈值决定。给客户端一个"直接改 status"的入口，等于把死信阈值与去重预检
+    变成可绕过的装饰——真正需要人工介入时，正确动作是重试或补齐缺件。
+    """
+
+    serializer_class = AssetCandidateEventSerializer
+    filterset_fields = ["project", "source_type", "status", "signal"]
+
+    def get_queryset(self):
+        queryset = AssetCandidateEvent.objects.select_related("project", "candidate")
+        if self.request.user.is_superuser:
+            return queryset
+        return queryset.filter(project_id__in=_project_ids(self.request.user))
+
+    @action(detail=False, methods=["get"], url_path="stats")
+    def stats(self, request):
+        """队列概览与死信告警计数（飞轮控制台轮询）。"""
+        from rest_framework.exceptions import ValidationError
+
+        from .gold import AssetCandidateService
+
+        raw = request.query_params.get("project")
+        if not raw:
+            raise ValidationError({"project": "必须指定项目"})
+        _ensure_project_member(request.user, int(raw))
+        return Response(AssetCandidateService.status_summary(int(raw)))
+
+    @action(detail=False, methods=["post"], url_path="retry")
+    def retry(self, request):
+        """批量重试本项目失败/死信事件（R9 的补偿入口）。"""
+        from rest_framework.exceptions import ValidationError
+
+        from .gold import AssetCandidateService
+
+        raw = request.data.get("project")
+        if not raw:
+            raise ValidationError({"project": "必须指定项目"})
+        project_id = int(raw)
+        _ensure_project_member(request.user, project_id)
+        statuses = request.data.get("statuses") or ["failed", "dead_letter"]
+        results = AssetCandidateService.retry_failed(
+            project_id=project_id, statuses=tuple(str(item) for item in statuses),
+            actor=request.user,
+        )
+        return Response({
+            "project_id": project_id, "retried": len(results), "results": results,
+        })
+
+    @action(detail=True, methods=["post"], url_path="retry")
+    def retry_one(self, request, pk=None):
+        from .gold import AssetCandidateService
+
+        event = self.get_object()
+        _ensure_project_member(request.user, event.project_id)
+        event = AssetCandidateService.retry(event, actor=request.user)
+        return Response(self.get_serializer(event).data)
 
 
 class EvaluationRubricViewSet(viewsets.ModelViewSet):
@@ -1485,6 +1859,17 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
         project_id = int(request.query_params["project"]); self._check(request, project_id)
         return Response(KnowledgeHealthService().inspect(project_id))
 
+    @action(detail=False, methods=["get"], url_path="candidate-alerts")
+    def candidate_alerts(self, request):
+        """候选队列与死信告警：控制台据此显示"有事件没处理成功"（T04 / R9）。
+
+        独立成接口而不是塞进 ``metrics``：死信是需要人工介入的运维信号，
+        与质量指标的生命周期不同——混在一起会让"指标页很健康"掩盖住积压的死信。
+        """
+        from .gold import AssetCandidateService
+        project_id = int(request.query_params["project"]); self._check(request, project_id)
+        return Response(AssetCandidateService.status_summary(project_id))
+
     @action(detail=False, methods=["get"], url_path="cockpit")
     def cockpit(self, request):
         from .operations import ProjectQualityCockpitService
@@ -1514,7 +1899,8 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
         只允许测试负责人启动：启动动作决定了整条链路用哪几个能力包，
         属于发布决策而非日常执行。
 
-        请求可带 ``pins``：``{"阶段": "Skill 的 UUID"}``——向导里人**逐阶段选定**的包。
+        请求可带 ``pins``：``{"阶段": "SkillVersion 的 UUID"}``——向导里人逐阶段
+        选定公开 Skill Hub 中的具体版本。
         不传则沿用"按 manifest 声明解析活跃版本"的旧行为，两种入口都要能用。
         """
         from django.core.exceptions import ValidationError as DjangoValidationError

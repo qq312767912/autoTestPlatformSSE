@@ -136,6 +136,7 @@ class TaskSkillBindingService:
     @classmethod
     def bind_stage(cls, *, project, workflow_id, stage: str, actor=None,
                    allow_unmanaged: bool = True, skill=None,
+                   skill_version=None,
                    allow_stage_mismatch: bool = False) -> dict:
         """锁定四阶段流水线中**某一个阶段**的 Skill 版本。
 
@@ -152,6 +153,8 @@ class TaskSkillBindingService:
                 - 不再按 manifest 声明去筛阶段（见 ``allow_stage_mismatch``）；
                 - 不再要求"项目登记过声明该阶段的包"——显式选择本身就是登记行为。
                 包不可运行（被停用/隔离/驳回）时仍然拒绝，不放行。
+            skill_version: 人从公开 Skill Hub 显式选中的具体版本。给出后不会再按
+                Skill 的活跃/最新版本解析，确保不同项目能锁定各自选择的版本。
             allow_stage_mismatch: 显式选中的包声明的阶段与所选阶段不一致时是否放行。
                 True 时把"声明了什么"与"实际用在哪个阶段"一起写进锁的 ``detail``，
                 保证事后能看出这是**人主动跨声明使用**，而不是系统静默用错包。
@@ -176,7 +179,21 @@ class TaskSkillBindingService:
         # Skill Hub 是公共目录，任何项目看到的是同一份内容，所以"平台有没有为这个
         # 阶段登记 Skill"也应当是全局判据。继续按项目过滤会导致"管理员在 A 项目
         # 补填的阶段，B 项目发起流程时仍报未登记"——表面填了、实际不生效。
-        if skill is not None:
+        if skill_version is not None:
+            from skills.models import SkillVersion
+
+            selected_version = (
+                SkillVersion.objects.select_related("skill")
+                .filter(pk=getattr(skill_version, "pk", skill_version))
+                .first()
+            )
+            if selected_version is None:
+                raise SkillBindingRefused("所选 Skill 版本不存在")
+            if skill is not None and selected_version.skill_id != getattr(skill, "pk", skill):
+                raise SkillBindingRefused("所选 Skill 版本不属于指定 Skill")
+            skill = selected_version.skill
+            registered = Skill.objects.filter(pk=skill.pk)
+        elif skill is not None:
             # 显式指定了包，就不再按声明挑：否则"新链路阶段还没有包声明它"会把
             # 人选好的包直接判成"未登记"，回落到无版本溯源的默认行为——
             # 这与用户的意图正好相反。
@@ -202,6 +219,7 @@ class TaskSkillBindingService:
                 project=project, workflow_id=str(workflow_id),
                 actor=actor if getattr(actor, "pk", None) else None,
                 scope="workflow", stage=stage, skill=skill,
+                skill_version=skill_version,
                 allow_stage_mismatch=allow_stage_mismatch,
             )
         except SkillRuntimeUnavailable as exc:

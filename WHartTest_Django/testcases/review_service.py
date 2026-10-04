@@ -770,6 +770,24 @@ def _recover_issues_from_checkpoint(review):
     return issues, pending, governance, int(checkpoint.get("total_chunks") or 0), len(checkpoint.get("uncovered") or {})
 
 
+def _resolve_review_workflow_id(review) -> str:
+    """用例审查该归到哪条流程链（T06 / R2）。
+
+    优先级：显式指定 > 汇入被审需求文档的链 > 返回空串表示"由入口自建一条"。
+
+    为什么优先"汇入需求链"：从需求文档发起的四阶段链里，用例审查是"用例"这一环的
+    质量动作。若它自开一条链，同一份需求的产出就散落在两个 workflow_id 下，
+    流程视图再也拼不回一条可追溯链——而"单一可追溯链"正是 T06 的验收口径。
+    """
+    explicit = str((review.summary or {}).get("flywheel_workflow_id") or "").strip()
+    if explicit:
+        return explicit
+    document_ids = [str(item) for item in (review.requirement_document_ids or []) if str(item)]
+    if len(document_ids) == 1:
+        return f"req:{document_ids[0]}"
+    return ""
+
+
 def _publish_to_evolution(review, issues=None, pending=None, governance=None,
                           total_chunks=None, uncovered_chunks=None, skill_version=None):
     """把已完成的用例审查结果发布到数据飞轮，幂等。
@@ -798,6 +816,23 @@ def _publish_to_evolution(review, issues=None, pending=None, governance=None,
         if review.started_at and review.completed_at:
             duration_ms = max(0, round((review.completed_at - review.started_at).total_seconds() * 1000))
         findings = build_review_findings(review, issues)
+        # 测试管理入口：先登记/选择流程上下文，再让产出挂到这条链上（T06 / R1、R2）。
+        # 登记失败不能阻断发布本身——审查结果已经算出来了，硬失败只会让人白跑一次；
+        # 退回按审查标识溯源，链路仍可读，只是缺"汇入需求链"这一层。
+        try:
+            from knowledge_evolution.flywheel_context import FlywheelContextService
+
+            workflow_id = FlywheelContextService.open(
+                project=review.project,
+                entry_type="test_management",
+                source_id=str(review.pk),
+                workflow_id=_resolve_review_workflow_id(review),
+                actor=review.creator,
+                requirement_document_ids=review.requirement_document_ids or [],
+            )["workflow_id"]
+        except Exception:
+            logger.exception("用例审查未能登记飞轮流程上下文，退回按审查标识溯源")
+            workflow_id = str(review.pk)
         envelope = ADAPTERS["case_review"].build(
             project=review.project,
             user=review.creator,
@@ -805,7 +840,7 @@ def _publish_to_evolution(review, issues=None, pending=None, governance=None,
             # 单能力任务也带上 workflow_id：Skill 版本锁是按
             # (project, workflow_id, lock_key) 定位的，不带它事后就找不到
             # "这次审查当时用的是哪一份包"。
-            workflow_id=str(review.pk),
+            workflow_id=workflow_id,
             input_summary=review.business_context or f"测试用例审查：{review.source_name}",
             output={
                 "summary": {k: v for k, v in (review.summary or {}).items() if k != "_checkpoint"},

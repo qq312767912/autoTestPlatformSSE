@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "workflow_id",
+    "stage",
+    "parent_output_ids",
+    "coverage",
+    "pass_rate",
+    "failure_distribution",
+    "unclosed_issues",
+    "artifacts"
+  ],
+  "properties": {
+    "workflow_id": {
+      "type": "string"
+    },
+    "stage": {
+      "const": "report_generation"
+    },
+    "parent_output_ids": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "string"
+      }
+    },
+    "coverage": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "pass_rate": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "failure_distribution": {
+      "type": [
+        "object",
+        "array"
+      ]
+    },
+    "unclosed_issues": {
+      "type": "array"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": true
+}

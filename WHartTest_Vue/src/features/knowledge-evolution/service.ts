@@ -32,6 +32,15 @@ import type {
   OptimizationProposalResult,
   OutputLineageView,
   StageFeedbackResult,
+  AssetCandidateEvent,
+  AssetCandidateStats,
+  GoldCase,
+  GoldAnnotation,
+  GoldDatasetVersion,
+  TestAssetTaxonomy,
+  AnnotationConflict,
+  HistoryImportBatch,
+  HistoryReplay,
 } from './types';
 
 const BASE = '/api/knowledge-evolution';
@@ -76,6 +85,49 @@ async function post<T>(path: string, data?: unknown): Promise<T> {
 
 async function patch<T>(path: string, data?: unknown): Promise<T> {
   return request<T>('patch', path, data);
+}
+
+const rows = <T>(data: T[] | { results: T[] }): T[] => Array.isArray(data) ? data : (data?.results ?? []);
+
+export async function listGoldDatasetVersions(dataset?: string): Promise<GoldDatasetVersion[]> {
+  return rows(await get<GoldDatasetVersion[] | {results:GoldDatasetVersion[]}>('/gold-dataset-versions/', dataset ? {dataset} : undefined));
+}
+export async function freezeGoldDatasetVersion(id: string): Promise<GoldDatasetVersion> {
+  return post<GoldDatasetVersion>(`/gold-dataset-versions/${id}/freeze/`);
+}
+export async function listGoldCases(params: {version?:string;state?:string}): Promise<GoldCase[]> {
+  return rows(await get<GoldCase[] | {results:GoldCase[]}>('/gold-cases/', params));
+}
+export async function listAnnotationConflicts(params?: {case?:string;state?:string}): Promise<AnnotationConflict[]> {
+  return rows(await get<AnnotationConflict[] | {results:AnnotationConflict[]}>('/annotation-conflicts/', params));
+}
+export async function resolveAnnotationConflict(id: string, payload: Record<string, unknown>): Promise<GoldAnnotation> {
+  return post<GoldAnnotation>(`/annotation-conflicts/${id}/resolve/`, payload);
+}
+export async function listTestAssetTaxonomies(project: number): Promise<TestAssetTaxonomy[]> {
+  return rows(await get<TestAssetTaxonomy[] | {results:TestAssetTaxonomy[]}>('/test-asset-taxonomies/', {project}));
+}
+export async function createTestAssetTaxonomy(payload: Partial<TestAssetTaxonomy>): Promise<TestAssetTaxonomy> {
+  return post<TestAssetTaxonomy>('/test-asset-taxonomies/', payload);
+}
+export async function submitTestAssetTaxonomy(id:string): Promise<TestAssetTaxonomy> { return post<TestAssetTaxonomy>(`/test-asset-taxonomies/${id}/submit/`); }
+export async function publishTestAssetTaxonomy(id:string): Promise<TestAssetTaxonomy> { return post<TestAssetTaxonomy>(`/test-asset-taxonomies/${id}/publish/`); }
+export async function listHistoryImports(project:number): Promise<HistoryImportBatch[]> {
+  return rows(await get<HistoryImportBatch[] | {results:HistoryImportBatch[]}>('/history-imports/', {project}));
+}
+export async function preflightHistoryImport(project:number, manifest:Record<string,unknown>): Promise<Record<string,unknown>> { return post('/history-imports/preflight/', {project,manifest}); }
+export async function confirmHistoryImport(project:number, confirmation_token:string): Promise<HistoryImportBatch> { return post('/history-imports/confirm/', {project,confirmation_token}); }
+export async function listHistoryReplays(project:number): Promise<HistoryReplay[]> {
+  return rows(await get<HistoryReplay[] | {results:HistoryReplay[]}>('/history-replays/', {project}));
+}
+export async function startHistoryReplay(payload:Record<string,unknown>): Promise<HistoryReplay> { return post('/history-replays/start/', payload); }
+export async function decideHistoryDifference(replayId:string,difference:string,decision:string,note=''): Promise<unknown> { return post(`/history-replays/${replayId}/decide-difference/`,{difference,decision,note}); }
+export async function getFlywheelSetting(project:number): Promise<{project:number;enabled:boolean;rollout_note:string}|null> {
+  const values=rows(await get<Array<{project:number;enabled:boolean;rollout_note:string}>|{results:Array<{project:number;enabled:boolean;rollout_note:string}>}>('/flywheel-settings/', {project}));
+  return values[0]||null;
+}
+export async function setFlywheelSetting(project:number,enabled:boolean,rollout_note=''): Promise<{project:number;enabled:boolean;rollout_note:string}> {
+  return post('/flywheel-settings/set/',{project,enabled,rollout_note});
 }
 
 export async function listEvaluationSuites(projectId: number): Promise<EvaluationSuite[]> {
@@ -179,6 +231,57 @@ export async function listGoldDatasets(projectId: number): Promise<GoldDataset[]
   return Array.isArray(data) ? data : (data?.results ?? []);
 }
 
+export async function listAssetCandidateEvents(projectId: number, status?: string): Promise<AssetCandidateEvent[]> {
+  const data = await get<AssetCandidateEvent[] | { results: AssetCandidateEvent[] }>('/asset-candidates/', {
+    project: projectId,
+    ...(status ? { status } : {}),
+  });
+  return Array.isArray(data) ? data : (data?.results ?? []);
+}
+
+export async function getAssetCandidateStats(projectId: number): Promise<AssetCandidateStats> {
+  const raw = await get<{ by_status?: Record<string, number> }>('/asset-candidates/stats/', { project: projectId });
+  const counts = raw.by_status ?? {};
+  const value = (key: string) => Number(counts[key] ?? 0);
+  return {
+    total: Object.values(counts).reduce((sum, count) => sum + Number(count || 0), 0),
+    pending: value('pending'),
+    processing: value('processing'),
+    needs_review: value('needs_review'),
+    completed: value('completed'),
+    failed: value('failed'),
+    dead_letter: value('dead_letter'),
+  };
+}
+
+export async function retryAssetCandidate(eventId: string): Promise<AssetCandidateEvent> {
+  return post<AssetCandidateEvent>(`/asset-candidates/${eventId}/retry/`);
+}
+
+export async function retryFailedAssetCandidates(projectId: number): Promise<{ project_id: number; retried: number }> {
+  return post<{ project_id: number; retried: number }>('/asset-candidates/retry/', {
+    project: projectId,
+    statuses: ['failed', 'dead_letter'],
+  });
+}
+
+export async function getGoldCase(id: string): Promise<GoldCase> {
+  return get<GoldCase>(`/gold-cases/${id}/`);
+}
+
+export async function annotateGoldCase(id: string, data: {
+  round: 'primary' | 'review';
+  answer: Record<string, unknown>;
+  evidence: unknown[];
+  conclusion: 'accepted' | 'rejected' | 'needs_changes';
+  comment: string;
+  tags: string[];
+  split: string;
+  category: string;
+}): Promise<GoldAnnotation> {
+  return post<GoldAnnotation>(`/gold-cases/${id}/annotate/`, data);
+}
+
 export async function listExecutionSpans(traceId: string): Promise<ExecutionSpan[]> {
   const data = await get<ExecutionSpan[] | { results: ExecutionSpan[] }>('/execution-spans/', { trace: traceId });
   return Array.isArray(data) ? data : (data?.results ?? []);
@@ -273,12 +376,11 @@ export async function getStageOutput(projectId: number, workflowId: string, stag
 /**
  * 启动四阶段流水线：后端会**一次性锁定四个阶段的 Skill 版本**。
  *
- * `pins` 是「阶段 → Skill ID」：向导里人逐个阶段显式选包时传进来。
+ * `pins` 是「阶段 → SkillVersion ID」：向导里人逐个阶段显式选具体版本时传进来。
  * 不传则沿用后端按 manifest 声明的默认解析（保持老调用方的行为不变）。
  *
- * 为什么允许人选到"声明的是别的阶段"的包：主链路刚换过阶段名，现存包声明的还是旧阶段，
- * 按声明硬筛会让向导一个候选都给不出来。人选它比包里写了什么更强，但后端会把
- * `pinned` / `declared_stage` / `stage_mismatch` 写进流程锁留痕——见 `mismatched_stages`。
+ * 发起向导按 `declared_stage` 严格分组，只允许从当前阶段的下拉列表选择具体版本；
+ * 同一 Skill 的多个版本分别作为候选，最终选中的 SkillVersion ID 会被锁进本次流程。
  *
  * 返回值里的 `unmanaged_stages` 必须展示给发起人——它列出项目尚未登记
  * 可用 Skill 版本、因而没有版本溯源的阶段。等跑到报告阶段才暴露这个问题，
@@ -290,6 +392,39 @@ export async function startWorkflow(projectId: number, workflowId: string, pins?
     workflow_id: workflowId,
     ...(pins && Object.keys(pins).length ? { pins } : {}),
   });
+}
+
+/** 四类入口统一的「创建或选择流程上下文」结果。 */
+export interface FlywheelRunContext {
+  run_id: string;
+  project_id: number;
+  workflow_id: string;
+  entry_type: string;
+  intent: string;
+  status: string;
+  /** 本次是否新建了流程（false = 汇入了已有链）。 */
+  created: boolean;
+  /** workflow_id 是否由后端派生（true = 用户没填、由入口自动生成）。 */
+  derived: boolean;
+}
+
+/**
+ * 创建或选择流程上下文（T06）。
+ *
+ * 页面**不再要求用户手工填/复制 workflow_id**：不传 `workflow_id` 时后端按
+ * `entry_type + source_id` 确定性派生（人工入口给可读的唯一标识）。派生规则只在
+ * 后端一处，否则同一份需求从需求页和飞轮页各发起一次就会开出两条链。
+ */
+export async function openFlywheelRun(payload: {
+  project: number;
+  entry_type: 'requirement' | 'chat' | 'test_management' | 'flywheel' | 'history_replay';
+  source_id?: string;
+  workflow_id?: string;
+  requirement_document_ids?: string[];
+  intent?: string;
+  metadata?: Record<string, unknown>;
+}): Promise<FlywheelRunContext> {
+  return post<FlywheelRunContext>('/flywheel-runs/open/', payload);
 }
 
 /**

@@ -60,6 +60,61 @@ GATE_SCORABLE_STATES = frozenset({"pending", "unscored", "passed", "failed"})
 GATE_HUMAN_FINAL_STATES = frozenset({"confirmed", "overridden"})
 
 
+class FlywheelRun(models.Model):
+    """跨需求、Agent、测试管理和飞轮入口共享的项目级流程上下文。"""
+
+    ENTRY_CHOICES = [
+        ("requirement", "需求管理"),
+        ("chat", "Agent 对话"),
+        ("test_management", "测试管理"),
+        ("flywheel", "质量飞轮"),
+        ("history_replay", "历史回放"),
+    ]
+    INTENT_CHOICES = [
+        ("production", "生产流程"),
+        ("history_replay", "历史回放"),
+        ("shadow_evaluation", "影子评测"),
+    ]
+    STATUS_CHOICES = [
+        ("draft", "草稿"),
+        ("running", "运行中"),
+        ("completed", "已完成"),
+        ("failed", "失败"),
+        ("cancelled", "已取消"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        "projects.Project", on_delete=models.CASCADE, related_name="flywheel_runs",
+    )
+    workflow_id = models.CharField(max_length=128, db_index=True)
+    entry_type = models.CharField(max_length=24, choices=ENTRY_CHOICES)
+    intent = models.CharField(max_length=24, choices=INTENT_CHOICES, default="production")
+    requirement_document_ids = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="draft", db_index=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="flywheel_runs",
+    )
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "workflow_id"], name="uniq_flywheel_run_project_workflow",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["project", "status", "updated_at"], name="ke_run_proj_status_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.project_id}/{self.workflow_id}"
+
+
 class WorkflowStageGate(models.Model):
     STAGE_CHOICES = WORKFLOW_STAGE_CHOICES
     #: 状态机真值。新增状态时**必须**同时看本文件顶部的 GATE_*_STATES——

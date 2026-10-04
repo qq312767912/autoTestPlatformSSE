@@ -476,7 +476,7 @@ def record_test_execution(execution) -> tuple[str, str] | None:
             if execution.status == "completed" and not execution.failed_count and not execution.error_count
             else "test_failed"
         )
-        FeedbackEvent.objects.get_or_create(
+        feedback, _ = FeedbackEvent.objects.get_or_create(
             idempotency_key=f"test-execution:{execution.pk}:{execution.status}",
             defaults={
                 "project": execution.suite.project,
@@ -489,6 +489,12 @@ def record_test_execution(execution) -> tuple[str, str] | None:
                 "actor_type": "system",
             },
         )
+        # 测试失败是"平台漏了"的客观信号，必须自动沉淀候选（T04 / R10）。
+        # 这条反馈是直接 ``get_or_create`` 的产物、不走 ``FeedbackService``，
+        # 所以入队要在这里显式补一次，否则"测试失败"这一路永远没有候选。
+        from .gold import AssetCandidateService
+
+        AssetCandidateService.enqueue_from_feedback(feedback)
     except Exception:
         logger.exception("记录测试执行反馈失败，不影响测试主流程")
     return ids

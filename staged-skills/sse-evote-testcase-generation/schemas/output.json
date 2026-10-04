@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "workflow_id",
+    "stage",
+    "parent_output_ids",
+    "coverage",
+    "test_cases",
+    "artifacts"
+  ],
+  "properties": {
+    "workflow_id": {
+      "type": "string"
+    },
+    "stage": {
+      "const": "testcase_generation"
+    },
+    "parent_output_ids": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "coverage": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "test_cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "case_id",
+          "plan_item_ids",
+          "steps",
+          "expected_results",
+          "priority",
+          "execution_mode"
+        ]
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": true
+}

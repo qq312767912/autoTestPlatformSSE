@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "workflow_id",
+    "output_root"
+  ],
+  "properties": {
+    "workflow_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requirements": {
+      "type": [
+        "string",
+        "object",
+        "array",
+        "null"
+      ]
+    },
+    "page_structure": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "website_url": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uri"
+    },
+    "historical_context": {
+      "type": [
+        "object",
+        "array",
+        "null"
+      ]
+    },
+    "auth_reference": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "output_root": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "anyOf": [
+    {
+      "required": [
+        "requirements"
+      ]
+    },
+    {
+      "required": [
+        "page_structure"
+      ]
+    }
+  ],
+  "additionalProperties": true
+}

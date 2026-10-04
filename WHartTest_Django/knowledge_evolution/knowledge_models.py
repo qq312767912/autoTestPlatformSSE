@@ -1150,6 +1150,11 @@ class KnowledgeAuditLog(models.Model):
         ("submit_approval", "提交审批"),
         ("approve", "审批通过"),
         ("reject", "驳回"),
+        # T05：金标资产的人工审核与版本冻结必须各自可追溯。"复核/仲裁"与
+        # "冻结"是两类责任完全不同的动作——前者是判断样本对错，后者是宣布
+        # 这批数据从此不可变。挤进 "transition" 就分不出谁批准了、谁只是过手。
+        ("annotate", "人工审核"),
+        ("freeze", "冻结版本"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

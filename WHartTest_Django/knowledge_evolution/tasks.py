@@ -56,3 +56,18 @@ def snapshot_monthly_flywheel_metrics():
     from .operations import FlywheelMetricsService
     service = FlywheelMetricsService()
     return [service.summarize(project_id) for project_id in Project.objects.values_list("id", flat=True)]
+
+
+@shared_task(bind=True, ignore_result=False)
+def process_asset_candidate_event(self, event_id: str):
+    """处理一条候选事件：预检 → 去重 → 建/并候选（T04）。
+
+    刻意**不**让 Celery 自动重试：处理失败的原因（来源被清理、跨项目引用、
+    缺阻断性证据）大多不是"重试就会好"。失败尝试与死信由
+    ``AssetCandidateService`` 自己记，重试走显式接口，这样"重试过几次、
+    为什么进死信"在飞轮控制台是可见的，而不是散在 worker 日志里。
+    """
+    from .gold import AssetCandidateService
+
+    event = AssetCandidateService.process_by_id(event_id)
+    return {"event_id": str(event_id), "status": getattr(event, "status", "missing")}

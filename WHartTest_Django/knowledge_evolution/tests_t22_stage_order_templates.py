@@ -302,9 +302,21 @@ class StageCatalogTests(WorkflowBaseTests):
         listed = {item["skill_id"]: item for item in self._catalog()["skills"]}[str(skill.pk)]
 
         self.assertFalse(listed["runnable"])
-        self.assertEqual(listed["version"], "")
+        # 公开版本库仍展示被隔离版本的身份，只禁止选择运行。
+        self.assertEqual(listed["version"], version.version)
         # 声明仍然要看得见：候选版本已经声明了阶段。
         self.assertEqual(listed["declared_stage"], "testcase_generation")
+
+    def test_catalog_lists_versions_uploaded_from_other_projects(self):
+        """Skill Hub 是公开仓库，上传来源项目不构成目录读取边界。"""
+        _skill, version = self.make_skill_version(
+            name="public-from-other-project", version="1.0.0",
+            stage=CURRENT[0], project=self.other_project,
+        )
+
+        version_ids = {item["skill_version_id"] for item in self._catalog()["skills"]}
+
+        self.assertIn(str(version.pk), version_ids)
 
     def test_unknown_stage_is_rejected(self):
         with self.assertRaises(ValidationError):

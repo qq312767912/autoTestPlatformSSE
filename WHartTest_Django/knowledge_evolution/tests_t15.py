@@ -75,6 +75,47 @@ class StartWorkflowTests(WorkflowBaseTests):
             self.assertEqual(lock.scope, "workflow")
             self.assertEqual(lock.package_sha256, versions[stage].package_sha256)
 
+    def test_projects_can_lock_different_versions_from_public_skill_hub(self):
+        """公开仓库共享版本；项目隔离的是选择和流程锁。"""
+        from skills.runtime import SkillRuntimeResolver
+
+        stage = STAGES[0]
+        _skill, version_v1 = self.make_skill_version(
+            name="public-stage-skill", version="1.0.0", stage=stage,
+        )
+        _skill, version_v2 = self.make_skill_version(
+            name="public-stage-skill", version="2.0.0", stage=stage,
+        )
+
+        WorkflowGateService.start_workflow(
+            project=self.project, workflow_id="wf-project-a", actor=self.lead,
+            stages=[stage], pins={stage: str(version_v1.pk)},
+        )
+        WorkflowGateService.start_workflow(
+            project=self.other_project, workflow_id="wf-project-b", actor=self.lead,
+            stages=[stage], pins={stage: str(version_v2.pk)},
+        )
+
+        lock_a = WorkflowSkillLock.objects.get(
+            project=self.project, workflow_id="wf-project-a", stage=stage,
+        )
+        lock_b = WorkflowSkillLock.objects.get(
+            project=self.other_project, workflow_id="wf-project-b", stage=stage,
+        )
+        self.assertEqual(lock_a.skill_version_id, version_v1.pk)
+        self.assertEqual(lock_b.skill_version_id, version_v2.pk)
+        self.assertEqual(SkillRuntimeResolver.resolve_locked(lock_b).pk, version_v2.pk)
+
+        # 商店出现更新版本，也不能让已启动流程漂移。
+        self.make_skill_version(name="public-stage-skill", version="3.0.0", stage=stage)
+        repeated = WorkflowGateService.start_workflow(
+            project=self.project, workflow_id="wf-project-a", actor=self.lead,
+            stages=[stage], pins={stage: str(version_v2.pk)},
+        )
+        self.assertEqual(
+            repeated["bindings"][stage]["skill_version_id"], str(version_v1.pk),
+        )
+
     def test_unregistered_stages_are_reported_not_faked(self):
         """项目一个阶段的 Skill 都没登记 → 必须如实报"未纳入版本管理"。"""
         result = WorkflowGateService.start_workflow(

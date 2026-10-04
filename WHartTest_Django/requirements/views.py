@@ -85,6 +85,11 @@ class RequirementDocumentViewSet(BaseModelViewSet):
         if self.action == "get_image":
             return []
 
+        # 发起飞轮流程只登记/选择流程上下文，不改文档本身，所以不套 Django 模型
+        # 「add」权限：那会让普通成员无法从需求页发起，而"发起"正是执行人员的动作。
+        if self.action == "flywheel_run":
+            return [IsAuthenticated(), IsProjectMemberForRequirement()]
+
         # 获取基础权限（用户认证 + Django模型权限）
         base_permissions = super().get_permissions()
 
@@ -466,6 +471,42 @@ class RequirementDocumentViewSet(BaseModelViewSet):
                 },
             }
         )
+
+    @action(detail=True, methods=["post"], url_path="flywheel-run")
+    def flywheel_run(self, request, pk=None):
+        """需求文档入口：为本文档创建或选择飞轮流程上下文（T06 / R1、R2）。
+
+        需求文档是"四阶段单一可追溯链"的自然起点，所以这里派生出的 workflow_id 是
+        确定的 ``req:<文档 ID>``：方案 / 用例 / 执行 / 报告四个阶段随后都汇入同一条链，
+        而不是各自开一条。用户不需要（也不应该）手工复制这个 ID。
+
+        不传 ``workflow_id`` 就按文档派生；传了表示要并入一条已有的链（例如同一需求
+        的二期迭代）。两种情况的返回值都带 ``created``/``derived``，页面可如实回显。
+        """
+        document = self.get_object()
+        from knowledge_evolution.flywheel_context import FlywheelContextService
+
+        try:
+            result = FlywheelContextService.open(
+                project=document.project,
+                entry_type="requirement",
+                source_id=str(document.id),
+                workflow_id=request.data.get("workflow_id", ""),
+                actor=request.user,
+                intent=request.data.get("intent", "production"),
+                requirement_document_ids=[str(document.id)],
+                metadata={"document_title": document.title or ""},
+            )
+        except Exception as exc:  # noqa: BLE001
+            from django.core.exceptions import ValidationError as DjangoValidationError
+            if isinstance(exc, DjangoValidationError):
+                return Response({"detail": exc.messages}, status=status.HTTP_400_BAD_REQUEST)
+            logger.exception("需求文档发起飞轮流程失败")
+            return Response(
+                {"detail": "发起飞轮流程失败，请稍后重试"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        return Response(result)
 
     @action(detail=True, methods=["post"], url_path="split-modules")
     def split_modules(self, request, pk=None):

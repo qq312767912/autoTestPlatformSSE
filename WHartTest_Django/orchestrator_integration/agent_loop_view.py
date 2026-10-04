@@ -1014,10 +1014,22 @@ class AgentLoopStreamAPIView(View):
                     capability = None
             adapter = ADAPTERS[module_key]
             workflow_id = (
-                (getattr(request, "_flywheel_workflow_id", "") or session_id)
+                (getattr(request, "_flywheel_workflow_id", "") or "")
                 if module_key in WORKFLOW_MODULE_KEYS
                 else ""
             )
+            if module_key in WORKFLOW_MODULE_KEYS and not workflow_id:
+                # 未显式指定流程时，用「Agent 对话」入口按会话确定性派生一条真正的
+                # FlywheelRun。不能继续把 session_id 直接当 workflow_id：那样这条链
+                # 只存在于产出的 metadata 里，流程列表、门禁留痕与链路图都看不到它，
+                # "四类入口统一创建/选择 FlywheelRun"（T06 / R1）就落不到实处。
+                from knowledge_evolution.flywheel_context import FlywheelContextService
+
+                context = await sync_to_async(FlywheelContextService.open)(
+                    project=project, entry_type="chat", source_id=str(session_id or ""),
+                    actor=request.user,
+                )
+                workflow_id = context["workflow_id"]
             skill_version = await sync_to_async(self._bind_stage_skill)(
                 project=project, workflow_id=workflow_id, stage=module_key,
                 actor=request.user,
