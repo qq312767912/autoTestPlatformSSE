@@ -167,6 +167,10 @@
             <template #title>
               <span @click="handleTestManagementClick">{{ testManagementMenuLabel }}</span>
             </template>
+            <a-menu-item key="test-plans" v-if="hasTestcasesPermission">
+              <template #icon><icon-file /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/test-plans')">{{ planGenerationMenuLabel }}</a>
+            </a-menu-item>
             <a-menu-item key="testcases" v-if="hasTestcasesPermission">
               <template #icon><icon-code-block /></template>
               <a href="#" @click="checkProjectAndNavigate($event, '/testcases')">{{ caseManagementMenuLabel }}</a>
@@ -423,6 +427,7 @@ const knowledgeEvolutionMenuLabel = computed(() => (locale.value === 'en-US' ? '
 const apiKeysMenuLabel = computed(() => (locale.value === 'en-US' ? 'Keys' : tl('KEY管理')));
 const testManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Testing' : tl('测试管理')));
 const caseManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Cases' : tl('用例管理')));
+const planGenerationMenuLabel = computed(() => (locale.value === 'en-US' ? 'Plan Analysis' : '方案分析'));
 const caseReviewMenuLabel = computed(() => (locale.value === 'en-US' ? 'Case Review' : tl('用例审查')));
 const suitesMenuLabel = computed(() => (locale.value === 'en-US' ? 'Suites' : tl('测试套件')));
 const executionHistoryMenuLabel = computed(() => (locale.value === 'en-US' ? 'History' : tl('执行历史')));
@@ -487,6 +492,7 @@ const activeMenu = computed(() => {
   if (path.startsWith('/ui-automation')) return 'ui-automation';
   if (path.startsWith('/testsuites')) return 'testsuites'; // 添加对测试套件路由的识别
   if (path.startsWith('/test-executions')) return 'test-executions'; // 添加对执行历史路由的识别
+  if (path.startsWith('/test-plans')) return 'test-plans';
   if (path.startsWith('/testcases')) return 'testcases';
   if (path.startsWith('/testcase-reviews')) return 'testcase-reviews';
   if (path.startsWith('/users')) return 'users';

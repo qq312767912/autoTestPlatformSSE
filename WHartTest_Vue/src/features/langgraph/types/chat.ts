@@ -34,6 +34,9 @@ export interface ChatRequest {
   runtime_mode?: string;
   resolved_source?: string;
   resolved_bundle_id?: number;
+  skill_version_id?: string;
+  workflow_id?: string;
+  parent_output_ids?: string[];
 }
 
 /**

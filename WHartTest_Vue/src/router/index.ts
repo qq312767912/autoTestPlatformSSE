@@ -9,6 +9,7 @@ import OrganizationManagementView from '../views/OrganizationManagementView.vue'
 import PermissionManagementView from '../views/PermissionManagementView.vue'; // 导入权限管理页面组件。
 import ProjectManagementView from '../views/ProjectManagementView.vue'; // 导入项目管理页面组件。
 import TestCaseManagementView from '../views/TestCaseManagementView.vue'; // 导入测试用例管理页面组件。
+import TestPlanGenerationView from '../views/TestPlanGenerationView.vue';
 import TestSuiteManagementView from '../views/TestSuiteManagementView.vue'; // 导入测试套件管理页面组件。
 import TestExecutionHistoryView from '../views/TestExecutionHistoryView.vue'; // 导入测试执行历史页面组件。
 import LlmConfigManagementView from '@/features/langgraph/views/LlmConfigManagementView.vue'; // 导入 LLM 配置管理页面组件。
@@ -73,6 +74,11 @@ const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束�
         path: 'permissions', // 定义权限管理子路径。
         name: 'PermissionManagement', // 定义权限管理路由名称。
         component: PermissionManagementView, // 指定权限管理页面组件。
+      },
+      {
+        path: 'test-plans',
+        name: 'TestPlanGeneration',
+        component: TestPlanGenerationView,
       },
       {
         path: 'testcases', // 定义测试用例管理子路径。

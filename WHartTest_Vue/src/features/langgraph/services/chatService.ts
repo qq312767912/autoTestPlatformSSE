@@ -393,7 +393,8 @@ async function refreshAccessToken(): Promise<string | null> {
 export async function sendChatMessageStream(
   data: ChatRequest,
   onStart: (sessionId: string) => void, // 简化回调，只保留 onStart
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onError?: (message: string) => void
 ): Promise<void> {
   const authStore = useAuthStore();
   let token = authStore.getAccessToken;
@@ -419,8 +420,10 @@ export async function sendChatMessageStream(
 
     // 真正的错误
     console.error('Stream error:', error);
+    const message = error?.message || '流式请求失败';
+    onError?.(message);
     if (sessionId && activeStreams.value[sessionId]) {
-      activeStreams.value[sessionId].error = error.message || '流式请求失败';
+      activeStreams.value[sessionId].error = message;
       activeStreams.value[sessionId].isComplete = true;
     }
   };
@@ -463,7 +466,14 @@ export async function sendChatMessageStream(
     }
 
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      let message = `请求失败（HTTP ${response.status}）`;
+      try {
+        const payload = await response.json();
+        message = payload?.message || payload?.detail || payload?.error || message;
+      } catch {
+        // Keep the status-based fallback when the server does not return JSON.
+      }
+      throw new Error(message);
     }
 
     const reader = response.body?.getReader();
