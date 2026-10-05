@@ -11,7 +11,7 @@ export const useSystemConfigStore = defineStore('systemConfig', () => {
     name: 'WHartTest',
     login_title: 'WHartTest',
     login_subtitle: 'AI自动化测试平台',
-    login_tags: 'AI 智能生成, RAG 知识库, MCP 工具调用, Skills 技能库, Playwright 自动化, LangGraph',
+    login_tags: 'AI 智能生成, RAG 知识库, MCP 工具调用, Skills 技能库, Playwright 自动化, LangGraph, 代码审查, 知识图谱, 数据飞轮, Skill 自进化',
     logo_url: '',
     brand_badge_enabled: true,
     brand_badge_url: defaultBrandBadgeUrl,

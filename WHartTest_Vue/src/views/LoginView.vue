@@ -221,12 +221,16 @@ const brandSubtitle = computed(() => {
 })
 const featureTags = computed(() => {
   const configTags = systemConfigStore.getLoginTags
-  if (configTags && configTags.length > 0) {
-    return configTags
-  }
-  return isEnglish.value
-    ? ['AI generation', 'RAG knowledge base', 'MCP tool calling', 'Skills library', 'Playwright automation', 'LangGraph', 'API automation']
-    : ['AI 智能生成', 'RAG 知识库', 'MCP 工具调用', 'Skills 技能库', 'Playwright 自动化', 'LangGraph', '接口自动化']
+  const defaults = isEnglish.value
+    ? ['AI generation', 'RAG knowledge base', 'MCP tool calling', 'Skills library', 'Playwright automation', 'LangGraph', 'Code review', 'Knowledge graph', 'Data flywheel', 'Skill self-evolution']
+    : ['AI 智能生成', 'RAG 知识库', 'MCP 工具调用', 'Skills 技能库', 'Playwright 自动化', 'LangGraph', '代码审查', '知识图谱', '数据飞轮', 'Skill 自进化']
+  if (!configTags?.length) return defaults
+  // 历史环境保存的自定义标签可能早于新能力上线：保留自定义顺序，
+  // 同时确保已交付的核心能力不会因旧配置而从登录页消失。
+  const required = isEnglish.value
+    ? ['Code review', 'Knowledge graph', 'Data flywheel']
+    : ['代码审查', '知识图谱', '数据飞轮']
+  return [...configTags, ...required.filter(tag => !configTags.includes(tag))]
 })
 const launcherTitle = computed(() => (
   isEnglish.value ? 'Account Login' : '账号登录'

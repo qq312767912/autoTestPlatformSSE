@@ -263,7 +263,7 @@ const authStore = useAuthStore();
 const systemConfigStore = useSystemConfigStore();
 const { t, tl } = useAppI18n();
 const DEFAULT_LOGIN_SUBTITLE = '小麦智测自动化平台';
-const DEFAULT_LOGIN_TAGS = 'AI 智能生成, RAG 知识库, MCP 工具调用, Skills 技能库, Playwright 自动化, LangGraph, 接口自动化';
+const DEFAULT_LOGIN_TAGS = 'AI 智能生成, RAG 知识库, MCP 工具调用, Skills 技能库, Playwright 自动化, LangGraph, 代码审查, 知识图谱, 数据飞轮, Skill 自进化';
 const DEFAULT_BRAND_BADGE_URL = getPublicAssetUrl('PE.svg');
 
 const hasViewPermission = computed(() => authStore.hasPermission('accounts.view_systemconfig'));

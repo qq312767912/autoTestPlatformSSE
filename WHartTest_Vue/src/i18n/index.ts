@@ -800,6 +800,7 @@ const LEGACY_EXACT_EN_MAP: Record<string, string> = {
   '请输入以 http/https 开头的完整图片地址，或 data:image/png;base64,... 图片编码': 'Enter an image URL or Base64 string.',
   '支持完整的图片 URL 地址，或直接贴入 Base64 编码的图标，留空则自动回退至默认的麦穗图标。': 'Supports image URL or Base64. Leave blank to use the default logo.',
   '小麦智测自动化平台': 'WheatTest Automation Platform',
+  'AI 智能生成, RAG 知识库, MCP 工具调用, Skills 技能库, Playwright 自动化, LangGraph, 代码审查, 知识图谱, 数据飞轮, Skill 自进化': 'AI Generation, RAG Knowledge Base, MCP Tool Calling, Skills Library, Playwright Automation, LangGraph, Code Review, Knowledge Graph, Data Flywheel, Skill Self-Evolution',
   'AI 智能生成, RAG 知识库, MCP 工具调用, Skills 技能库, Playwright 自动化, LangGraph': 'AI Generation, RAG Knowledge Base, MCP Tool Calling, Skills Library, Playwright Automation, LangGraph',
   'AI 智能生成, RAG 知识库, MCP 工具调用, Skills 技能库, Playwright 自动化, LangGraph, 接口自动化': 'AI Generation, RAG Knowledge Base, MCP Tool Calling, Skills Library, Playwright Automation, LangGraph, API Automation',
   '平台全局用户审计日志，用于审计和跟踪所有非只读性操作，保障系统的安全与合规。': 'Platform-wide user audit logs, used to audit and track all non-read-only operations to ensure system security and compliance.',

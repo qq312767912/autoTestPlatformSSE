@@ -372,7 +372,9 @@ const startAutomationTask = (
         duration: 10000,
         id: `${notificationIdPrefix}-${sessionId}`,
       });
-    }
+    },
+    undefined,
+    (message) => Message.error(message)
   );
 };
 
@@ -983,7 +985,7 @@ const executeUiTestCaseWithAutoHealing = async (
           const requestData: ChatRequest = {
             message,
             project_id: String(currentProjectId.value),
-            module_key: 'testcase_execution',
+            module_key: 'test_execution',
             use_knowledge_base: false,
             test_case_id: testCase.id,
           };
@@ -1173,7 +1175,7 @@ const handleExecuteConfirm = async (options: ExecuteConfirmOptions) => {
   const requestData: ChatRequest = {
     message,
     project_id: String(currentProjectId.value),
-    module_key: 'testcase_execution',
+    module_key: 'test_execution',
     use_knowledge_base: false,
     // Playwright 脚本生成参数
     generate_playwright_script: options.generatePlaywrightScript,
