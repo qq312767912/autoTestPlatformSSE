@@ -31,6 +31,7 @@ from .views import (
     OptimizationExperimentViewSet,
     OptimizationProposalViewSet,
     FlywheelRunViewSet,
+    StageExecutionAttemptViewSet,
     TestAssetTaxonomyViewSet,
     AssetCandidateViewSet,
     HistoryImportViewSet,
@@ -68,6 +69,9 @@ router.register("failure-attributions", FailureAttributionViewSet, basename="fai
 router.register("optimization-proposals", OptimizationProposalViewSet, basename="optimization-proposal")
 router.register("optimization-experiments", OptimizationExperimentViewSet, basename="optimization-experiment")
 router.register("flywheel-runs", FlywheelRunViewSet, basename="flywheel-run")
+# T01 §4.4 的 ``/stage-attempts/{id}/`` 与 ``/stage-attempts/{id}/retry/``：
+# 执行尝试即使在正式产出之前也必须可查，失败记录必须保留。
+router.register("stage-attempts", StageExecutionAttemptViewSet, basename="stage-attempt")
 router.register("test-asset-taxonomies", TestAssetTaxonomyViewSet, basename="test-asset-taxonomy")
 # 设计 §6.2 的 ``/asset-candidates/retry/``：候选事件队列 + 失败补偿入口（T04）。
 router.register("asset-candidates", AssetCandidateViewSet, basename="asset-candidate")

@@ -60,6 +60,68 @@ GATE_SCORABLE_STATES = frozenset({"pending", "unscored", "passed", "failed"})
 GATE_HUMAN_FINAL_STATES = frozenset({"confirmed", "overridden"})
 
 
+# ---------------------------------------------------------------- 执行尝试状态机真值
+#
+# 与上面的 ``GATE_*_STATES`` 同样的理由，这些集合必须是**模块级**的：
+# attempt 的状态机是"谁能改谁"的唯一判据。散进 service / view 各写一遍，
+# 必然出现"接口放行、模型不放行"这种两套说法——而 attempt 的错状态会直接把
+# 飞轮的"运行中/已产出/失败"显示带偏，比门禁状态更难人工发现。
+
+#: 执行尝试的状态集合。
+#:
+#: ``output_published`` 与 ``completed`` 刻意分开："Agent 已正式提交产出"和
+#: "这一轮执行已收尾"是两件事——产出提交之后还要绑定 ``output``、重算门禁、
+#: 登记候选，任一步失败都会让 attempt 停在 ``output_published``。
+#: 合并成一个状态，就再也看不出它卡在哪一步。
+ATTEMPT_STATUS_CHOICES = [
+    ("planned", "已计划"),
+    ("dispatched", "已派发"),
+    ("running", "运行中"),
+    ("output_published", "已发布产出"),
+    ("completed", "已完成"),
+    ("failed", "失败"),
+    ("cancelled", "已取消"),
+    ("timed_out", "已超时"),
+]
+
+#: 终态：落在这些状态之后不再允许流转。
+#:
+#: 失败/取消/超时同样是终态，不是"中间态"——它们各自有独立的失败原因留痕，
+#: 需要继续跑就**新建一条 attempt**（``retry_of`` 指回来）。允许把 ``failed``
+#: 直接改成 ``completed``，等于让一次失败从记录里消失。
+ATTEMPT_TERMINAL_STATES = frozenset({"completed", "failed", "cancelled", "timed_out"})
+
+#: 非终态集合（= 还在链路上）。飞轮据此显示"进行中"，
+#: 重复派发判定据此判断"这一轮是不是还活着"。
+ATTEMPT_ACTIVE_STATES = frozenset(
+    status for status, _ in ATTEMPT_STATUS_CHOICES
+) - ATTEMPT_TERMINAL_STATES
+
+#: 合法迁移表：**只能前进，或转向某个失败终态**。
+#:
+#: 回退（``running`` → ``dispatched``）和跨终态更新（``failed`` → ``completed``）
+#: 在这里被挡掉，而不是靠每个调用方自己记得判断。终态的出边为空集，
+#: 这正是"禁止跨终态更新"的实现方式。
+ATTEMPT_TRANSITIONS = {
+    "planned": frozenset({"dispatched", "cancelled", "failed", "timed_out"}),
+    "dispatched": frozenset({"running", "cancelled", "failed", "timed_out"}),
+    "running": frozenset({
+        "output_published", "completed", "failed", "cancelled", "timed_out",
+    }),
+    # 刚发布产出就收尾是正常路径；发布之后才发现绑定/校验失败也算 failed。
+    "output_published": frozenset({"completed", "failed"}),
+    "completed": frozenset(),
+    "failed": frozenset(),
+    "cancelled": frozenset(),
+    "timed_out": frozenset(),
+}
+
+
+def attempt_transition_allowed(current: str, target: str) -> bool:
+    """状态迁移的唯一判定入口。未知状态一律不放行。"""
+    return target in ATTEMPT_TRANSITIONS.get(current, frozenset())
+
+
 class FlywheelRun(models.Model):
     """跨需求、Agent、测试管理和飞轮入口共享的项目级流程上下文。"""
 
@@ -248,3 +310,109 @@ class WorkflowSkillLock(models.Model):
     def __str__(self) -> str:
         version = self.skill_version.version if self.skill_version_id else "-"
         return f"{self.workflow_id}/{self.lock_key} -> {version}"
+
+
+class StageExecutionAttempt(models.Model):
+    """一次阶段执行的尝试记录（T01 / R4）。
+
+    存在的理由：``GenerationOutput`` 只描述"正式产出"，而 Agent 会在产出之前
+    失败、超时、被取消——那时没有 output，但用户必须能看到"这一轮跑过、卡在哪"。
+    把两者合成一张表，等于要求"失败也必须伪造一个产出"。
+
+    因此职责切分是：
+    - **attempt 表示一次运行**：只要派发过就存在一条，失败也保留；
+    - **``output`` 只在正式发布之后才有值**：它指向 ``GenerationOutput``，
+      是"这一轮确实产出了东西"的证据，而不是"这一轮存在过"的证据。
+
+    ``retry_of`` 让重试链可追溯：重试**新建**一条 attempt 并指回原记录，
+    而不是把失败记录改写成成功——否则"重试过几次、每次为什么失败"就丢了。
+    """
+
+    STAGE_CHOICES = WORKFLOW_STAGE_CHOICES
+    STATUS_CHOICES = ATTEMPT_STATUS_CHOICES
+
+    #: 入口类型的真值取 ``FlywheelRun.ENTRY_CHOICES``，不另抄一份：
+    #: 飞轮流程和它的执行尝试必须能用同一套词描述"这一轮从哪来"，
+    #: 抄成两份早晚会出现"流程说来自飞轮、尝试说来自聊天"。
+    ENTRY_CHOICES = FlywheelRun.ENTRY_CHOICES
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        "projects.Project", on_delete=models.CASCADE, related_name="stage_attempts",
+    )
+    flywheel_run = models.ForeignKey(
+        FlywheelRun, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="stage_attempts",
+    )
+    workflow_id = models.CharField(max_length=128, db_index=True)
+    stage = models.CharField(max_length=32, choices=STAGE_CHOICES, db_index=True)
+    #: 本轮**实际**使用的 Skill 版本。它不一定来自版本锁（旁路模式没有锁），
+    #: 所以单独存一份，而不是每次回查 ``WorkflowSkillLock``。
+    skill_version = models.ForeignKey(
+        "skills.SkillVersion", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="stage_attempts",
+    )
+    skill_package_sha256 = models.CharField(max_length=64, blank=True, db_index=True)
+    #: 上游阶段的产出 ID 列表。存列表而不是单个外键：报告阶段可能同时依赖
+    #: 用例产出与执行结果，后续多阶段图谱合并也要用到。
+    parent_output_ids = models.JSONField(default=list, blank=True)
+    session_id = models.CharField(max_length=128, blank=True, db_index=True)
+    entry_type = models.CharField(max_length=24, choices=ENTRY_CHOICES, default="flywheel")
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default="planned", db_index=True,
+    )
+    output = models.ForeignKey(
+        "knowledge_evolution.GenerationOutput", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="stage_attempts",
+    )
+    retry_of = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="retries",
+    )
+    #: 幂等键：重复点击"执行"只应得到同一条 attempt。
+    #: 空串表示"调用方不要幂等保证"（旁路入口），因此唯一约束只约束非空值。
+    idempotency_key = models.CharField(max_length=128, blank=True, db_index=True)
+    error_code = models.CharField(max_length=100, blank=True)
+    #: 受限错误摘要：只存可展示的结论，不落完整堆栈与敏感参数。
+    error_summary = models.TextField(blank=True)
+    detail = models.JSONField(
+        default=dict, blank=True,
+        help_text="执行参数的快照与扩展明细；状态机只由 status 决定，这里不参与判定。",
+    )
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="stage_attempts",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    dispatched_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    output_published_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            # 幂等只对"同一项目 + 同一幂等键"生效；空串（旁路入口）不参与，
+            # 否则第二条旁路 attempt 会撞上唯一约束。
+            models.UniqueConstraint(
+                fields=["project", "idempotency_key"],
+                condition=~models.Q(idempotency_key=""),
+                name="uniq_stage_attempt_idempotency",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["project", "workflow_id", "stage"], name="ke_attempt_proj_wf_stage_idx"),
+            models.Index(fields=["project", "status", "created_at"], name="ke_attempt_proj_status_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workflow_id}/{self.stage} [{self.status}]"
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in ATTEMPT_TERMINAL_STATES
+
+    def can_transition_to(self, target: str) -> bool:
+        return attempt_transition_allowed(self.status, target)
+

@@ -25,7 +25,7 @@ from .gold_models import (
 from .evaluation_v2_models import EvaluationRubric, JudgeResult
 from .trace_models import ExecutionSpan, FailureAttribution
 from .optimization_models import OptimizationExperiment, OptimizationProposal
-from .workflow_models import FlywheelRun
+from .workflow_models import FlywheelRun, StageExecutionAttempt
 from .history_models import (
     HistoryImportBatch, HistoryImportItem, HistoryReplay,
     HistoryReplayDifference, ProjectFlywheelSetting,
@@ -61,6 +61,45 @@ class FlywheelRunSerializer(serializers.ModelSerializer):
         if not isinstance(value, list):
             raise serializers.ValidationError("requirement_document_ids 必须是数组")
         return [str(item) for item in value]
+
+
+class StageExecutionAttemptSerializer(serializers.ModelSerializer):
+    """执行尝试的只读视图（T01）。
+
+    带出 ``skill_name`` / ``skill_version_label`` / ``is_terminal`` 三个派生字段，
+    是为了让飞轮页不必自己 join ``SkillVersion`` 才能显示"这一轮用的哪份包"，
+    也不必自己重算终态——终态判定只有 ``ATTEMPT_TERMINAL_STATES`` 一个真值。
+    """
+
+    skill_name = serializers.SerializerMethodField()
+    skill_version_label = serializers.SerializerMethodField()
+    requested_by_username = serializers.SerializerMethodField()
+    is_terminal = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = StageExecutionAttempt
+        fields = [
+            "id", "project", "flywheel_run", "workflow_id", "stage",
+            "skill_version", "skill_name", "skill_version_label", "skill_package_sha256",
+            "parent_output_ids", "session_id", "entry_type", "status",
+            "output", "retry_of", "idempotency_key", "error_code", "error_summary",
+            "detail", "requested_by", "requested_by_username", "is_terminal",
+            "created_at", "dispatched_at", "started_at", "output_published_at",
+            "finished_at", "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_skill_name(self, obj) -> str:
+        version = obj.skill_version
+        if version is None or not version.skill_id:
+            return ""
+        return version.skill.name
+
+    def get_skill_version_label(self, obj) -> str:
+        return obj.skill_version.version if obj.skill_version_id else ""
+
+    def get_requested_by_username(self, obj) -> str:
+        return obj.requested_by.username if obj.requested_by_id else ""
 
 
 class ProjectFlywheelSettingSerializer(serializers.ModelSerializer):

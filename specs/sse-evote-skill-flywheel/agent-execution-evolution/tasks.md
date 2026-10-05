@@ -30,33 +30,33 @@ T07 + T09 + T10 + T11 + T12 → T13
 
 ## T01：建立阶段执行尝试模型（P0）
 
-**状态**：待实施  
+**状态**：已完成（2026-10-05，`tests_t01.py` 35 项通过）  
 **依赖**：无  
 **设计映射**：§4.4、§13
 
-**代码落点**：
+**代码落点**（实际）：
 
-- `WHartTest_Django/knowledge_evolution/workflow_models.py`
-- `WHartTest_Django/knowledge_evolution/migrations/`
-- `WHartTest_Django/knowledge_evolution/serializers.py`
-- `WHartTest_Django/knowledge_evolution/views.py`
-- 新增模型与 API 测试
+- `WHartTest_Django/knowledge_evolution/workflow_models.py`（模型 + 状态机真值）
+- `WHartTest_Django/knowledge_evolution/migrations/0037_stageexecutionattempt.py`
+- `WHartTest_Django/knowledge_evolution/operations.py`（`StageExecutionAttemptService`）
+- `WHartTest_Django/knowledge_evolution/serializers.py`、`views.py`、`urls.py`
+- `WHartTest_Django/knowledge_evolution/tests_t01.py`
 
 **实施内容**：
 
-- [ ] 新增 `StageExecutionAttempt`。
-- [ ] 实现 `planned/dispatched/running/output_published/completed/failed/cancelled/timed_out` 状态。
-- [ ] 保存流程、阶段、实际 SkillVersion、上游产出、会话、入口、输出、失败摘要和时间。
-- [ ] 增加 `retry_of` 和 `idempotency_key`，防止重复点击生成两个任务。
-- [ ] 校验 attempt、Skill 锁、上游产出和流程属于同一项目。
-- [ ] 为状态迁移实现服务层方法，禁止非法回退和跨终态更新。
+- [x] 新增 `StageExecutionAttempt`。
+- [x] 实现 `planned/dispatched/running/output_published/completed/failed/cancelled/timed_out` 状态。
+- [x] 保存流程、阶段、实际 SkillVersion、上游产出、会话、入口、输出、失败摘要和时间。
+- [x] 增加 `retry_of` 和 `idempotency_key`，防止重复点击生成两个任务。
+- [x] 校验 attempt、Skill 锁、上游产出和流程属于同一项目。
+- [x] 为状态迁移实现服务层方法，禁止非法回退和跨终态更新。
 
 **验收**：
 
-- Agent 尚未产生正式输出时也能查询执行状态。
-- 同一幂等键重复派发只返回同一个 attempt。
-- 失败 attempt 保留，重试创建新 attempt 并关联原记录。
-- 跨项目 Skill、流程或父产出全部被拒绝。
+- Agent 尚未产生正式输出时也能查询执行状态。→ `GET /stage-attempts/{id}/`，`output` 为空仍可读。
+- 同一幂等键重复派发只返回同一个 attempt。→ 唯一约束 `uniq_stage_attempt_idempotency`（`idempotency_key` 非空时生效）。
+- 失败 attempt 保留，重试创建新 attempt 并关联原记录。→ `retry()` 新建 + `retry_of`。
+- 跨项目 Skill、流程或父产出全部被拒绝。→ `_assert_same_project`（不存在与跨项目合并为同一结论，避免探测）。
 
 ---
 
@@ -108,7 +108,7 @@ T07 + T09 + T10 + T11 + T12 → T13
 
 **实施内容**：
 
-- [ ] 将方案阶段按钮改为“跳转到方案分析执行”。
+- [ ] 将方案阶段按钮改为“跳转到Agent执行”。
 - [ ] 派发成功后自动跳转后端返回的 `launch_url`。
 - [ ] 方案分析页解析 `execution_context_id`。
 - [ ] 受控模式显示流程横幅、阶段、锁定 Skill 和上游产出。

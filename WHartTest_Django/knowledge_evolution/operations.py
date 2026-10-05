@@ -26,10 +26,12 @@ from .knowledge_models import IndexProjection, KnowledgeConflict, KnowledgeVersi
 from .models import FeedbackEvent, GenerationOutput, RetrievalTrace
 from .gold_models import GoldDataset
 from .workflow_models import (
+    ATTEMPT_TRANSITIONS,
     GATE_CONFIRMABLE_STATES,
     GATE_HUMAN_FINAL_STATES,
     GATE_PASSING_STATES,
     GATE_SCORABLE_STATES,
+    StageExecutionAttempt,
     WorkflowSkillLock,
     WorkflowStageGate,
 )
@@ -1158,6 +1160,293 @@ class WorkflowGateService:
             "stage_mismatch": bool(binding.get("stage_mismatch")),
             "detail": binding.get("detail", ""),
         }
+
+
+class StageExecutionAttemptService:
+    """阶段执行尝试的生命周期服务（T01 / R4）。
+
+    为什么必须有这一层：attempt 的状态机、项目隔离和幂等是三条**跨入口**的约束
+    （飞轮派发、Agent 回调、重试按钮、补偿任务都会写 attempt）。如果允许各调用方
+    直接 ``attempt.status = "completed"`` 再 ``save()``，那么"非法回退"和
+    "跨终态更新"就只是口头约定——而它们的后果是飞轮上出现一条状态自相矛盾的记录，
+    事后无法判断这一轮到底跑没跑完。
+
+    所以收口规则只有一条：**所有 attempt 的创建与流转都走这个类**。
+    """
+
+    #: ``detail`` 只允许这些键落地。Agent 的原始请求整包塞进来会带上凭据、
+    #: 绝对路径和大段参数，而 attempt 是会被飞轮页面读出来展示的。
+    DETAIL_KEYS = frozenset({
+        "channel", "module_key", "entry", "hint", "workflow_stage_order",
+        "plan_requested_at", "replaces_output",
+    })
+
+    # ------------------------------------------------------------------ 项目隔离
+
+    @classmethod
+    def _assert_same_project(
+        cls, *, project, workflow_id, stage, flywheel_run=None,
+        skill_version=None, parent_output_ids=None,
+    ) -> None:
+        """校验流程、父产出与版本锁都属于同一个项目。
+
+        跨项目引用是**静默错误**：接口能返回 201，页面也能显示，只是这条 attempt
+        永远归不到正确的流程上，并且会把另一个项目的产出 ID 泄漏给当前项目。
+        因此宁可在这里拒绝，也不靠"调用方应该传对"。
+        """
+        if flywheel_run is not None:
+            if flywheel_run.project_id != project.pk:
+                raise ValidationError("飞轮流程与当前项目不一致")
+            if str(flywheel_run.workflow_id) != str(workflow_id):
+                raise ValidationError("飞轮流程与 workflow_id 不一致")
+
+        parent_ids = [str(item) for item in (parent_output_ids or []) if item]
+        if parent_ids:
+            found = set(
+                str(pk) for pk in GenerationOutput.objects
+                .filter(pk__in=parent_ids, project_id=project.pk)
+                .values_list("pk", flat=True)
+            )
+            missing = [item for item in parent_ids if item not in found]
+            if missing:
+                # 不存在与"存在但属于别的项目"合并成同一个结论：
+                # 区分开来等于告诉调用方"这个 ID 在别的项目里是真的"。
+                raise ValidationError(f"上游产出不属于当前项目或不存在：{missing}")
+
+        lock = WorkflowSkillLock.objects.filter(
+            project_id=project.pk, workflow_id=workflow_id, lock_key=f"stage:{stage}",
+        ).first()
+        if lock is not None and skill_version is not None:
+            if lock.skill_version_id and str(lock.skill_version_id) != str(skill_version.pk):
+                raise ValidationError("所选 Skill 版本与该流程已锁定版本不一致")
+        return lock
+
+    # ------------------------------------------------------------------ 创建
+
+    @classmethod
+    def _create(
+        cls, *, project, workflow_id, stage, status, skill_version=None,
+        parent_output_ids=None, entry_type="flywheel", session_id="",
+        idempotency_key="", actor=None, detail=None, flywheel_run=None, retry_of=None,
+    ):
+        workflow_id = str(workflow_id or "").strip()
+        if not workflow_id:
+            raise ValidationError("必须提供 workflow_id")
+        if stage not in ALL_WORKFLOW_STAGE_SET:
+            raise ValidationError(f"未知的阶段：{stage}")
+
+        key = str(idempotency_key or "")
+        if key:
+            existing = cls._find_by_idempotency(project=project, idempotency_key=key)
+            if existing is not None:
+                return existing, False
+
+        lock = cls._assert_same_project(
+            project=project, workflow_id=workflow_id, stage=stage,
+            flywheel_run=flywheel_run, skill_version=skill_version,
+            parent_output_ids=parent_output_ids,
+        )
+
+        safe_detail = {
+            name: value for name, value in (detail or {}).items()
+            if name in cls.DETAIL_KEYS
+        }
+        now = timezone.now() if status == "dispatched" else None
+        attempt = StageExecutionAttempt.objects.create(
+            project=project,
+            flywheel_run=flywheel_run,
+            workflow_id=workflow_id,
+            stage=stage,
+            skill_version=skill_version,
+            skill_package_sha256=(
+                str(getattr(skill_version, "package_sha256", "") or "")
+                or (lock.package_sha256 if lock is not None else "")
+            ),
+            parent_output_ids=[str(item) for item in (parent_output_ids or []) if item],
+            session_id=str(session_id or ""),
+            entry_type=entry_type,
+            status=status,
+            retry_of=retry_of,
+            idempotency_key=key,
+            detail=safe_detail,
+            requested_by=actor if getattr(actor, "pk", None) else None,
+            dispatched_at=now,
+        )
+        return attempt, True
+
+    @classmethod
+    def _find_by_idempotency(cls, *, project, idempotency_key):
+        return StageExecutionAttempt.objects.filter(
+            project_id=project.pk, idempotency_key=str(idempotency_key),
+        ).first()
+
+    @classmethod
+    def plan(cls, *, project, workflow_id, stage, **kwargs):
+        """只登记"打算执行"，不派发。
+
+        存在的意义是让"用户点了但参数还没准备好"这种状态有地方落：
+        Agent 真正起来之前就能查到这一轮，不必等到有产出。
+        """
+        return cls._create(project=project, workflow_id=workflow_id, stage=stage,
+                           status="planned", **kwargs)
+
+    @classmethod
+    def dispatch(cls, *, project, workflow_id, stage, attempt=None, **kwargs):
+        """派发一轮执行，返回 ``(attempt, created)``。
+
+        幂等在这里生效：同一个 ``idempotency_key`` 重复调用只返回同一条记录，
+        ``created=False``。这样"用户连点两下执行"不会变成两条并行的 attempt。
+
+        传入 ``attempt`` 时表示把一条已存在的 ``planned`` 记录推进到 ``dispatched``，
+        而不是新建。
+        """
+        if attempt is not None:
+            return cls.transition(attempt, "dispatched", actor=kwargs.get("actor")), False
+
+        created_attempt, created = cls._create(
+            project=project, workflow_id=workflow_id, stage=stage,
+            status="dispatched", **kwargs,
+        )
+        if not created:
+            return created_attempt, False
+
+        # 版本锁只在派发时才写入 detail：plan 阶段可能还没有锁。
+        lock = WorkflowSkillLock.objects.filter(
+            project_id=project.pk, workflow_id=workflow_id, lock_key=f"stage:{stage}",
+        ).first()
+        if lock is not None:
+            created_attempt.detail = {
+                **(created_attempt.detail or {}),
+                "locked_skill_version_id": str(lock.skill_version_id or ""),
+            }
+        created_attempt.detail = {
+            **(created_attempt.detail or {}),
+            "dispatched_by": getattr(kwargs.get("actor"), "username", "") or "",
+        }
+        created_attempt.save(update_fields=["detail", "updated_at"])
+        return created_attempt, True
+
+    # ------------------------------------------------------------------ 流转
+
+    #: 每个目标状态要补写的时间戳。集中成一张表，避免每个包装方法各写一遍
+    #: ——漏一个就会出现"completed 了但没有 finished_at"这种半截记录。
+    _TIMESTAMP_FIELD = {
+        "dispatched": "dispatched_at",
+        "running": "started_at",
+        "output_published": "output_published_at",
+        "completed": "finished_at",
+        "failed": "finished_at",
+        "cancelled": "finished_at",
+        "timed_out": "finished_at",
+    }
+
+    @classmethod
+    def transition(cls, attempt, target, *, actor=None, error_code="",
+                   error_summary="", output=None, detail=None):
+        """状态迁移的唯一入口。非法回退与跨终态更新都在这里被拒。
+
+        特例：``target`` 与当前状态相同按幂等处理，直接返回不报错。理由是
+        SSE 重连、回调重放都会重复上报同一个状态，把重放当成错误会让补偿任务
+        永远无法收敛——而"状态没变"本身确实不是问题。
+        """
+        target = str(target or "")
+        if target not in ATTEMPT_TRANSITIONS:
+            raise ValidationError(f"未知的执行状态：{target}")
+        if target == attempt.status:
+            return attempt
+        if attempt.is_terminal:
+            raise ValidationError(
+                f"执行尝试已处于终态 {attempt.status}，不允许再改为 {target}"
+            )
+        if not attempt.can_transition_to(target):
+            raise ValidationError(f"不允许的状态迁移：{attempt.status} → {target}")
+
+        update_fields = ["status", "updated_at"]
+        attempt.status = target
+        stamp_field = cls._TIMESTAMP_FIELD.get(target)
+        if stamp_field:
+            setattr(attempt, stamp_field, timezone.now())
+            update_fields.append(stamp_field)
+        if target == "running" and not attempt.session_id:
+            # 没有 session_id 的运行没法关联到对话与轨迹，属调用方失误；
+            # 但不该在这里硬拦，交由上层决定。
+            logger.info("attempt %s 进入 running 但缺少 session_id", attempt.pk)
+        if output is not None:
+            attempt.output = output
+            update_fields.append("output")
+        if error_code:
+            attempt.error_code = str(error_code)[:100]
+            update_fields.append("error_code")
+        if error_summary:
+            attempt.error_summary = str(error_summary)
+            update_fields.append("error_summary")
+        if detail:
+            attempt.detail = {**(attempt.detail or {}), **detail}
+            update_fields.append("detail")
+        attempt.save(update_fields=update_fields)
+        return attempt
+
+    @classmethod
+    def mark_running(cls, attempt, *, session_id="", actor=None, detail=None):
+        if session_id and not attempt.session_id:
+            attempt.session_id = str(session_id)
+            attempt.save(update_fields=["session_id", "updated_at"])
+        return cls.transition(attempt, "running", actor=actor, detail=detail)
+
+    @classmethod
+    def mark_output_published(cls, attempt, *, output=None, detail=None):
+        return cls.transition(attempt, "output_published", output=output, detail=detail)
+
+    @classmethod
+    def complete(cls, attempt, *, output=None, detail=None):
+        return cls.transition(attempt, "completed", output=output, detail=detail)
+
+    @classmethod
+    def fail(cls, attempt, *, error_code="", error_summary="", detail=None):
+        return cls.transition(
+            attempt, "failed", error_code=error_code,
+            error_summary=error_summary, detail=detail,
+        )
+
+    @classmethod
+    def cancel(cls, attempt, *, error_summary="", detail=None):
+        return cls.transition(attempt, "cancelled", error_summary=error_summary, detail=detail)
+
+    @classmethod
+    def timeout(cls, attempt, *, error_summary="", detail=None):
+        return cls.transition(attempt, "timed_out", error_summary=error_summary, detail=detail)
+
+    # ------------------------------------------------------------------ 重试
+
+    @classmethod
+    def retry(cls, attempt, *, actor=None, idempotency_key="", detail=None):
+        """重试：**新建**一条 attempt 并指回原记录，原记录保持终态不动。
+
+        为什么不直接复用原记录：把 ``failed`` 改回 ``running`` 会让这次失败从
+        记录里消失，"重试过几次、每次卡在哪"就再也查不出来——而重试链正是
+        归因"是环境问题还是 Skill 问题"的主要证据。
+
+        默认幂等键取 ``retry:<原 attempt id>``：对同一条失败记录连点重试仍然只有
+        一条新 attempt。
+        """
+        if not attempt.is_terminal:
+            raise ValidationError(
+                f"执行尝试仍处于 {attempt.status}，请先结束或取消后再重试"
+            )
+        return cls.dispatch(
+            project=attempt.project,
+            workflow_id=attempt.workflow_id,
+            stage=attempt.stage,
+            skill_version=attempt.skill_version,
+            parent_output_ids=attempt.parent_output_ids,
+            entry_type=attempt.entry_type,
+            session_id=attempt.session_id,
+            idempotency_key=str(idempotency_key or f"retry:{attempt.pk}"),
+            actor=actor,
+            detail={**(attempt.detail or {}), **(detail or {}), "retry_of": str(attempt.pk)},
+            flywheel_run=attempt.flywheel_run,
+            retry_of=attempt,
+        )
 
 
 class ProjectQualityCockpitService:

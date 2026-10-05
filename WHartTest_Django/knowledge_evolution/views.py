@@ -21,6 +21,7 @@ from .models import (
     GoldDatasetVersion,
     TestAssetTaxonomy,
     FlywheelRun,
+    StageExecutionAttempt,
     HistoryImportBatch,
     HistoryReplay,
     HistoryReplayDifference,
@@ -52,6 +53,7 @@ from .serializers import (
     GoldDatasetVersionSerializer,
     TestAssetTaxonomySerializer,
     FlywheelRunSerializer,
+    StageExecutionAttemptSerializer,
     HistoryImportBatchSerializer,
     HistoryReplaySerializer,
     HistoryReplayDifferenceSerializer,
@@ -312,6 +314,51 @@ class FlywheelRunViewSet(viewsets.ModelViewSet):
                 raise ValidationError(exc.messages)
             raise
         return Response(result)
+
+
+class StageExecutionAttemptViewSet(ProjectScopedReadOnlyViewSet):
+    """阶段执行尝试的查询与重试（T01 / R4）。
+
+    之所以是**独立资源**而不是挂在 ``GenerationOutput`` 下：attempt 在正式产出
+    之前就存在，甚至可能永远没有产出。挂在产出下意味着"跑失败的那一轮"没有
+    地方可查，而它恰恰是最需要看的一轮。
+    """
+
+    serializer_class = StageExecutionAttemptSerializer
+    filterset_fields = ["project", "workflow_id", "stage", "status", "entry_type"]
+
+    def get_queryset(self):
+        queryset = StageExecutionAttempt.objects.select_related(
+            "project", "flywheel_run", "skill_version__skill", "output", "requested_by",
+        )
+        return self.scoped(queryset)
+
+    @action(detail=True, methods=["post"])
+    def retry(self, request, pk=None):
+        """重试一条已结束的 attempt：新建 attempt 并关联原记录。
+
+        需要测试负责人权限：重试会重新消耗模型额度并可能覆盖已评过的产出，
+        属于执行决策而不是"谁都能点的刷新"。
+        """
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+
+        from .operations import StageExecutionAttemptService
+
+        attempt = self.get_object()
+        _ensure_test_lead(request.user, attempt.project_id)
+        try:
+            new_attempt, created = StageExecutionAttemptService.retry(
+                attempt,
+                actor=request.user,
+                idempotency_key=str(request.data.get("idempotency_key") or ""),
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(
+            self.get_serializer(new_attempt).data,
+            status=201 if created else 200,
+        )
 
 
 class TestAssetTaxonomyViewSet(viewsets.ModelViewSet):
