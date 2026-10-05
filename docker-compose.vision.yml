@@ -20,9 +20,9 @@ services:
       - "8923:8010"
     volumes:
       # 与backend保持相同绝对路径，使模型传入的上传文档路径可直接被Vision MCP读取。
-      - ./data:/app/data
+      - ${WHARTTEST_DATA_DIR:-./data}:/app/data
       # 与Playwright MCP共享截图绝对路径，用于需求图与当前页面截图对比。
-      - ./data/playwright-screenshots:/tmp/playwright-output:ro
+      - ${WHARTTEST_DATA_DIR:-./data}/playwright-screenshots:/tmp/playwright-output:ro
     networks:
       - wharttest-network
     restart: unless-stopped
