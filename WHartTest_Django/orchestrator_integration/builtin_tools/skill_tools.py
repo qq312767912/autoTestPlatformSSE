@@ -430,6 +430,7 @@ def get_skill_tools(
     test_case_id: Optional[int] = None,
     chat_session_id: Optional[str] = None,
     auth_state_id: Optional[int] = None,
+    selected_skill_version_id: Optional[str] = None,
 ) -> list[object]:
     """获取 Skill 工具列表（Skills 全局共享，不限制项目）"""
     current_user_id = user_id
@@ -437,6 +438,22 @@ def get_skill_tools(
     current_test_case_id = test_case_id
     current_chat_session_id = chat_session_id
     current_auth_state_id = auth_state_id
+    current_selected_skill_version_id = str(selected_skill_version_id or "")
+
+    def _selected_version_for(skill_name: str):
+        if not current_selected_skill_version_id:
+            return None
+        from skills.models import SkillVersion
+
+        return (
+            SkillVersion.objects.select_related("skill", "release")
+            .filter(
+                pk=current_selected_skill_version_id,
+                skill__name=skill_name,
+                skill__is_active=True,
+            )
+            .first()
+        )
 
     @langchain_tool
     def read_skill_content(skill_name: str) -> str:
@@ -457,7 +474,8 @@ def get_skill_tools(
         logger.info(f"[read_skill_content] skill_name={skill_name}")
 
         try:
-            skill = Skill.objects.filter(name=skill_name, is_active=True).first()
+            selected_version = _selected_version_for(skill_name)
+            skill = selected_version.skill if selected_version else Skill.objects.filter(name=skill_name, is_active=True).first()
 
             if not skill:
                 available = Skill.objects.filter(is_active=True).values_list(
@@ -466,11 +484,11 @@ def get_skill_tools(
                 available_list = list(available)
                 return f"错误: 未找到名为 '{skill_name}' 的 Skill。可用的 Skills: {available_list}"
 
-            if not skill.skill_content:
+            skill_dir = selected_version.get_full_path() if selected_version else skill.get_full_path()
+            skill_md = Path(skill_dir) / "SKILL.md" if skill_dir else None
+            content = skill_md.read_text(encoding="utf-8") if skill_md and skill_md.is_file() else skill.skill_content
+            if not content:
                 return f"错误: Skill '{skill_name}' 没有 SKILL.md 内容"
-
-            content = skill.skill_content
-            skill_dir = skill.get_full_path()
             if skill_dir and os.path.isdir(skill_dir):
                 references_dir = Path(skill_dir) / "references"
                 if references_dir.is_dir():
@@ -509,7 +527,8 @@ def get_skill_tools(
         )
 
         try:
-            skill = Skill.objects.filter(name=skill_name, is_active=True).first()
+            selected_version = _selected_version_for(skill_name)
+            skill = selected_version.skill if selected_version else Skill.objects.filter(name=skill_name, is_active=True).first()
 
             if not skill:
                 available = Skill.objects.filter(is_active=True).values_list(
@@ -518,7 +537,7 @@ def get_skill_tools(
                 available_list = list(available)
                 return f"错误: 未找到名为 '{skill_name}' 的 Skill。可用的 Skills: {available_list}"
 
-            skill_dir = skill.get_full_path()
+            skill_dir = selected_version.get_full_path() if selected_version else skill.get_full_path()
             if not skill_dir or not os.path.isdir(skill_dir):
                 return f"错误: Skill '{skill_name}' 目录不存在"
 

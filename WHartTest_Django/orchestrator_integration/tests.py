@@ -18,6 +18,7 @@ from .agent_loop_view import (
     _normalize_knowledge_document_ids,
     _normalize_uploaded_image_base64_list,
     _prepare_agent_loop_human_message,
+    _is_gated_workflow_request,
 )
 from .builtin_tools.skill_tools import (
     _build_skill_artifacts_dir,
@@ -59,6 +60,20 @@ class KnowledgeBaseSelectionTests(SimpleTestCase):
         normalized = _normalize_knowledge_document_ids(document_ids)
         self.assertEqual(normalized[0], "doc-1")
         self.assertEqual(len(normalized), 20)
+
+
+class WorkflowGateBoundaryTests(SimpleTestCase):
+    def test_standalone_business_output_does_not_enable_workflow_gate(self):
+        self.assertFalse(_is_gated_workflow_request("testcase_generation", ""))
+
+    def test_chat_session_id_is_not_implicitly_a_workflow(self):
+        self.assertFalse(_is_gated_workflow_request("testcase_generation", None))
+
+    def test_explicit_workflow_stage_enables_gate(self):
+        self.assertTrue(_is_gated_workflow_request("testcase_generation", "wf-1"))
+
+    def test_non_workflow_capability_never_enables_gate(self):
+        self.assertFalse(_is_gated_workflow_request("case_review", "wf-1"))
 
 
 class LLMFriendlyErrorTests(SimpleTestCase):

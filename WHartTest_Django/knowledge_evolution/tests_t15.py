@@ -18,7 +18,7 @@ import tempfile
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from knowledge_evolution.models import GenerationOutput
+from knowledge_evolution.models import AssetCandidateEvent, GenerationOutput
 from knowledge_evolution.operations import WORKFLOW_STAGE_ORDER, WorkflowGateService
 from knowledge_evolution.protocol import ADAPTERS, publish_output
 from knowledge_evolution.task_binding import SkillBindingRefused
@@ -256,6 +256,40 @@ class StageGateTests(WorkflowBaseTests):
         result = self._publish_stage(stage="case_review", workflow_id="", enforce=False)
         self.assertIsNotNone(result)
         self.assertTrue(GenerationOutput.objects.filter(pk=result[1]).exists())
+
+    def test_standalone_workflow_shaped_output_does_not_create_stage_gate(self):
+        """普通产出可旁路沉淀，但不能反向变成受控流程门禁。"""
+        envelope = ADAPTERS["testcase_generation"].build(
+            project=self.project,
+            user=self.lead,
+            source_id="standalone-case-generation",
+            workflow_id="chat-derived-run",
+            input_summary="普通用例生成",
+            output={"content": "用例产出"},
+            extensions={
+                "enforce_quality_gate": False,
+                "register_workflow_gate": False,
+            },
+        )
+
+        result = publish_output(envelope)
+
+        self.assertTrue(GenerationOutput.objects.filter(pk=result[1]).exists())
+        self.assertFalse(
+            WorkflowStageGate.objects.filter(
+                project=self.project,
+                workflow_id="chat-derived-run",
+                stage="testcase_generation",
+            ).exists()
+        )
+        self.assertTrue(
+            AssetCandidateEvent.objects.filter(
+                project=self.project,
+                source_type="stage_output",
+                source_id=str(result[1]),
+                status="pending",
+            ).exists()
+        )
 
 
 @override_settings(MEDIA_ROOT=TEST_MEDIA_ROOT)

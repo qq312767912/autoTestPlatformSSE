@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import httpx
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import StreamingHttpResponse, JsonResponse
 from django.utils.decorators import method_decorator
 from django.views import View
@@ -84,6 +85,14 @@ FLYWHEEL_MODULE_KEYS = frozenset(ALL_TASK_TYPES)
 #: 链路型阶段：产出必须携带 ``workflow_id``，且进入前要过阶段门禁。
 #: 取并集（新四阶段 + 历史四阶段），存量流程与新建流程共用同一套判断。
 WORKFLOW_MODULE_KEYS = frozenset(ALL_WORKFLOW_STAGES)
+
+
+def _is_gated_workflow_request(module_key: str, workflow_id: str) -> bool:
+    """Only explicit workflow advancement is allowed to affect normal output."""
+    return bool(
+        module_key in WORKFLOW_MODULE_KEYS
+        and str(workflow_id or "").strip()
+    )
 
 from .auth_state_binding import (
     AuthStateBindingError,
@@ -1013,11 +1022,15 @@ class AgentLoopStreamAPIView(View):
                 except Exception:
                     capability = None
             adapter = ADAPTERS[module_key]
-            workflow_id = (
+            explicit_workflow_id = (
                 (getattr(request, "_flywheel_workflow_id", "") or "")
                 if module_key in WORKFLOW_MODULE_KEYS
                 else ""
             )
+            gated_workflow = _is_gated_workflow_request(
+                module_key, explicit_workflow_id
+            )
+            workflow_id = explicit_workflow_id
             if module_key in WORKFLOW_MODULE_KEYS and not workflow_id:
                 # 未显式指定流程时，用「Agent 对话」入口按会话确定性派生一条真正的
                 # FlywheelRun。不能继续把 session_id 直接当 workflow_id：那样这条链
@@ -1030,10 +1043,12 @@ class AgentLoopStreamAPIView(View):
                     actor=request.user,
                 )
                 workflow_id = context["workflow_id"]
-            skill_version = await sync_to_async(self._bind_stage_skill)(
-                project=project, workflow_id=workflow_id, stage=module_key,
-                actor=request.user,
-            )
+            skill_version = getattr(request, "_selected_skill_version", None)
+            if skill_version is None:
+                skill_version = await sync_to_async(self._bind_stage_skill)(
+                    project=project, workflow_id=workflow_id, stage=module_key,
+                    actor=request.user,
+                )
             envelope = adapter.build(
                 project=project,
                 user=request.user,
@@ -1066,7 +1081,10 @@ class AgentLoopStreamAPIView(View):
                     "knowledge_enabled": bool(use_knowledge_base and knowledge_base_ids),
                     "knowledge_base_ids": list(knowledge_base_ids or []),
                     "execution_spans": self._tool_execution_spans(all_messages),
-                    "enforce_quality_gate": module_key in WORKFLOW_MODULE_KEYS,
+                    # 普通产出只做旁路沉淀：不校验、也不创建阶段门禁。
+                    # 只有显式携带 workflow_id 的质量飞轮任务属于受控链路。
+                    "enforce_quality_gate": gated_workflow,
+                    "register_workflow_gate": gated_workflow,
                 },
             )
             return await sync_to_async(publish_output)(envelope)
@@ -1286,6 +1304,11 @@ class AgentLoopStreamAPIView(View):
                 test_case_id=test_case_id,
                 chat_session_id=session_id,
                 auth_state_id=auth_state_id,
+                selected_skill_version_id=(
+                    str(request._selected_skill_version.pk)
+                    if request._selected_skill_version is not None
+                    else None
+                ),
             )
             tools.extend(builtin_tools)
             logger.info(f"AgentLoopStreamAPI: Added {len(builtin_tools)} builtin tools")
@@ -1320,6 +1343,18 @@ class AgentLoopStreamAPIView(View):
             effective_prompt, prompt_source = await get_effective_system_prompt_async(
                 request.user, prompt_id, project
             )
+
+            if request._selected_skill_version is not None:
+                selected = request._selected_skill_version
+                effective_prompt = (
+                    (effective_prompt or "")
+                    + "\n\n# 本轮已选定 Skill 版本\n"
+                    + f"- Skill: {selected.skill.name}\n"
+                    + f"- Version: {selected.version}\n"
+                    + f"- Package SHA256: {selected.package_sha256}\n"
+                    + "本轮必须使用上述 Skill；先调用 read_skill_content 读取该精确版本的指令，"
+                      "再按该指令完成任务，不得改用其他 Skill。"
+                )
 
             # 8.1 如果需要生成脚本，追加脚本生成指令
             if generate_playwright_script:
@@ -1843,16 +1878,17 @@ class AgentLoopStreamAPIView(View):
         request._flywheel_module_key = (
             module_key if module_key in FLYWHEEL_MODULE_KEYS else ""
         )
+        # Only an explicit workflow_id means that the caller is advancing an
+        # existing gated workflow. A standalone chat/task still gets attached
+        # to a flywheel run when its output is recorded, but must not treat its
+        # session_id as a workflow and fail a previous-stage gate that never
+        # existed for this entry point.
         request._flywheel_workflow_id = str(body_data.get("workflow_id") or "")
-        if (
-            request._flywheel_module_key in WORKFLOW_MODULE_KEYS
-            and not request._flywheel_workflow_id
-        ):
-            request._flywheel_workflow_id = str(body_data.get("session_id") or "")
         parent_ids = body_data.get("parent_output_ids") or []
         request._flywheel_parent_output_ids = [str(item) for item in parent_ids if item]
         request._flywheel_capability_id = str(body_data.get("capability_id") or "")
         request._flywheel_capability = None
+        request._selected_skill_version = None
         session_id = body_data.get("session_id")
         project_id = body_data.get("project_id")
         knowledge_base_ids = _normalize_knowledge_base_ids(
@@ -1923,6 +1959,44 @@ class AgentLoopStreamAPIView(View):
         if not project:
             return api_error_response("Project access denied", 403)
 
+        # The task stage and the concrete Skill version are separate choices.
+        # Existing callers may omit the version and retain the old resolver.
+        selected_skill_version_id = str(body_data.get("skill_version_id") or "")
+        if selected_skill_version_id:
+            from skills.models import SkillVersion
+
+            try:
+                selected_version = await sync_to_async(
+                    SkillVersion.objects.select_related("skill", "release").filter(
+                        pk=selected_skill_version_id,
+                        skill__is_active=True,
+                    ).first
+                )()
+            except (TypeError, ValueError, DjangoValidationError):
+                return api_error_response("skill_version_id 无效", 400)
+            if selected_version is None or not selected_version.is_runnable:
+                return api_error_response("所选 Skill 版本不存在或不可运行", 400)
+            declared_stage = str(
+                (selected_version.manifest or {}).get("stage")
+                or selected_version.skill.declared_stage
+                or ""
+            )
+            if request._flywheel_module_key and declared_stage != request._flywheel_module_key:
+                return api_error_response("所选 Skill 版本不适用于当前任务阶段", 400)
+            if request._flywheel_workflow_id:
+                from knowledge_evolution.workflow_models import WorkflowSkillLock
+
+                locked_version_id = await sync_to_async(
+                    WorkflowSkillLock.objects.filter(
+                        project=project,
+                        workflow_id=request._flywheel_workflow_id,
+                        lock_key=f"stage:{request._flywheel_module_key}",
+                    ).values_list("skill_version_id", flat=True).first
+                )()
+                if locked_version_id and str(locked_version_id) != str(selected_version.pk):
+                    return api_error_response("所选 Skill 版本与该质量飞轮流程已锁定版本不一致", 409)
+            request._selected_skill_version = selected_version
+
         # 5. 生成 session_id
         if not session_id:
             session_id = uuid.uuid4().hex
@@ -1931,8 +2005,13 @@ class AgentLoopStreamAPIView(View):
         # 链路型业务在真正调用模型前执行质量门禁，防止先生成后拦截。
         # 首阶段没有前置门禁，检查会直接放行，不必为它写例外——
         # 写例外反而会在"主链路换序"时把新的首阶段漏在门外。
-        if request._flywheel_module_key in WORKFLOW_MODULE_KEYS:
-            workflow_id = request._flywheel_workflow_id or session_id
+        if (
+            _is_gated_workflow_request(
+                request._flywheel_module_key,
+                request._flywheel_workflow_id,
+            )
+        ):
+            workflow_id = request._flywheel_workflow_id
             try:
                 from knowledge_evolution.operations import WorkflowGateService
                 await sync_to_async(WorkflowGateService.assert_can_enter)(

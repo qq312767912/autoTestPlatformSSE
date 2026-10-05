@@ -404,7 +404,7 @@ class WorkflowGateService:
         }
 
     @classmethod
-    def register_output(cls, output):
+    def register_output(cls, output, *, create_gate: bool = True):
         protocol = (output.metadata or {}).get("protocol") or {}
         workflow_id = protocol.get("workflow_id")
         stage = protocol.get("stage") or output.task_type
@@ -419,6 +419,10 @@ class WorkflowGateService:
             AssetCandidateService.enqueue_from_output(output)
         except Exception:  # noqa: BLE001
             logger.exception("正式阶段产出入候选队列失败，不影响门禁登记")
+        # 普通入口的产出只进入待人工审核候选，不创建或改变流程门禁。
+        # 显式 workflow 入口才允许继续操作阶段锁与门禁状态。
+        if not create_gate:
+            return None
         # 无论门禁走到哪一步，都先把这一阶段的版本锁定补上：
         # 流水线若由 ``start_workflow`` 启动，锁在入口就已存在（幂等返回）；
         # 若历史链路或旁路调用直接产出了结果，这里补锁，产出才谈得上版本溯源。

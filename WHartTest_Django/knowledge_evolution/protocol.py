@@ -198,5 +198,8 @@ def publish_output(envelope: OutputEnvelope):
     if envelope.evaluation_mode == EvaluationMode.WORKFLOW:
         from .models import GenerationOutput
         output = GenerationOutput.objects.get(pk=result[1])
-        WorkflowGateService.register_output(output)
+        WorkflowGateService.register_output(
+            output,
+            create_gate=envelope.extensions.get("register_workflow_gate", True),
+        )
     return result

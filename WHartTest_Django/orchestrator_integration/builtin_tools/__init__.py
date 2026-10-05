@@ -20,6 +20,7 @@ def get_builtin_tools(
     test_case_id: int = None,
     chat_session_id: str = None,
     auth_state_id: int = None,
+    selected_skill_version_id: str = None,
 ) -> list:
     """获取所有内置工具"""
     tools = []
@@ -30,6 +31,7 @@ def get_builtin_tools(
         test_case_id=test_case_id,
         chat_session_id=chat_session_id,
         auth_state_id=auth_state_id,
+        selected_skill_version_id=selected_skill_version_id,
     )
     tools.extend(skill_tools)
     logger.info(f"[BuiltinTools] 加载 {len(skill_tools)} 个 Skill 工具")
