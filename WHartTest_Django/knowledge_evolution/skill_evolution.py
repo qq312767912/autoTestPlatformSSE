@@ -24,6 +24,7 @@
 """
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import re
@@ -39,26 +40,45 @@ from skills.versions import SkillVersionService
 
 from .attribution import assert_confirmed_attributions
 from .knowledge_models import KnowledgeAuditLog
-from .optimization import TYPE_BY_CATEGORY
+from .optimization import CATEGORY_CHANNELS, SKILL_CONTENT_CATEGORIES, SKILL_CONTENT_TYPES
 
-#: 归因类型 → 是否属于"Skill 包可修复"。
-#: 从 ``TYPE_BY_CATEGORY`` 派生而不是另抄一份，避免两张表慢慢漂移。
-SKILL_ADDRESSABLE_TYPES = frozenset({"prompt", "skill_tool"})
+#: 归因类型 → 是否属于"Skill 包可修复"。从 ``optimization`` 取真值而不是另抄一份，
+#: 避免两张表慢慢漂移：口径变更时只改一处，这里跟着变。
+SKILL_ADDRESSABLE_TYPES = SKILL_CONTENT_TYPES
 
 #: Skill 包可修复的归因类别。
-SKILL_ADDRESSABLE_CATEGORIES = frozenset(
-    category for category, proposal_type in TYPE_BY_CATEGORY.items()
-    if proposal_type in SKILL_ADDRESSABLE_TYPES
-)
+SKILL_ADDRESSABLE_CATEGORIES = SKILL_CONTENT_CATEGORIES
 
 #: 不可由 Skill 包修复的类别 → 应走的通道。写出来是为了给出**可执行的**错误提示，
 #: 而不是一句"不支持这个类别"。
-ALTERNATIVE_CHANNELS = {
-    "knowledge_missing": "应生成知识候选（knowledge）并走知识审核",
-    "knowledge_stale": "应更新知识版本并走知识审核",
-    "retrieval_error": "应生成检索策略候选（retrieval_policy）",
-    "environment_error": "属于执行环境问题，需修复运行环境，改 Skill 包无效",
-}
+ALTERNATIVE_CHANNELS = CATEGORY_CHANNELS
+
+#: Skill **包内容**补丁允许改动的文件白名单（T13 / R12）。
+#:
+#: 只允许改"内容 / 契约 / 模板 / 确定性校验脚本"这四类：
+#:
+#: - ``SKILL.md``：能力说明与受管护栏；
+#: - ``references/*.md``：判定依据、字段口径这类知识性内容；
+#: - ``schemas/*.json``：输入输出契约（改错会当场被静态校验拦住）；
+#: - ``templates/*``：输出模板；
+#: - ``scripts/validate*.py`` / ``scripts/check*.py``：确定性校验脚本。
+#:
+#: 刻意**不**放开依赖声明、凭据、可执行入口（``entrypoint`` 指向的脚本）与
+#: 任意路径：那些属于"换一个包"，而不是"改一个包"，放进来就等于绕开了
+#: 上传通道的静态扫描与凭据扫描。``fnmatch`` 的 ``*`` 会跨 ``/`` 匹配，
+#: 于是 ``references/*.md`` 也覆盖子目录，符合"相关 references"的原意。
+SKILL_CONTENT_WHITELIST = (
+    "SKILL.md",
+    "references/*.md",
+    "schemas/*.json",
+    "templates/*.md",
+    "templates/*.txt",
+    "templates/*.json",
+    "templates/*.j2",
+    "templates/*.jinja2",
+    "scripts/validate*.py",
+    "scripts/check*.py",
+)
 
 #: 受管护栏小节的起止标记。用固定标记而不是"追加到文件末尾"，
 #: 是因为候选会反复派生：没有标记的话每次都在上次结果后面继续堆，包会越改越乱。
@@ -226,6 +246,82 @@ class SkillCandidateDeriver:
             if target.is_file():
                 target.unlink()
         return work_dir
+
+
+def normalize_package_relative_path(relative) -> str:
+    """把补丁里的路径归一化成包内相对路径；越界或空路径直接报错。
+
+    归一化在**校验之前**做，是为了让白名单判断面对的是最终形态：``./SKILL.md``
+    与 ``SKILL.md`` 必须判成同一个文件，否则加个 ``./`` 前缀就能绕过白名单。
+    """
+    raw = str(relative or "").strip().replace("\\", "/")
+    if not raw:
+        raise ValidationError("候选补丁存在缺少 path 的编辑项")
+    if raw.startswith("/") or re.match(r"^[a-zA-Z]:", raw):
+        raise ValidationError(f"候选补丁不接受绝对路径：{raw}")
+    parts = [part for part in raw.split("/") if part not in ("", ".")]
+    if any(part == ".." for part in parts):
+        raise ValidationError(f"候选补丁不允许跳出包目录：{raw}")
+    if not parts:
+        raise ValidationError(f"候选补丁路径无效：{raw}")
+    return "/".join(parts)
+
+
+def is_whitelisted_skill_path(relative) -> bool:
+    """路径是否落在 ``SKILL_CONTENT_WHITELIST`` 内。"""
+    try:
+        normalized = normalize_package_relative_path(relative)
+    except ValidationError:
+        return False
+    return any(fnmatch.fnmatch(normalized, pattern) for pattern in SKILL_CONTENT_WHITELIST)
+
+
+def assert_patch_within_whitelist(patch: dict) -> list:
+    """硬校验：补丁只碰白名单文件。返回实际改动的路径清单（供审计）。
+
+    ``remove`` 也一并校验：删掉 ``SKILL.md`` 比改它更具破坏性，
+    只校验写路径等于给"删掉再说"留了后门。
+    """
+    paths: list[str] = []
+    for edit in patch.get("edits") or []:
+        paths.append(normalize_package_relative_path(edit.get("path")))
+    for relative in patch.get("remove") or []:
+        paths.append(normalize_package_relative_path(relative))
+    rejected = sorted({path for path in paths if not is_whitelisted_skill_path(path)})
+    if rejected:
+        raise ValidationError(
+            "候选补丁试图修改白名单之外的文件："
+            + "、".join(rejected)
+            + f"（允许范围：{'、'.join(SKILL_CONTENT_WHITELIST)}）"
+        )
+    return sorted(set(paths))
+
+
+class SkillContentPatchBuilder:
+    """构造**最小增量** Skill 内容补丁（T13 / R12）。
+
+    默认策略复用 ``SkillCandidateDeriver`` 的受管护栏小节：它写进 ``SKILL.md``
+    的是一段有起止标记的块，反复派生时**原地替换**而不是往后堆，天然满足
+    "最小增量"。调用方也可以显式给 ``edits`` 去改 references / schemas / 模板，
+    但无论哪条路都必须过白名单。
+    """
+
+    @classmethod
+    def build_patch(cls, *, skill_version, attributions, edits=None) -> dict:
+        items = list(attributions)
+        if edits:
+            patch = {
+                "strategy": "explicit_edits",
+                "edits": [dict(edit) for edit in edits],
+                "attribution_ids": sorted(str(item.id) for item in items),
+                "categories": sorted({item.category for item in items}),
+            }
+        else:
+            patch = SkillCandidateDeriver.build_patch(
+                skill_version=skill_version, attributions=items,
+            )
+        patch["whitelist_paths"] = assert_patch_within_whitelist(patch)
+        return patch
 
 
 class SkillEvolutionService:

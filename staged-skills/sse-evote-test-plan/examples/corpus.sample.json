@@ -1,0 +1,27 @@
+{
+  "_comment": "自检用的最小原文索引样例。真实运行时由 Skill 按本次实际检索到的知识文档生成。",
+  "documents": [
+    {
+      "document_id": "doc-21",
+      "document_version": "v3",
+      "chunks": [
+        {
+          "chunk_id": "chunk-108",
+          "start_offset": 2048,
+          "text": "股权处理申请提交环节需校验账户白名单。非白名单证券账户不得进入后续投票处理流程。校验失败时应在审计日志中记录拒绝原因。"
+        }
+      ]
+    },
+    {
+      "document_id": "doc-31",
+      "document_version": "v1",
+      "chunks": [
+        {
+          "chunk_id": "chunk-07",
+          "start_offset": 512,
+          "text": "采编系统导入数据时，采集记录以会议ID与时间戳组合作为唯一标识。重复导入应被拒绝并返回明确错误信息。"
+        }
+      ]
+    }
+  ]
+}

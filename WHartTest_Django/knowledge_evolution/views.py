@@ -53,6 +53,7 @@ from .serializers import (
     GoldDatasetVersionSerializer,
     TestAssetTaxonomySerializer,
     FlywheelRunSerializer,
+    StageExecutionContextSerializer,
     StageExecutionAttemptSerializer,
     HistoryImportBatchSerializer,
     HistoryReplaySerializer,
@@ -100,6 +101,27 @@ def _ensure_test_lead(user, project_id):
     ensure_test_lead(user, project_id)
 
 
+def _ensure_linkage_enabled(project_id):
+    """项目级灰度开关：飞轮**控制面入口**的统一闸门（T14 / R15）。
+
+    只用 403 不用 400："这个项目还没灰度到这个能力"是权限语义；用 400 会把用户
+    引向去检查 payload，而 payload 一点问题都没有。文案取 ``rollout`` 里的唯一真值。
+
+    ⚠️ 调用顺序：**先成员、后开关**。反过来的话，非成员会因为"项目没开开关"
+    拿到 403，而成员拿到的是同一状态码——两种身份得到同样的反馈，
+    等于顺手把"这个项目是否已灰度"泄露给了不该知道的人。
+
+    ⚠️ 只闸入口（发起 / 启动 / 纳管），**不闸执行面**（产出发布、登记、反馈、归因）：
+    否则运维事后关掉开关，会把一条正在跑的受控链路从半路掐断。
+    """
+    from rest_framework.exceptions import PermissionDenied
+
+    from .rollout import LINKAGE_DISABLED_MESSAGE, linkage_enabled
+
+    if not linkage_enabled(project_id):
+        raise PermissionDenied(LINKAGE_DISABLED_MESSAGE)
+
+
 class ProjectScopedReadOnlyViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
 
@@ -118,6 +140,28 @@ class ProjectFlywheelSettingViewSet(viewsets.ReadOnlyModelViewSet):
         return queryset if self.request.user.is_superuser else queryset.filter(
             project_id__in=_project_ids(self.request.user)
         )
+
+    @action(detail=False, methods=["get"], url_path="state")
+    def state(self, request):
+        """当前项目是否已灰度开启飞轮联动（T14）。
+
+        前端必须在**渲染入口按钮之前**拿到这个值：让用户点了按钮才收到 403，
+        他看到的是"功能坏了"；提前拿到 ``enabled=false``，他看到的是
+        "这个项目还没灰度到"，两种体验的差别就在这一次查询。
+
+        成员即可读（不是测试负责人）：普通执行人员也要知道按钮为什么是灰的。
+        """
+        from rest_framework.exceptions import ValidationError
+
+        from projects.models import Project
+        from .rollout import linkage_state
+
+        raw = request.query_params.get("project")
+        if not raw:
+            raise ValidationError({"project": "必须指定项目"})
+        project_id = int(raw)
+        _ensure_project_member(request.user, project_id)
+        return Response(linkage_state(get_object_or_404(Project, pk=project_id)))
 
     @action(detail=False, methods=["post"], url_path="set")
     def set_flag(self, request):
@@ -145,12 +189,10 @@ class HistoryImportViewSet(ProjectScopedReadOnlyViewSet):
     @action(detail=False, methods=["post"])
     def preflight(self, request):
         from projects.models import Project
-        from .history_ingestion import HistoryIngestionService, flywheel_enabled
+        from .history_ingestion import HistoryIngestionService
         project = get_object_or_404(Project, pk=request.data.get("project"))
         _ensure_project_member(request.user, project.pk)
-        if not flywheel_enabled(project):
-            from rest_framework.exceptions import ValidationError
-            raise ValidationError("当前项目未开启质量飞轮")
+        _ensure_linkage_enabled(project.pk)
         return Response(HistoryIngestionService.preflight(
             project=project, manifest=request.data.get("manifest") or {},
         ))
@@ -160,11 +202,10 @@ class HistoryImportViewSet(ProjectScopedReadOnlyViewSet):
         from projects.models import Project
         from django.core.exceptions import ValidationError as DjangoValidationError
         from rest_framework.exceptions import ValidationError
-        from .history_ingestion import HistoryIngestionService, flywheel_enabled
+        from .history_ingestion import HistoryIngestionService
         project = get_object_or_404(Project, pk=request.data.get("project"))
         _ensure_test_lead(request.user, project.pk)
-        if not flywheel_enabled(project):
-            raise ValidationError("当前项目未开启质量飞轮")
+        _ensure_linkage_enabled(project.pk)
         try:
             batch, created = HistoryIngestionService.confirm(
                 project=project, token=str(request.data.get("confirmation_token") or ""), actor=request.user,
@@ -187,12 +228,10 @@ class HistoryReplayViewSet(ProjectScopedReadOnlyViewSet):
     @action(detail=False, methods=["post"])
     def start(self, request):
         from projects.models import Project
-        from .history_ingestion import HistoryReplayService, flywheel_enabled
-        from rest_framework.exceptions import ValidationError
+        from .history_ingestion import HistoryReplayService
         project = get_object_or_404(Project, pk=request.data.get("project"))
         _ensure_test_lead(request.user, project.pk)
-        if not flywheel_enabled(project):
-            raise ValidationError("当前项目未开启质量飞轮")
+        _ensure_linkage_enabled(project.pk)
         batch = get_object_or_404(HistoryImportBatch, pk=request.data.get("batch"), project=project)
         gold = None
         if request.data.get("gold_version"):
@@ -242,6 +281,7 @@ class FlywheelRunViewSet(viewsets.ModelViewSet):
 
         project = serializer.validated_data["project"]
         _ensure_project_member(self.request.user, project.pk)
+        _ensure_linkage_enabled(project.pk)
         run = FlywheelContextService.create(
             project=project,
             workflow_id=serializer.validated_data["workflow_id"],
@@ -276,6 +316,7 @@ class FlywheelRunViewSet(viewsets.ModelViewSet):
             from rest_framework.exceptions import ValidationError
             raise ValidationError({"project": "必须指定项目"})
         _ensure_project_member(request.user, int(project_id))
+        _ensure_linkage_enabled(int(project_id))
         from django.core.exceptions import ValidationError as DjangoValidationError
         from projects.models import Project
         project = get_object_or_404(Project, pk=int(project_id))
@@ -359,6 +400,138 @@ class StageExecutionAttemptViewSet(ProjectScopedReadOnlyViewSet):
             self.get_serializer(new_attempt).data,
             status=201 if created else 200,
         )
+
+    # ---------------------------------------------------------- 执行链路（T08）
+
+    @action(detail=True, methods=["get"], url_path="trace")
+    def trace(self, request, pk=None):
+        """一次拿全：业务摘要 + 事件流 + Span 明细。
+
+        合成一个接口而不是三个，是因为飞轮阶段卡在 Agent 运行期间会**反复轮询**：
+        三个接口意味着三次往返、三种"前半段新、后半段旧"的拼装结果，
+        页面上的进度会来回跳。
+        """
+        from .attribution import AttemptTraceService
+
+        attempt = self.get_object()
+        return Response({
+            "summary": AttemptTraceService.summary(attempt, user=request.user),
+            "events": AttemptTraceService.events(attempt, user=request.user),
+            "spans": AttemptTraceService.spans(attempt, user=request.user),
+        })
+
+    @action(detail=True, methods=["get"], url_path="trace-spans")
+    def trace_spans(self, request, pk=None):
+        """只取 Span 明细（下钻面板展开时刷新用，避免整包重取）。"""
+        from .attribution import AttemptTraceService
+
+        attempt = self.get_object()
+        return Response({
+            "spans": AttemptTraceService.spans(attempt, user=request.user),
+            "summary": AttemptTraceService.summary(attempt, user=request.user),
+        })
+
+    @action(detail=True, methods=["post"], url_path="trace-span")
+    def record_trace_span(self, request, pk=None):
+        """增量写入一个 Span（执行过程中即可调用，不等待最终产出）。
+
+        权限用**执行人员**而不是负责人：写 Span 是执行链路的一部分，
+        与"重试/覆盖产出"这种决策动作不同。
+        """
+        from rest_framework.exceptions import ValidationError
+
+        from .attribution import AttemptTraceService
+
+        attempt = self.get_object()
+        _ensure_project_member(request.user, attempt.project_id)
+        step_type = str(request.data.get("step_type") or "")
+        if not step_type:
+            raise ValidationError({"step_type": "必须提供 step_type"})
+        try:
+            span = AttemptTraceService.record_span(
+                attempt=attempt,
+                step_type=step_type,
+                status=str(request.data.get("status") or "running"),
+                tool_name=str(request.data.get("tool_name") or ""),
+                tool_version=str(request.data.get("tool_version") or ""),
+                agent_name=str(request.data.get("agent_name") or ""),
+                latency_ms=int(request.data.get("latency_ms") or 0),
+                error_type=str(request.data.get("error_type") or ""),
+                error_message=str(request.data.get("error_message") or ""),
+                input_hash=str(request.data.get("input_hash") or ""),
+                output_hash=str(request.data.get("output_hash") or ""),
+                sequence=request.data.get("sequence"),
+                evidence=request.data.get("evidence") or [],
+                metadata=request.data.get("metadata") or {},
+            )
+        except ValueError as exc:
+            raise ValidationError({"sequence": str(exc)})
+        return Response(
+            {"span_id": str(span.id), "sequence": span.sequence, "status": span.status},
+            status=201,
+        )
+
+
+class StageExecutionContextViewSet(viewsets.ReadOnlyModelViewSet):
+    """执行上下文的解析接口（T02 / R3）。
+
+    刻意**不继承** ``ProjectScopedReadOnlyViewSet``：那个基类靠 query 里的 project
+    过滤 queryset，并把"取不到"表达成 404。而这里要做的是一次四道校验的解析，
+    且「不存在」与「存在但跨项目」必须返回**同一个**结论——用基类的 404 语义
+    恰好会把两者区分开，那正是我们不想泄漏的信息。
+    """
+
+    serializer_class = StageExecutionContextSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return StageExecutionContext.objects.select_related(
+            "project", "attempt", "skill_version__skill", "flywheel_run",
+        )
+
+    def list(self, request):
+        """按项目列出上下文（可选再按 workflow_id / stage 收窄）。
+
+        列表存在的原因是排障：上下文过期后页面会提示"回飞轮重新派发"，
+        而人要能查清"上一份是什么时候发的、解析过几次"。
+        """
+        from rest_framework.exceptions import ValidationError
+
+        from .operations import StageExecutionContextService
+
+        project_id = request.query_params.get("project")
+        if not project_id:
+            raise ValidationError("必须提供 project")
+        project_id = int(project_id)
+        StageExecutionContextService._assert_member(request.user, project_id)
+
+        queryset = self.get_queryset().filter(project_id=project_id)
+        for name in ("workflow_id", "stage"):
+            value = request.query_params.get(name)
+            if value:
+                queryset = queryset.filter(**{name: str(value)})
+        queryset = queryset.order_by("-created_at")[:100]
+        return Response(self.get_serializer(queryset, many=True).data)
+
+    def retrieve(self, request, pk=None):
+        """解析一份上下文，返回业务页面需要的可信参数。
+
+        返回的是 ``StageExecutionContextService.view`` 的扁平结构而不是
+        serializer 的字段：业务页面需要「流程 + 阶段 + 锁定 Skill + 上游产出」
+        一次拿全，且字段名要与飞轮派发回执一致，避免同一个概念在前后端
+        出现两种拼法。
+        """
+        from rest_framework.exceptions import ValidationError
+
+        from .operations import StageExecutionContextService
+
+        project_id = request.query_params.get("project")
+        if not project_id:
+            raise ValidationError("必须提供 project")
+        context = StageExecutionContextService.resolve(
+            context_id=pk, project_id=int(project_id), user=request.user,
+        )
+        return Response(StageExecutionContextService.view(context))
 
 
 class TestAssetTaxonomyViewSet(viewsets.ModelViewSet):
@@ -859,6 +1032,7 @@ class OptimizationProposalViewSet(viewsets.ReadOnlyModelViewSet):
             proposals = OptimizationProposalService.generate(
                 attributions=attributions, actor=request.user,
                 capability=capability, baseline_release=baseline,
+                target_type=request.data.get("target_type"),
             )
         except DjangoValidationError as exc:
             raise ValidationError(exc.messages)
@@ -880,6 +1054,203 @@ class OptimizationProposalViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(
             CapabilityReleaseSerializer(release, context={"request": request}).data,
             status=201,
+        )
+
+    # ---------------------------------------------------------------- T13 工坊
+    #
+    # 这几个动作构成 Skill 进化工坊的服务端：派生候选 → 冻结集门禁 →
+    # 提交审批 → 激活 → 观察 → 回滚。语义不合并（派生不顺带评测、评测不顺带
+    # 提交审批），因为每一步的失败处理与授权人都不同；合成一个"一键进化"
+    # 会让失败时无法判断停在哪儿、也没法只重跑其中一步。
+
+    @staticmethod
+    def _skill_content(proposal):
+        from .skill_content import SkillContentGateService
+        if proposal.proposal_type != "skill_content":
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"proposal_type": "该动作只适用于 skill_content 候选"})
+        return SkillContentGateService
+
+    @action(detail=True, methods=["get"], url_path="skill-content-plan")
+    def skill_content_plan(self, request, pk=None):
+        """候选计划与门禁摘要（只读）：改了哪些文件、回滚目标、缺哪些条件。"""
+        proposal = self.get_object()
+        _ensure_project_member(request.user, proposal.project_id)
+        return Response(self._skill_content(proposal).summary(proposal))
+
+    @action(detail=True, methods=["post"], url_path="skill-content-materialize")
+    def skill_content_materialize(self, request, pk=None):
+        """派生候选：产生**新的不可变 SkillVersion**，不改 active 包。"""
+        proposal = self.get_object()
+        _ensure_test_lead(request.user, proposal.project_id)
+        self._skill_content(proposal)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+        from .skill_content import SkillContentGateService, SkillContentOptimizationService
+        try:
+            result = SkillContentOptimizationService.materialize(
+                proposal=proposal, actor=request.user,
+                edits=request.data.get("edits") or None,
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        payload = SkillContentGateService.summary(proposal)
+        payload.update({
+            "reused": result["reused"],
+            "active_untouched": result["active_untouched"],
+            "diff": result.get("diff") or {},
+            "patch": result.get("patch") or {},
+            "rollback_target": result.get("rollback_target", ""),
+            "release": CapabilityReleaseSerializer(
+                result["release"], context={"request": request},
+            ).data,
+        })
+        return Response(payload, status=200 if result["reused"] else 201)
+
+    @action(detail=True, methods=["post"], url_path="skill-content-evaluate")
+    def skill_content_evaluate(self, request, pk=None):
+        """冻结集对照 + 硬门禁。基线/候选必须是同一份冻结金标上的回放。"""
+        proposal = self.get_object()
+        _ensure_test_lead(request.user, proposal.project_id)
+        service = self._skill_content(proposal)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+        from .models import EvaluationRun, GoldDatasetVersion
+        gold = get_object_or_404(
+            GoldDatasetVersion, pk=request.data.get("gold_dataset_version"),
+            dataset__project_id=proposal.project_id,
+        )
+        baseline_run = get_object_or_404(
+            EvaluationRun, pk=request.data.get("baseline_run"),
+            suite__project_id=proposal.project_id,
+        )
+        candidate_run = get_object_or_404(
+            EvaluationRun, pk=request.data.get("candidate_run"),
+            suite__project_id=proposal.project_id,
+        )
+        try:
+            experiment = service.run(
+                proposal=proposal, gold_version=gold,
+                baseline_run=baseline_run, candidate_run=candidate_run,
+                actor=request.user, thresholds=request.data.get("thresholds") or None,
+                kind=str(request.data.get("kind") or "full"),
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response({
+            "experiment_id": str(experiment.id),
+            "status": experiment.status,
+            "gate_report": experiment.gate_report,
+            "plan": service.summary(proposal),
+        })
+
+    @staticmethod
+    def _skill_content_lifecycle(proposal):
+        from .skill_content import SkillContentLifecycleService
+        return SkillContentLifecycleService
+
+    @action(detail=True, methods=["post"], url_path="skill-content-submit-approval")
+    def skill_content_submit_approval(self, request, pk=None):
+        proposal = self.get_object()
+        _ensure_test_lead(request.user, proposal.project_id)
+        self._skill_content(proposal)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+        try:
+            release = self._skill_content_lifecycle(proposal).submit_for_approval(
+                proposal=proposal, actor=request.user,
+                reason=str(request.data.get("reason") or ""),
+                kind=str(request.data.get("kind") or "full"),
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(CapabilityReleaseSerializer(release, context={"request": request}).data)
+
+    @action(detail=True, methods=["post"], url_path="skill-content-activate")
+    def skill_content_activate(self, request, pk=None):
+        proposal = self.get_object()
+        _ensure_test_lead(request.user, proposal.project_id)
+        self._skill_content(proposal)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+        try:
+            release = self._skill_content_lifecycle(proposal).activate(
+                proposal=proposal, actor=request.user,
+                reason=str(request.data.get("reason") or ""),
+                kind=str(request.data.get("kind") or "full"),
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(CapabilityReleaseSerializer(release, context={"request": request}).data)
+
+    @action(detail=True, methods=["post"], url_path="skill-content-reject")
+    def skill_content_reject(self, request, pk=None):
+        proposal = self.get_object()
+        _ensure_test_lead(request.user, proposal.project_id)
+        self._skill_content(proposal)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+        try:
+            release = self._skill_content_lifecycle(proposal).reject(
+                proposal=proposal, actor=request.user,
+                reason=str(request.data.get("reason") or ""),
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(CapabilityReleaseSerializer(release, context={"request": request}).data)
+
+    @action(detail=True, methods=["post"], url_path="skill-content-observe")
+    def skill_content_observe(self, request, pk=None):
+        """记录一个灰度观察窗口；超阈值时自动回滚（复用发布状态机）。"""
+        proposal = self.get_object()
+        _ensure_test_lead(request.user, proposal.project_id)
+        self._skill_content(proposal)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+        try:
+            payload = self._skill_content_lifecycle(proposal).observe(
+                proposal=proposal,
+                window_key=str(request.data.get("window_key") or ""),
+                metrics=request.data.get("metrics") or {},
+                actor=request.user,
+                thresholds=request.data.get("thresholds") or None,
+                auto_rollback=bool(request.data.get("auto_rollback", True)),
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(payload, status=201)
+
+    @action(detail=True, methods=["post"], url_path="skill-content-rollback")
+    def skill_content_rollback(self, request, pk=None):
+        proposal = self.get_object()
+        _ensure_test_lead(request.user, proposal.project_id)
+        self._skill_content(proposal)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+        try:
+            release = self._skill_content_lifecycle(proposal).rollback(
+                proposal=proposal, actor=request.user,
+                reason=str(request.data.get("reason") or ""),
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(exc.messages)
+        return Response(
+            {"release": CapabilityReleaseSerializer(release, context={"request": request}).data}
+            if release is not None else {"release": None},
+        )
+
+    @action(detail=True, methods=["get"], url_path="skill-content-running-flows")
+    def skill_content_running_flows(self, request, pk=None):
+        """取证：激活候选后，运行中流程仍钉在各自锁定的版本上。"""
+        proposal = self.get_object()
+        _ensure_project_member(request.user, proposal.project_id)
+        from .skill_content import SkillContentGateService, SkillContentLifecycleService
+        version = SkillContentGateService._candidate_version(proposal)
+        if version is None:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"proposal": "候选尚未派生 Skill 版本"})
+        return Response(
+            SkillContentLifecycleService.running_flow_evidence(version.skill)
         )
 
 
@@ -1886,6 +2257,36 @@ def _validation_text(exc) -> str:
     return "；".join(parts)
 
 
+def _validation_payload(exc) -> dict | str:
+    """把字段级校验失败翻成前端能直接定位的结构。
+
+    传 dict 给 ``ValidationError`` 时 Django 会把字段错误收在 ``message_dict`` 里，
+    ``messages`` 则会把它展平成带引号的字符串——前端只能整句显示，用户看不出
+    是"哪个字段"错了。这里保留字段名，同时给一句可直接展示的话。
+
+    没有字段结构（单句错误）时退回 ``_validation_text``，不为了统一形状而
+    编出一个假的 ``fields``：那会让前端以为"有字段级错误"，然后渲染出一片空白。
+    """
+    message_dict = getattr(exc, "message_dict", None)
+    if not message_dict:
+        return _validation_text(exc)
+
+    fields = {
+        str(field): [str(item) for item in (value if isinstance(value, list) else [value])]
+        for field, value in message_dict.items()
+    }
+    flat = "；".join(
+        f"{field}: {message}"
+        for field, messages in fields.items()
+        for message in messages
+    )
+    return {
+        "message": flat,
+        "fields": fields,
+        "count": sum(len(messages) for messages in fields.values()),
+    }
+
+
 class FlywheelOperationsViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
 
@@ -1916,6 +2317,79 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
         from .gold import AssetCandidateService
         project_id = int(request.query_params["project"]); self._check(request, project_id)
         return Response(AssetCandidateService.status_summary(project_id))
+
+    @action(detail=False, methods=["get"], url_path="registration-failures")
+    def registration_failures(self, request):
+        """飞轮登记失败的补偿队列（T14 / §13）。
+
+        与 ``candidate-alerts`` 并列而不是合并：候选事件的失败意味着
+        "金标没沉淀"，登记失败意味着"这一版产出没进门禁"。两者的处置人、
+        处置动作和严重度都不同，合成一个数字只会让两边都看不清。
+        """
+        from rest_framework.exceptions import ValidationError
+
+        from .registration import FlywheelRegistrationService
+
+        raw = request.query_params.get("project")
+        if not raw:
+            raise ValidationError({"project": "必须指定项目"})
+        project_id = int(raw)
+        self._check(request, project_id)
+        summary = FlywheelRegistrationService.status_summary(project_id)
+        if str(request.query_params.get("detail") or "") in {"1", "true", "yes"}:
+            summary["items"] = [
+                {
+                    "id": str(record.pk),
+                    "output_id": str(record.output_id),
+                    "workflow_id": record.workflow_id,
+                    "stage": record.stage,
+                    "status": record.status,
+                    "attempts": record.attempts,
+                    "max_attempts": record.max_attempts,
+                    "last_error": record.last_error,
+                    "created_at": record.created_at,
+                }
+                for record in FlywheelRegistrationService.open_for_project(project_id)
+            ]
+        return Response(summary)
+
+    @action(detail=False, methods=["post"], url_path="registration-failures-retry")
+    def registration_failures_retry(self, request):
+        """批量重试未决的登记失败（补偿入口）。"""
+        from rest_framework.exceptions import ValidationError
+
+        from .registration import FlywheelRegistrationService
+
+        raw = request.data.get("project")
+        if not raw:
+            raise ValidationError({"project": "必须指定项目"})
+        project_id = int(raw)
+        _ensure_test_lead(request.user, project_id)
+        results = FlywheelRegistrationService.retry_failed(
+            project_id=project_id, actor=request.user,
+        )
+        return Response({
+            "project_id": project_id, "retried": len(results), "results": results,
+            "summary": FlywheelRegistrationService.status_summary(project_id),
+        })
+
+    @action(detail=False, methods=["get"], url_path="launch-readiness")
+    def launch_readiness(self, request):
+        """上线就绪自检（T14）：把检查表里**可自动判定**的条件跑一遍。
+
+        只读且成员可见：上线前要能反复跑，跑之前不该先申请一次权限。
+        """
+        from rest_framework.exceptions import ValidationError
+
+        from projects.models import Project
+        from .rollout import LaunchReadinessService
+
+        raw = request.query_params.get("project")
+        if not raw:
+            raise ValidationError({"project": "必须指定项目"})
+        project_id = int(raw)
+        self._check(request, project_id)
+        return Response(LaunchReadinessService.check(get_object_or_404(Project, pk=project_id)))
 
     @action(detail=False, methods=["get"], url_path="cockpit")
     def cockpit(self, request):
@@ -1958,6 +2432,7 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
 
         project_id = int(request.data["project"]); self._check(request, project_id)
         _ensure_test_lead(request.user, project_id)
+        _ensure_linkage_enabled(project_id)
         project = get_object_or_404(Project, pk=project_id)
         raw_pins = request.data.get("pins")
         if raw_pins in (None, ""):
@@ -2328,6 +2803,714 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
             "workflow_id": workflow_id,
             **result,
         }, status=201)
+
+    # ------------------------------------------------------ 人工确认报告（T09）
+
+    def _resolve_stage_for_review(self, request):
+        """三个确认报告动作共用的定位与阶段校验。"""
+        from rest_framework.exceptions import ValidationError
+
+        from .operations import ALL_WORKFLOW_STAGE_SET, WorkflowGateService
+
+        project_id = int(request.data.get("project") or request.query_params["project"])
+        self._check(request, project_id)
+        workflow_id = str(
+            request.data.get("workflow_id") or request.query_params.get("workflow_id") or ""
+        )
+        stage = str(request.data.get("stage") or request.query_params.get("stage") or "")
+        if stage not in ALL_WORKFLOW_STAGE_SET:
+            raise ValidationError(f"未知的阶段：{stage}")
+
+        output, gate = WorkflowGateService.locate_stage_output(
+            project_id=project_id, workflow_id=workflow_id, stage=stage,
+        )
+        if output is None:
+            raise ValidationError(
+                f"{WorkflowGateService.STAGE_LABELS.get(stage, stage)}阶段暂无产出；"
+                f"请先执行本阶段"
+            )
+        return project_id, workflow_id, stage, output, gate
+
+    @action(detail=False, methods=["get"], url_path="workflow-stage-review-report")
+    def workflow_stage_review_report(self, request):
+        """「下载确认报告」：生成并登记方案确认报告（T07 + T09）。
+
+        与「下载报告」**不是同一个东西**，刻意分成两个按钮：那份是 Skill 的业务
+        主产物（方案本身），这份是**给人工填四列**的表。合成一个文件，人就得在
+        业务方案上直接改，改完也没法机器解析。
+        """
+        from urllib.parse import quote
+
+        from django.http import HttpResponse
+        from rest_framework.exceptions import ValidationError
+
+        from . import derived_artifacts as da
+        from .operations import WorkflowGateService
+
+        project_id, workflow_id, stage, output, _gate = self._resolve_stage_for_review(request)
+        stage_result_payload = self._extract_stage_result_payload(output)
+        if stage_result_payload is None:
+            raise ValidationError(
+                "该产出没有结构化协议（stage_result.json），无法生成逐项确认报告；"
+                "请确认本阶段 Skill 已按 stage-result/v1 输出"
+            )
+
+        try:
+            artifacts = da.register_for_output(
+                output, stage_result_payload=stage_result_payload, actor=request.user,
+                best_effort=False,
+            )
+        except ValidationError:
+            raise
+        except Exception as exc:
+            # 结构化协议失败：业务产出仍在，这一点必须在提示里说清，
+            # 否则用户会以为方案白跑了。
+            detail = getattr(getattr(exc, "validation", None), "detail", "")
+            raise ValidationError(
+                detail or f"结构化协议校验未通过，无法生成确认报告（业务产出不受影响）：{exc}"
+            )
+
+        report = next((item for item in artifacts if item.kind == da.KIND_REVIEW_REPORT), None)
+        if report is None:
+            raise ValidationError("确认报告未能生成，请稍后重试或联系管理员")
+
+        response = HttpResponse(da.read_artifact(report), content_type=da.KIND_CONTENT_TYPES[report.kind])
+        response["Content-Disposition"] = (
+            f"attachment; filename=\"stage-review-report.xlsx\"; "
+            f"filename*=UTF-8''{quote(report.filename)}"
+        )
+        # 让前端能核验"下的就是登记的那一份"，并与提交时的哈希对上。
+        response["X-Artifact-Sha256"] = report.content_hash
+        response["X-Artifact-Id"] = str(report.pk)
+        return response
+
+    @action(detail=False, methods=["get"], url_path="workflow-stage-review-status")
+    def workflow_stage_review_status(self, request):
+        """该阶段人工确认的当前状态（是否已生成报告、上次草稿/提交到哪）。"""
+        from . import derived_artifacts as da
+        from .operations import WorkflowGateService
+        from .workflow_feedback import WorkflowStageReviewService
+
+        project_id, workflow_id, stage, output, _gate = self._resolve_stage_for_review(request)
+        report = (
+            da.list_for_output(output).filter(kind=da.KIND_REVIEW_REPORT).first()
+        )
+        latest = WorkflowStageReviewService.latest(output)
+        return Response({
+            "stage": stage,
+            "stage_label": WorkflowGateService.STAGE_LABELS.get(stage, stage),
+            "workflow_id": workflow_id,
+            "output_id": str(output.pk),
+            "structured_input_available": self._extract_stage_result_payload(output) is not None,
+            "report": ({
+                "artifact_id": str(report.pk),
+                "filename": report.filename,
+                "content_hash": report.content_hash,
+                "generator_version": report.generator_version,
+                "level": report.level,
+                "created_at": report.created_at.isoformat() if report.created_at else "",
+            } if report is not None else None),
+            "latest_review": latest,
+            "history": (
+                WorkflowStageReviewService.history(output.skill_version.skill)
+                if output.skill_version_id and output.skill_version.skill_id else []
+            ),
+        })
+
+    @action(detail=False, methods=["post"], url_path="workflow-stage-review-draft")
+    def workflow_stage_review_draft(self, request):
+        """保存确认报告草稿：允许有空白，**不进入进化**（T09）。"""
+        return self._apply_review_upload(request, submit=False)
+
+    @action(detail=False, methods=["post"], url_path="workflow-stage-review-submit")
+    def workflow_stage_review_submit(self, request):
+        """正式提交确认报告：校验条件必填，成为可用于进化的版本化反馈。"""
+        return self._apply_review_upload(request, submit=True)
+
+    # ------------------------------------------------------------ 人工补充文件（T10）
+
+    @action(detail=False, methods=["get"], url_path="workflow-stage-attachment-catalog")
+    def workflow_stage_attachment_catalog(self, request):
+        """补充文件上传表单的选项真值（用途 / 阶段）。
+
+        由后端给而不是前端写死：用途与阶段的合法取值属于**协议**，
+        前端各抄一份的结果是"页面能选、提交 400"。
+        """
+        from .feedback_attachments import (
+            ATTACHMENT_PURPOSE_LABELS, ATTACHMENT_STAGES, ATTACHMENT_MAX_BYTES,
+        )
+        from .operations import WorkflowGateService
+
+        return Response({
+            "purposes": [
+                {"value": value, "label": label}
+                for value, label in ATTACHMENT_PURPOSE_LABELS.items()
+            ],
+            "stages": [
+                {
+                    "value": stage,
+                    "label": WorkflowGateService.STAGE_LABELS.get(stage, stage),
+                }
+                for stage in ATTACHMENT_STAGES
+            ],
+            "max_bytes": ATTACHMENT_MAX_BYTES,
+        })
+
+    @action(detail=False, methods=["get", "post"], url_path="workflow-stage-attachments")
+    def workflow_stage_attachments(self, request):
+        """阶段人工补充文件：列表与上传（T10 / §7.4）。
+
+        **只进反馈，不进生产**：这个接口不派生 Skill、不改 ``active`` 版本、
+        不进金标集。人工交一份参考附件就改动生产 Skill，是最难被接受的一类副作用。
+        """
+        from .feedback_attachments import StageAttachmentService
+
+        project_id = int(request.query_params.get("project") or request.data.get("project") or 0)
+        if not project_id:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"project": "必须指定项目"})
+        self._check(request, project_id)
+
+        if request.method == "GET":
+            rows = StageAttachmentService.list_for(
+                project_id=project_id,
+                stage=request.query_params.get("stage") or "",
+                workflow_id=request.query_params.get("workflow_id") or "",
+                purpose=request.query_params.get("purpose") or "",
+                include_retired=str(request.query_params.get("include_retired") or "")
+                in {"1", "true", "True"},
+            )
+            return Response({
+                "count": len(rows),
+                "results": [StageAttachmentService.view(row) for row in rows],
+            })
+
+        import uuid
+
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from django.shortcuts import get_object_or_404
+
+        from knowledge_evolution.models import GenerationOutput
+        from projects.models import Project
+
+        from .workflow_models import StageExecutionAttempt
+
+        project = get_object_or_404(Project, pk=project_id)
+        stage = str(request.data.get("stage") or "")
+        purpose = str(request.data.get("purpose") or "")
+
+        output = None
+        output_id = str(request.data.get("output_id") or "").strip()
+        if output_id:
+            # 产出只按 id 取是够的：下面 service 还会校验它属不属于本项目，
+            # 越权会得到 400 而不是"读到别的项目的产出"。
+            # ⚠️ 产出主键是 UUID，不能按"是不是数字"判合法取出。
+            try:
+                output_uuid = uuid.UUID(output_id)
+            except (ValueError, TypeError, AttributeError):
+                output_uuid = None
+            output = (
+                GenerationOutput.objects.filter(pk=output_uuid).first()
+                if output_uuid is not None else None
+            )
+            if output is None:
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError({"output_id": "产出不存在"})
+
+        attempt = None
+        attempt_id = str(request.data.get("attempt_id") or "").strip()
+        if attempt_id:
+            try:
+                attempt_uuid = uuid.UUID(attempt_id)
+            except (ValueError, TypeError, AttributeError):
+                attempt_uuid = None
+            attempt = (
+                StageExecutionAttempt.objects.filter(pk=attempt_uuid).first()
+                if attempt_uuid is not None else None
+            )
+            if attempt is None:
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError({"attempt_id": "执行尝试不存在"})
+
+        try:
+            attachment, created = StageAttachmentService.upload(
+                project=project, stage=stage, purpose=purpose, actor=request.user,
+                upload=request.FILES.get("file"),
+                file_id=request.data.get("file_id") or None,
+                workflow_id=str(request.data.get("workflow_id") or ""),
+                output=output, attempt=attempt,
+                note=str(request.data.get("note") or ""),
+            )
+        except DjangoValidationError as exc:
+            return Response({"detail": _validation_payload(exc)}, status=400)
+
+        return Response(
+            {"created": created, **StageAttachmentService.view(attachment)},
+            status=201 if created else 200,
+        )
+
+    @action(detail=False, methods=["post"], url_path="workflow-stage-attachment-retire")
+    def workflow_stage_attachment_retire(self, request):
+        """退役一份补充文件：软删除 + 记原因，物理文件与审计都留下。"""
+        from django.shortcuts import get_object_or_404
+        from rest_framework.exceptions import ValidationError
+
+        from .feedback_attachments import StageAttachmentService
+        from .workflow_models import StageFeedbackAttachment
+
+        attachment_id = request.data.get("attachment_id")
+        if not attachment_id:
+            raise ValidationError({"attachment_id": "必须指定要退役的文件"})
+        attachment = get_object_or_404(StageFeedbackAttachment, pk=attachment_id)
+        self._check(request, attachment.project_id)
+
+        StageAttachmentService.retire(
+            attachment=attachment, actor=request.user,
+            reason=str(request.data.get("reason") or ""),
+        )
+        return Response(StageAttachmentService.view(attachment))
+
+    def _apply_review_upload(self, request, *, submit: bool):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+
+        from .workflow_feedback import ReviewSubmissionError, WorkflowStageReviewService
+
+        project_id, workflow_id, stage, output, _gate = self._resolve_stage_for_review(request)
+        upload = request.FILES.get("file")
+        if upload is None:
+            raise ValidationError({"file": "必须上传已填写人工列的确认报告"})
+
+        action = (
+            WorkflowStageReviewService.submit if submit
+            else WorkflowStageReviewService.save_draft
+        )
+        try:
+            result = action(
+                output=output, stage=stage, data=upload.read(), actor=request.user,
+                report_name=getattr(upload, "name", "") or "",
+            )
+        except ReviewSubmissionError as exc:
+            # 逐行错误原样带出去：这是**行级**校验（"第 3 行缺修改类型"），
+            # 拍成一句话会让用户回去一行行找。
+            return Response({"detail": {
+                "message": exc.detail,
+                "errors": exc.errors,
+                "count": len(exc.errors),
+            }}, status=400)
+        except DjangoValidationError as exc:
+            # 格式不对、无产出等单句错误：400 并带上那句话，而不是 500
+            # 让前端弹"系统错误"把该看的提示吃掉。
+            return Response({"detail": _validation_text(exc)}, status=400)
+
+        return Response({"workflow_id": workflow_id, **result}, status=201)
+
+    @staticmethod
+    def _extract_stage_result_payload(output):
+        """从产出里取出 Skill 的 ``stage_result.json`` 内容。
+
+        三个来源按可信度递减：产出运行时显式回传 → 产出登记的产物文件 →
+        产出 metadata 里的内联信封。**不做目录扫描**：扫到哪个算哪个会让
+        "这次解读的是哪份结构化产出"取决于磁盘上的偶然残留。
+        """
+        import json
+
+        from .stage_outputs import STAGE_RESULT_FILENAME
+
+        metadata = output.metadata or {}
+        inline = metadata.get("stage_result_payload")
+        if isinstance(inline, dict):
+            return inline
+
+        artifacts = (metadata.get("artifacts") or [])
+        for entry in artifacts:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "")
+            path = str(entry.get("path") or "")
+            if name != STAGE_RESULT_FILENAME and not path.endswith(STAGE_RESULT_FILENAME):
+                continue
+            if not path:
+                continue
+            try:
+                with open(path, "rb") as handle:
+                    return json.loads(handle.read().decode("utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                # 文件在、读不动：当作"取不到"而不是抛错——上层会给出
+                # "该产出没有结构化协议"的明确提示，而 500 什么也说明不了。
+                return None
+        return None
+
+    # -------------------------------------------- 差异、反查与归因工作区（T11）
+
+    @staticmethod
+    def _stage_derived_payload(output) -> dict:
+        """读取该产出已登记的派生物：证据图谱与质量摘要（T07）。
+
+        读**登记文件**而不是现场重算：检索结果与知识版本在事后都可能变化，
+        重算出来的图谱与人工当时看到的那张不是同一张，归因就会指向一个
+        当时并不存在的状态。登记文件是把"当时是这么判的"固定下来的唯一凭据。
+        """
+        import json
+
+        from . import derived_artifacts as da
+
+        payload = {"graph": None, "quality": None, "graph_stale": False, "available": False}
+        for artifact in da.list_for_output(output):
+            if artifact.kind not in (da.KIND_EVIDENCE_GRAPH, da.KIND_QUALITY_SUMMARY):
+                continue
+            try:
+                content = json.loads(da.read_artifact(artifact).decode("utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                content = None
+            if artifact.kind == da.KIND_EVIDENCE_GRAPH:
+                payload["graph"] = content
+                # 产出被替换后（T12），旧解读要显式标为过期而不是继续当有效。
+                payload["graph_stale"] = da.output_hash_changed(artifact, output)
+            else:
+                payload["quality"] = content
+        payload["available"] = payload["graph"] is not None or payload["quality"] is not None
+        return payload
+
+    @staticmethod
+    def _attribution_payload(attribution) -> dict:
+        """归因工作区的对外结构。
+
+        ``usable_for_content_patch`` 由 ``assert_usable_for_content_patch`` 派生，
+        而不是让前端按 category 自己判：环境层能不能改 Skill 是**规则**，
+        抄到前端就会出现"后端拦住了、页面还显示可派生"。
+        """
+        from .attribution import assert_usable_for_content_patch
+
+        usable = bool(assert_usable_for_content_patch([attribution]))
+        return {
+            "id": str(attribution.pk),
+            "state": attribution.state,
+            "state_label": attribution.get_state_display(),
+            "category": attribution.category,
+            "category_label": attribution.get_category_display(),
+            "layer": attribution.layer,
+            "layer_label": attribution.get_layer_display() if attribution.layer else "",
+            "source": attribution.source,
+            "confidence": attribution.confidence,
+            "hypothesis": attribution.hypothesis,
+            "evidence": attribution.evidence or [],
+            "counterevidence": attribution.counterevidence or [],
+            "workflow_id": attribution.workflow_id,
+            "output_id": str(attribution.output_id or ""),
+            "span_id": str(attribution.span_id or ""),
+            "confirmed_by": (
+                attribution.confirmed_by.username if attribution.confirmed_by_id else ""
+            ),
+            "confirmed_at": (
+                attribution.confirmed_at.isoformat() if attribution.confirmed_at else ""
+            ),
+            "created_at": attribution.created_at.isoformat(),
+            "usable_for_content_patch": usable,
+            "excluded_reason": "" if usable else "执行环境问题不得生成 Skill 内容补丁",
+        }
+
+    @staticmethod
+    def _stage_review_rows(output) -> list[dict]:
+        """取最近一次人工确认里"填过的行"，作为差异比对的人工侧。"""
+        from .workflow_feedback import WorkflowStageReviewService
+
+        latest = WorkflowStageReviewService.latest(output)
+        return list((latest or {}).get("human_rows") or [])
+
+    def _stage_diff_inputs(self, request):
+        """差异计算的一次性输入（产出、stage_result、人工行、附件、派生物）。
+
+        三个接口（查看差异、重新归因）必须基于**同一次读取**，否则会出现
+        "差异是按新报告算的、归因还是上一版"的错位。
+        """
+        from rest_framework.exceptions import ValidationError
+
+        from .feedback_attachments import StageAttachmentService
+        from .stage_outputs import StageResult, classify_level
+
+        project_id, workflow_id, stage, output, _gate = self._resolve_stage_for_review(request)
+        raw = self._extract_stage_result_payload(output)
+        if not isinstance(raw, dict):
+            raise ValidationError(
+                "该产出没有可解析的结构化协议（stage_result.json），无法计算人工差异"
+            )
+        stage_result = StageResult.from_payload(raw, classify_level(raw))
+        derived = self._stage_derived_payload(output)
+        attachments = list(StageAttachmentService.list_for(
+            project_id=project_id, stage=stage, workflow_id=workflow_id,
+        ))
+        return {
+            "project_id": project_id, "workflow_id": workflow_id, "stage": stage,
+            "output": output, "stage_result": stage_result,
+            "rows": self._stage_review_rows(output),
+            "attachments": attachments, "derived": derived,
+        }
+
+    @action(detail=False, methods=["get"], url_path="workflow-stage-diff")
+    def workflow_stage_diff(self, request):
+        """「差异与反查」：把人工确认报告里的改动还原成结构化差异（T11 / §8.2）。
+
+        三件事一次给齐，因为它们必须基于同一次读取：差异（人改了什么）、
+        反查链（这条改动从哪来）、归因工作区（平台怀疑是谁的问题）。
+        拆成三个接口会出现"差异刷新了、反查还是上一版"的错位。
+        """
+        from .evidence_graph import reverse_trace
+        from .operations import WorkflowGateService
+        from .stage_diff import build_stage_diff
+        from .trace_models import FailureAttribution
+
+        ctx = self._stage_diff_inputs(request)
+        diff = build_stage_diff(
+            ctx["stage_result"], ctx["rows"],
+            attachments=ctx["attachments"], quality=ctx["derived"]["quality"],
+        )
+        graph = ctx["derived"]["graph"] or {}
+        reverse_traces = {
+            item["item_id"]: reverse_trace(graph, item_id=item["item_id"])
+            for item in diff["items"]
+        }
+        attributions = [
+            self._attribution_payload(attribution)
+            for attribution in FailureAttribution.objects
+            .filter(output=ctx["output"]).select_related("confirmed_by")
+            .order_by("state", "-created_at")
+        ]
+        return Response({
+            "stage": ctx["stage"],
+            "stage_label": WorkflowGateService.STAGE_LABELS.get(ctx["stage"], ctx["stage"]),
+            "workflow_id": ctx["workflow_id"],
+            "output_id": str(ctx["output"].pk),
+            "diff": diff,
+            "reverse_traces": reverse_traces,
+            "derived": {
+                "available": ctx["derived"]["available"],
+                "graph_stale": ctx["derived"]["graph_stale"],
+            },
+            # 人没在平台上交过确认报告时差异必然为空，必须让页面能区分
+            # "审完了没改"和"平台压根没拿到人工结论"。
+            "review_rows_available": bool(ctx["rows"]),
+            "attributions": attributions,
+            "attribution_summary": {
+                "proposed": sum(1 for item in attributions if item["state"] == "proposed"),
+                "confirmed": sum(1 for item in attributions if item["state"] == "confirmed"),
+                "rejected": sum(1 for item in attributions if item["state"] == "rejected"),
+                "usable_for_content_patch": sum(
+                    1 for item in attributions if item["usable_for_content_patch"]
+                ),
+            },
+        })
+
+    @action(detail=False, methods=["post"], url_path="workflow-stage-attribution-run")
+    def workflow_stage_attribution_run(self, request):
+        """「重新归因」：按当前人工差异重新生成**待确认**归因（T11）。
+
+        只创建 ``proposed``：人改过不等于 Skill 有错（也可能只是偏好），
+        自动落成 confirmed 会跳过唯一一次能拦住错误补丁的机会。
+        环境类失败单独成条，供内容补丁环节整条剔除。
+        """
+        from rest_framework.exceptions import ValidationError
+
+        from .attribution import HumanEditAttributionService
+
+        ctx = self._stage_diff_inputs(request)
+        if not ctx["rows"]:
+            raise ValidationError(
+                "尚无人工确认记录（没有上传过填写后的确认报告），没有差异可归因"
+            )
+        results = HumanEditAttributionService.run_for_output(
+            ctx["output"], stage_result=ctx["stage_result"], rows=ctx["rows"],
+            graph=ctx["derived"]["graph"], attachments=ctx["attachments"],
+        )
+        return Response({
+            "workflow_id": ctx["workflow_id"],
+            "stage": ctx["stage"],
+            "created": len(results),
+            "attributions": [self._attribution_payload(item) for item in results],
+        })
+
+    def _attribution_target(self, request):
+        """按 id 定位归因并校验项目成员身份。"""
+        from rest_framework.exceptions import ValidationError
+
+        from .trace_models import FailureAttribution
+
+        attribution_id = request.data.get("attribution_id")
+        if not attribution_id:
+            raise ValidationError({"attribution_id": "必须指定要处理的归因"})
+        attribution = get_object_or_404(FailureAttribution, pk=attribution_id)
+        self._check(request, attribution.project_id)
+        return attribution
+
+    @action(detail=False, methods=["post"], url_path="workflow-stage-attribution-decide")
+    def workflow_stage_attribution_decide(self, request):
+        """确认 / 驳回归因（T11 工作区）。**确认后才可用于派生候选。**
+
+        采纳决定属测试负责人职责（与失败归因既有的 confirm/reject 口径一致）：
+        驳回一条不成立的假设和批准一条成立的假设，后果不对称，门槛应当一致。
+        """
+        from rest_framework.exceptions import ValidationError
+
+        from .attribution import AttributionService
+        from projects.roles import ensure_test_lead
+
+        attribution = self._attribution_target(request)
+        action = str(request.data.get("action") or "").lower()
+        if action not in ("confirm", "reject"):
+            raise ValidationError({"action": "必须是 confirm 或 reject"})
+        ensure_test_lead(request.user, attribution.project_id)
+        updated = AttributionService.decide(
+            attribution=attribution, actor=request.user,
+            accepted=(action == "confirm"), note=str(request.data.get("note") or ""),
+        )
+        return Response(self._attribution_payload(updated))
+
+    @action(detail=False, methods=["post"], url_path="workflow-stage-attribution-rewrite")
+    def workflow_stage_attribution_rewrite(self, request):
+        """改写归因（T11）：改类别必须重算责任层，否则候选补丁会改错文件。"""
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        from .attribution import AttributionService
+        from projects.roles import ensure_test_lead
+
+        attribution = self._attribution_target(request)
+        ensure_test_lead(request.user, attribution.project_id)
+        try:
+            updated = AttributionService.rewrite(
+                attribution, actor=request.user,
+                category=str(request.data.get("category") or ""),
+                hypothesis=str(request.data.get("hypothesis") or ""),
+                note=str(request.data.get("note") or ""),
+            )
+        except DjangoValidationError as exc:
+            return Response({"detail": _validation_payload(exc)}, status=400)
+        return Response(self._attribution_payload(updated))
+
+    # ---------------------------------------------------- 旁路产出纳管（T12）
+
+    @staticmethod
+    def _submission_output(request):
+        """定位待纳管的产出。**只按 id 取、由调用方校验成员身份**。"""
+        import uuid as _uuid
+
+        from rest_framework.exceptions import ValidationError
+
+        from .models import GenerationOutput
+
+        raw = (
+            request.data.get("output_id") or request.query_params.get("output_id")
+            or request.data.get("output") or request.query_params.get("output")
+        )
+        if not raw:
+            raise ValidationError({"output_id": "必须指定要纳入质量飞轮的产出"})
+        try:
+            output_id = _uuid.UUID(str(raw))
+        except (ValueError, TypeError, AttributeError):
+            raise ValidationError({"output_id": "产出 id 不合法"})
+        output = GenerationOutput.objects.filter(pk=output_id).select_related(
+            "skill_version", "project",
+        ).first()
+        if output is None:
+            raise ValidationError({"output_id": "产出不存在"})
+        return output
+
+    @action(detail=False, methods=["get"], url_path="workflow-submission-catalog")
+    def workflow_submission_catalog(self, request):
+        """纳管选项真值（去处 / 状态 / 阶段 / 可确认码），由后端下发。"""
+        from .operations import WorkflowGateService
+        from .submissions import CONFIRMABLE_CODES, SUBMISSION_STAGES
+        from .workflow_models import SUBMISSION_STATE_LABELS, SUBMISSION_TARGET_LABELS
+
+        return Response({
+            "targets": [
+                {"value": value, "label": label}
+                for value, label in SUBMISSION_TARGET_LABELS.items()
+            ],
+            "states": [
+                {"value": value, "label": label}
+                for value, label in SUBMISSION_STATE_LABELS.items()
+            ],
+            "stages": [
+                {"value": stage, "label": WorkflowGateService.STAGE_LABELS.get(stage, stage)}
+                for stage in SUBMISSION_STAGES
+            ],
+            "confirmable_codes": sorted(CONFIRMABLE_CODES),
+        })
+
+    @action(detail=False, methods=["get"], url_path="workflow-stage-submission-preflight")
+    def workflow_stage_submission_preflight(self, request):
+        """「纳入质量飞轮」预检：先问后端能不能纳、会不会冲突。
+
+        冲突必须先被知道：让用户点下去才发现要确认替换，等于把"这次替换会作废
+        一次已完成的评审"藏在一 次点击之后。预检与提交走同一份判定，
+        因此不会出现"预检说能、提交被拒"。
+        """
+        from .submissions import WorkflowSubmissionService
+        from .workflow_models import SUBMISSION_TARGET_EXISTING
+
+        output = self._submission_output(request)
+        self._check(request, output.project_id)
+        return Response(WorkflowSubmissionService.analyze(
+            project=output.project, output=output,
+            stage=str(request.query_params.get("stage") or ""),
+            target=str(request.query_params.get("target") or SUBMISSION_TARGET_EXISTING),
+            workflow_id=str(request.query_params.get("workflow_id") or ""),
+            replace_output_id=str(request.query_params.get("replace_output_id") or ""),
+        ))
+
+    @action(detail=False, methods=["post"], url_path="workflow-stage-submit")
+    def workflow_stage_submit(self, request):
+        """「纳入质量飞轮」：把旁路产出接进流程（T12）。**不改产出协议。**"""
+        from projects.roles import ensure_test_lead
+
+        from .submissions import SubmissionRefused, WorkflowSubmissionService
+        from .workflow_models import SUBMISSION_TARGET_EXISTING
+
+        output = self._submission_output(request)
+        self._check(request, output.project_id)
+        # 纳管会把产出接进受控流程、并可能顶掉同阶段已有产出，属测试负责人职责。
+        ensure_test_lead(request.user, output.project_id)
+        # 纳管是"进入飞轮"的动作之一：未灰度的项目不许把产出接进来。
+        _ensure_linkage_enabled(output.project_id)
+
+        try:
+            payload = WorkflowSubmissionService.admit(
+                project=output.project, output=output, actor=request.user,
+                stage=str(request.data.get("stage") or ""),
+                target=str(request.data.get("target") or SUBMISSION_TARGET_EXISTING),
+                workflow_id=str(request.data.get("workflow_id") or ""),
+                replace_output_id=str(request.data.get("replace_output_id") or ""),
+                confirm_replace=bool(request.data.get("confirm_replace")),
+                note=str(request.data.get("note") or ""),
+            )
+        except SubmissionRefused as exc:
+            # 拒绝要带码：前端据此决定"弹确认替换"还是"直接报错"。
+            # 可确认的冲突用 409 —— 它不是"参数错了"，而是"当前状态冲突"。
+            return Response(
+                {"detail": exc.as_dict()}, status=409 if exc.confirmable else 400,
+            )
+        return Response(payload, status=201 if payload["created"] else 200)
+
+    @action(detail=False, methods=["get"], url_path="workflow-stage-submissions")
+    def workflow_stage_submissions(self, request):
+        """已纳管绑定列表（按项目/流程/阶段/状态过滤）。"""
+        from rest_framework.exceptions import ValidationError
+
+        from .submissions import WorkflowSubmissionService
+
+        raw_project = request.query_params.get("project")
+        if not raw_project:
+            raise ValidationError({"project": "必须指定项目"})
+        project_id = int(raw_project)
+        self._check(request, project_id)
+        items = WorkflowSubmissionService.list_for(
+            project_id=project_id,
+            workflow_id=str(request.query_params.get("workflow_id") or ""),
+            stage=str(request.query_params.get("stage") or ""),
+            state=str(request.query_params.get("state") or ""),
+        )
+        results = [WorkflowSubmissionService.view(item) for item in items]
+        return Response({"count": len(results), "results": results})
 
     @action(detail=False, methods=["post"], url_path="evaluate-workflow")
     def evaluate_workflow(self, request):

@@ -1,0 +1,89 @@
+{
+  "schema_version": "stage-result/v1",
+  "stage": "test_plan_generation",
+  "status": "completed",
+  "primary_artifacts": [
+    {
+      "name": "test_plan.xlsx",
+      "kind": "xlsx",
+      "sha256": "5f1e0f0c8b2a4d6e9c3b7a1d0e2f4c6b8a0d2e4f6c8b0a2d4e6f8c0b2a4d6e8f"
+    }
+  ],
+  "requirements": [
+    {
+      "id": "REQ-01",
+      "title": "股权处理白名单反向校验",
+      "source": "需求文档 §3.2"
+    },
+    {
+      "id": "REQ-02",
+      "title": "采编系统时间戳唯一性约束",
+      "source": "需求文档 §4.1"
+    }
+  ],
+  "items": [
+    {
+      "id": "TP-001",
+      "title": "非白名单证券账户提交股权处理申请被拒绝",
+      "requirement_ids": ["REQ-01"],
+      "evidence_ids": ["EV-001"],
+      "module": "股权处理/申请提交",
+      "scenario_type": "negative",
+      "priority": "P0",
+      "expected": "接口返回业务失败，vote_equity_apply 表无新增记录，审计日志记录拒绝原因",
+      "decisions": [
+        {
+          "decision": "按反向场景覆盖，不做正向白名单穷举",
+          "reason": "业务规则只约束「非白名单不得通过」，白名单成员由上游系统维护"
+        }
+      ],
+      "assumptions": ["白名单由上游系统每日刷新"],
+      "uncertainties": ["白名单刷新时点是否影响当日申请"],
+      "counterevidence": []
+    },
+    {
+      "id": "TP-002",
+      "title": "同一会议ID+时间戳重复导入被唯一性约束拦截",
+      "requirement_ids": ["REQ-02"],
+      "evidence_ids": ["EV-002"],
+      "module": "采编系统/数据导入",
+      "scenario_type": "boundary",
+      "priority": "P1",
+      "expected": "第二次导入返回唯一约束冲突，采集记录仍为 1 条，错误信息回显会议ID与时间戳",
+      "assumptions": [],
+      "uncertainties": ["时间戳精度为秒还是毫秒"],
+      "counterevidence": []
+    }
+  ],
+  "evidence": [
+    {
+      "id": "EV-001",
+      "document_id": "doc-21",
+      "document_version": "v3",
+      "chunk_id": "chunk-108",
+      "quote": "非白名单证券账户不得进入后续投票处理流程。",
+      "content_hash": "sha256:d7d1db313d277cc4d45ccc80ea1e4d3af9f6584397c6bb848b67e2ebf273f822"
+    },
+    {
+      "id": "EV-002",
+      "document_id": "doc-31",
+      "document_version": "v1",
+      "chunk_id": "chunk-07",
+      "quote": "采集记录以会议ID与时间戳组合作为唯一标识。",
+      "content_hash": ""
+    }
+  ],
+  "decision_summary": [
+    {
+      "decision": "股权处理仅覆盖反向与状态组合，正向白名单不逐条列举",
+      "reason": "白名单由上游维护且规模大，穷举收益低于维护成本"
+    },
+    {
+      "decision": "回归范围裁剪为股权处理与采编导入两个子系统",
+      "reason": "本次变更未触及投票主流程与展示层"
+    }
+  ],
+  "assumptions": ["本次迭代不涉及小程序端 UI 改动"],
+  "uncertainties": ["白名单刷新时点是否影响当日申请"],
+  "counterevidence": []
+}

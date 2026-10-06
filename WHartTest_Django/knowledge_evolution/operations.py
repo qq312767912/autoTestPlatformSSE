@@ -4,8 +4,9 @@ import os
 import re
 import uuid
 from collections import Counter
+from datetime import timedelta
 
-from django.db.models import Avg, Count, Sum
+from django.db.models import Avg, Count, F, Sum
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
@@ -26,11 +27,14 @@ from .knowledge_models import IndexProjection, KnowledgeConflict, KnowledgeVersi
 from .models import FeedbackEvent, GenerationOutput, RetrievalTrace
 from .gold_models import GoldDataset
 from .workflow_models import (
+    ATTEMPT_ACTIVE_STATES,
     ATTEMPT_TRANSITIONS,
+    EXECUTION_CONTEXT_TTL_MINUTES,
     GATE_CONFIRMABLE_STATES,
     GATE_HUMAN_FINAL_STATES,
     GATE_PASSING_STATES,
     GATE_SCORABLE_STATES,
+    StageExecutionContext,
     StageExecutionAttempt,
     WorkflowSkillLock,
     WorkflowStageGate,
@@ -779,17 +783,25 @@ class WorkflowGateService:
     #: 这件事必须落在后端一张表里，而不是前端按阶段名写 if-else：否则"哪些阶段能
     #: 在平台内跑"这个事实会散在前端，后端将来补上某个阶段的执行器时，页面不会跟着变，
     #: 于是又出现"后端能跑、页面说不能"的两套说法。
+    #:
+    #: ``launch_path``（T02）是**业务页面的路由路径**，用来生成 ``launch_url``。
+    #: 只有真正有对应业务页面的阶段才填：填一个还不存在的路由，用户点「跳转到 Agent 执行」
+    #: 就会落到 404 上——"跳过去了但打不开"比"根本没跳"更让人困惑。
+    #: 一期只有方案分析页（``/test-plans``）；其余阶段留空，前端据 ``launch_url``
+    #: 是否为空决定是跳转还是沿用原来的"请到某某页面执行"提示。
     STAGE_EXECUTION_CHANNELS = {
         "risk_identification": {
             "channel": "agent",
             "module_key": "risk_identification",
             "entry": "LLM对话",
+            "launch_path": "",
             "hint": "由 agent 基于需求/规格说明识别高风险点，产出按统一协议回写本流程后本阶段自动亮起",
         },
         "issue_tracking": {
             "channel": "agent",
             "module_key": "issue_tracking",
             "entry": "LLM对话",
+            "launch_path": "",
             "hint": "由 agent 汇总问题清单与闭环状态，产出按统一协议回写本流程后本阶段自动亮起",
         },
         # ---- 以下两个通道只为**存量流程**保留：它们已不在新主链表里，
@@ -798,24 +810,28 @@ class WorkflowGateService:
         "test_plan_generation": {
             "channel": "agent",
             "module_key": "test_plan_generation",
-            "entry": "LLM对话",
+            "entry": "方案分析",
+            "launch_path": "/test-plans",
             "hint": "由 agent 产出测试方案，产出按统一协议回写本流程后本阶段自动亮起",
         },
         "report_generation": {
             "channel": "agent",
             "module_key": "report_generation",
             "entry": "LLM对话",
+            "launch_path": "",
             "hint": "由 agent 产出测试报告，产出按统一协议回写本流程后本阶段自动亮起",
         },
         "testcase_generation": {
             "channel": "agent",
             "module_key": "testcase_generation",
             "entry": "LLM对话",
+            "launch_path": "",
             "hint": "由 agent 产出测试用例，产出按统一协议回写本流程后本阶段自动亮起",
         },
         "test_execution": {
             "channel": "platform",
             "entry": "测试执行",
+            "launch_path": "",
             "hint": (
                 "在测试执行页选用例套件发起执行；必须带上本流程的 workflow_id，"
                 "否则不校验前置阶段、产出也无法归属到本流程"
@@ -962,6 +978,43 @@ class WorkflowGateService:
             project_id=project.pk, workflow_id=workflow_id, stage=stage
         ).first()
         requested_at = timezone.now()
+
+        # T02：把"派发"从一句参数回执，变成**一条可追踪的执行尝试 + 一份短期上下文**。
+        #
+        # 幂等刻意用"复用活跃 attempt"而不是幂等键：幂等键要求前端每次派发都算出同一个键，
+        # 而页面刷新一次、参数变一点，键就变了——那等于没有幂等。用"这一阶段是不是
+        # 已经有一条还没结束的 attempt"来判断，重复点击才真的收敛到同一条上。
+        # 想重跑的人有 ``retry`` 这条显式路径，不需要靠连点两下来达成。
+        attempt = StageExecutionAttempt.objects.filter(
+            project_id=project.pk, workflow_id=workflow_id, stage=stage,
+            status__in=sorted(ATTEMPT_ACTIVE_STATES),
+        ).order_by("-created_at").first()
+        if attempt is None:
+            attempt, _created = StageExecutionAttemptService.dispatch(
+                project=project, workflow_id=workflow_id, stage=stage, actor=actor,
+                skill_version=(lock.skill_version if lock is not None else None),
+                parent_output_ids=parent_output_ids,
+                entry_type="flywheel",
+                detail={
+                    "channel": channel.get("channel", ""),
+                    "module_key": channel.get("module_key", ""),
+                    "entry": channel.get("entry", ""),
+                    "hint": channel.get("hint", ""),
+                    "plan_requested_at": requested_at.isoformat(),
+                    "replaces_output": bool(gate is not None and gate.output_id),
+                },
+            )
+
+        context = StageExecutionContextService.issue(
+            attempt=attempt, project=project, actor=actor,
+            channel=channel.get("channel", ""),
+            module_key=channel.get("module_key", ""),
+            skill_version=(lock.skill_version if lock is not None else None),
+            parent_output_ids=parent_output_ids,
+            payload={"workflow_stage_order": list(order)},
+        )
+        launch_path = str(channel.get("launch_path") or "")
+
         plan = {
             "workflow_id": workflow_id,
             "stage": stage,
@@ -981,6 +1034,17 @@ class WorkflowGateService:
             "replaces_output": bool(gate is not None and gate.output_id),
             "requested_by": getattr(actor, "username", "") or "",
             "requested_at": requested_at.isoformat(),
+            # --- T02 新增：业务页面自己不再拼 workflow_id / module_key / SkillVersion ---
+            "attempt_id": str(attempt.pk),
+            "attempt_status": attempt.status,
+            "execution_context_id": str(context.pk),
+            "execution_context_expires_at": context.expires_at.isoformat(),
+            # 为空表示这一阶段还没有对应业务页面（一期只有方案分析）。
+            # 前端据此决定是"直接跳"还是"沿用原来的请到某某页面执行"提示——
+            # 空值而不是用一个猜出来的路由，避免跳到 404。
+            "launch_url": (
+                f"{launch_path}?execution_context_id={context.pk}" if launch_path else ""
+            ),
         }
 
         if gate is None:
@@ -1447,6 +1511,171 @@ class StageExecutionAttemptService:
             flywheel_run=attempt.flywheel_run,
             retry_of=attempt,
         )
+
+
+class StageExecutionContextService:
+    """阶段执行上下文的签发与解析（T02 / R3）。
+
+    上下文是"飞轮控制面"与"业务页面执行面"之间的**唯一接口**：飞轮把这一轮
+    全部可信参数写在这里，业务页面只拿一个不透明 id。这样做的直接后果是——
+    前端再也拿不到、也改不了 `skill_version_id`，篡改 URL 只能篡改那个 id，
+    而 id 解析时要过项目、成员、过期、版本锁四道校验。
+
+    为什么解析必须**幂等**：业务页面会在挂载时解析一次、刷新再解析一次、
+    上下文失效重试时还会解析。把"解析"设计成一次性消费，会让第二次刷新
+    直接失败——而用户根本没做错什么。所以这里只累加 `resolve_count` 做审计，
+    不影响有效性；真正决定"还能不能用"的是 `expires_at` 与版本锁是否仍一致。
+    """
+
+    #: 允许写进上下文的**参数白名单**。
+    #:
+    #: 业务页面读回这些参数用于回显，因此它们会被页面渲染出来。白名单之外
+    #: 一律丢弃：Agent 的原始请求体里有凭据、绝对路径、完整知识正文，
+    #: 整包落库等于把它们复制到一张"任何项目成员都能解析"的表里。
+    PAYLOAD_KEYS = frozenset({
+        "module_key", "workflow_stage_order", "input_summary",
+        "use_knowledge_base", "knowledge_base_ids", "knowledge_document_ids",
+        "prompt_id", "requirement_document_ids",
+    })
+
+    @classmethod
+    def _sanitize_payload(cls, payload) -> dict:
+        return {
+            name: value for name, value in (payload or {}).items()
+            if name in cls.PAYLOAD_KEYS
+        }
+
+    @classmethod
+    def issue(
+        cls, *, attempt, project, actor=None, channel="", module_key="",
+        skill_version=None, parent_output_ids=None, payload=None,
+        ttl_minutes: int = EXECUTION_CONTEXT_TTL_MINUTES,
+    ) -> StageExecutionContext:
+        """签发一份上下文。
+
+        ``skill_version`` 缺省时回落到 attempt 上的版本：attempt 已经解析过一次锁，
+        再让调用方传一遍只会多一个"传漏了就变成无版本上下文"的机会。
+        """
+        version = skill_version if skill_version is not None else attempt.skill_version
+        return StageExecutionContext.objects.create(
+            project=project,
+            flywheel_run=attempt.flywheel_run,
+            attempt=attempt,
+            workflow_id=attempt.workflow_id,
+            stage=attempt.stage,
+            entry_type=attempt.entry_type,
+            channel=str(channel or ""),
+            module_key=str(module_key or ""),
+            skill_version=version,
+            skill_package_sha256=(
+                str(getattr(version, "package_sha256", "") or "")
+                or str(attempt.skill_package_sha256 or "")
+            ),
+            parent_output_ids=[
+                str(item) for item in (parent_output_ids or attempt.parent_output_ids or []) if item
+            ],
+            payload=cls._sanitize_payload(payload),
+            issued_to=actor if getattr(actor, "pk", None) else None,
+            expires_at=timezone.now() + timedelta(minutes=max(1, int(ttl_minutes or 1))),
+        )
+
+    @classmethod
+    def _assert_member(cls, user, project_id) -> None:
+        from rest_framework.exceptions import PermissionDenied
+
+        if getattr(user, "is_superuser", False):
+            return
+        if not ProjectMember.objects.filter(user=user, project_id=project_id).exists():
+            raise PermissionDenied("无权访问该项目飞轮数据")
+
+    @classmethod
+    def resolve(cls, *, context_id, project_id, user) -> StageExecutionContext:
+        """解析上下文，返回**可信**的流程参数。四道校验全过才放行。
+
+        1. **存在性**：「不存在」与「存在但属于别的项目」返回同一个结论。
+           分开报错会让接口变成一个探测别项目是否存在的工具——只要 id 猜对就能
+           从 404/403 的差别里读出信息。
+        2. **过期**：过期不是错误，是"该重新派发了"，所以单独给一条可恢复的提示。
+        3. **成员权限**：拿上下文的人必须是该项目成员。
+        4. **版本锁一致性**：回查 ``WorkflowSkillLock``，若上下文记录的版本
+           与流程当前锁定的版本不一致，拒绝——这正是"篡改 URL 不能替换锁定版本"
+           这条要求的落点：即使有人拿到旧上下文的 id，旧版本也换不回流程。
+        """
+        from rest_framework.exceptions import ValidationError as DrfValidationError
+
+        try:
+            context_id = uuid.UUID(str(context_id))
+        except (ValueError, TypeError, AttributeError):
+            raise DrfValidationError("执行上下文不存在或已失效")
+
+        context = StageExecutionContext.objects.select_related(
+            "project", "attempt", "skill_version__skill", "flywheel_run",
+        ).filter(pk=context_id).first()
+        # 「不存在」与「跨项目」合并：不泄漏"这个 id 在别的项目里存在"。
+        if context is None or context.project_id != int(project_id):
+            raise DrfValidationError("执行上下文不存在或已失效")
+
+        cls._assert_member(user, context.project_id)
+
+        if context.is_expired():
+            raise DrfValidationError(
+                "执行上下文已过期，请回到质量飞轮重新派发本阶段"
+            )
+
+        lock = WorkflowSkillLock.objects.filter(
+            project_id=context.project_id, workflow_id=context.workflow_id,
+            lock_key=f"stage:{context.stage}",
+        ).first()
+        if lock is not None and str(lock.skill_version_id or "") != str(context.skill_version_id or ""):
+            raise DrfValidationError(
+                "本阶段锁定的 Skill 版本已变更，该上下文不再可信，请回到质量飞轮重新派发"
+            )
+
+        # 解析是审计行为，不是消费行为：只累加计数，不改变有效性。
+        StageExecutionContext.objects.filter(pk=context.pk).update(
+            last_resolved_at=timezone.now(),
+            resolve_count=F("resolve_count") + 1,
+        )
+        context.refresh_from_db(fields=["last_resolved_at", "resolve_count"])
+        return context
+
+    @classmethod
+    def view(cls, context: StageExecutionContext) -> dict:
+        """把上下文摊平成业务页面直接可用的结构（T02 / §4.3）。
+
+        刻意**不含** attempt 的失败摘要与 output 正文：页面这一步只需要"我要跑什么"，
+        执行结果走 attempt / output 的查询接口。混在一起会让"解析上下文"变成一个
+        权限口径更大的读接口。
+        """
+        version = context.skill_version
+        return {
+            "execution_context_id": str(context.pk),
+            "project": context.project_id,
+            "workflow_id": context.workflow_id,
+            "stage": context.stage,
+            "stage_label": WorkflowGateService.STAGE_LABELS.get(context.stage, context.stage),
+            "entry_type": context.entry_type,
+            "channel": context.channel,
+            "module_key": context.module_key,
+            "attempt_id": str(context.attempt_id),
+            "attempt_status": (
+                context.attempt.status if context.attempt_id else ""
+            ),
+            "parent_output_ids": list(context.parent_output_ids or []),
+            "managed": bool(context.skill_version_id),
+            "skill": {
+                "skill_id": str(getattr(version, "skill_id", "") or ""),
+                "skill_name": (
+                    version.skill.name if version is not None and version.skill_id else ""
+                ),
+                "skill_version_id": str(context.skill_version_id or ""),
+                "version": str(getattr(version, "version", "") or ""),
+                "package_sha256": str(context.skill_package_sha256 or ""),
+            },
+            "payload": dict(context.payload or {}),
+            "expires_at": context.expires_at.isoformat(),
+            "expired": context.is_expired(),
+        }
 
 
 class ProjectQualityCockpitService:

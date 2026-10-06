@@ -81,6 +81,9 @@ class FlywheelRunAPITests(TestCase):
         ProjectMember.objects.create(project=self.project, user=self.user, role="member")
         self.client = APIClient()
         self.url = "/api/knowledge-evolution/flywheel-runs/"
+        # T14：`flywheel-runs` 的创建与 `open` 都受项目级灰度开关管辖。
+        from .history_models import ProjectFlywheelSetting
+        ProjectFlywheelSetting.objects.create(project=self.project, enabled=True)
 
     def test_member_can_create_and_list_a_run(self):
         self.client.force_authenticate(self.user)

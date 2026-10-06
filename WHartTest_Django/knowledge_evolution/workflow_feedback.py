@@ -217,3 +217,251 @@ class WorkflowStageFeedbackService:
             },
         )
         return event, created
+
+
+# ---------------------------------------------------------------------------
+# 确认报告闭环（T09 / §7）
+# ---------------------------------------------------------------------------
+
+#: 确认报告反馈的 ``reason_code``。
+#:
+#: 与 ``REASON_CODE``（只记一个采纳率）**刻意分开**：这条流带的是一整套逐项
+#: 人机对比结论（采纳/修改后采纳/删除 + 修改类型）。混成一个 reason_code 会让
+#: "采纳率版本对比"图里混进两份口径不同的数据，而它们的数值不可比。
+REVIEW_REASON_CODE = "stage_review_report"
+
+#: 反馈状态真值。
+REVIEW_STATE_DRAFT = "draft"
+REVIEW_STATE_SUBMITTED = "submitted"
+REVIEW_STATES: tuple[str, ...] = (REVIEW_STATE_DRAFT, REVIEW_STATE_SUBMITTED)
+
+#: 正式提交时的信号：有空白也允许提交（人可能故意只审一部分），
+#: 但**草稿永远不能进进化**——用信号区分，让下游按信号过滤而不是靠猜。
+REVIEW_SIGNAL = {REVIEW_STATE_DRAFT: "edited", REVIEW_STATE_SUBMITTED: "accepted"}
+
+
+class ReviewSubmissionError(Exception):
+    """正式提交校验失败，**带逐行错误**。
+
+    为什么不用 Django ``ValidationError`` 传结构化错误：它的 ``messages`` 会把
+    dict 展平成字符串列表，逐行信息（"第 3 行缺修改类型"）在半路就丢掉了，
+    页面只能显示一句"提交校验未通过"，用户得回去一行行找。这里显式带
+    ``errors``，由视图层原样交给前端。
+    """
+
+    def __init__(self, errors, detail: str = "") -> None:
+        self.errors = list(errors or [])
+        self.detail = detail or (
+            "存在必填项缺失或非法取值，无法正式提交；可先保存草稿继续填写"
+        )
+        super().__init__(self.detail)
+
+
+class WorkflowStageReviewService:
+    """确认报告的草稿与正式提交（T09）。
+
+    两条路径**共用同一个幂等键**：同一份文件先存草稿、再正式提交，是同一条记录的
+    状态推进，而不是两条反馈。重复上传同一份已提交的文件也命中同一条——"再点一次
+    提交"不该在版本对比图里多出一个点。
+
+    能不能进进化由 ``detail['state']`` 决定，不由"能不能上传"决定：
+    草稿允许有空白（人可能只审了一部分），正式提交才校验条件必填。
+    """
+
+    @classmethod
+    def save_draft(cls, *, output, stage: str, data: bytes, actor, report_name: str = "") -> dict:
+        """保存草稿：**不做条件必填校验**，只要求文件结构可解析。"""
+        return cls._apply(
+            output=output, stage=stage, data=data, actor=actor,
+            report_name=report_name, state=REVIEW_STATE_DRAFT,
+        )
+
+    @classmethod
+    def submit(cls, *, output, stage: str, data: bytes, actor, report_name: str = "") -> dict:
+        """正式提交：逐行校验条件必填关系，不通过直接拒绝并回具体行。"""
+        return cls._apply(
+            output=output, stage=stage, data=data, actor=actor,
+            report_name=report_name, state=REVIEW_STATE_SUBMITTED,
+        )
+
+    @classmethod
+    def _apply(
+        cls, *, output, stage: str, data: bytes, actor, report_name: str, state: str,
+    ) -> dict:
+        from .review_reports import ReviewReportFormatError, parse_review_workbook
+        from .operations import WorkflowGateService
+
+        if output is None:
+            raise ValidationError("该阶段暂无产出，无法关联人工确认结论")
+
+        try:
+            parsed = parse_review_workbook(data)
+        except ReviewReportFormatError as exc:
+            # 文件本身不对 → 明确报格式，而不是报"未评分"。
+            raise ValidationError(str(exc)) from exc
+
+        validation = parsed["validation"]
+        if state == REVIEW_STATE_SUBMITTED and not validation["ok"]:
+            raise ReviewSubmissionError(validation["errors"])
+
+        statistics = parsed["statistics"]
+        fingerprint = parsed["fingerprint"]
+        report_sha256 = hashlib.sha256(data).hexdigest()
+        key = (
+            f"workflow-stage-review:{output.project_id}:{stage}:{report_sha256[:16]}"
+        )
+
+        detail = {
+            "kind": "workflow_stage_review",
+            "stage": stage,
+            "state": state,
+            "report_name": report_name,
+            "report_sha256": report_sha256,
+            "rows_fingerprint": fingerprint,
+            "statistics": statistics,
+            "blank_count": validation["blank_count"],
+            # 已审核行数与原样采纳率是下游（T11 差异、T13 候选）唯一需要的两个索引值；
+            # 其余指标留在 statistics 里，供页面展示。
+            "reviewed_count": statistics["已审核数"],
+            # 低采纳率**不是门槛**：照常入库，只是把"低于参考线"标出来。
+            "evolvable": state == REVIEW_STATE_SUBMITTED,
+            # 人工填过的行**原文留档**（T11）：差异与归因要在提交之后还能算，
+            # 而报告文件由人保管、可能已离线流转几天。只存"填过的行"而不是整份
+            # 报告——没填的行不参与差异（未审 ≠ 采纳），存下来只会撑大这张表。
+            "human_rows": parsed["human_rows"],
+        }
+
+        percent = round(float(statistics.get("采纳率") or 0) * 100, 2)
+        event, created = ReviewFeedbackEventStore.upsert(
+            output=output, stage=stage, key=key, percent=percent, state=state,
+            report_name=report_name, detail=detail, actor=actor,
+            comment=cls._comment(stage=stage, state=state, statistics=statistics),
+        )
+        return {
+            "stage": stage,
+            "stage_label": WorkflowGateService.STAGE_LABELS.get(stage, stage),
+            "output_id": str(output.pk),
+            "feedback_id": str(event.id),
+            "state": state,
+            "created": created,
+            "acceptance_score": percent,
+            "statistics": statistics,
+            "validation": validation,
+            "evolvable": detail["evolvable"],
+            "skill_version": output.skill_version.version if output.skill_version_id else "",
+        }
+
+    @staticmethod
+    def _comment(*, stage: str, state: str, statistics: dict) -> str:
+        return (
+            f"{stage} 阶段确认报告（{'草稿' if state == REVIEW_STATE_DRAFT else '正式提交'}）："
+            f"已审核 {statistics['已审核数']}/{statistics['原始项数']}，"
+            f"采纳 {statistics['采纳数']}，修改后采纳 {statistics['修改后采纳数']}，"
+            f"删除 {statistics['删除数']}"
+        )
+
+    @classmethod
+    def latest(cls, output) -> dict | None:
+        """该产出最近一次人工确认结论（供页面回显"上次填到哪了"）。"""
+        if output is None:
+            return None
+        event = (
+            FeedbackEvent.objects
+            .filter(output=output, reason_code=REVIEW_REASON_CODE)
+            .order_by("-occurred_at", "-created_at")
+            .first()
+        )
+        if event is None:
+            return None
+        detail = event.detail or {}
+        return {
+            "feedback_id": str(event.id),
+            "state": detail.get("state", ""),
+            "report_name": detail.get("report_name", ""),
+            "statistics": detail.get("statistics") or {},
+            "blank_count": detail.get("blank_count", 0),
+            "evolvable": bool(detail.get("evolvable")),
+            "submitted_at": event.occurred_at.isoformat() if event.occurred_at else "",
+            "actor": event.actor.username if event.actor_id else "",
+            # T11：差异计算的输入。报告文件由人保管、可能离线流转，平台手上只有
+            # 这一次上传解析出来的"填过的行"原文；不在这里带出来，差异服务就只能
+            # 靠重新下载 Excel 才知道人改了什么。
+            "human_rows": list(detail.get("human_rows") or []),
+        }
+
+    @classmethod
+    def history(cls, skill, *, limit: int = 12) -> list[dict]:
+        """按版本列出**已正式提交**的人工确认结论。
+
+        只取 submitted：草稿是"还没审完"，把它画进版本对比图会让采纳率曲线出现
+        一段由"人还没填完"造成的假低谷。
+        """
+        if skill is None:
+            return []
+        rows = (
+            FeedbackEvent.objects
+            .filter(skill_version__skill=skill, reason_code=REVIEW_REASON_CODE)
+            .select_related("skill_version")
+            .order_by("-occurred_at")[: limit * 2]
+        )
+        history = []
+        for row in rows:
+            detail = row.detail or {}
+            if detail.get("state") != REVIEW_STATE_SUBMITTED:
+                continue
+            history.append({
+                "version": row.skill_version.version if row.skill_version_id else "",
+                "version_id": str(row.skill_version_id) if row.skill_version_id else "",
+                "score": round((row.value or 0) * 100, 2),
+                "statistics": detail.get("statistics") or {},
+                "at": row.occurred_at.isoformat() if row.occurred_at else "",
+            })
+            if len(history) >= limit:
+                break
+        return history
+
+
+class ReviewFeedbackEventStore:
+    """确认报告反馈的落库口径（唯一入口）。
+
+    单独拆出来是因为"更新已有记录"与"新建记录"在 ``FeedbackEvent`` 上的字段
+    写法不同（``update_or_create`` 的 ``defaults`` 不会覆盖幂等键以外的判断），
+    把这层收在一处，是避免"草稿转提交"时漏更新某个字段的第二道保险。
+    """
+
+    @staticmethod
+    def upsert(
+        *, output, stage: str, key: str, percent: float, state: str,
+        report_name: str, detail: dict, actor, comment: str,
+    ):
+        defaults = {
+            "project_id": output.project_id,
+            "output": output,
+            "trace": output.trace,
+            "capability": output.capability,
+            "capability_kind": "skill",
+            "skill_version": output.skill_version,
+            "signal": REVIEW_SIGNAL.get(state, "edited"),
+            # ``value`` 与原「采纳率」口径一致（0–1 的原样采纳率）：
+            # 版本对比图要能直接把两条流画在同一根轴上。
+            "value": round(float(percent) / 100.0, 4),
+            "reason_code": REVIEW_REASON_CODE,
+            "comment": comment,
+            "detail": detail,
+            "actor": actor,
+            "actor_type": "user",
+        }
+        event, created = FeedbackEvent.objects.get_or_create(
+            idempotency_key=key, defaults=defaults,
+        )
+        if not created:
+            # 草稿 → 正式提交是同一条记录的**状态推进**；不做这一步会让
+            # "先存草稿再提交"在版本对比图上多出一个点，而它其实只发生过一次评审。
+            #
+            # ``occurred_at`` 刻意不动：它记的是"这次评审是什么时候做的"，
+            # 重复上传同一份文件不该把评审时间往后推——那会让版本对比图上
+            # 的点无端右移，看上去像又评了一轮。
+            for field, value in defaults.items():
+                setattr(event, field, value)
+            event.save(update_fields=list(defaults))
+        return event, created

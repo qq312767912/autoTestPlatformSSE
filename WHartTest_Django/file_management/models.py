@@ -74,6 +74,10 @@ class FileReference(models.Model):
     REF_UI_TESTCASE = 'ui_testcase'
     REF_UI_PAGE_STEPS = 'ui_page_steps'
     REF_LLM_CHAT = 'llm_chat'
+    #: 质量飞轮阶段人工补充文件（T10）。加这一档是为了让这类文件**有引用**：
+    #: ``cleanup_unreferenced_files`` 删的是 ``references__isnull=True`` 的文件，
+    #: 不登记引用就会被"清理未引用文件"当成垃圾删掉 —— 而它是人工交上来的证据。
+    REF_FEEDBACK_ATTACHMENT = 'knowledge_evolution_feedback'
     REF_CHOICES = [
         (REF_API_INTERFACE, '接口'),
         (REF_API_TESTCASE, '测试用例'),
@@ -81,6 +85,7 @@ class FileReference(models.Model):
         (REF_UI_TESTCASE, 'UI用例'),
         (REF_UI_PAGE_STEPS, 'UI页面步骤'),
         (REF_LLM_CHAT, 'LLM对话'),
+        (REF_FEEDBACK_ATTACHMENT, '飞轮阶段补充文件'),
     ]
 
     file = models.ForeignKey(FileAsset, on_delete=models.CASCADE, related_name='references')

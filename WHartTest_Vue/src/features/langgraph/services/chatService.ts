@@ -60,6 +60,19 @@ interface StreamState {
     }>;
   };
   isWaitingForApproval?: boolean; // 是否正在等待用户审批
+  /**
+   * 正式产出事件（T04 / §4.5）。
+   *
+   * 页面据此判断「这一阶段真的产出并登记了」，而不是继续靠文件名或聊天文本推断——
+   * 后两种办法在「产出叫了别的名字」或「模型在聊天里顺口提到产出了」时都会骗人。
+   * 只在受控执行（请求带 attempt_id）时出现。
+   */
+  outputPublished?: {
+    attemptId: string;
+    outputId: string;
+    workflowId: string;
+    stage: string;
+  };
 }
 
 // Agent Loop SSE 事件类型定义（供文档和类型参考）
@@ -749,6 +762,20 @@ export async function sendChatMessageStream(
               action_requests: parsed.action_requests || [],
             };
             activeStreams.value[streamSessionId].isWaitingForApproval = true;
+          }
+
+          // ⭐ 正式产出事件（T04 §4.5）：业务页面据此判定阶段完成。
+          // 必须单独一支而不是并进 complete：complete 表示"这一轮对话结束了"，
+          // output_published 表示"产出已经登记进飞轮"。两者并不总是同时发生
+          // （产出登记失败时对话仍会正常结束），并在一起就再也分不出这种情况。
+          if (parsed.type === 'output_published' && streamSessionId && activeStreams.value[streamSessionId]) {
+            activeStreams.value[streamSessionId].outputPublished = {
+              attemptId: String(parsed.attempt_id || ''),
+              outputId: String(parsed.output_id || ''),
+              workflowId: String(parsed.workflow_id || ''),
+              stage: String(parsed.stage || ''),
+            };
+            console.log('[ChatService] Output published:', parsed);
           }
 
           if (parsed.type === 'complete' && streamSessionId && activeStreams.value[streamSessionId]) {

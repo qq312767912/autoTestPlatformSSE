@@ -64,6 +64,7 @@ class OutputLineageService:
         project_id = output.project_id
 
         bindings = OutputLineageService._bindings(output)
+        submission = OutputLineageService._submission(output)
         feedbacks = list(
             FeedbackEvent.objects.filter(project_id=project_id, output_id=output.pk)
             .select_related("actor", "capability", "release", "skill_version")
@@ -97,7 +98,15 @@ class OutputLineageService:
 
         stages = {
             "output": {"ok": True, "count": 1},
-            "binding": {"ok": any(item["skill_version_id"] for item in bindings), "count": len(bindings)},
+            "binding": {
+                # 旁路产出纳管后才谈得上"版本绑定"（T12）；受控执行则在发布时就锁好了版本。
+                "ok": (
+                    any(item["skill_version_id"] for item in bindings)
+                    or submission is not None
+                ),
+                "count": len(bindings),
+                "submitted": submission is not None,
+            },
             "feedback": {"ok": bool(feedbacks), "count": len(feedbacks)},
             "gold": {"ok": bool(gold_cases), "count": len(gold_cases)},
             "attribution": {
@@ -183,6 +192,9 @@ class OutputLineageService:
             # 内容来源：回答"这个需求点、这条用例是参考什么文件和 Skill 内容生成的"。
             # 与 stages 并列而不是并进 stages：前者是"链路走到哪"，后者是"内容从哪来"。
             "sources": sources,
+            # 这份产出是怎么进流程的（T12）：受控执行自带版本锁，旁路产出要靠纳管。
+            # 不显示它，页面就无法区分"从没纳管过"和"纳管了但没锁到版本"。
+            "submission": submission,
             "stages": stages,
             "broken_at": broken_at,
             "closed_loop": not broken_at,
@@ -414,6 +426,31 @@ class OutputLineageService:
             "version": version.version if version is not None else "",
             "package_sha256": package_sha256,
             "protocol_descriptor": protocol.get("skill") or {},
+        }
+
+    @staticmethod
+    def _submission(output) -> dict | None:
+        """该产出的纳管绑定（T12）。没有纳管时返回 ``None``。
+
+        刻意不伪造一个"未纳管"对象：页面拿到一个真对象就会以为它确实在流程里，
+        而"旁路产出尚未纳管"正是最需要被显式显示出来的状态。
+        """
+        from .submissions import WorkflowSubmissionService
+
+        submission = WorkflowSubmissionService.submission_for(output)
+        if submission is None:
+            return None
+        return {
+            "id": str(submission.pk),
+            "workflow_id": submission.workflow_id,
+            "stage": submission.stage,
+            "target": submission.target,
+            "state": submission.state,
+            "supersedes_output_id": str(submission.supersedes_output_id or ""),
+            "created_at": submission.created_at.isoformat() if submission.created_at else "",
+            "created_by": (
+                submission.created_by.username if submission.created_by_id else ""
+            ),
         }
 
     @staticmethod

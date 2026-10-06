@@ -63,6 +63,20 @@ class OutputEnvelope:
     #: 放在协议层而不是让各业务自己往 metadata 里塞，是因为下游的反馈绑定、金标候选、
     #: 归因与派生全都要读它——一旦有业务漏填，闭环就会在那一环断掉却查不出原因。
     skill_version: Any = None
+    #: ``stage-result/v1`` 信封是否随本次产出提交（T05）。**可选**：存量 Skill 不提交
+    #: 时保持 ``False``，平台按 L0/L1 处理，照样发布——把"有没有信封"当发布前提
+    #: 会让这次升级一次性卡死所有存量 Skill。
+    #:
+    #: 这里只记"有没有"、不记正文：信封正文是 Skill 的产物文件，需要时按主产物名
+    #: 去读文件重新校验；把正文复制进协议元数据会让每条产出都多带一份内容副本
+    #: （与 ``output_descriptor`` 只存哈希同一条理由）。
+    stage_result: bool = False
+    #: 该产出实测到的兼容等级（L0–L3）。由 ``stage_outputs.classify_level`` 算出，
+    #: 不接受调用方直接声明——声明值放在 Skill 版本的 manifest 里，是另一回事。
+    compatibility_level: str = "L0"
+    #: 校验结论摘要（错误路径清单、声明与实测的差距等）。只存摘要，不存整份 payload，
+    #: 避免把产出内容复制进协议元数据、扩大访问面。
+    stage_result_validation: dict[str, Any] | None = None
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     schema_version: str = "platform-output/v1"
 
@@ -138,8 +152,26 @@ class OutputEnvelope:
             "metrics": self.metrics,
             "producer": self.producer,
             "skill": self.skill_descriptor,
+            "compatibility_level": self.compatibility_level,
+            "stage_result_submitted": self.stage_result,
+            "stage_result_validation": self.stage_result_validation or {},
             "extensions": self.extensions,
         }
+
+    def attach_stage_result(self, validation: Any) -> "OutputEnvelope":
+        """挂上 ``stage-result/v1`` 的校验结论。
+
+        参数收的是任何有 ``as_dict()`` 的对象（实际类型是
+        ``stage_outputs.StageResultValidation``），协议层刻意不 import 校验器：
+        协议要能被只想发一条产出的调用方单独使用，不该被 schema 库拖进来。
+        """
+        if validation is None:
+            return self
+        summary = validation.as_dict() if hasattr(validation, "as_dict") else dict(validation)
+        self.stage_result_validation = summary
+        self.compatibility_level = str(summary.get("effective_level") or "L0")
+        self.stage_result = True
+        return self
 
     @property
     def idempotency_key(self) -> str:
@@ -187,7 +219,15 @@ def publish_output(envelope: OutputEnvelope):
         channels=envelope.channels, candidates=envelope.findings, citations=envelope.evidence,
         timings={"total_ms": envelope.metrics.get("latency_ms", 0)},
         token_usage=envelope.metrics.get("token_usage", 0),
-        metadata={"protocol": payload, "idempotency_key": envelope.idempotency_key},
+        metadata={
+            "protocol": payload,
+            "idempotency_key": envelope.idempotency_key,
+            # 与业务产物同存一条记录：飞轮要能直接回答"这条产出当时的信封合不合规"，
+            # 而不是事后重算——重算需要重建当时的 Skill 版本与文件，多半已经不在。
+            "stage_result_submitted": envelope.stage_result,
+            "stage_result_validation": envelope.stage_result_validation or {},
+            "compatibility_level": envelope.compatibility_level,
+        },
         policy_version=envelope.producer.get("policy_version", "platform-output/v1"),
         prompt_version=envelope.producer.get("prompt_version", "platform-output/v1"),
         model_version=envelope.producer.get("model_version", ""), status=envelope.status,
@@ -196,10 +236,16 @@ def publish_output(envelope: OutputEnvelope):
         skill_version=envelope.skill_version,
     )
     if envelope.evaluation_mode == EvaluationMode.WORKFLOW:
+        # 走带补偿的登记入口（T14 / §13）：登记失败**不得**反向炸掉业务产出。
+        # 业务产出此时已落库且可用，飞轮侧的问题应落成一条可重试、可告警的
+        # 补偿记录，而不是让业务页面看到一个 500，也不是只写一行日志。
         from .models import GenerationOutput
+        from .registration import FlywheelRegistrationService
+
         output = GenerationOutput.objects.get(pk=result[1])
-        WorkflowGateService.register_output(
+        FlywheelRegistrationService.register(
             output,
+            actor=envelope.user,
             create_gate=envelope.extensions.get("register_workflow_gate", True),
         )
     return result

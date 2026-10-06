@@ -32,6 +32,34 @@ NON_OPTIMIZABLE_CATEGORIES = {
     "environment_error": "执行环境问题需修复运行环境本身，不能通过修改能力候选解决",
 }
 
+#: Skill **包内容**候选类型（T13 / R12）。
+#:
+#: 它刻意**不**出现在 ``TYPE_BY_CATEGORY`` 里：同一个失败既能靠改 Prompt 修，
+#: 也能落成 Skill 包内容补丁，选哪条路由人在工坊里决定。若把它塞进类别映射，
+#: 就会变成"某类归因只能产出某种候选"，把人的判断权换成一张表。
+SKILL_CONTENT_TYPE = "skill_content"
+
+#: 目标型候选：不按归因类别分流，由调用方显式指定产出哪一种候选。
+TARGET_TYPES = frozenset({SKILL_CONTENT_TYPE})
+
+#: 可由 Skill 包**内容**补丁修复的既有优化类型。真值只此一处，
+#: ``skill_evolution`` 从中派生自己的"Skill 可修复类别"集合，避免两张表慢慢漂移。
+SKILL_CONTENT_TYPES = frozenset({"prompt", "skill_tool"})
+
+#: 可由 Skill 包内容补丁修复的归因类别。
+SKILL_CONTENT_CATEGORIES = frozenset(
+    category for category, proposal_type in TYPE_BY_CATEGORY.items()
+    if proposal_type in SKILL_CONTENT_TYPES
+)
+
+#: 类别 → 该走哪条候选通道。给的是**可执行的**下一步，而不是一句"不支持"。
+CATEGORY_CHANNELS = {
+    "knowledge_missing": "应生成知识候选（knowledge）并走知识审核",
+    "knowledge_stale": "应更新知识版本并走知识审核",
+    "retrieval_error": "应生成检索策略候选（retrieval_policy）",
+    "environment_error": "属于执行环境问题，需修复运行环境，改 Skill 包无效",
+}
+
 
 TEMPLATES = {
     "prompt": {
@@ -50,13 +78,22 @@ TEMPLATES = {
         "operation": "adjust_skill_tool_config",
         "instructions": ["增加调用前参数校验", "增加失败重试、降级和结果校验"],
     },
+    "skill_content": {
+        "operation": "patch_skill_content",
+        "instructions": [
+            "只改白名单文件（SKILL.md / references / schemas / 模板 / 校验脚本）",
+            "补丁必须是增量：保留原有可执行内容与安全约束",
+            "落成新的不可变 SkillVersion，禁止原地改 active 包",
+        ],
+    },
 }
 
 
 class OptimizationProposalService:
     @staticmethod
     @transaction.atomic
-    def generate(*, attributions, actor, capability=None, baseline_release=None):
+    def generate(*, attributions, actor, capability=None, baseline_release=None,
+                 target_type=None):
         attributions = list(attributions)
         if not attributions:
             raise ValidationError("至少需要一条失败归因")
@@ -68,22 +105,40 @@ class OptimizationProposalService:
         if capability and capability.project_id not in project_ids:
             raise ValidationError("能力定义与归因不属于同一项目")
 
+        target_type = str(target_type or "").strip() or None
+        if target_type is not None and target_type not in TARGET_TYPES:
+            raise ValidationError(f"不支持的候选目标类型：{target_type}")
+
         groups = {}
         blocked = []
-        for item in attributions:
-            if item.category in NON_OPTIMIZABLE_CATEGORIES:
-                blocked.append(item.category)
-                continue
-            proposal_type = TYPE_BY_CATEGORY.get(item.category)
-            if proposal_type is None:
-                blocked.append(item.category)
-                continue
-            groups.setdefault(proposal_type, []).append(item)
+        if target_type == SKILL_CONTENT_TYPE:
+            # 目标型候选：整批归到一个 skill_content 候选里，不按类别拆成多个。
+            # 拆开会产生"N 条归因 → N 个补丁"，而它们改的是同一个包，评审时还要
+            # 自己再合并一次；候选与归因的对应关系反而更模糊。
+            blocked = sorted({
+                item.category for item in attributions
+                if item.category not in SKILL_CONTENT_CATEGORIES
+            })
+            if not blocked:
+                groups[SKILL_CONTENT_TYPE] = attributions
+        else:
+            for item in attributions:
+                if item.category in NON_OPTIMIZABLE_CATEGORIES:
+                    blocked.append(item.category)
+                    continue
+                proposal_type = TYPE_BY_CATEGORY.get(item.category)
+                if proposal_type is None:
+                    blocked.append(item.category)
+                    continue
+                groups.setdefault(proposal_type, []).append(item)
 
         if blocked:
-            reasons = sorted({NON_OPTIMIZABLE_CATEGORIES.get(
-                category, f"归因类别 {category} 没有对应的可优化类型"
-            ) for category in blocked})
+            reasons = sorted({
+                NON_OPTIMIZABLE_CATEGORIES.get(category)
+                or CATEGORY_CHANNELS.get(category)
+                or f"归因类别 {category} 没有对应的可优化类型"
+                for category in blocked
+            })
             raise ValidationError("；".join(reasons))
         if not groups:
             raise ValidationError("所提供的归因没有可生成优化候选的类型")
@@ -186,6 +241,17 @@ class OptimizationMaterializationService:
         from .capability_models import CapabilityRelease
         from .knowledge_models import KnowledgeCandidate
         from .retrieval_models import RetrievalPolicy
+
+        # skill_content 走独立通道：它产出的是**新的不可变 SkillVersion**，
+        # 而不是一条 CapabilityRelease 配置。两件事的约束完全不同
+        # （前者要求"基线包零改动 + 静态校验 + 新版本号"，后者只要求配置合法），
+        # 所以不在这里复用 _ensure_allowed，交给专门的服务的更严判据。
+        if proposal.proposal_type == SKILL_CONTENT_TYPE:
+            from .skill_content import SkillContentOptimizationService
+            result = SkillContentOptimizationService.materialize(
+                proposal=proposal, actor=actor,
+            )
+            return result["release"]
 
         cls._ensure_allowed(proposal)
         expected_kind = "skill" if proposal.proposal_type == "skill_tool" else proposal.proposal_type

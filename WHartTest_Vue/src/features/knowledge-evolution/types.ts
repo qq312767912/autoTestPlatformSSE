@@ -513,6 +513,51 @@ export interface StageExecutionPlan {
   replaces_output: boolean;
   requested_by: string;
   requested_at: string;
+  /**
+   * 下面四项（T02）是"派发之后到底发生了什么"的凭据。
+   *
+   * 在此之前，界面拿到的只是一段参数回执，用户要自己把 workflow_id / module_key
+   * 抄到另一个页面去。现在派发同时产生一条执行尝试和一份**服务端保存**的上下文，
+   * 前端只需要带着 `execution_context_id` 跳过去——流程锁定的 Skill 版本因此
+   * 不再经过用户可改的 URL。
+   */
+  attempt_id: string;
+  attempt_status: string;
+  execution_context_id: string;
+  execution_context_expires_at: string;
+  /** 业务页面路由（含 context id）。为空表示该阶段还没有对应页面，界面不跳转。 */
+  launch_url: string;
+}
+
+/**
+ * 执行上下文的解析结果（T02 / R3）。
+ *
+ * `skill` 是**服务端认定**的锁定版本，业务页面必须只读展示它，不允许换成别的版本——
+ * 这就是"篡改 URL 不能替换流程锁定的 SkillVersion"在界面上的落点。
+ */
+export interface ExecutionContextView {
+  execution_context_id: string;
+  project: number;
+  workflow_id: string;
+  stage: string;
+  stage_label: string;
+  entry_type: string;
+  channel: string;
+  module_key: string;
+  attempt_id: string;
+  attempt_status: string;
+  parent_output_ids: string[];
+  managed: boolean;
+  skill: {
+    skill_id: string;
+    skill_name: string;
+    skill_version_id: string;
+    version: string;
+    package_sha256: string;
+  };
+  payload: Record<string, unknown>;
+  expires_at: string;
+  expired: boolean;
 }
 
 /** 「查看结果」的返回：产出正文（可能截断）+ 门禁证据。 */

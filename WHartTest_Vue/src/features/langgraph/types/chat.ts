@@ -37,6 +37,14 @@ export interface ChatRequest {
   skill_version_id?: string;
   workflow_id?: string;
   parent_output_ids?: string[];
+  /**
+   * 受控执行尝试 ID（T02/T03）。
+   *
+   * 受控模式下必须携带：Agent 起点据此把 attempt 推进到 running 并绑定 session_id，
+   * 正式产出发布后据此回写 attempt → output，飞轮才能显示"运行中 / 已产出 / 失败"。
+   * 旁路模式不传，行为与过去一致。
+   */
+  attempt_id?: string;
 }
 
 /**

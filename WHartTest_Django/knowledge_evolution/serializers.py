@@ -25,7 +25,7 @@ from .gold_models import (
 from .evaluation_v2_models import EvaluationRubric, JudgeResult
 from .trace_models import ExecutionSpan, FailureAttribution
 from .optimization_models import OptimizationExperiment, OptimizationProposal
-from .workflow_models import FlywheelRun, StageExecutionAttempt
+from .workflow_models import FlywheelRun, StageExecutionContext, StageExecutionAttempt
 from .history_models import (
     HistoryImportBatch, HistoryImportItem, HistoryReplay,
     HistoryReplayDifference, ProjectFlywheelSetting,
@@ -100,6 +100,50 @@ class StageExecutionAttemptSerializer(serializers.ModelSerializer):
 
     def get_requested_by_username(self, obj) -> str:
         return obj.requested_by.username if obj.requested_by_id else ""
+
+
+class StageExecutionContextSerializer(serializers.ModelSerializer):
+    """执行上下文的只读视图（T02 / R3）。
+
+    与 ``StageExecutionAttemptSerializer`` 的区别很关键：attempt 讲"这一轮跑成什么样"，
+    context 讲"这一轮被授权用什么参数跑"。因此这里**只**带出参数与版本，
+    不带输出正文、不带失败堆栈——那些属于 attempt / output 的查询口径，
+    混进来会让"解析上下文"变成一个顺带能读产出的宽接口。
+    """
+
+    stage_label = serializers.SerializerMethodField()
+    skill_name = serializers.SerializerMethodField()
+    skill_version_label = serializers.SerializerMethodField()
+    attempt_status = serializers.SerializerMethodField()
+    expired = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = StageExecutionContext
+        fields = [
+            "id", "project", "flywheel_run", "attempt", "attempt_status",
+            "workflow_id", "stage", "stage_label", "entry_type",
+            "channel", "module_key", "skill_version", "skill_name",
+            "skill_version_label", "skill_package_sha256", "parent_output_ids",
+            "payload", "issued_to", "expires_at", "expired",
+            "last_resolved_at", "resolve_count", "created_at", "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_stage_label(self, obj) -> str:
+        from .operations import WorkflowGateService
+        return WorkflowGateService.STAGE_LABELS.get(obj.stage, obj.stage)
+
+    def get_skill_name(self, obj) -> str:
+        version = obj.skill_version
+        if version is None or not version.skill_id:
+            return ""
+        return version.skill.name
+
+    def get_skill_version_label(self, obj) -> str:
+        return obj.skill_version.version if obj.skill_version_id else ""
+
+    def get_attempt_status(self, obj) -> str:
+        return obj.attempt.status if obj.attempt_id else ""
 
 
 class ProjectFlywheelSettingSerializer(serializers.ModelSerializer):

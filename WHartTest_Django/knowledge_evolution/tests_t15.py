@@ -424,6 +424,9 @@ class WorkflowAPITests(TestCase):
         ProjectMember.objects.create(project=self.other_project, user=self.lead, role="owner")
         self.client = APIClient()
         self.url = "/api/knowledge-evolution/operations/"
+        # T14：启动流程受项目级灰度开关管辖（未配置视为关闭）。
+        from .history_models import ProjectFlywheelSetting
+        ProjectFlywheelSetting.objects.create(project=self.project, enabled=True)
 
     def test_executor_cannot_start_a_workflow(self):
         self.client.force_authenticate(self.executor)

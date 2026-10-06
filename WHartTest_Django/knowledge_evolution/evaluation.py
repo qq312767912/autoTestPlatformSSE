@@ -403,3 +403,57 @@ class EvaluationEngine:
             "t_statistic": round(t_stat, 4),
             "p_value": p_value,
         }
+
+
+class CaseComparisonService:
+    """逐样本对比（T13 / R13）。
+
+    ``EvaluationEngine.compare_runs`` 给的是**均分差**：均分涨了 0.02，可能是因为
+    两条样本各涨 0.1、两条各跌 0.09。而 T13 的两条硬门禁恰恰要问"具体哪条没修好、
+    哪条退化了"，均分答不了。所以这里单列一层逐样本视图。
+
+    口径固定用 ``l1_score``：它与门禁里的 ``quality`` 同源，避免"门禁按 L1 判、
+    逐样本按别的层判"这种自相矛盾。
+    """
+
+    #: 逐样本对比使用的分数层。
+    LEVEL = "l1"
+
+    @classmethod
+    def score_map(cls, run, *, split: str | None = None) -> Dict[str, float]:
+        """取 ``{case_id: score}``；未完成或没分数的样本不进入映射（而不是记 0）。
+
+        记 0 会把"这条没跑"伪装成"这条退化了"，从而在关键回归门禁上产生假警报，
+        掩盖真正没跑起来的评测。缺样本应该在分区完整性门禁上暴露。
+        """
+        if run is None:
+            return {}
+        rows = EvaluationResult.objects.filter(run=run, status="completed")
+        if split:
+            rows = rows.filter(case__split=split)
+        field = f"{cls.LEVEL}_score"
+        return {
+            str(row.case_id): float(getattr(row, field))
+            for row in rows.select_related("case")
+            if getattr(row, field) is not None
+        }
+
+    @classmethod
+    def compare_cases(cls, *, baseline_run, candidate_run, split: str | None = None) -> list:
+        """逐样本给出 ``baseline -> candidate`` 的变化，按差值升序（最差的排前面）。"""
+        baseline = cls.score_map(baseline_run, split=split)
+        candidate = cls.score_map(candidate_run, split=split)
+        rows = []
+        for case_id in sorted(set(baseline) | set(candidate)):
+            before = baseline.get(case_id)
+            after = candidate.get(case_id)
+            rows.append({
+                "case_id": case_id,
+                "baseline": before,
+                "candidate": after,
+                "delta": None if before is None or after is None else round(after - before, 6),
+                # 只有两侧都有分数才谈得上"退化"；单侧缺失属于分区/样本问题。
+                "comparable": before is not None and after is not None,
+            })
+        rows.sort(key=lambda row: (row["delta"] if row["delta"] is not None else 0.0))
+        return rows

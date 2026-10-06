@@ -9,6 +9,10 @@ class OptimizationProposal(models.Model):
     TYPE_CHOICES = [
         ("prompt", "Prompt"), ("knowledge", "知识"),
         ("retrieval_policy", "检索策略"), ("skill_tool", "Skill/工具配置"),
+        # T13：真正落到 Skill 包**文件内容**上的候选（改 SKILL.md / references /
+        # schemas / 模板 / 确定性校验脚本）。与 skill_tool 的区别是后者只调
+        # 运行时参数（超时、重试、输入输出校验），一行业务内容都不改。
+        ("skill_content", "Skill 内容"),
     ]
     STATE_CHOICES = [
         ("draft", "草稿"), ("evaluating", "评测中"),

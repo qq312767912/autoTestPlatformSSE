@@ -166,6 +166,22 @@
             <!-- 同名副本数：列表按名字归并成一条展示，得让使用者知道库里不止一份。 -->
             <a-tag size="small" color="green">{{ skill.version_count || 1 }} 个版本</a-tag>
             <a-tag v-if="skill.has_evolution" size="small" color="orangered">已自进化</a-tag>
+            <!-- 产出协议等级（T05）：**声明**与**实测**分成两个标签。
+                 合成一个会把"声称能进化"读成"已经能进化"——而这正是 Skill 作者
+                 最需要知道的一条反馈。实测标签用 ok 着色，不看声明。 -->
+            <a-tooltip v-if="skill.stage_result_level" :content="stageResultLevelTip(skill)">
+              <a-tag size="small" :color="stageResultLevelColor(skill.stage_result_level)">
+                {{ skill.stage_result_level_label }}
+              </a-tag>
+            </a-tooltip>
+            <a-tooltip v-if="skill.stage_result_last_run" :content="stageResultRunTip(skill)">
+              <a-tag
+                size="small"
+                :color="skill.stage_result_last_run.ok ? 'green' : 'red'"
+              >
+                {{ skill.stage_result_last_run.ok ? text.stageResultRunOk : text.stageResultRunFailed }}
+              </a-tag>
+            </a-tooltip>
           </div>
           <!-- 功能简介：卡片里最多两行，超出省略；悬浮看完整简介。 -->
           <div class="skill-summary">
@@ -463,6 +479,14 @@ const text = computed(() => (
         revokeStageSuccess: '已撤销阶段声明',
         bindStageFailed: '更新阶段声明失败',
         stageFromManifest: '由版本包 manifest 声明。版本包是不可变产物，改它只能发新版本；这里不提供修改入口。',
+        stageResultLevelTip: (level: string, capability: string) =>
+          `声明了 ${level} 产出协议。${capability ? `${capability}。` : ''}这只是声明——是否兑现看右侧的实测标签。`,
+        stageResultRunOk: '协议通过',
+        stageResultRunFailed: '结构化协议失败',
+        stageResultRunOkTip: (level: string) => `最近一次产出的 stage-result 信封合格（实测 ${level}）。`,
+        stageResultRunFailedTip: (count: number) =>
+          `最近一次产出的业务产物已生成，但 stage-result 信封有 ${count} 处字段问题。业务产物已保留，未被删除。`,
+        stageResultMoreIssues: (count: number) => `…等共 ${count} 条`,
         manageOnly: '只有平台管理员或项目测试负责人可以启停 / 删除 Skill。',
         category: '所属分类', categoryPlaceholder: '选择阶段，或直接输入以新增', categoryRequired: '请先选择所属分类',
         customStageTip: '没有合适的阶段？直接输入名称即可新建自定义阶段（如「性能测试」），之后可复用。',
@@ -679,6 +703,38 @@ const canEditStage = (skill: SkillListItem) =>
 /** 标签点击统一走这里：没权限时点标签不该有任何反应。 */
 const handleStageTagClick = (skill: SkillListItem) => {
   if (skill.stage_label ? canEditStage(skill) : canBindStage.value) openStageBinding(skill)
+}
+
+/**
+ * 产出协议等级标签的配色。
+ *
+ * 按等级单调加深（灰 → 蓝 → 青 → 紫），让"越高越结构化"在卡片上一眼可辨，
+ * 而不是每个等级一个互不相干的颜色。
+ */
+const stageResultLevelColor = (level: string) =>
+  ({ L0: 'gray', L1: 'arcoblue', L2: 'cyan', L3: 'purple' } as Record<string, string>)[level] || 'gray'
+
+/** 声明等级悬浮说明：等级本身的意思 + "这只是声明"这句话。 */
+const stageResultLevelTip = (skill: SkillListItem) => {
+  const base = skill.stage_result_capability || ''
+  return text.value.stageResultLevelTip(skill.stage_result_level, base)
+}
+
+/** 实测结论悬浮说明：实测等级、声明差距与具体字段错误。 */
+const stageResultRunTip = (skill: SkillListItem) => {
+  const run = skill.stage_result_last_run
+  if (!run) return ''
+  const head = run.ok
+    ? text.value.stageResultRunOkTip(run.effective_level_label || run.effective_level)
+    : text.value.stageResultRunFailedTip(run.issues.length)
+  const lines = [head]
+  if (run.detail) lines.push(run.detail)
+  // 只列前 3 条字段错误：卡片悬浮框不是错误报告页，全量清单在产出详情里看。
+  for (const issue of run.issues.slice(0, 3)) {
+    lines.push(`${issue.path || '/'} ${issue.message}`)
+  }
+  if (run.issues.length > 3) lines.push(text.value.stageResultMoreIssues(run.issues.length - 3))
+  return lines.filter(Boolean).join('\n')
 }
 
 const handleBindStage = async () => {

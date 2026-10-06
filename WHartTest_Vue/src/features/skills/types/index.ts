@@ -14,6 +14,38 @@ export interface Skill {
   updated_at: string
 }
 
+/**
+ * 最近一次 `stage-result/v1` 校验结论（T05）。
+ *
+ * 后端在产出落库时把摘要写进 `GenerationOutput.metadata`，这里读的就是那份摘要，
+ * **不在前端重算** —— 重算需要当时的 Skill 包与产出文件，多半已经不在了。
+ */
+export interface StageResultRun {
+  ok: boolean
+  /** 由产出内容实测出的等级（不看声明）。 */
+  level: string
+  level_label: string
+  /** Skill 自己声明的等级；空串表示未声明。 */
+  declared_level: string
+  /** 平台实际按哪一档对待 = 声明与实测中较低的一档。 */
+  effective_level: string
+  effective_level_label: string
+  /** 声明高于实测。 */
+  level_gap: boolean
+  /**
+   * `ok` / `structured_protocol_failure`。
+   *
+   * 与「业务生成失败」是两个标记，页面必须分开显示：前者是"跑成功了但信封不合规"，
+   * 对应的补救动作是改 Skill 或改产出；后者才是重跑。
+   */
+  result_marker: string
+  /** 字段级错误清单（`path` 是 JSON Pointer，如 `/items/0/id`）。 */
+  issues: Array<{ path: string; message: string; code: string }>
+  detail: string
+  compatibility_level: string
+  recorded_at: string
+}
+
 export interface SkillListItem {
   id: number
   name: string
@@ -49,6 +81,18 @@ export interface SkillListItem {
   version_count: number
   /** 是否已有自进化派生版本。 */
   has_evolution: boolean
+  /**
+   * Skill **声明**的产出协议等级（L0–L3），来自版本 manifest；未声明为空串。
+   *
+   * 与 `stage_result_last_run` 分开显示而不是合成一个字段：
+   * "声称 L3"与"跑出来是 L3"恰恰是最需要被分开看见的差距。
+   */
+  stage_result_level: string
+  stage_result_level_label: string
+  /** 该等级能做什么（后端给的自然语言说明，避免前端再抄一份口径）。 */
+  stage_result_capability: string
+  /** **实测**结论：最近一次产出的校验摘要；从没跑过受控阶段时为 `null`。 */
+  stage_result_last_run: StageResultRun | null
 }
 
 export interface SkillUploadResponse {

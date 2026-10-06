@@ -289,6 +289,13 @@
                       <template v-if="planFor(activeFlow.workflow_id,step.stage)!.parent_output_ids.length"> · 上游产出 <code>{{ planFor(activeFlow.workflow_id,step.stage)!.parent_output_ids.join('、') }}</code></template>
                       <template v-if="planFor(activeFlow.workflow_id,step.stage)!.managed"> · 已锁定 {{ planFor(activeFlow.workflow_id,step.stage)!.skill_name }} {{ planFor(activeFlow.workflow_id,step.stage)!.skill_version }}</template>
                       <br/>{{ planFor(activeFlow.workflow_id,step.stage)!.hint }}
+                      <!-- 自动跳转之后用户会回到本页看状态；这里保留一个直达入口，
+                           免得"想再去跑一次"只能靠浏览器回退。链接里的
+                           execution_context_id 过期时，业务页面会明确提示重新派发。 -->
+                      <template v-if="planFor(activeFlow.workflow_id,step.stage)!.launch_url">
+                        <br/><a class="dispatch-link" @click="router.push(planFor(activeFlow.workflow_id,step.stage)!.launch_url)">前往执行 →</a>
+                        <small class="dispatch-ttl">（上下文有效至 {{ contextExpiryText(planFor(activeFlow.workflow_id,step.stage)!.execution_context_expires_at) }}）</small>
+                      </template>
                     </p>
                     <!-- 平台没有"打回上一阶段"这个动作，就不能摆一个按了没反应的按钮。
                          不通过时人真正该做的是重跑门禁或请负责人放行，这里把出路写清楚。 -->
@@ -318,7 +325,7 @@
                         <template #icon><icon-upload/></template>上传反馈
                       </a-button>
                       <a-button v-if="!step.output_id" size="small" type="primary" :disabled="!['ready','running'].includes(step.status)" :loading="executeBusy===`${activeFlow.workflow_id}:${step.stage}`" @click="executeStage(activeFlow.workflow_id,step.stage)">
-                        <template #icon><icon-play-arrow/></template>执行本阶段
+                        <template #icon><icon-play-arrow/></template>跳转到Agent执行
                       </a-button>
                       <a-button v-if="step.output_id && ['pending','unscored','failed'].includes(step.status)" size="small" :loading="gateBusy===`${activeFlow.workflow_id}:${step.stage}`" @click="runGate(activeFlow.workflow_id,step.stage)">运行门禁测评</a-button>
                       <a-button v-if="step.output_id && step.scorable" size="small" @click="openStageScore(activeFlow.workflow_id,step.stage)">
@@ -909,6 +916,20 @@ const gateEvidenceText=(step:WorkflowStageGateView)=>{
   return parts.length?parts.join(' · '):'门禁尚无结论；可运行门禁测评、人工评分，或直接确认进入下一步。';
 };
 const planFor=(workflowId:string,stage:string)=>executionPlans.value[`${workflowId}:${stage}`];
+/**
+ * 上下文有效期的人读文本（T02）。
+ *
+ * 只精确到分钟：上下文是一次临时凭据，"有效至 14:03:27.123"级别的精度既没有
+ * 决策价值，又会让人以为它是个需要精确对齐的时间点。显示不出来就如实说"未知"，
+ * 不猜一个看起来像样的时间。
+ */
+const contextExpiryText=(iso:string)=>{
+  if(!iso)return '未知';
+  const date=new Date(iso);
+  if(Number.isNaN(date.getTime()))return '未知';
+  const pad=(n:number)=>String(n).padStart(2,'0');
+  return `${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
 function openStageScore(workflowId:string,stage:string){
   const flow=cockpit.value.workflows.find(v=>v.workflow_id===workflowId);
   const step=flow?.stages.find(v=>v.stage===stage);
@@ -945,12 +966,23 @@ async function executeStage(workflowId:string,stage:string){
   try{
     const plan=await executeWorkflowStage(projectStore.currentProjectId,workflowId,stage);
     executionPlans.value={...executionPlans.value,[`${workflowId}:${stage}`]:plan};
-    // 必须说清"这不等于已经跑完"：平台只有测试执行有内部执行器，
-    // 另外三个阶段的产出由 agent 提交。含糊其辞会让人一直等一个不会来的结果。
-    if(plan.channel==='platform')Message.info(`已校验前置阶段并下发执行参数：请到「${plan.entry}」选用例套件执行，workflow_id 填 ${plan.workflow_id}`);
-    else Message.info(`已校验前置阶段并下发执行参数：请到「${plan.entry}」以 module_key = ${plan.module_key} 执行，产出回写后本阶段自动亮起`);
     await loadCockpit();
-  }catch{Message.error('执行本阶段失败：请确认上一阶段已放行')}
+    // T03 §4.2：派发成功后直接跳到后端给的业务页面。用户不必再手工复制
+    // workflow_id / module_key —— 那样既容易抄错，也让"流程 ID 是可信凭据"这件事
+    // 变成一句空话。URL 里只带一个 execution_context_id：流程、阶段、锁定的
+    // SkillVersion 全部由服务端按这个 id 解析，前端带不过去也改不了。
+    // 必须先 await loadCockpit()：跳转之后本页不再刷新，而阶段条上的
+    // "已派发、等待执行"应该在上一步就已经落定，而不是等用户跳回来才补上。
+    if(plan.launch_url){
+      Message.success(`已派发本阶段，正在跳转到${plan.entry}`);
+      router.push(plan.launch_url);
+      return;
+    }
+    // 还没有对应业务页面的阶段：如实说明该去哪、带什么参数，而不是给一个
+    // 点了没反应的按钮。平台只有测试执行有内部执行器，其余阶段由 agent 提交产出。
+    if(plan.channel==='platform')Message.info(`已校验前置阶段并下发执行参数：请到「${plan.entry}」选用例套件执行，workflow_id 填 ${plan.workflow_id}`);
+    else Message.info(`已派发本阶段（${plan.stage_label}）：请到「${plan.entry}」以 module_key = ${plan.module_key} 执行，产出回写后本阶段自动亮起`);
+  }catch{Message.error('派发本阶段失败：请确认上一阶段已放行，或该流程已启用质量飞轮')}
   finally{executeBusy.value=''}
 }
 async function openStageOutput(workflowId:string,stage:string){
@@ -1652,6 +1684,11 @@ watch(()=>projectStore.currentProjectId,async id=>{
 .detail-note{margin:10px 0 0;color:var(--color-text-2);font-size:12px;line-height:1.75}
 .dispatch-note{margin:10px 0 0;padding:10px;border-radius:7px;background:rgb(var(--arcoblue-1));color:var(--color-text-1);font-size:12px;line-height:1.85}
 .dispatch-note code{padding:1px 5px;border-radius:4px;background:var(--color-fill-2);font-size:11px}
+/* 派发后的"前往执行"入口（T03）。做成链接而不是按钮：它是对已有派发的再次进入，
+   不是又一次操作，用主按钮会让人以为点了会重新派发一轮。 */
+.dispatch-link{cursor:pointer;color:rgb(var(--arcoblue-6));font-weight:600}
+.dispatch-link:hover{text-decoration:underline}
+.dispatch-ttl{margin-left:6px;color:var(--color-text-3)}
 .stage-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
 .score-preview{font-size:12px;font-weight:700}
 .score-preview.ok{color:#16a34a}

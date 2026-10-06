@@ -32,6 +32,7 @@ from .views import (
     OptimizationProposalViewSet,
     FlywheelRunViewSet,
     StageExecutionAttemptViewSet,
+    StageExecutionContextViewSet,
     TestAssetTaxonomyViewSet,
     AssetCandidateViewSet,
     HistoryImportViewSet,
@@ -72,6 +73,9 @@ router.register("flywheel-runs", FlywheelRunViewSet, basename="flywheel-run")
 # T01 §4.4 的 ``/stage-attempts/{id}/`` 与 ``/stage-attempts/{id}/retry/``：
 # 执行尝试即使在正式产出之前也必须可查，失败记录必须保留。
 router.register("stage-attempts", StageExecutionAttemptViewSet, basename="stage-attempt")
+# T02 §4.2：业务页面只携带 execution_context_id，可信参数（流程 / 阶段 /
+# 锁定 SkillVersion / 上游产出）一律由服务端解析，前端拿不到也改不了。
+router.register("execution-contexts", StageExecutionContextViewSet, basename="execution-context")
 router.register("test-asset-taxonomies", TestAssetTaxonomyViewSet, basename="test-asset-taxonomy")
 # 设计 §6.2 的 ``/asset-candidates/retry/``：候选事件队列 + 失败补偿入口（T04）。
 router.register("asset-candidates", AssetCandidateViewSet, basename="asset-candidate")

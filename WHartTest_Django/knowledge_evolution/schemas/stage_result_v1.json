@@ -1,0 +1,107 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "stage-result/v1",
+  "title": "阶段结构化产出信封 stage-result/v1",
+  "description": "各阶段 Skill 在业务主产物之外额外提交的机器可读信封。平台只依赖这一份协议做评审、图谱与归因，不依赖任何具体 Excel/PDF 的列号。",
+  "type": "object",
+  "required": ["schema_version", "stage", "status", "primary_artifacts", "items", "evidence"],
+  "properties": {
+    "schema_version": {
+      "const": "stage-result/v1",
+      "description": "协议版本。平台按此分流解析器；不认识的值按 L0 处理而不是报错中断。"
+    },
+    "stage": {
+      "type": "string",
+      "minLength": 1,
+      "description": "产出所属阶段，须与平台链路阶段标识一致。"
+    },
+    "status": {
+      "enum": ["completed", "partial", "failed"],
+      "description": "业务侧自评的完成度。partial 表示部分产出可用，不能当作完整产出进入下游。"
+    },
+    "primary_artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "description": "主产物声明。至少要有一项，否则平台只能靠文件名正则猜哪个是正主——那正是本协议要消灭的做法。",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "path": { "type": "string" },
+          "sha256": { "type": "string" },
+          "kind": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "items": {
+      "type": "array",
+      "description": "结构化业务项。平台按 id 做差异、归因与图谱连接，因此 id 必须稳定且唯一。",
+      "items": {
+        "type": "object",
+        "required": ["id", "title"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$",
+            "description": "稳定业务项 ID。同一份文档重跑时应保持不变，否则差异比对会把整份方案算成全新内容。"
+          },
+          "title": { "type": "string", "minLength": 1 },
+          "requirement_ids": { "type": "array", "items": { "type": "string" } },
+          "evidence_ids": { "type": "array", "items": { "type": "string" } },
+          "module": { "type": "string" },
+          "scenario_type": { "type": "string" },
+          "priority": { "type": "string" },
+          "expected": { "type": "string" },
+          "decisions": { "type": "array" },
+          "assumptions": { "type": "array" },
+          "uncertainties": { "type": "array" },
+          "counterevidence": { "type": "array" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "description": "知识原句引用。平台必须能凭 document/chunk/quote 回到原文并校验，定位不了的一律标记 invalid，不得冒充可信证据。",
+      "items": {
+        "type": "object",
+        "required": ["id", "document_id", "quote"],
+        "properties": {
+          "id": { "type": "string" },
+          "document_id": { "type": "string" },
+          "document_version": { "type": "string" },
+          "chunk_id": { "type": "string" },
+          "quote": { "type": "string", "minLength": 1 },
+          "start_offset": { "type": "integer", "minimum": 0 },
+          "end_offset": { "type": "integer", "minimum": 0 },
+          "content_hash": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "requirements": {
+      "type": "array",
+      "description": "推荐字段：本次产出所依据的需求清单。存在时，items[].requirement_ids 必须能在其中找到，否则算非法引用。",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "title": { "type": "string" },
+          "source": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "decision_summary": {
+      "type": "array",
+      "description": "推荐字段：显式结构化决策记录。不含模型隐藏思维链，只记录可核验的结论与理由。"
+    },
+    "assumptions": { "type": "array", "description": "推荐字段：本次产出所依赖的假设。" },
+    "uncertainties": { "type": "array", "description": "推荐字段：不确定项与待确认问题。" },
+    "counterevidence": { "type": "array", "description": "推荐字段：反证检查结果。" }
+  },
+  "additionalProperties": true
+}

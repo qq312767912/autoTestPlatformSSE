@@ -21,6 +21,7 @@ import type {
   ProjectQualityCockpit,
   StartWorkflowResult,
   StageExecutionPlan,
+  ExecutionContextView,
   StageOutputView,
   WorkflowStageCatalog,
   WorkflowStatusView,
@@ -366,6 +367,21 @@ export async function scoreWorkflowStage(projectId: number, workflowId: string, 
  */
 export async function executeWorkflowStage(projectId: number, workflowId: string, stage: string): Promise<StageExecutionPlan> {
   return post<StageExecutionPlan>('/operations/execute-workflow-stage/', { project: projectId, workflow_id: workflowId, stage });
+}
+
+/**
+ * 解析执行上下文（T02 / R3）：业务页面唯一的可信取值入口。
+ *
+ * 页面只携带 `execution_context_id`，流程、阶段、锁定的 SkillVersion 和上游产出
+ * 都由服务端按 id + 当前项目解析。**不要**改成从 URL 直接读 workflow_id /
+ * skill_version_id：那些是可篡改的字符串，一旦被当成版本依据，
+ * 受控运行就能用上流程没有锁定的包而流程记录仍显示"用的是锁定版本"。
+ *
+ * 解析失败（过期 / 跨项目 / 版本漂移）会抛错，页面据此给出"回飞轮重新派发"的入口，
+ * 而不是静默降级成旁路模式——那等于把受控运行悄悄变成了不受控。
+ */
+export async function getExecutionContext(projectId: number, contextId: string): Promise<ExecutionContextView> {
+  return get<ExecutionContextView>(`/execution-contexts/${contextId}/`, { project: projectId });
 }
 
 /** 「查看结果」：按 project + workflow_id + stage 三元定位读取产出正文与门禁证据。 */

@@ -218,6 +218,14 @@ class SkillListSerializer(serializers.ModelSerializer):
     copies = serializers.SerializerMethodField()
     version_count = serializers.SerializerMethodField()
     has_evolution = serializers.SerializerMethodField()
+    # T05：产出协议等级。``stage_result_level`` 是 Skill **声明**的等级（来自版本
+    # manifest），``stage_result_last_run`` 是**实测**结论（来自最近一次产出的
+    # 校验摘要）。两个都显示、不合成一个字段，因为"声称 L3"和"跑出来是 L3"
+    # 恰恰是最需要被分开看见的差距。
+    stage_result_level = serializers.SerializerMethodField()
+    stage_result_level_label = serializers.SerializerMethodField()
+    stage_result_capability = serializers.SerializerMethodField()
+    stage_result_last_run = serializers.SerializerMethodField()
 
     class Meta:
         model = Skill
@@ -230,6 +238,10 @@ class SkillListSerializer(serializers.ModelSerializer):
             # 同名副本数（Skill Hub 是公共目录，同名归并成一条展示后，
             # 要把"库里其实有几份"显式告诉使用者，而不是把多重性藏起来）。
             'copies', 'version_count', 'has_evolution',
+            # 产出协议等级与最近一次校验结论（T05）。纯描述性元数据，
+            # 不参与可用性判定——可用性判据仍然只有 ``SkillRuntimeResolver`` 一处。
+            'stage_result_level', 'stage_result_level_label',
+            'stage_result_capability', 'stage_result_last_run',
         ]
 
     # -- 展示版本（元数据来源，不是可用性判据） ---------------------------
@@ -322,6 +334,45 @@ class SkillListSerializer(serializers.ModelSerializer):
 
     def get_has_evolution(self, obj):
         return bool((self.context.get('evolved_skill_ids') or set()).__contains__(obj.pk))
+
+    # -- 产出协议等级（T05，描述性元数据，不是可用性判据） -----------------
+
+    def _declared_stage_result_level(self, obj):
+        """取 Skill **声明**的 ``stage_result`` 等级，未声明返回空串。
+
+        真值在 ``knowledge_evolution.stage_outputs``（等级集合与回落口径的唯一来源），
+        这里只是把它读出来展示，不另立一套判定。
+        """
+        from knowledge_evolution.stage_outputs import read_declared_level
+
+        version = self._version(obj)
+        if version is None:
+            return ''
+        return read_declared_level(version.manifest)
+
+    def get_stage_result_level(self, obj):
+        return self._declared_stage_result_level(obj)
+
+    def get_stage_result_level_label(self, obj):
+        from knowledge_evolution.stage_outputs import level_label
+
+        level = self._declared_stage_result_level(obj)
+        return level_label(level) if level else ''
+
+    def get_stage_result_capability(self, obj):
+        from knowledge_evolution.stage_outputs import COMPATIBILITY_CAPABILITIES
+
+        level = self._declared_stage_result_level(obj)
+        return COMPATIBILITY_CAPABILITIES.get(level, '') if level else ''
+
+    def get_stage_result_last_run(self, obj):
+        """最近一次运行的校验结论；从没跑过受控阶段时返回 ``None``。
+
+        返回 ``None`` 而不是一个"空结论"对象：页面要区分"没跑过"和"跑了但没提交
+        信封"，后者是 ``result_marker = structured_protocol_failure``。
+        """
+        runs = self.context.get('stage_result_runs') or {}
+        return runs.get(obj.pk) or None
 
 
 class SkillToggleSerializer(serializers.ModelSerializer):

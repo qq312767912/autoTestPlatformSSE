@@ -426,7 +426,8 @@ from .trace_models import ExecutionSpan, FailureAttribution  # noqa: E402,F401
 # 两个都显式导入：模型注册靠"应用加载时被 import 到"，若只靠别处顺手 import，
 # 一旦那个模块被重构掉，模型就会从 Django 的应用注册表里消失（表现为迁移生成不出、表查不到）。
 from .workflow_models import (  # noqa: E402,F401
-    FlywheelRun, StageExecutionAttempt, WorkflowSkillLock, WorkflowStageGate,
+    FlywheelRun, StageExecutionContext, StageExecutionAttempt,
+    WorkflowSkillLock, WorkflowStageGate,
 )
 
 from .history_models import (  # noqa: E402,F401

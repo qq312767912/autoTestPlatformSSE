@@ -2,8 +2,36 @@
   <div class="plan-page">
     <a-page-header title="测试方案分析" subtitle="基于已确认的需求与技术文档产出可追溯的测试方案" />
 
-    <a-alert v-if="workflowId" type="info" class="context-alert">
+    <!-- 受控模式横幅（T03 §4.3）：流程、阶段、锁定的 Skill 与上游产出必须一眼可见。
+         这些值全部来自**服务端解析**的执行上下文；URL 里只有一个
+         execution_context_id，篡改它只会得到"上下文失效"，换不出别的 Skill 版本。 -->
+    <a-alert v-if="controlled" type="info" class="context-alert">
+      <template #title>已关联质量飞轮流程 · {{ executionContext!.stage_label }}</template>
+      <div class="context-lines">
+        <span>流程 <code>{{ executionContext!.workflow_id }}</code></span>
+        <span>
+          Skill 版本
+          <code>{{ executionContext!.skill.skill_name || '未锁定 Skill' }}{{ executionContext!.skill.version ? ' ' + executionContext!.skill.version : '' }}</code>
+          （由流程锁定，本页不可更换）
+        </span>
+        <span v-if="executionContext!.parent_output_ids.length">
+          上游产出 <code>{{ executionContext!.parent_output_ids.join('、') }}</code>
+        </span>
+        <span>执行尝试 <code>{{ executionContext!.attempt_id }}</code></span>
+      </div>
+    </a-alert>
+    <a-alert v-else-if="workflowId" type="info" class="context-alert">
       当前由质量飞轮流程进入，产出将关联流程 {{ workflowId }}。
+    </a-alert>
+
+    <!-- 上下文失效不是"静默降级成旁路"，而是一次明确的失败：受控运行的产出必须
+         归属到流程与锁定版本，悄悄跑完只会制造一条没有版本溯源的产出。 -->
+    <a-alert v-if="contextError" type="error" class="context-alert">
+      <template #title>执行上下文已失效，本页暂不可执行</template>
+      <div class="context-lines">
+        <span>{{ contextError }}</span>
+        <a-button size="mini" type="primary" @click="backToFlywheel">回到质量飞轮重新派发</a-button>
+      </div>
     </a-alert>
 
     <a-grid :cols="24" :col-gap="16" :row-gap="16">
@@ -18,6 +46,7 @@
               <a-select
                 v-model="form.skillVersionId"
                 :loading="loadingSkills"
+                :disabled="controlled"
                 allow-search
                 placeholder="选择适用于方案生成的 Skill 版本"
               >
@@ -27,7 +56,12 @@
                 </a-option>
               </a-select>
               <template #extra>
-                仅展示 Skill Hub 中声明为“测试方案生成”且可运行的版本；已自动选中默认版本。
+                <template v-if="controlled">
+                  本页由质量飞轮流程进入，Skill 版本已在发起流程时锁定，不可更换。
+                </template>
+                <template v-else>
+                  仅展示 Skill Hub 中声明为“测试方案生成”且可运行的版本；已自动选中默认版本。
+                </template>
               </template>
             </a-form-item>
 
@@ -220,8 +254,8 @@ import type { UserPrompt, UserPromptListResponseData } from '@/features/prompts/
 import { KnowledgeService } from '@/features/knowledge/services/knowledgeService';
 import type { KnowledgeBase } from '@/features/knowledge/types/knowledge';
 import KnowledgeDocumentScopeSelector from '@/features/knowledge/components/KnowledgeDocumentScopeSelector.vue';
-import { getWorkflowStageCatalog } from '@/features/knowledge-evolution/service';
-import type { WorkflowCatalogSkill } from '@/features/knowledge-evolution/types';
+import { getExecutionContext, getWorkflowStageCatalog } from '@/features/knowledge-evolution/service';
+import type { ExecutionContextView, WorkflowCatalogSkill } from '@/features/knowledge-evolution/types';
 import { activeStreams, getChatHistory, sendChatMessageStream } from '@/features/langgraph/services/chatService';
 import type { ChatHistoryMessage, ChatRequest } from '@/features/langgraph/types/chat';
 import { parseToolResultDisplayPayload } from '@/features/langgraph/utils/toolResultParser';
@@ -233,8 +267,24 @@ type SelectedModule = DocumentModule & { documentId: string; documentTitle: stri
 const projectStore = useProjectStore();
 const route = useRoute();
 const router = useRouter();
-const workflowId = computed(() => String(route.query.workflow_id || ''));
+
+// ---------------------------------------------------------------- 受控执行上下文（T03）
+//
+// 飞轮派发后跳到本页，URL 上只有 execution_context_id。流程 / 阶段 / 锁定的 Skill
+// 版本 / 上游产出全部由服务端按这个 id 解析——**这是本页唯一可信的取值来源**。
+// 绝不能改成"URL 上有 workflow_id 就用 URL 上的"：那是用户可改的字符串，
+// 一旦被当成版本依据，页面显示的版本和流程实际锁定的版本就可以不是同一个。
+const executionContextId = computed(() => String(route.query.execution_context_id || ''));
+const executionContext = ref<ExecutionContextView | null>(null);
+const loadingContext = ref(false);
+const contextError = ref('');
+/** 受控模式：由飞轮派发进入，Skill 版本锁定，页面不得更换。 */
+const controlled = computed(() => Boolean(executionContext.value));
+
+const workflowId = computed(() => executionContext.value?.workflow_id || String(route.query.workflow_id || ''));
 const parentOutputIds = computed(() => {
+  // 受控模式下上游产出来自服务端解析结果；Query 参数只作为旁路模式的历史兼容。
+  if (executionContext.value) return executionContext.value.parent_output_ids;
   const raw = route.query.parent_output_ids;
   const values = Array.isArray(raw) ? raw : String(raw || '').split(',');
   return values.map(value => String(value || '').trim()).filter(Boolean);
@@ -414,7 +464,12 @@ async function loadSkills() {
     const catalog = await getWorkflowStageCatalog(projectStore.currentProjectId);
     planSkills.value = catalog.skills.filter(skill => skill.runnable && skill.declared_stage === 'test_plan_generation');
     const stage = catalog.stages.find(item => item.stage === 'test_plan_generation');
-    form.skillVersionId = stage?.default?.skill_version_id || planSkills.value[0]?.skill_version_id || '';
+    // 受控模式下版本由流程锁定，**不能**用"当前默认版本"覆盖它：
+    // 那会让页面显示 A、流程记录的是 B，事后谁都不认账。
+    // 受控模式的取值统一在 resolveExecutionContext 里落下。
+    if (!executionContextId.value) {
+      form.skillVersionId = stage?.default?.skill_version_id || planSkills.value[0]?.skill_version_id || '';
+    }
   } catch (error) {
     Message.error(error instanceof Error ? error.message : '加载 Skill 列表失败');
   } finally {
@@ -609,8 +664,66 @@ function notifyGenerationStarted(id: string) {
   });
 }
 
+/**
+ * 解析受控执行上下文（T03 / §4.3）。
+ *
+ * 解析失败**不降级成旁路模式**：受控运行的产出必须归属到流程与锁定版本，静默降级
+ * 等于制造一条没有版本溯源的产出，事后既归因不了也回滚不了。所以失败时只暴露
+ * 恢复入口（回飞轮重新派发），页面本身保持不可执行。
+ *
+ * 锁定版本还会被补进 `planSkills`：若该版本未被声明为"方案生成"（例如发起流程时
+ * 由负责人显式指定），下拉里就没有它的选项，选择框会显示成空——页面看起来像
+ * "没选版本"，而实际用的是锁定版本，又是一处两套说法。
+ */
+async function resolveExecutionContext() {
+  const contextId = executionContextId.value;
+  const projectId = projectStore.currentProjectId;
+  if (!contextId || !projectId) return;
+  loadingContext.value = true;
+  contextError.value = '';
+  try {
+    const view = await getExecutionContext(projectId, contextId);
+    executionContext.value = view;
+    if (view.skill.skill_version_id) {
+      if (!planSkills.value.some(skill => skill.skill_version_id === view.skill.skill_version_id)) {
+        planSkills.value = [{
+          skill_id: view.skill.skill_id,
+          skill_name: view.skill.skill_name,
+          description: '',
+          declared_stage: view.stage,
+          declared_stage_label: view.stage_label,
+          runnable: true,
+          skill_version_id: view.skill.skill_version_id,
+          version: view.skill.version,
+          release_state: '',
+          package_sha256: view.skill.package_sha256,
+          updated_at: '',
+        }, ...planSkills.value];
+      }
+      form.skillVersionId = view.skill.skill_version_id;
+    }
+  } catch (error) {
+    executionContext.value = null;
+    contextError.value = error instanceof Error
+      ? error.message
+      : '执行上下文已过期或不再可信，请回到质量飞轮重新派发';
+  } finally {
+    loadingContext.value = false;
+  }
+}
+
+/** 上下文失效后的恢复入口：回飞轮重新派发（只新建上下文，attempt 不变）。 */
+function backToFlywheel() {
+  router.push({ name: 'KnowledgeEvolution' });
+}
+
 async function generatePlan() {
   if (!projectStore.currentProjectId) return Message.warning('请先选择项目');
+  // 受控模式下上下文没解析成功就不允许执行：宁可让用户回飞轮重派，
+  // 也不要让这一轮跑到流程外面去——那样产出的版本溯源就断了。
+  if (executionContextId.value && !executionContext.value) {
+    return Message.error(contextError.value || '正在解析执行上下文，请稍候再试');
+  }
   if (!form.skillVersionId) return Message.warning('请选择 Skill 版本');
   if (!form.documentIds.length) return Message.warning('请选择文档');
   const selectedModules = modules.value.filter(module => form.moduleIds.includes(module.id));
@@ -635,6 +748,10 @@ async function generatePlan() {
     knowledge_document_ids: form.knowledgeDocumentScope === 'selected' ? form.knowledgeDocumentIds : undefined,
     workflow_id: workflowId.value || undefined,
     parent_output_ids: parentOutputIds.value.length ? parentOutputIds.value : undefined,
+    // 受控模式下必须带上 attempt_id：Agent 据此把这条执行尝试推进到 running
+    // 并绑定 session_id，正式产出发布后再回写 attempt → output。
+    // 没有它，飞轮只看到"已派发"，永远不知道这一轮跑起来没有。
+    attempt_id: executionContext.value?.attempt_id || undefined,
   };
   try {
     await sendChatMessageStream(request, id => {
@@ -674,12 +791,20 @@ watch(() => projectStore.currentProjectId, async (projectId) => {
   historyArtifacts.value = [];
   historyContent.value = '';
   await Promise.all([loadSkills(), loadDocuments(), loadSessionArtifacts()]);
+  // 上下文解析必须排在 Skill 加载**之后**：受控模式下它会用锁定版本覆盖选择器，
+  // 顺序相反时 loadSkills 的"默认版本"会盖掉锁定版本，
+  // 于是页面显示 A、流程记录的是 B —— 正是本设计要消灭的两套说法。
+  await resolveExecutionContext();
 }, { immediate: true });
 </script>
 
 <style scoped>
 .plan-page { padding: 20px; min-height: 100%; background: var(--color-fill-1); }
 .context-alert { margin-bottom: 16px; }
+/* 受控模式横幅的字段行：流程 / 锁定版本 / 上游产出 / attempt 各自成行。
+   这些值是要被核对与抄录的，挤成一整句话会让人漏看其中一项。 */
+.context-lines { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.context-lines code { padding: 1px 5px; border-radius: 4px; background: var(--color-fill-2); font-size: 12px; }
 .module-groups { display: grid; gap: 12px; width: 100%; }
 .module-row { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 12px; align-items: center; }
 .module-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-2); }

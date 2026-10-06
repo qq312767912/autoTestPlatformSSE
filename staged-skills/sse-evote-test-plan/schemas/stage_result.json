@@ -1,0 +1,149 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "stage-result/v1#sse-evote-test-plan",
+  "title": "上证e投票测试方案生成 stage_result.json",
+  "description": "本 Skill 对平台 `stage-result/v1` 的收紧声明。平台 schema 只要求「有主产物、有 items、有 evidence」；本 Skill 额外承诺 L3：每个末级方案项都有稳定 ID、需求关联与可定位证据。这份 schema 与平台 knowledge_evolution/schemas/stage_result_v1.json 是包含关系——本份更严，绝不更松。",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "stage",
+    "status",
+    "primary_artifacts",
+    "requirements",
+    "items",
+    "evidence",
+    "decision_summary"
+  ],
+  "properties": {
+    "schema_version": { "const": "stage-result/v1" },
+    "stage": { "const": "test_plan_generation" },
+    "status": { "enum": ["completed", "partial", "failed"] },
+
+    "primary_artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "description": "主产物声明。必须包含 test_plan.xlsx——前端不再靠文件名正则猜哪个是正主。",
+      "items": {
+        "type": "object",
+        "required": ["name", "sha256"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "path": { "type": "string" },
+          "kind": { "type": "string" },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "业务主产物的内容哈希。平台据此证明「这份信封描述的就是这份方案」。"
+          }
+        },
+        "additionalProperties": true
+      },
+      "contains": {
+        "type": "object",
+        "properties": { "name": { "const": "test_plan.xlsx" } },
+        "required": ["name"]
+      }
+    },
+
+    "requirements": {
+      "type": "array",
+      "description": "本次方案依据的需求清单。items[].requirement_ids 必须全部落在这一份清单里。",
+      "items": {
+        "type": "object",
+        "required": ["id", "title"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^REQ-[A-Za-z0-9_.-]+$" },
+          "title": { "type": "string", "minLength": 1 },
+          "source": { "type": "string", "description": "需求出处，如文档名或章节号。" }
+        },
+        "additionalProperties": true
+      }
+    },
+
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "description": "末级方案项。每个末级方案项一条，不多不少。",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "requirement_ids",
+          "evidence_ids",
+          "module",
+          "scenario_type",
+          "priority",
+          "expected"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^TP-[0-9]{3,}$",
+            "description": "稳定方案项 ID：TP-001 起顺序编号。同一份需求重跑时应尽量保持不变——它变了，差异比对会把整份方案算成全新内容。"
+          },
+          "title": { "type": "string", "minLength": 1 },
+          "requirement_ids": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" }
+          },
+          "evidence_ids": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" }
+          },
+          "module": { "type": "string", "minLength": 1, "description": "对应测试方案里的模块层级，最多四级。" },
+          "scenario_type": { "enum": ["positive", "negative", "boundary", "exception", "concurrency", "compatibility"] },
+          "priority": { "enum": ["P0", "P1", "P2", "P3"] },
+          "expected": {
+            "type": "string",
+            "minLength": 1,
+            "description": "可判定的预期结果。写「功能正常」不合格——验收时无法据此判对错。"
+          },
+          "decisions": {
+            "type": "array",
+            "description": "该项的显式结构化决策（选了什么、为什么）。不记录模型隐藏思维链。"
+          },
+          "assumptions": { "type": "array" },
+          "uncertainties": { "type": "array" },
+          "counterevidence": { "type": "array" }
+        },
+        "additionalProperties": true
+      }
+    },
+
+    "evidence": {
+      "type": "array",
+      "description": "知识原句引用。L3 要求每条都能凭 document/version/chunk/quote 回到原文。",
+      "items": {
+        "type": "object",
+        "required": ["id", "document_id", "document_version", "chunk_id", "quote"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^EV-[0-9]{3,}$" },
+          "document_id": { "type": "string", "minLength": 1 },
+          "document_version": { "type": "string", "minLength": 1, "description": "缺版本就无法回答「当时依据的是哪一版需求」。" },
+          "chunk_id": { "type": "string", "minLength": 1 },
+          "quote": { "type": "string", "minLength": 1 },
+          "start_offset": { "type": "integer", "minimum": 0 },
+          "end_offset": { "type": "integer", "minimum": 0 },
+          "content_hash": { "type": "string", "description": "quote 内容的哈希，用于检测原文被改动。" }
+        },
+        "additionalProperties": true
+      }
+    },
+
+    "decision_summary": {
+      "type": "array",
+      "minItems": 1,
+      "description": "本次方案的显式结构化决策摘要（覆盖范围取舍、策略选择、为什么这样裁剪回归）。这是 L3 与 L2 的分界：没有它，平台无法把人工修改归因到某条规则。"
+    },
+    "assumptions": { "type": "array", "description": "本次方案依赖的假设。" },
+    "uncertainties": { "type": "array", "description": "待确认问题，与业务产出里的待确认项保持一致。" },
+    "counterevidence": {
+      "type": "array",
+      "description": "反证检查：有没有与本次结论相冲突的原句？查过但没有冲突也要显式写空数组，而不是省略——省略无法区分「没查」和「查了没有」。"
+    }
+  },
+  "additionalProperties": true
+}

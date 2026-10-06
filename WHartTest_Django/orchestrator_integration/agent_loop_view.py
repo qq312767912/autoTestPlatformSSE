@@ -1087,10 +1087,79 @@ class AgentLoopStreamAPIView(View):
                     "register_workflow_gate": gated_workflow,
                 },
             )
-            return await sync_to_async(publish_output)(envelope)
+            result = await sync_to_async(publish_output)(envelope)
+            # T04：产出正式发布之后立刻把 attempt 推进到 output_published → completed
+            # 并绑定 output。放在这里而不是放在 SSE 发送处，是因为只有这里才知道
+            # 产出到底有没有真的落库——在 SSE 处推进会出现"事件发了、产出没写进去"
+            # 这种记录与实际相反的情况，而那正是最需要被记录的一种失败。
+            return await self._advance_attempt_on_publish(request, result)
         except Exception:
             logger.exception("用例生成结果未能记录到数据飞轮")
             return None
+
+    async def _advance_attempt_on_publish(self, request, result):
+        """产出发布后回写执行尝试（T04 / §4.4）。
+
+        回写失败只记日志、不改返回值：业务产出此刻**已经落库**，
+        如果因为飞轮侧的登记失败就抛错，等于让观测面把业务产物一起丢掉
+        （需求 R15 明确禁止）。
+        """
+        attempt = getattr(request, "_flywheel_attempt", None)
+        if attempt is None or not result:
+            return result
+        output_id = result[1] if len(result) > 1 else None
+        if not output_id:
+            return result
+
+        from knowledge_evolution.models import GenerationOutput
+        from knowledge_evolution.operations import StageExecutionAttemptService
+
+        try:
+            output = await sync_to_async(
+                GenerationOutput.objects.filter(pk=output_id).first
+            )()
+            if output is None:
+                return result
+            await sync_to_async(StageExecutionAttemptService.mark_output_published)(
+                attempt, output=output,
+            )
+            await sync_to_async(StageExecutionAttemptService.complete)(
+                attempt, output=output,
+            )
+        except Exception:
+            logger.exception(
+                "AgentLoopStreamAPI: 执行尝试回写产出失败 attempt=%s output=%s",
+                getattr(attempt, "pk", ""), output_id,
+            )
+        return result
+
+    async def _mark_attempt_failed(self, request, exc):
+        """把执行尝试标记为失败（T04 / §13）。
+
+        错误摘要**必须受限**：attempt 会被飞轮页面直接读出来展示，把异常全文
+        （可能含绝对路径、SQL 片段甚至凭据）落进去，等于把一次失败放大成一次泄漏。
+        这里只保留异常类型与截断后的首行。
+        """
+        attempt = getattr(request, "_flywheel_attempt", None)
+        if attempt is None:
+            return
+        from knowledge_evolution.operations import StageExecutionAttemptService
+
+        text = str(exc or "").strip()
+        summary = text.splitlines()[0][:300] if text else ""
+        try:
+            await sync_to_async(StageExecutionAttemptService.fail)(
+                attempt,
+                error_code=type(exc).__name__,
+                error_summary=summary,
+            )
+        except Exception:
+            # 已经终态的 attempt 再标记失败会抛错——那是正常情况（比如产出发完之后
+            # 会话标题总结炸了），不是需要打扰用户的问题。
+            logger.exception(
+                "AgentLoopStreamAPI: 执行尝试标记失败失败 attempt=%s",
+                getattr(attempt, "pk", ""),
+            )
 
     def _update_session_token_usage(
         self, session_id: str, input_tokens: int, output_tokens: int,
@@ -1818,6 +1887,17 @@ class AgentLoopStreamAPIView(View):
                     complete_data = {"type": "complete", "total_steps": step_count}
                     if evolution_ids:
                         complete_data["trace_id"], complete_data["output_id"] = evolution_ids
+                        # T04 §4.5：正式产出单独发一条事件。页面据此判断"这一阶段真的
+                        # 产出了"，不再继续靠文件名或聊天文本猜——后两种办法在
+                        # "产出叫了别的名字"或"模型在聊天里顺口提到产出了"时都会骗人。
+                        if request._flywheel_attempt is not None and len(evolution_ids) > 1:
+                            yield create_sse_data({
+                                "type": "output_published",
+                                "attempt_id": str(request._flywheel_attempt.pk),
+                                "output_id": str(evolution_ids[1]),
+                                "workflow_id": request._flywheel_attempt.workflow_id,
+                                "stage": request._flywheel_attempt.stage,
+                            })
                     if generate_playwright_script:
                         complete_data["script_generation"] = {
                             "enabled": True,
@@ -1828,6 +1908,9 @@ class AgentLoopStreamAPIView(View):
                 yield "data: [DONE]\n\n"
 
         except Exception as e:
+            # T04：Agent 中途失败时也必须有记录。没有这条，飞轮上只能看到"已派发"，
+            # 而一个永远不动的"已派发"和一个"正在跑"是分不出来的——用户只能干等。
+            await self._mark_attempt_failed(request, e)
             friendly_error = get_user_friendly_llm_error(e)
             if friendly_error:
                 logger.warning(
@@ -1889,6 +1972,12 @@ class AgentLoopStreamAPIView(View):
         request._flywheel_capability_id = str(body_data.get("capability_id") or "")
         request._flywheel_capability = None
         request._selected_skill_version = None
+        # T04：受控执行尝试。它一旦存在，流程 / 阶段 / 版本就以它为准——
+        # 请求体里的 workflow_id / module_key / skill_version_id 都只是"页面上填的值"，
+        # 而 attempt 是服务端在派发时落下的记录。以记录为准，才谈得上"篡改 URL
+        # 换不来另一个版本"。默认 None 保证后面任何分支引用它都不会 AttributeError。
+        request._flywheel_attempt = None
+        request._flywheel_attempt_id = str(body_data.get("attempt_id") or "")
         session_id = body_data.get("session_id")
         project_id = body_data.get("project_id")
         knowledge_base_ids = _normalize_knowledge_base_ids(
@@ -1959,9 +2048,51 @@ class AgentLoopStreamAPIView(View):
         if not project:
             return api_error_response("Project access denied", 403)
 
+        # 4.1 解析受控执行尝试（T04 / R4）。
+        #
+        # 这是"可信参数"真正生效的地方：attempt 是派发时服务端写下的记录，
+        # 因此流程 id、阶段、锁定 Skill 版本一律以它为准，**不再读请求体**。
+        # 页面就算把 workflow_id 改成别人的流程、把 skill_version_id 换成没锁定的
+        # 版本，这一轮跑的仍然是 attempt 上记着的那一套。
+        if request._flywheel_attempt_id:
+            from knowledge_evolution.models import StageExecutionAttempt as _Attempt
+
+            try:
+                attempt_uuid = uuid.UUID(request._flywheel_attempt_id)
+            except (TypeError, ValueError, AttributeError):
+                return api_error_response("执行尝试不存在或已失效", 400)
+            attempt = await sync_to_async(
+                _Attempt.objects.select_related("skill_version").filter(pk=attempt_uuid).first
+            )()
+            # 「不存在」与「属于别的项目」返回同一个结论：分开报错会让接口
+            # 变成探测别项目 attempt 是否存在的工具。
+            if attempt is None or attempt.project_id != int(project_id):
+                return api_error_response("执行尝试不存在或已失效", 400)
+            if attempt.stage != request._flywheel_module_key:
+                return api_error_response("执行尝试与本次任务的阶段不一致", 400)
+            if attempt.is_terminal:
+                return api_error_response(
+                    "该执行尝试已结束，如需重跑请回到质量飞轮重新派发", 409
+                )
+            request._flywheel_attempt = attempt
+            request._flywheel_workflow_id = attempt.workflow_id
+            request._flywheel_module_key = attempt.stage
+
         # The task stage and the concrete Skill version are separate choices.
         # Existing callers may omit the version and retain the old resolver.
         selected_skill_version_id = str(body_data.get("skill_version_id") or "")
+        if request._flywheel_attempt is not None:
+            # 受控模式下版本由 attempt（= 流程锁）决定。请求体里显式传了别的版本
+            # 说明这一轮不是从受控页面发起的（或有人改了请求），必须拒绝而不是静默忽略
+            # —— 静默忽略会让"页面显示 A、实际用 B"这种问题再也查不出来。
+            attempt_version_id = str(request._flywheel_attempt.skill_version_id or "")
+            if (
+                selected_skill_version_id
+                and attempt_version_id
+                and selected_skill_version_id != attempt_version_id
+            ):
+                return api_error_response("所选 Skill 版本与本次执行尝试锁定的版本不一致", 409)
+            selected_skill_version_id = attempt_version_id
         if selected_skill_version_id:
             from skills.models import SkillVersion
 
@@ -2019,6 +2150,29 @@ class AgentLoopStreamAPIView(View):
                 )
             except ValidationError as exc:
                 return api_error_response(f"质量门禁未通过：{exc}", 409)
+
+        # 5.0 受控执行尝试进入「运行中」（T04 / §4.4）。
+        #
+        # 放在门禁校验**之后**：门禁没过就不该留下"运行过"的痕迹，否则飞轮上会出现
+        # 一条 running 的 attempt，而实际一次模型都没调。
+        # 放在真正调用模型**之前**：这样"派发后卡住"当场就能被看见，而不是页面上
+        # 一直显示"已派发"，直到有人去翻日志才发现根本没跑。
+        if request._flywheel_attempt is not None:
+            from knowledge_evolution.operations import StageExecutionAttemptService
+
+            try:
+                await sync_to_async(StageExecutionAttemptService.mark_running)(
+                    request._flywheel_attempt,
+                    session_id=session_id,
+                    actor=request.user,
+                )
+            except Exception:
+                # 状态回写失败不影响业务执行：产出照常生成，只是观测面的状态会滞后。
+                # 观测面出问题不该把执行面一起停掉——那等于用小毛病换大故障。
+                logger.exception(
+                    "AgentLoopStreamAPI: 执行尝试推进到 running 失败 attempt=%s",
+                    request._flywheel_attempt_id,
+                )
 
         # 5.1 在加载 LLM/工具前完成登录态绑定；Cookie/token 不进入模型参数。
         try:

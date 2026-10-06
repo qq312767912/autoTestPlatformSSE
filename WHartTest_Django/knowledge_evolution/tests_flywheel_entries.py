@@ -30,6 +30,10 @@ class FlywheelEntryTests(TestCase):
         ProjectMember.objects.create(project=self.project, user=self.lead, role="owner")
         ProjectMember.objects.create(project=self.project, user=self.member, role="member")
         self.client = APIClient()
+        # T14：飞轮入口受项目级灰度开关管辖，未配置视为关闭。本类测的是入口
+        # 派生/幂等行为，显式开启，避免把"开关"混进"入口"的判定里。
+        from .history_models import ProjectFlywheelSetting
+        ProjectFlywheelSetting.objects.create(project=self.project, enabled=True)
 
     def test_open_derives_deterministic_id_and_is_idempotent(self):
         first = FlywheelContextService.open(

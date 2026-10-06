@@ -14,7 +14,6 @@ from file_management.models import FileAsset
 from .gold import AssetCandidateService
 from .history_models import (
     HistoryImportBatch, HistoryImportItem, HistoryReplay, HistoryReplayDifference,
-    ProjectFlywheelSetting,
 )
 from .workflow_models import FlywheelRun, WorkflowSkillLock
 
@@ -212,4 +211,11 @@ class HistoryReplayService:
 
 
 def flywheel_enabled(project) -> bool:
-    return ProjectFlywheelSetting.objects.filter(project=project, enabled=True).exists()
+    """项目是否已灰度开启质量飞轮联动。
+
+    真值已上移到 ``rollout.linkage_enabled``（T14），这里保留同名包装只是为了
+    不破坏既有调用方。"未配置视为关闭"的语义与开关默认值一致，两处不会再分叉。
+    """
+    from .rollout import linkage_enabled
+
+    return linkage_enabled(project)

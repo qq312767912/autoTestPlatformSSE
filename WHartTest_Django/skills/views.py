@@ -252,6 +252,8 @@ class SkillViewSet(BaseModelViewSet):
                 'copies': copies,
                 'version_counts': {key: value['total'] for key, value in version_stats.items()},
                 'evolved_skill_ids': {key for key, value in version_stats.items() if value['evolved']},
+                # T05：最近一次 ``stage-result/v1`` 校验结论，同样一次批量取齐。
+                'stage_result_runs': self._last_stage_result_runs(skills),
             },
         )
         # 随信封带回"调用者能不能管这个公共目录"和可绑定的阶段清单：
@@ -328,10 +330,59 @@ class SkillViewSet(BaseModelViewSet):
                 versions[skill.pk] = skill.active_version
         return versions
 
+    @staticmethod
+    def _last_stage_result_runs(skills):
+        """每个 Skill 最近一次 ``stage-result/v1`` 校验结论（T05）。
+
+        读的是 ``GenerationOutput.metadata`` 里落库的摘要，**不重算**：重算要用到
+        当时的 Skill 包与产出文件，多半已经不在了；而且列表页重算一次 = 每个 Skill
+        读一遍磁盘，代价和 N+1 一样。
+
+        没有任何结构化结论的产出（旁路入口生成的、或旧版本在 T05 之前产生的）
+        会被跳过，而不是占用"最近一次校验结果"这个位置——否则页面会把
+        "从没跑过受控阶段"显示成"上次协议失败"，把两件不相干的事混成一条告警。
+        """
+        skills = list(skills)
+        if not skills:
+            return {}
+
+        from knowledge_evolution.models import GenerationOutput
+
+        runs = {}
+        rows = (
+            GenerationOutput.objects
+            .filter(skill_version__skill_id__in=[skill.pk for skill in skills])
+            .values('skill_version__skill_id', 'created_at', 'metadata')
+            .order_by('skill_version__skill_id', '-created_at')
+        )
+        for row in rows.iterator():
+            skill_id = row['skill_version__skill_id']
+            if skill_id in runs:
+                continue
+            metadata = row['metadata'] or {}
+            summary = metadata.get('stage_result_validation') or {}
+            if not summary:
+                continue
+            runs[skill_id] = {
+                **summary,
+                'compatibility_level': metadata.get('compatibility_level') or '',
+                'recorded_at': row['created_at'].isoformat() if row['created_at'] else '',
+            }
+        return runs
+
     def retrieve(self, request, *args, **kwargs):
         """获取 Skill 详情"""
         instance = self.get_object()
-        serializer = self.get_serializer(instance)
+        # ``list`` 显式传 context，这里也得补上同两个键——只加一处会出现
+        # "列表能看到等级、点进详情反而没有"，那种不一致比完全不给更让人困惑。
+        serializer = self.get_serializer(
+            instance,
+            context={
+                **self.get_serializer_context(),
+                'versions': self._display_versions([instance]),
+                'stage_result_runs': self._last_stage_result_runs([instance]),
+            },
+        )
         return Response({
             'code': 200,
             'message': '获取成功',
