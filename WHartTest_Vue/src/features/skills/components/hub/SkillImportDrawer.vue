@@ -21,6 +21,18 @@
             <a-option v-for="opt in categoryOptions" :key="opt.value" :value="opt.value">{{ stageOptionText(opt) }}</a-option>
           </a-select>
         </a-form-item>
+        <a-form-item label="Skill 名称（平台生成）">
+          <!-- 留空即沿用包内 name；多 Skill 包置只读——一个名字对应不了多条 Skill。 -->
+          <a-input
+            v-model="name"
+            :max-length="40"
+            :disabled="multiSkill"
+            placeholder="生成后请人工确认；留空则沿用包内名称"
+          />
+          <template v-if="nameHint" #extra>
+            <span class="import__hint">{{ nameHint }}</span>
+          </template>
+        </a-form-item>
         <a-form-item label="功能简介（平台生成）" required>
           <a-textarea v-model="description" :max-length="60" show-word-limit />
         </a-form-item>
@@ -70,7 +82,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 
 import { SkillService } from '../../services/skillService'
@@ -96,8 +108,19 @@ const gitForm = ref({ git_url: '', branch: 'main' })
 const storeForm = ref({ zip_url: '', sha256: '' })
 const category = ref('')
 const description = ref('')
+/** 展示名称：平台生成、人工确认；留空则沿用包内 name。 */
+const name = ref('')
+/** 包内识别到的 Skill 数量：>1 时名称输入置只读。 */
+const skillCount = ref(0)
 const suggested = ref(false)
 const categoryOptions = ref<Array<{ value: string; label: string; custom?: boolean }>>([])
+
+const multiSkill = computed(() => skillCount.value > 1)
+const nameHint = computed(() =>
+  multiSkill.value
+    ? `该包含 ${skillCount.value} 个 Skill，名称按各自 SKILL.md 保留，此处不做统一改名。`
+    : '',
+)
 
 watch(
   () => props.visible,
@@ -112,6 +135,8 @@ watch(
       storeForm.value = { zip_url: '', sha256: '' }
       category.value = ''
       description.value = ''
+      name.value = ''
+      skillCount.value = 0
       suggested.value = false
     }
   },
@@ -127,8 +152,10 @@ async function submit() {
         : await SkillService.suggestMetadata(props.projectId, { name: storeForm.value.zip_url, content: storeForm.value.zip_url })
       category.value = suggestion.category
       description.value = suggestion.description
+      name.value = suggestion.name || ''
+      skillCount.value = suggestion.skill_count || 0
       suggested.value = true
-      Message.info('已生成建议，请确认后再次点击导入')
+      Message.info(nameHint.value ? '已生成分类与简介；该仓库含多个 Skill，名称按各包保留' : '已生成建议，请确认后再次点击导入')
       return
     }
     if (!category.value || !description.value.trim()) { error.value = '请确认所属分类与功能简介'; return }
@@ -143,6 +170,8 @@ async function submit() {
         category.value,
         description.value.trim(),
         gitForm.value.branch || 'main',
+        undefined,
+        name.value.trim(),
       )
     } else {
       if (!storeForm.value.zip_url) {
@@ -155,6 +184,8 @@ async function submit() {
         category.value,
         description.value.trim(),
         storeForm.value.sha256 || undefined,
+        undefined,
+        name.value.trim(),
       )
     }
     Message.success(`导入完成，共 ${imported.value.length} 个 Skill`)
@@ -176,6 +207,11 @@ async function submit() {
 
 .import__note {
   font-size: 12px;
+}
+
+.import__hint {
+  font-size: 12px;
+  color: var(--color-text-3);
 }
 
 .import__alert {

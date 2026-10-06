@@ -32,7 +32,7 @@ from knowledge_evolution.capability_models import CapabilityRelease
 from knowledge_evolution.capability_registry import SKILL_STAGE_OPTIONS
 from projects.models import Project, ProjectMember
 from skills.canonical import canonical_skills, pick_canonical
-from skills.models import Skill, SkillVersion
+from skills.models import Skill, SkillVersion, SkillWorkshopExclusion
 
 
 def _sha(seed: str) -> str:
@@ -395,6 +395,16 @@ class PublicCatalogueEntryIsNotProjectBoundTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(Skill.objects.filter(pk=self.skill.pk).exists())
 
+    def test_remove_from_workshop_preserves_hub_source(self):
+        url = reverse('project-skills-workshop-materials', kwargs={'project_pk': self.project_a.id})
+        response = self.client.post(url, {'skill_id': self.skill.pk}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(Skill.objects.filter(pk=self.skill.pk).exists())
+        self.assertTrue(SkillWorkshopExclusion.objects.filter(project=self.project_a, source_skill=self.skill).exists())
+        self.client.delete(url, {'skill_id': self.skill.pk}, format='json')
+        self.assertFalse(SkillWorkshopExclusion.objects.filter(project=self.project_a, source_skill=self.skill).exists())
+        self.assertTrue(Skill.objects.filter(pk=self.skill.pk).exists())
+
     # ---------------- 角色门槛：治理需负责人，读只需登录 ----------------
 
     def test_plain_executor_cannot_govern_the_catalogue(self):
@@ -613,4 +623,3 @@ class CustomStageTests(APITestCase):
         self.assertEqual(row["stage"], "custom:性能测试")
         self.assertEqual(row["stage_label"], "性能测试")
         self.assertEqual(row["stage_source"], "declared")
-

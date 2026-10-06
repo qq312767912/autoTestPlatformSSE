@@ -799,7 +799,16 @@ watch(() => projectStore.currentProjectId, async (projectId) => {
 </script>
 
 <style scoped>
-.plan-page { padding: 20px; min-height: 100%; background: var(--color-fill-1); }
+.plan-page {
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 0;
+  padding: 20px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--color-fill-1);
+  scrollbar-gutter: stable;
+}
 .context-alert { margin-bottom: 16px; }
 /* 受控模式横幅的字段行：流程 / 锁定版本 / 上游产出 / attempt 各自成行。
    这些值是要被核对与抄录的，挤成一整句话会让人漏看其中一项。 */

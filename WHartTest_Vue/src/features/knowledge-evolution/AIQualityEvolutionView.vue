@@ -20,7 +20,7 @@
         <button type="button" :class="{active:quickMode==='hub'}" @click="quickMode='hub'">Skill Hub</button>
       </nav>
 
-      <div class="workspace-shell" :class="{'graph-layout':primaryView==='graph'}">
+      <div class="workspace-shell" :class="{'graph-layout':primaryView==='graph','workflow-layout':workspace==='workflow'}">
 
       <main class="workspace-content">
         <div v-if="primaryView==='data' && quickMode==='console' && workspace!=='overview'" class="console-context">
@@ -216,6 +216,14 @@
         </section>
 
         <section v-else-if="workspace === 'workflow'" class="panel content-panel workflow-panel">
+          <WorkflowEvolutionWorkbench
+            :project-id="projectStore.currentProjectId!"
+            @start-workflow="openWorkflowStart"
+            @open-stage-output="openStageOutput"
+          />
+          <!-- 旧版四阶段卡片暂时保留在源码中作为灰度回退，不参与渲染；
+               新工作台通过同一批服务接口读写，不改变后端流程真值。 -->
+          <div v-if="false">
           <div class="section-head toolbar"><div><span>全链路测试</span><h2>四阶段质量门禁</h2><p>{{ workflowChainText }}。每阶段评测通过后进入下一阶段，失败样本用于改进对应 Skill。</p></div><div class="actions"><a-tag color="arcoblue">{{ cockpit.workflows.length }} 条流程</a-tag><a-button type="primary" @click="openWorkflowStart"><template #icon><icon-plus/></template>发起流程</a-button></div></div>
           <div v-if="workflowStartResult" class="start-result">
             <div class="start-result-head"><div><b>已发起流程 {{ workflowStartResult.workflow_id }}</b><small>四阶段 Skill 版本已在入口一次性锁定</small></div><a-button size="mini" @click="workflowStartResult=null">收起</a-button></div>
@@ -350,6 +358,7 @@
               <a-empty v-else description="左侧选中一条流程后，这里显示它的四阶段时间线"/>
             </div>
           </div>
+          </div>
         </section>
 
         <section v-else-if="workspace === 'gold'" class="panel content-panel">
@@ -405,7 +414,7 @@
           <div class="roadmap"><icon-safe/><div><b>受控自进化公共能力</b><small>候选版本 → 同集影子对比 → 硬门禁 → 测试负责人发布 → 可回滚</small></div><a-tag color="green">后端能力已就绪</a-tag></div>
         </section>
       </main>
-        <aside v-if="primaryView!=='graph'" class="team-panel panel" aria-label="项目测试团队">
+        <aside v-if="primaryView!=='graph'" v-show="workspace!=='workflow'" class="team-panel panel" aria-label="项目测试团队">
           <header class="team-head"><div><i></i><span>测试团队</span></div><button type="button" @click="loadCockpit"><icon-refresh />刷新</button></header>
           <p class="team-note">负责质量门禁决策、任务执行与结果反馈</p>
           <div class="people-group lead-group">
@@ -712,7 +721,7 @@
         </a-form-item>
       </a-form>
     </a-modal>
-    <a-modal v-model:visible="showStageOutputModal" title="阶段结果" :footer="false" width="820px">
+    <a-modal v-model:visible="showStageOutputModal" title="阶段结果与质量闭环" :footer="false" width="1080px">
       <a-spin :loading="stageOutputLoading" style="width:100%">
         <template v-if="stageOutput">
           <div class="output-meta">
@@ -729,6 +738,8 @@
             <span>{{ stageOutput.gate.reason || '门禁暂无说明' }}</span>
             <span v-if="stageOutput.gate.decided_by">操作人 {{ stageOutput.gate.decided_by }}</span>
           </div>
+          <a-tabs v-model:active-key="stageResultTab" class="stage-workbench-tabs">
+            <a-tab-pane key="output" title="产出物">
           <pre class="output-content">{{ stageOutput.content || '（本阶段产出正文为空）' }}</pre>
           <p v-if="stageOutput.truncated" class="detail-note">正文共 {{ stageOutput.content_length }} 字，此处只展示前 4000 字。</p>
 
@@ -796,6 +807,93 @@
             </template>
             <p v-else class="detail-note">尚未读取；点「读取来源」查看这份产出的检索通道、引用条目与 Skill 包摘要。</p>
           </section>
+            </a-tab-pane>
+
+            <a-tab-pane key="trace" title="Agent 执行链路">
+              <a-spin :loading="stageWorkbenchLoading" style="width:100%">
+                <a-alert type="info" class="trace-boundary">这里展示可审计的步骤、工具、耗时和知识证据；模型隐藏思维链不会被采集或展示。</a-alert>
+                <template v-if="stageTrace">
+                  <div class="trace-kpis">
+                    <article><small>执行状态</small><b>{{ stageTrace.summary.status }}</b></article>
+                    <article><small>步骤</small><b>{{ stageTrace.summary.steps.total }}</b></article>
+                    <article><small>失败</small><b>{{ stageTrace.summary.steps.failed }}</b></article>
+                    <article><small>耗时</small><b>{{ stageTrace.summary.duration_ms===null?'—':`${stageTrace.summary.duration_ms} ms` }}</b></article>
+                  </div>
+                  <div v-if="stageTrace.spans.length" class="trace-chain">
+                    <article v-for="span in stageTrace.spans" :key="span.id" :class="span.status">
+                      <i>{{ span.sequence }}</i>
+                      <div class="trace-main">
+                        <header><b>{{ stageTrace.summary.labels[span.group] || span.step_type }}</b><a-tag size="small" :color="span.status==='failed'?'red':span.status==='running'?'orange':'green'">{{ span.status }}</a-tag></header>
+                        <p>{{ span.agent_name || 'Agent' }}<template v-if="span.tool_name"> · 工具 {{ span.tool_name }}</template><template v-if="span.latency_ms"> · {{ span.latency_ms }} ms</template></p>
+                        <div v-if="span.evidence?.length" class="trace-evidence">
+                          <small>读取的知识证据</small>
+                          <blockquote v-for="(evidence,index) in span.evidence" :key="index">{{ displayEvidence(evidence) }}</blockquote>
+                        </div>
+                        <p v-if="span.error_summary" class="trace-error">{{ span.error_summary }}</p>
+                      </div>
+                    </article>
+                  </div>
+                  <a-empty v-else description="本次执行尚未登记链路步骤"/>
+                  <p v-if="!stageTrace.summary.can_see_quotes" class="detail-note">当前账号无权查看知识原句；来源标识与哈希仍可用于审计。</p>
+                </template>
+                <a-empty v-else :description="stageAttempt?'本次执行尚无可展示轨迹':'未找到该阶段的执行尝试'"/>
+              </a-spin>
+            </a-tab-pane>
+
+            <a-tab-pane key="review" title="人工确认">
+              <a-spin :loading="stageWorkbenchLoading" style="width:100%">
+                <a-alert type="info">人工只需填写四列：人工结论、修改类型、修改内容、备注。人工结论初始为空，可选采纳、修改后采纳、删除。</a-alert>
+                <div class="review-actions">
+                  <a-button :loading="stageReviewBusy==='download'" @click="downloadReviewTemplate"><template #icon><icon-download/></template>下载确认稿</a-button>
+                  <a-button :loading="stageReviewBusy==='draft'" @click="pickStageReview('draft')">保存草稿</a-button>
+                  <a-button type="primary" :loading="stageReviewBusy==='submit'" @click="pickStageReview('submit')">正式提交</a-button>
+                </div>
+                <div v-if="stageReviewStatus?.latest_review" class="review-status-card">
+                  <div><b>{{ stageReviewStatus.latest_review.state==='submitted'?'已正式提交':'草稿' }}</b><small>{{ stageReviewStatus.latest_review.report_name }} · {{ stageReviewStatus.latest_review.actor || '未知操作人' }}</small></div>
+                  <a-tag :color="stageReviewStatus.latest_review.evolvable?'green':'orange'">{{ stageReviewStatus.latest_review.evolvable?'可进入 Skill 进化':'尚不可进化' }}</a-tag>
+                  <span>已审核 {{ stageReviewStatus.latest_review.statistics['已审核数'] ?? 0 }} 项 · 留空 {{ stageReviewStatus.latest_review.blank_count }}</span>
+                </div>
+                <a-empty v-else description="尚未上传人工确认稿"/>
+
+                <section class="attachment-panel">
+                  <h4>人工补充文件</h4>
+                  <p class="detail-note">例如人工用例或补充依据；文件只进入本阶段反馈，不会直接改动生产 Skill。</p>
+                  <div class="attachment-form">
+                    <a-select v-model="stageAttachmentForm.purpose" placeholder="文件用途">
+                      <a-option v-for="item in stageAttachmentCatalog.purposes" :key="item.value" :value="item.value">{{ item.label }}</a-option>
+                    </a-select>
+                    <a-input v-model="stageAttachmentForm.note" placeholder="备注（可选）"/>
+                    <a-button :loading="stageAttachmentBusy" :disabled="!stageAttachmentForm.purpose" @click="pickStageAttachment"><template #icon><icon-upload/></template>上传文件</a-button>
+                  </div>
+                  <div v-if="stageAttachments.length" class="attachment-list">
+                    <article v-for="file in stageAttachments" :key="file.id"><div><b>{{ file.filename }}</b><small>{{ file.purpose_label }} · {{ formatBytes(file.byte_size) }} · {{ file.uploaded_by }}</small></div><span>{{ file.note || '—' }}</span></article>
+                  </div>
+                </section>
+              </a-spin>
+            </a-tab-pane>
+
+            <a-tab-pane key="evolution" title="差异与进化输入">
+              <a-spin :loading="stageWorkbenchLoading" style="width:100%">
+                <template v-if="stageDiff">
+                  <div class="evolution-summary">
+                    <a-tag :color="stageDiff.derived.available?'green':'orange'">{{ stageDiff.derived.available?'证据图谱已生成':'暂无派生产物' }}</a-tag>
+                    <a-tag v-if="stageDiff.derived.graph_stale" color="red">图谱已过期</a-tag>
+                    <span>差异 {{ stageDiff.diff.items?.length || 0 }} 条 · 待确认归因 {{ stageDiff.attribution_summary.proposed || 0 }} 条 · 可生成内容补丁 {{ stageDiff.attribution_summary.usable_for_content_patch || 0 }} 条</span>
+                    <a-button size="small" type="primary" :loading="stageAttributionBusy" :disabled="!stageDiff.review_rows_available" @click="rerunStageAttribution">重新归因</a-button>
+                  </div>
+                  <div v-if="stageDiff.diff.items?.length" class="diff-list">
+                    <article v-for="(item,index) in stageDiff.diff.items" :key="String(item.item_id||index)">
+                      <header><b>{{ item.title || item.item_id || `差异 ${index+1}` }}</b><a-tag size="small">{{ item.action || item.conclusion || '已修改' }}</a-tag></header>
+                      <p>{{ item.change || item.modified_content || item.reason || '已记录人工差异，可沿证据图谱反查来源。' }}</p>
+                    </article>
+                  </div>
+                  <a-empty v-else description="确认稿中没有可归因的人工改动"/>
+                  <p class="detail-note">正式确认稿、原始产出、执行证据图谱与人工补充文件会共同成为 Skill 进化工坊的候选输入；归因仍需人工确认。</p>
+                </template>
+                <a-empty v-else description="正式提交确认稿后，这里会生成差异、反查链和待确认归因"/>
+              </a-spin>
+            </a-tab-pane>
+          </a-tabs>
         </template>
       </a-spin>
     </a-modal>
@@ -803,6 +901,8 @@
     <!-- 「上传反馈」的取文件入口。用隐藏 input 而不是 a-upload：反馈是**就地**动作、
          不弹窗，往四张卡片里各塞一个完整上传组件会把卡片挤乱。 -->
     <input ref="stageFeedbackInput" type="file" accept=".xlsx,.xlsm" class="hidden-file-input" @change="onStageFeedbackPicked"/>
+    <input ref="reviewFileInput" type="file" accept=".xlsx,.xlsm" class="hidden-file-input" @change="onStageReviewPicked"/>
+    <input ref="attachmentFileInput" type="file" class="hidden-file-input" @change="onStageAttachmentPicked"/>
   </div>
 </template>
 
@@ -815,9 +915,10 @@ import { IconBranch, IconDashboard, IconDownload, IconEdit, IconExperiment, Icon
 import { useProjectStore } from '@/store/projectStore';
 import { SkillHubConsole, SkillManager } from '@/features/skills';
 import KnowledgeGraphView from '@/features/knowledge-graph/KnowledgeGraphView.vue';
+import WorkflowEvolutionWorkbench from './WorkflowEvolutionWorkbench.vue';
 import { WORKFLOW_STAGES as DEFAULT_WORKFLOW_STAGES } from '@/features/skills/utils/stages';
-import { annotateGoldCase, confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, createTestAssetTaxonomy, confirmHistoryImport, downloadSkillPackage, downloadStageArtifact, evaluateWorkflowStage, evolveCaseReview, executeWorkflowStage, freezeGoldDatasetVersion, generateCandidatesFromRun, getAssetCandidateStats, getGenerationOutputLineage, getGoldCase, getProjectQualityCockpit, getStageOutput, getWorkflowStageCatalog, getWorkflowStatus, listAnnotationConflicts, listAssetCandidateEvents, listCapabilityReleases, listCaseReviewEvolutionCandidates, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listGoldDatasetVersions, listHistoryImports, listHistoryReplays, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, listTestAssetTaxonomies, openFlywheelRun, overrideWorkflowStage, preflightCaseReviewEvolution, preflightHistoryImport, proposeCaseReviewOptimizations, publishTestAssetTaxonomy, confirmCaseReviewOptimizations, resolveAnnotationConflict, retryAssetCandidate, retryFailedAssetCandidates, scoreWorkflowStage, startHistoryReplay, startWorkflow, submitTestAssetTaxonomy, updateCandidateState, uploadStageFeedback } from './service';
-import type { AnnotationConflict, AssetCandidateEvent, AssetCandidateStats, CapabilityRelease, CaseReviewEvolutionCandidate, CaseReviewEvolutionPreflight, CaseReviewEvolutionResult, EvaluationResult, EvaluationRun, EvaluationSuite, ExecutionSpan, FailureAttribution, FeedbackEvent, GoldCase, GoldDataset, GoldDatasetVersion, HistoryImportBatch, HistoryReplay, KnowledgeCandidate, OptimizationCandidate, OptimizationProposal, OptimizationProposalResult, OutputLineageView, ProjectQualityCockpit, ProjectQualityPerson, ProjectWorkflowView, RetrievalTrace, StageExecutionPlan, StageFeedbackResult, StageOutputView, StartWorkflowResult, TestAssetTaxonomy, WorkflowCatalogSkill, WorkflowStageCatalog, WorkflowStageGateView } from './types';
+import { annotateGoldCase, confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, createTestAssetTaxonomy, confirmHistoryImport, downloadSkillPackage, downloadStageArtifact, downloadStageReviewReport, evaluateWorkflowStage, evolveCaseReview, executeWorkflowStage, freezeGoldDatasetVersion, generateCandidatesFromRun, getAssetCandidateStats, getGenerationOutputLineage, getGoldCase, getProjectQualityCockpit, getStageAttachmentCatalog, getStageAttemptTrace, getStageDiff, getStageOutput, getStageReviewStatus, getWorkflowStageCatalog, getWorkflowStatus, listAnnotationConflicts, listAssetCandidateEvents, listCapabilityReleases, listCaseReviewEvolutionCandidates, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listGoldDatasetVersions, listHistoryImports, listHistoryReplays, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, listStageAttachments, listStageAttempts, listTestAssetTaxonomies, openFlywheelRun, overrideWorkflowStage, preflightCaseReviewEvolution, preflightHistoryImport, proposeCaseReviewOptimizations, publishTestAssetTaxonomy, confirmCaseReviewOptimizations, resolveAnnotationConflict, retryAssetCandidate, retryFailedAssetCandidates, runStageAttribution, scoreWorkflowStage, startHistoryReplay, startWorkflow, submitTestAssetTaxonomy, updateCandidateState, uploadStageAttachment, uploadStageFeedback, uploadStageReview } from './service';
+import type { AnnotationConflict, AssetCandidateEvent, AssetCandidateStats, CapabilityRelease, CaseReviewEvolutionCandidate, CaseReviewEvolutionPreflight, CaseReviewEvolutionResult, EvaluationResult, EvaluationRun, EvaluationSuite, ExecutionSpan, FailureAttribution, FeedbackEvent, GoldCase, GoldDataset, GoldDatasetVersion, HistoryImportBatch, HistoryReplay, KnowledgeCandidate, OptimizationCandidate, OptimizationProposal, OptimizationProposalResult, OutputLineageView, ProjectQualityCockpit, ProjectQualityPerson, ProjectWorkflowView, RetrievalTrace, StageAttachmentCatalog, StageAttachmentView, StageAttemptTraceView, StageDiffView, StageExecutionAttemptView, StageExecutionPlan, StageFeedbackResult, StageOutputView, StageReviewStatusView, StartWorkflowResult, TestAssetTaxonomy, WorkflowCatalogSkill, WorkflowStageCatalog, WorkflowStageGateView } from './types';
 
 type Workspace='overview'|'single'|'workflow'|'gold'|'evaluation'|'attribution'|'optimization';
 type PrimaryView='agents'|'data'|'graph';
@@ -867,6 +968,12 @@ const executionPlans=ref<Record<string,StageExecutionPlan>>({});
 const showStageScoreModal=ref(false),stageScoreBusy=ref(false);
 const stageScore=ref({workflowId:'',stage:'',value:80,reason:'',threshold:70});
 const showStageOutputModal=ref(false),stageOutputLoading=ref(false),stageOutput=ref<StageOutputView|null>(null);
+const stageResultTab=ref('output');
+const stageAttempt=ref<StageExecutionAttemptView|null>(null),stageTrace=ref<StageAttemptTraceView|null>(null);
+const stageReviewStatus=ref<StageReviewStatusView|null>(null),stageDiff=ref<StageDiffView|null>(null);
+const stageAttachments=ref<StageAttachmentView[]>([]),stageAttachmentCatalog=ref<StageAttachmentCatalog>({purposes:[],max_bytes:0});
+const stageWorkbenchLoading=ref(false),stageReviewBusy=ref(''),stageAttachmentBusy=ref(false),stageAttributionBusy=ref(false);
+const stageAttachmentForm=ref({purpose:'',note:''});
 /** 放行状态：与后端 `GATE_PASSING_STATES` 一一对应，多一个少一个都会出现"页面说能走、接口 400"。 */
 const PASSING_STATES=['passed','confirmed','overridden'];
 const isPassedStatus=(v:string)=>PASSING_STATES.includes(v);
@@ -988,6 +1095,7 @@ async function executeStage(workflowId:string,stage:string){
 async function openStageOutput(workflowId:string,stage:string){
   if(!projectStore.currentProjectId)return;
   showStageOutputModal.value=true;stageOutputLoading.value=true;stageOutput.value=null;
+  stageResultTab.value='output';stageAttempt.value=null;stageTrace.value=null;stageReviewStatus.value=null;stageDiff.value=null;stageAttachments.value=[];
   // 换了产出就把上一次的来源清掉：留着它会让 B 的页面显示 A 的引用条目。
   lineage.value=null;
   try{
@@ -996,10 +1104,89 @@ async function openStageOutput(workflowId:string,stage:string){
     // 等于把"这份产出参考了什么"藏在一个没人会点的按钮后面。
     const outputId=stageOutput.value?.output_id;
     if(outputId)void loadLineageForOutput(outputId,true);
+    void loadStageWorkbench(workflowId,stage);
   }
   catch(error:any){Message.error(errorText(error,'读取阶段结果失败'))}
   finally{stageOutputLoading.value=false}
 }
+async function loadStageWorkbench(workflowId:string,stage:string){
+  const projectId=projectStore.currentProjectId;
+  if(!projectId)return;
+  stageWorkbenchLoading.value=true;
+  const attemptsPromise=listStageAttempts(projectId,workflowId,stage);
+  const settled=await Promise.allSettled([
+    attemptsPromise,
+    getStageReviewStatus(projectId,workflowId,stage),
+    listStageAttachments(projectId,workflowId,stage),
+    getStageAttachmentCatalog(),
+    getStageDiff(projectId,workflowId,stage),
+  ]);
+  const attemptsResult=settled[0];
+  if(attemptsResult.status==='fulfilled'){
+    const latest=attemptsResult.value.slice().sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at)))[0]||null;
+    stageAttempt.value=latest;
+    if(latest){
+      try{stageTrace.value=await getStageAttemptTrace(latest.id)}catch{stageTrace.value=null}
+    }
+  }
+  if(settled[1].status==='fulfilled')stageReviewStatus.value=settled[1].value;
+  if(settled[2].status==='fulfilled')stageAttachments.value=settled[2].value;
+  if(settled[3].status==='fulfilled'){
+    stageAttachmentCatalog.value=settled[3].value;
+    if(!stageAttachmentForm.value.purpose)stageAttachmentForm.value.purpose=settled[3].value.purposes[0]?.value||'';
+  }
+  // 没交过确认稿时差异接口会返回业务拒绝；这不影响查看正文、轨迹和上传确认稿。
+  stageDiff.value=settled[4].status==='fulfilled'?settled[4].value:null;
+  stageWorkbenchLoading.value=false;
+}
+const reviewFileInput=ref<HTMLInputElement|null>(null),reviewUploadMode=ref<'draft'|'submit'>('draft');
+function pickStageReview(mode:'draft'|'submit'){
+  reviewUploadMode.value=mode;
+  if(reviewFileInput.value){reviewFileInput.value.value='';reviewFileInput.value.click()}
+}
+async function onStageReviewPicked(){
+  const file=reviewFileInput.value?.files?.[0],view=stageOutput.value,projectId=projectStore.currentProjectId;
+  if(!file||!view||!projectId)return;
+  stageReviewBusy.value=reviewUploadMode.value;
+  try{
+    const result=await uploadStageReview(projectId,view.workflow_id,view.stage,file,reviewUploadMode.value==='submit');
+    Message.success(reviewUploadMode.value==='submit'?`确认稿已正式提交，采纳率 ${result.acceptance_score}%`:'草稿已保存，可继续填写空白项');
+    await loadStageWorkbench(view.workflow_id,view.stage);
+  }catch(error:unknown){Message.error(errorText(error,'上传确认稿失败'))}
+  finally{stageReviewBusy.value='';if(reviewFileInput.value)reviewFileInput.value.value=''}
+}
+async function downloadReviewTemplate(){
+  const view=stageOutput.value,projectId=projectStore.currentProjectId;
+  if(!view||!projectId)return;
+  stageReviewBusy.value='download';
+  try{const name=await downloadStageReviewReport(projectId,view.workflow_id,view.stage);Message.success(`已下载 ${name}`)}
+  catch(error:unknown){Message.error(errorText(error,'下载确认稿失败'))}
+  finally{stageReviewBusy.value=''}
+}
+const attachmentFileInput=ref<HTMLInputElement|null>(null);
+function pickStageAttachment(){if(attachmentFileInput.value){attachmentFileInput.value.value='';attachmentFileInput.value.click()}}
+async function onStageAttachmentPicked(){
+  const file=attachmentFileInput.value?.files?.[0],view=stageOutput.value,projectId=projectStore.currentProjectId;
+  if(!file||!view||!projectId)return;
+  stageAttachmentBusy.value=true;
+  try{
+    await uploadStageAttachment({projectId,workflowId:view.workflow_id,stage:view.stage,outputId:view.output_id,purpose:stageAttachmentForm.value.purpose,note:stageAttachmentForm.value.note,file});
+    Message.success('补充文件已纳入本阶段反馈，不会直接修改生产 Skill');
+    stageAttachmentForm.value.note='';
+    stageAttachments.value=await listStageAttachments(projectId,view.workflow_id,view.stage);
+  }catch(error:unknown){Message.error(errorText(error,'上传补充文件失败'))}
+  finally{stageAttachmentBusy.value=false;if(attachmentFileInput.value)attachmentFileInput.value.value=''}
+}
+async function rerunStageAttribution(){
+  const view=stageOutput.value,projectId=projectStore.currentProjectId;
+  if(!view||!projectId)return;
+  stageAttributionBusy.value=true;
+  try{const result=await runStageAttribution(projectId,view.workflow_id,view.stage);Message.success(`已生成 ${result.created} 条待确认归因`);stageDiff.value=await getStageDiff(projectId,view.workflow_id,view.stage)}
+  catch(error:unknown){Message.error(errorText(error,'重新归因失败'))}
+  finally{stageAttributionBusy.value=false}
+}
+const displayEvidence=(item:Record<string,unknown>)=>String(item.quote||item.text||item.snippet||item.title||item.source_id||item.document_id||'已记录证据（无可展示原句）');
+const formatBytes=(value:number)=>value>=1048576?`${(value/1048576).toFixed(1)} MB`:`${Math.max(1,Math.round(value/1024))} KB`;
 // ---- 阶段报告出口 / 反馈入口（R1/R2）：两个动作都**挂在产出上**，没有产出就没有"这一版"
 const stageArtifactBusy=ref(''),stageFeedbackBusy=ref('');
 const stageFeedback=ref<Record<string,StageFeedbackResult>>({});
@@ -1711,6 +1898,7 @@ watch(()=>projectStore.currentProjectId,async id=>{
 .workspace-tabs button{display:flex;height:38px;flex:none;align-items:center;gap:7px;padding:0 13px;border:0;border-radius:7px;color:#4e5969;background:transparent;cursor:pointer;font-size:13px;transition:background .16s ease,color .16s ease,box-shadow .16s ease}
 .workspace-tabs button:hover{color:#165dff;background:#f2f3f5}.workspace-tabs button.active{color:#1d2129;background:#f2f3f5;box-shadow:inset 0 0 0 1px #c9cdd4}.workspace-tabs button svg{font-size:15px}.workspace-tabs em{min-width:19px;padding:1px 5px;border-radius:9px;color:#86909c;background:#e5e6eb;font-size:10px;font-style:normal;text-align:center}.workspace-tabs button.active em{color:#165dff;background:#e8f3ff}
 .workspace-shell{grid-template-columns:minmax(0,1fr) 282px;gap:14px;margin-top:0}.workspace-content{order:1}.team-panel{position:sticky;top:14px;order:2;padding:17px;background:#fff}.team-note{margin:8px 0 0;color:#86909c;font-size:11px;line-height:1.55}
+.workspace-shell.workflow-layout{grid-template-columns:minmax(0,1fr)}
 .metrics{gap:0;margin-bottom:14px;overflow:hidden;border:1px solid #e5e6eb;border-radius:10px;background:#fff}.metrics article{min-height:126px;padding:17px 20px;border:0;border-right:1px solid #f0f1f2;border-radius:0;background:#fff}.metrics article:last-child{border-right:0}.metrics article:before{display:none}.metrics span{font-size:12px}.metrics b{margin:7px 0 2px;font-size:27px;letter-spacing:-.02em}.metrics small{font-size:11px}
 .panel{border-color:#e5e6eb;border-radius:10px;background:#fff}.loop-panel,.source-panel,.overview-grid .panel{padding:20px}.section-head h2{font-size:16px}.section-head span{color:#86909c}.loop{gap:0;border:1px solid #e5e6eb;border-radius:9px}.loop button{min-height:124px;padding:17px 14px 43px;border:0;border-right:1px solid #e5e6eb;border-radius:0;background:#fff}.loop button:first-child{border-radius:8px 0 0 8px}.loop button:last-child{border-right:0;border-radius:0 8px 8px 0}.loop button:after{right:-1px;width:1px;border:0}.loop button:hover{background:#f7f8fa}.loop em{display:grid;width:24px;height:24px;flex:none;place-items:center;border-radius:50%;color:#165dff;background:#e8f3ff}.source-grid article{border-color:#e5e6eb!important;background:#fff!important}.source-grid article:hover{background:#f7f8fa!important}.task-list button{background:#fff}.task-list button:hover{background:#f7f8fa}
 .team-head{padding-bottom:13px;border-bottom:1px solid #f0f1f2}.team-head>div>i{width:3px;height:16px}.team-head span{font-size:15px}.people-group{margin-top:17px}.person-card{padding:13px;background:#f7f8fa}.person-card:hover{background:#fff}.person-main>i{width:42px;height:42px;box-shadow:none}.person-main b{font-size:14px}.person-card footer>span{font-size:10px}.group-title b{font-size:12px}
@@ -1862,6 +2050,19 @@ watch(()=>projectStore.currentProjectId,async id=>{
 .skill-content-note li{display:flex;gap:8px;color:var(--color-text-2);font-size:11px;line-height:1.7}
 .skill-content-note li code{font-family:ui-monospace,MENLO,monospace}
 .skill-content-note li span{color:var(--color-text-3);font-family:ui-monospace,MENLO,monospace}
+.stage-workbench-tabs{margin-top:10px}
+.trace-boundary{margin-bottom:12px}
+.trace-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}
+.trace-kpis article{padding:10px 12px;border:1px solid var(--color-border-2);border-radius:8px;background:var(--color-fill-1)}
+.trace-kpis small,.trace-kpis b{display:block}.trace-kpis small{color:var(--color-text-3);font-size:11px}.trace-kpis b{margin-top:4px;font-size:16px}
+.trace-chain{display:grid;gap:0}.trace-chain>article{display:grid;grid-template-columns:32px minmax(0,1fr);gap:10px;position:relative;padding-bottom:12px}
+.trace-chain>article>i{display:flex;z-index:1;align-items:center;justify-content:center;width:26px;height:26px;border:2px solid #94bfff;border-radius:50%;color:#165dff;background:#fff;font-size:11px;font-style:normal}
+.trace-chain>article:not(:last-child)::before{position:absolute;top:24px;bottom:0;left:12px;width:2px;background:#e5e6eb;content:''}.trace-chain>article.failed>i{border-color:#f76560;color:#cb2634}
+.trace-main{padding:9px 11px;border:1px solid var(--color-border-2);border-radius:8px;background:var(--color-bg-2)}.trace-main header{display:flex;align-items:center;justify-content:space-between}.trace-main p{margin:5px 0 0;color:var(--color-text-3);font-size:11px}.trace-main .trace-error{color:#cb2634}
+.trace-evidence{margin-top:8px}.trace-evidence small{color:var(--color-text-3);font-size:11px}.trace-evidence blockquote{margin:5px 0 0;padding:7px 9px;border-left:3px solid #4080ff;color:var(--color-text-2);background:var(--color-fill-1);font-size:12px;line-height:1.6}
+.review-actions{display:flex;gap:8px;margin:14px 0}.review-status-card{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:12px;padding:11px 13px;border:1px solid var(--color-border-2);border-radius:8px;background:var(--color-fill-1)}.review-status-card b,.review-status-card small{display:block}.review-status-card small,.review-status-card span{margin-top:3px;color:var(--color-text-3);font-size:11px}
+.attachment-panel{margin-top:18px;padding-top:14px;border-top:1px solid var(--color-border-2)}.attachment-panel h4{margin:0;font-size:13px}.attachment-form{display:grid;grid-template-columns:180px minmax(0,1fr) auto;gap:8px;margin-top:10px}.attachment-list{display:grid;gap:6px;margin-top:10px}.attachment-list article{display:grid;grid-template-columns:minmax(0,1fr) 1fr;gap:10px;padding:8px 10px;border-radius:7px;background:var(--color-fill-1)}.attachment-list b,.attachment-list small{display:block}.attachment-list small,.attachment-list span{margin-top:2px;color:var(--color-text-3);font-size:11px}
+.evolution-summary{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.evolution-summary span{color:var(--color-text-2);font-size:12px}.evolution-summary .arco-btn{margin-left:auto}.diff-list{display:grid;gap:8px;margin-top:12px}.diff-list article{padding:10px 12px;border:1px solid var(--color-border-2);border-radius:8px}.diff-list header{display:flex;align-items:center;justify-content:space-between}.diff-list p{margin:6px 0 0;color:var(--color-text-2);font-size:12px;line-height:1.6}
 /* ---- 第 ③ 步：AI 候选优化点 */
 .proposal-head{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:12px;font-size:12px}
 .proposal-head .sha{overflow:hidden;color:var(--color-text-3);font-size:11px;text-overflow:ellipsis;white-space:nowrap}
@@ -1879,4 +2080,5 @@ watch(()=>projectStore.currentProjectId,async id=>{
 .governance-columns{display:grid;grid-template-columns:1.1fr .9fr;gap:18px;margin-top:14px}.governance-columns h3{margin:0 0 10px;font-size:14px}.section-inline{display:flex;align-items:center;justify-content:space-between}.asset-strip .clickable{cursor:pointer}.governance-list{display:grid;gap:8px;margin-top:10px}.governance-list>article{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:10px;padding:11px 13px;border:1px solid #e5e6eb;border-radius:8px;background:#fafafa}.governance-list b,.governance-list small{display:block}.governance-list small{margin-top:3px;color:#86909c;font-size:11px}.history-entry{display:grid;grid-template-columns:1fr 1fr 1fr 1fr auto;gap:8px;margin:14px 0}.preflight-card{display:flex;align-items:center;flex-wrap:wrap;gap:14px;padding:13px;border:1px solid #94bfff;border-radius:8px;background:#f7faff}.preflight-card span{color:#4e5969;font-size:12px}.preflight-card pre{width:100%;max-height:180px;overflow:auto}.replay-list{margin-top:18px}
 @media(max-width:1080px){.governance-columns{grid-template-columns:1fr}.history-entry{grid-template-columns:1fr 1fr}.history-entry .arco-btn{grid-column:1/-1}}
 @media(max-width:1080px){.wf-shell{grid-template-columns:1fr}.wf-flows{max-height:240px}.wf-stage-bar{grid-template-columns:repeat(2,minmax(0,1fr))}.wf-card-body,.pin-summary{grid-template-columns:1fr}.pin-block{grid-template-columns:1fr}.pin-selected{grid-column:1}}
+@media(max-width:720px){.trace-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.attachment-form,.review-status-card{grid-template-columns:1fr}}
 </style>

@@ -38,6 +38,18 @@ class SkillCategoryMixin(serializers.Serializer):
 
     category = serializers.CharField(max_length=64, required=True, allow_blank=False)
     description = serializers.CharField(max_length=200, required=True, allow_blank=False)
+    # 展示名称：与 category / description 同属"平台生成、人工确认"的导入元数据。
+    # 允许留空 —— 留空就沿用包内 name，存量调用方不传这个字段行为完全不变。
+    # ⚠️ 它落到 ``Skill.display_name``，**不是** ``Skill.name``：后者是 Skill Hub
+    # 的跨项目归并键、也是版本包认逻辑身份的依据，被随手改掉会让同名正本裂开
+    # （详见 ``Skill.display_name`` 的模型注释）。
+    name = serializers.CharField(
+        max_length=128,
+        required=False,
+        allow_blank=True,
+        default='',
+        help_text='展示名称（平台生成、人工确认）；留空则沿用包内 name。不改变 Skill 的逻辑身份',
+    )
 
     def validate_category(self, value):
         from knowledge_evolution.capability_registry import normalize_stage_input
@@ -58,14 +70,14 @@ class SkillSerializer(serializers.ModelSerializer):
     class Meta:
         model = Skill
         fields = [
-            'id', 'name', 'description', 'skill_content',
+            'id', 'name', 'display_name', 'description', 'skill_content',
             'skill_path', 'script_path', 'is_active',
             'project', 'project_name',
             'creator', 'creator_name',
             'created_at', 'updated_at'
         ]
         read_only_fields = [
-            'id', 'name', 'description', 'skill_content',
+            'id', 'name', 'display_name', 'description', 'skill_content',
             'skill_path', 'creator', 'creator_name',
             'project_name', 'created_at', 'updated_at'
         ]
@@ -230,7 +242,7 @@ class SkillListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Skill
         fields = [
-            'id', 'name', 'description', 'is_active',
+            'id', 'name', 'display_name', 'description', 'is_active',
             'creator_name', 'created_at',
             # 描述性元数据：筛选器与卡片标签用，不参与任何可用性判定。
             'source_type', 'source_type_label',

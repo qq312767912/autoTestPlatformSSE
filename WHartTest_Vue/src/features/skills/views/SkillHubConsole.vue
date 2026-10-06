@@ -17,6 +17,7 @@
       </div>
 
       <a-space size="small">
+        <a-button size="small" @click="materialPickerVisible = true">选择原材料</a-button>
         <a-button v-if="compact" size="small" @click="catalogDrawer = true">
           <template #icon><icon-apps /></template>
           能力目录
@@ -95,7 +96,10 @@
           :selected-skill-id="selectedSkillId"
           :keyword="keyword"
           :stage-filter="stageFilter"
+          :can-delete="canManageCatalog"
+          :deleting-skill-id="deletingSkillId"
           @select="selectSkill"
+          @delete="requestDeleteSkill"
           @refresh="loadCatalog"
           @update:keyword="(value: string) => (keyword = value)"
           @update:stage-filter="(value: string) => (stageFilter = value)"
@@ -152,7 +156,10 @@
         :selected-skill-id="selectedSkillId"
         :keyword="keyword"
         :stage-filter="stageFilter"
+        :can-delete="canManageCatalog"
+        :deleting-skill-id="deletingSkillId"
         @select="selectSkill"
+        @delete="requestDeleteSkill"
         @refresh="loadCatalog"
         @update:keyword="(value: string) => (keyword = value)"
         @update:stage-filter="(value: string) => (stageFilter = value)"
@@ -195,6 +202,16 @@
       @imported="loadCatalog"
     />
 
+    <a-modal v-model:visible="materialPickerVisible" title="从 Skill Hub 选择原材料" :footer="false">
+      <a-empty v-if="!excludedMaterials.length" description="没有已移出的业务 Skill" />
+      <a-list v-else>
+        <a-list-item v-for="item in excludedMaterials" :key="item.id">
+          <a-list-item-meta :title="item.name" :description="item.description" />
+          <template #actions><a-button size="mini" type="primary" @click="restoreMaterial(item)">加入工坊</a-button></template>
+        </a-list-item>
+      </a-list>
+    </a-modal>
+
     <!-- 治理动作的原因弹窗：驳回/隔离/回滚必须留下原因，否则审计只有"有人点了按钮" -->
     <a-modal
       :visible="reasonModal.visible"
@@ -223,7 +240,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch, type Ref } from 'vue'
-import { Message } from '@arco-design/web-vue'
+import { Message, Modal } from '@arco-design/web-vue'
 import {
   IconApps,
   IconExclamationCircle,
@@ -252,6 +269,7 @@ import type {
   VersionDiff,
 } from '../types/hub'
 import { RELEASE_STATE_LABEL, canReachReleaseState, type ReleaseState } from '../types/hub'
+import { PLATFORM_BASE_STAGE } from '../utils/stages'
 
 const props = defineProps<{ projectId: number; embedded?: boolean }>()
 
@@ -277,10 +295,14 @@ interface VersionBucket {
 }
 
 const skills = ref<SkillListItem[]>([])
+const sourceSkills = ref<SkillListItem[]>([])
+const excludedSkillIds = ref<number[]>([])
 const versionsBySkill = ref<Record<number, VersionBucket>>({})
 
 const catalogLoading = ref(false)
 const catalogError = ref('')
+const canManageCatalog = ref(false)
+const deletingSkillId = ref<number | null>(null)
 const keyword = ref('')
 const stageFilter = ref('')
 
@@ -316,6 +338,7 @@ const uploadVisible = ref(false)
 const importVisible = ref(false)
 const catalogDrawer = ref(false)
 const governanceDrawer = ref(false)
+const materialPickerVisible = ref(false)
 
 // ------------------------------------------------------------- 响应式收敛
 
@@ -384,6 +407,8 @@ const catalogStats = computed(() => ({
   risks: entries.value.reduce((sum, item) => sum + item.quarantinedCount, 0),
 }))
 
+const excludedMaterials = computed(() => sourceSkills.value.filter((item) => excludedSkillIds.value.includes(item.id)))
+
 const selectedSkill = computed(
   () => entries.value.find((entry) => entry.id === selectedSkillId.value) ?? null,
 )
@@ -433,14 +458,22 @@ async function loadCatalog() {
   if (!id) return
   catalogLoading.value = true
   catalogError.value = ''
+  canManageCatalog.value = false
   try {
-    const { items: list } = await SkillService.getSkills(id)
-    skills.value = list
+    const [{ items: list, meta }, excluded] = await Promise.all([
+      SkillService.getSkills(id),
+      SkillService.getWorkshopExclusions(id),
+    ])
+    const evolvableSkills = list.filter((skill) => skill.stage !== PLATFORM_BASE_STAGE)
+    sourceSkills.value = evolvableSkills
+    excludedSkillIds.value = excluded
+    skills.value = evolvableSkills.filter((skill) => !excluded.includes(skill.id))
+    canManageCatalog.value = Boolean(meta.can_manage)
 
     // 版本概览逐个拉取：一个 Skill 拉失败不影响其它项，失败的那一项如实标错。
     const buckets: Record<number, VersionBucket> = {}
     await Promise.all(
-      list.map(async (skill) => {
+      evolvableSkills.map(async (skill) => {
         try {
           buckets[skill.id] = {
             versions: await SkillHubService.listVersions(id, skill.id),
@@ -479,6 +512,47 @@ async function loadCatalog() {
     return
   }
   await loadVersionContext()
+}
+
+function requestDeleteSkill(item: SkillCatalogEntry) {
+  Modal.warning({
+    title: '移出进化工坊',
+    content: `确认将“${item.name}”移出当前项目的进化工坊吗？Skill Hub 中的原材料、版本和包文件都不会改变，之后可通过“选择原材料”重新加入。`,
+    okText: '确认移出',
+    cancelText: '取消',
+    hideCancel: false,
+    onOk: () => deleteSkill(item),
+  })
+}
+
+async function deleteSkill(item: SkillCatalogEntry) {
+  deletingSkillId.value = item.id
+  try {
+    await SkillService.excludeFromWorkshop(props.projectId, item.id)
+    if (selectedSkillId.value === item.id) {
+      selectedSkillId.value = null
+      selectedVersionId.value = ''
+      baseVersionId.value = ''
+      clearVersionContext()
+    }
+    Message.success(`“${item.name}”已移出工坊，Skill Hub 原材料保持不变`)
+    await loadCatalog()
+  } catch (err) {
+    Message.error(toErrorMessage(err, '删除 Skill 失败'))
+  } finally {
+    deletingSkillId.value = null
+  }
+}
+
+async function restoreMaterial(item: SkillListItem) {
+  try {
+    await SkillService.restoreToWorkshop(props.projectId, item.id)
+    Message.success(`“${item.name}”已加入进化工坊`)
+    await loadCatalog()
+    if (!excludedMaterials.value.length) materialPickerVisible.value = false
+  } catch (err) {
+    Message.error(toErrorMessage(err, '加入工坊失败'))
+  }
 }
 
 async function selectSkill(skillId: number) {

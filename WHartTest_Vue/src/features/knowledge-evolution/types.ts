@@ -356,6 +356,27 @@ export interface OptimizationProposal {
   created_at: string;
 }
 
+export interface SkillContentPlanView {
+  proposal_id: string;
+  proposal_state: string;
+  proposal_type: string;
+  baseline_skill_version_id: string;
+  baseline_version: string;
+  candidate_skill_version_id: string;
+  candidate_version: string;
+  candidate_release_id: string;
+  candidate_release_state: string;
+  changed_paths: string[];
+  patch_strategy: string;
+  rollback_plan: Record<string, unknown>;
+  risk_notes: string[];
+  experiment_id: string;
+  gate_passed: boolean;
+  gate_checks: Array<{ code: string; label?: string; ok: boolean; detail?: string }>;
+  gate_details: Record<string, unknown>;
+  missing_conditions: string[];
+}
+
 export interface RunEvolutionRequest {
   name?: string;
   baseline_release_id?: string;
@@ -593,6 +614,103 @@ export interface StageOutputView {
     report_contract: Record<string, unknown> | null;
     evaluation: Record<string, unknown> | null;
   } | null;
+}
+
+export interface StageExecutionAttemptView {
+  id: string;
+  workflow_id: string;
+  stage: string;
+  status: string;
+  output?: string | null;
+  skill_name: string;
+  skill_version_label: string;
+  requested_by_username: string;
+  error_code: string;
+  error_summary: string;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface StageTraceSpan {
+  id: string;
+  sequence: number;
+  group: string;
+  step_type: string;
+  status: string;
+  agent_name: string;
+  tool_name: string;
+  latency_ms: number;
+  token_usage: number;
+  error_summary: string;
+  evidence: Array<Record<string, unknown>>;
+  metadata: Record<string, unknown>;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface StageAttemptTraceView {
+  summary: {
+    attempt_id: string;
+    status: string;
+    duration_ms: number | null;
+    steps: { total: number; running: number; failed: number };
+    groups: Record<string, { count: number; failed: number; names?: string[]; latency_ms?: number; evidence_count?: number }>;
+    labels: Record<string, string>;
+    failure: { count: number; error_code: string; error_summary: string };
+    can_see_quotes: boolean;
+  };
+  events: Array<Record<string, unknown>>;
+  spans: StageTraceSpan[];
+}
+
+export interface StageReviewStatusView {
+  structured_input_available: boolean;
+  report: { artifact_id: string; filename: string; content_hash: string; created_at: string } | null;
+  latest_review: {
+    state: 'draft' | 'submitted' | string;
+    report_name: string;
+    statistics: Record<string, number>;
+    blank_count: number;
+    evolvable: boolean;
+    submitted_at: string;
+    actor: string;
+  } | null;
+}
+
+export interface StageReviewUploadResult {
+  state: string;
+  created: boolean;
+  acceptance_score: number;
+  statistics: Record<string, number>;
+  validation: Record<string, unknown>;
+  evolvable: boolean;
+}
+
+export interface StageAttachmentView {
+  id: number;
+  purpose: string;
+  purpose_label: string;
+  filename: string;
+  byte_size: number;
+  note: string;
+  uploaded_by: string;
+  uploaded_at: string;
+  download_url: string;
+}
+
+export interface StageAttachmentCatalog {
+  purposes: Array<{ value: string; label: string }>;
+  max_bytes: number;
+}
+
+export interface StageDiffView {
+  review_rows_available: boolean;
+  diff: { items?: Array<Record<string, unknown>>; summary?: Record<string, unknown> };
+  reverse_traces: Record<string, unknown>;
+  derived: { available: boolean; graph_stale: boolean };
+  attributions: Array<Record<string, unknown>>;
+  attribution_summary: Record<string, number>;
 }
 
 /**

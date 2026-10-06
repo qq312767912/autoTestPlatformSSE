@@ -40,8 +40,12 @@ def generate_skill_metadata(*, name: str, content: str) -> dict:
     choices = '\n'.join(f'- {key}: {STAGE_LABELS.get(key, key)}' for key in SKILL_STAGE_OPTIONS)
     prompt = f"""
 你是测试平台 Skill Hub 的元数据编辑。根据 Skill 名称和内容，仅返回 JSON：
-{{"category":"下面允许的标识符之一","description":"不超过60个中文字的正式功能简介"}}
+{{"name":"不超过20个中文字的简洁展示名称","category":"下面允许的标识符之一","description":"不超过60个中文字的正式功能简介"}}
 不得返回 Markdown，不得创造新分类。
+
+**name 的写法**：给人看的功能名，说明"这个 Skill 能做什么"，例如「e投票方案生成」
+「接口用例自动补齐」。不要照抄包内的英文标识符（如 ``sse-evote-test-plan``），
+不要带 ``skill`` / ``技能`` / 版本号等冗余词。
 
 允许的分类：
 {choices}
@@ -63,11 +67,15 @@ Skill 内容：
     result = _json_object(getattr(response, 'content', response))
     category = str(result.get('category') or '').strip()
     description = re.sub(r'\s+', ' ', str(result.get('description') or '')).strip()
+    # 展示名**不做必填校验**：模型没给、或给得不好，调用方还有"包内 name"可用，
+    # 不该因为这个可选建议缺失就让整个导入流程失败（分类/简介缺失才必须拦）。
+    suggested_name = re.sub(r'\s+', ' ', str(result.get('name') or '')).strip()
     if category not in SKILL_STAGE_OPTIONS:
         raise ValidationError('模型返回了不受支持的 Skill 分类')
     if not description:
         raise ValidationError('模型未生成功能简介')
     return {
+        'name': suggested_name[:40],
         'category': category,
         'category_label': STAGE_LABELS.get(category, category),
         'description': description[:60],

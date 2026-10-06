@@ -1,5 +1,6 @@
 import logging
 import uuid
+from pathlib import Path
 
 from django.core.exceptions import ValidationError
 from django.http import Http404
@@ -19,7 +20,7 @@ from projects.roles import (
 )
 from .canonical import canonical_skills
 from .exporter import SkillPackageExporter
-from .models import Skill, SkillVersion
+from .models import Skill, SkillVersion, SkillWorkshopExclusion
 from .serializers import (
     SkillSerializer, SkillUploadSerializer, SkillGitImportSerializer,
     SkillListSerializer, SkillToggleSerializer, SkillZipUrlImportSerializer,
@@ -50,6 +51,53 @@ def _get_version_or_404(skill, version_id):
     except (ValueError, TypeError, AttributeError):
         raise Http404('版本不存在')
     return get_object_or_404(SkillVersion, id=version_id, skill=skill)
+
+
+def _package_skill_names(skill_files) -> list[str]:
+    """读取包内每个 SKILL.md 的 frontmatter name。
+
+    用途只有一个：判断"这一个包里到底有几个 Skill"。上传表单只有一个名称输入框，
+    它只能对应一条 Skill，数量大于 1 时前端要把该输入框置为只读，而不是拿一个名字
+    去覆盖多条。
+
+    解析不出来的条目直接跳过：它本来也进不了库（``create_from_zip`` 会在那边报出
+    具体原因），不必在这里先把一个可诊断的错误变成静默的空清单。
+    """
+    names: list[str] = []
+    for path in skill_files:
+        try:
+            names.append(Skill.parse_skill_md(Path(path).read_text(encoding='utf-8'))['name'])
+        except Exception:
+            continue
+    return names
+
+
+def _apply_import_metadata(skills, *, category: str, description: str, display_name: str = '') -> None:
+    """把人工确认的分类 / 简介 / 展示名落到刚入库的 Skill 上（三个导入接口共用）。
+
+    展示名**只在"这批恰好一个 Skill"时应用**：一次导入可以带多个 Skill，把同一个
+    名字套到多条上会互相覆盖，列表上还会出现两条同标题的条目。多 Skill 时前端已把
+    该输入框置为只读，这里再兜一道，保证"一个名字只属于一条 Skill"。
+
+    改的是 ``Skill.display_name`` 而不是 ``Skill.name``：``name`` 是 Skill Hub 的
+    跨项目归并键、也是版本包认逻辑身份的依据，改它会让同名正本被拆开、让同一个包
+    再次上传时重造一条新 Skill（详见 ``Skill.display_name`` 的模型注释）。
+    """
+    picked = (display_name or '').strip()
+    apply_name = bool(picked) and len(skills) == 1
+    for skill in skills:
+        fields: list[str] = []
+        if skill.declared_stage != category:
+            skill.declared_stage = category
+            fields.append('declared_stage')
+        if skill.description != description:
+            skill.description = description
+            fields.append('description')
+        if apply_name and skill.display_name != picked:
+            skill.display_name = picked
+            fields.append('display_name')
+        if fields:
+            skill.save(update_fields=[*fields, 'updated_at'])
 
 
 class SkillViewSet(BaseModelViewSet):
@@ -298,6 +346,27 @@ class SkillViewSet(BaseModelViewSet):
             },
         })
 
+    @action(detail=False, methods=['get', 'post', 'delete'], url_path='workshop-materials')
+    def workshop_materials(self, request, *args, **kwargs):
+        """维护当前项目从进化工坊移出的原材料，不修改 Skill Hub 原件。"""
+        project = self.get_project()
+        if request.method == 'GET':
+            ids = list(SkillWorkshopExclusion.objects.filter(project=project).values_list('source_skill_id', flat=True))
+            return Response({'code': 200, 'message': '获取成功', 'data': {'excluded_skill_ids': ids}})
+
+        skill_id = request.data.get('skill_id')
+        source = get_object_or_404(Skill, pk=skill_id)
+        if request.method == 'POST':
+            SkillWorkshopExclusion.objects.get_or_create(
+                project=project, source_skill=source,
+                defaults={'removed_by': request.user},
+            )
+            message = '已移出进化工坊，Skill Hub 原材料保持不变'
+        else:
+            SkillWorkshopExclusion.objects.filter(project=project, source_skill=source).delete()
+            message = '已重新加入进化工坊'
+        return Response({'code': 200, 'message': message, 'data': {'skill_id': source.pk}})
+
     @staticmethod
     def _display_versions(skills):
         """列表页的"展示版本"：活跃版本优先，其余取最新一版。
@@ -430,9 +499,8 @@ class SkillViewSet(BaseModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='suggest-metadata')
     def suggest_metadata(self, request, *args, **kwargs):
-        """导入前生成分类与短简介；只预览，不入库。"""
+        """导入前生成展示名称、分类与短简介；只预览，不入库。"""
         import tempfile
-        from pathlib import Path
         from .metadata_generation import generate_skill_metadata
         from .validation import safe_extract_zip
 
@@ -441,6 +509,7 @@ class SkillViewSet(BaseModelViewSet):
         git_url = str(request.data.get('git_url') or '').strip()
         branch = str(request.data.get('branch') or 'main').strip() or 'main'
         upload = request.FILES.get('file')
+        package_names: list[str] = []
 
         try:
             if upload is not None:
@@ -449,6 +518,7 @@ class SkillViewSet(BaseModelViewSet):
                     skill_files = list(Path(temp_dir).rglob('SKILL.md'))
                     if not skill_files:
                         raise ValidationError('zip 文件中未找到 SKILL.md')
+                    package_names = _package_skill_names(skill_files)
                     content = '\n\n'.join(path.read_text(encoding='utf-8') for path in skill_files[:5])
                     name = name or upload.name
             elif git_url:
@@ -457,12 +527,21 @@ class SkillViewSet(BaseModelViewSet):
                     skill_dirs = Skill._find_skill_dirs(temp_dir)
                     if not skill_dirs:
                         raise ValidationError('仓库中未找到 SKILL.md')
-                    files = [Path(path) / 'SKILL.md' for path in skill_dirs[:5]]
-                    content = '\n\n'.join(path.read_text(encoding='utf-8') for path in files)
+                    skill_files = [Path(path) / 'SKILL.md' for path in skill_dirs]
+                    package_names = _package_skill_names(skill_files)
+                    content = '\n\n'.join(path.read_text(encoding='utf-8') for path in skill_files[:5])
                     name = name or git_url.rsplit('/', 1)[-1]
             if not content:
                 raise ValidationError('缺少可用于生成元数据的 Skill 内容')
             suggestion = generate_skill_metadata(name=name or 'Skill', content=content)
+            # 名称建议只对"单 Skill 包"成立：多 Skill 时模型看到的是几份正文拼起来的
+            # 内容，它给的名字既不属于第一条也不算全部——用它只会误导，所以置空，
+            # 前端据此把输入框置为只读并提示包内有几个 Skill。
+            single = len(package_names) == 1
+            suggested = (suggestion.get('name') or '').strip() if single else ''
+            suggestion['name'] = suggested or (package_names[0] if single else '')
+            suggestion['skill_count'] = len(package_names)
+            suggestion['skill_names'] = package_names
             return Response({'code': 200, 'message': '已生成，请人工确认', 'data': suggestion})
         except ValidationError as exc:
             return Response(
@@ -573,13 +652,10 @@ class SkillViewSet(BaseModelViewSet):
                 creator=request.user,
                 api_key=api_key,
             )
-            for skill in skills:
-                if skill.declared_stage != category:
-                    skill.declared_stage = category
-                    skill.save(update_fields=['declared_stage', 'updated_at'])
-                if skill.description != description:
-                    skill.description = description
-                    skill.save(update_fields=['description', 'updated_at'])
+            _apply_import_metadata(
+                skills, category=category, description=description,
+                display_name=serializer.validated_data.get('name') or '',
+            )
             names = ', '.join(s.name for s in skills)
             return Response({
                 'code': 201,
@@ -628,13 +704,10 @@ class SkillViewSet(BaseModelViewSet):
                 creator=request.user,
                 api_key=api_key,
             )
-            for skill in skills:
-                if skill.declared_stage != category:
-                    skill.declared_stage = category
-                    skill.save(update_fields=['declared_stage', 'updated_at'])
-                if skill.description != description:
-                    skill.description = description
-                    skill.save(update_fields=['description', 'updated_at'])
+            _apply_import_metadata(
+                skills, category=category, description=description,
+                display_name=serializer.validated_data.get('name') or '',
+            )
             names = ', '.join(s.name for s in skills)
             return Response({
                 'code': 201,
@@ -695,13 +768,10 @@ class SkillViewSet(BaseModelViewSet):
                 expected_sha256=sha256,
                 api_key=api_key,
             )
-            for skill in skills:
-                if skill.declared_stage != category:
-                    skill.declared_stage = category
-                    skill.save(update_fields=['declared_stage', 'updated_at'])
-                if skill.description != description:
-                    skill.description = description
-                    skill.save(update_fields=['description', 'updated_at'])
+            _apply_import_metadata(
+                skills, category=category, description=description,
+                display_name=serializer.validated_data.get('name') or '',
+            )
             names = ', '.join(s.name for s in skills)
             return Response({
                 'code': 201,

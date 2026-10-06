@@ -33,6 +33,14 @@ import type {
   OptimizationProposalResult,
   OutputLineageView,
   StageFeedbackResult,
+  StageExecutionAttemptView,
+  StageAttemptTraceView,
+  StageReviewStatusView,
+  StageReviewUploadResult,
+  StageAttachmentView,
+  StageAttachmentCatalog,
+  StageDiffView,
+  SkillContentPlanView,
   AssetCandidateEvent,
   AssetCandidateStats,
   GoldCase,
@@ -369,6 +377,11 @@ export async function executeWorkflowStage(projectId: number, workflowId: string
   return post<StageExecutionPlan>('/operations/execute-workflow-stage/', { project: projectId, workflow_id: workflowId, stage });
 }
 
+/** 从工作台移除指定旧批次；服务端保留执行与产出审计记录。 */
+export async function deleteWorkflowBatch(projectId: number, workflowId: string): Promise<{ workflow_id: string; deleted: boolean }> {
+  return post('/operations/delete-workflow-batch/', { project: projectId, workflow_id: workflowId });
+}
+
 /**
  * 解析执行上下文（T02 / R3）：业务页面唯一的可信取值入口。
  *
@@ -657,6 +670,157 @@ export async function uploadStageFeedback(
   form.append('file', file);
   if (reference !== undefined) form.append('reference', String(reference));
   return upload<StageFeedbackResult>('/operations/workflow-stage-feedback/', form);
+}
+
+export async function listStageAttempts(projectId: number, workflowId: string, stage: string): Promise<StageExecutionAttemptView[]> {
+  return rows(await get<StageExecutionAttemptView[] | { results: StageExecutionAttemptView[] }>('/stage-attempts/', {
+    project: projectId, workflow_id: workflowId, stage,
+  }));
+}
+
+export async function getStageAttemptTrace(attemptId: string): Promise<StageAttemptTraceView> {
+  return get<StageAttemptTraceView>(`/stage-attempts/${attemptId}/trace/`);
+}
+
+export async function getStageReviewStatus(projectId: number, workflowId: string, stage: string): Promise<StageReviewStatusView> {
+  return get<StageReviewStatusView>('/operations/workflow-stage-review-status/', { project: projectId, workflow_id: workflowId, stage });
+}
+
+export async function downloadStageReviewReport(projectId: number, workflowId: string, stage: string): Promise<string> {
+  return downloadAttachment(
+    `${BASE}/operations/workflow-stage-review-report/`,
+    { project: projectId, workflow_id: workflowId, stage },
+    `${stage}-review.xlsx`,
+  );
+}
+
+export async function uploadStageReview(
+  projectId: number, workflowId: string, stage: string, file: File, submit: boolean,
+): Promise<StageReviewUploadResult> {
+  const form = new FormData();
+  form.append('project', String(projectId));
+  form.append('workflow_id', workflowId);
+  form.append('stage', stage);
+  form.append('file', file);
+  return upload<StageReviewUploadResult>(
+    `/operations/workflow-stage-review-${submit ? 'submit' : 'draft'}/`, form,
+  );
+}
+
+export async function getStageAttachmentCatalog(): Promise<StageAttachmentCatalog> {
+  return get<StageAttachmentCatalog>('/operations/workflow-stage-attachment-catalog/');
+}
+
+export async function listStageAttachments(projectId: number, workflowId: string, stage: string): Promise<StageAttachmentView[]> {
+  const data = await get<{ results: StageAttachmentView[] }>('/operations/workflow-stage-attachments/', {
+    project: projectId, workflow_id: workflowId, stage,
+  });
+  return data.results ?? [];
+}
+
+export async function uploadStageAttachment(payload: {
+  projectId: number; workflowId: string; stage: string; outputId: string;
+  purpose: string; note: string; file: File;
+}): Promise<StageAttachmentView & { created: boolean }> {
+  const form = new FormData();
+  form.append('project', String(payload.projectId));
+  form.append('workflow_id', payload.workflowId);
+  form.append('stage', payload.stage);
+  form.append('output_id', payload.outputId);
+  form.append('purpose', payload.purpose);
+  form.append('note', payload.note);
+  form.append('file', payload.file);
+  return upload<StageAttachmentView & { created: boolean }>('/operations/workflow-stage-attachments/', form);
+}
+
+export async function getStageDiff(projectId: number, workflowId: string, stage: string): Promise<StageDiffView> {
+  return get<StageDiffView>('/operations/workflow-stage-diff/', { project: projectId, workflow_id: workflowId, stage });
+}
+
+export async function runStageAttribution(projectId: number, workflowId: string, stage: string): Promise<{ created: number }> {
+  return post<{ created: number }>('/operations/workflow-stage-attribution-run/', { project: projectId, workflow_id: workflowId, stage });
+}
+
+export async function decideStageAttribution(attributionId: string, action: 'confirm' | 'reject', note = ''): Promise<Record<string, unknown>> {
+  return post<Record<string, unknown>>('/operations/workflow-stage-attribution-decide/', {
+    attribution_id: attributionId, action, note,
+  });
+}
+
+export async function rewriteStageAttribution(attributionId: string, category: string, hypothesis: string, note = ''): Promise<Record<string, unknown>> {
+  return post<Record<string, unknown>>('/operations/workflow-stage-attribution-rewrite/', {
+    attribution_id: attributionId, category, hypothesis, note,
+  });
+}
+
+export async function generateSkillContentProposal(attributionIds: string[]): Promise<OptimizationProposal[]> {
+  return post<OptimizationProposal[]>('/optimization-proposals/generate/', {
+    attribution_ids: attributionIds, target_type: 'skill_content',
+  });
+}
+
+export async function getSkillContentPlan(proposalId: string): Promise<SkillContentPlanView> {
+  return get<SkillContentPlanView>(`/optimization-proposals/${proposalId}/skill-content-plan/`);
+}
+
+export async function materializeSkillContent(proposalId: string): Promise<SkillContentPlanView & Record<string, unknown>> {
+  return post<SkillContentPlanView & Record<string, unknown>>(`/optimization-proposals/${proposalId}/skill-content-materialize/`, {});
+}
+
+export async function evaluateSkillContent(proposalId: string, payload: {
+  gold_dataset_version: string; baseline_run: string; candidate_run: string;
+}): Promise<{ experiment_id: string; status: string; gate_report: Record<string, unknown>; plan: SkillContentPlanView }> {
+  return post(`/optimization-proposals/${proposalId}/skill-content-evaluate/`, payload);
+}
+
+export async function transitionSkillContent(
+  proposalId: string, action: 'submit-approval' | 'activate' | 'reject' | 'rollback', reason = '',
+): Promise<Record<string, unknown>> {
+  return post<Record<string, unknown>>(`/optimization-proposals/${proposalId}/skill-content-${action}/`, { reason });
+}
+
+export async function getSkillContentRunningFlows(proposalId: string): Promise<Record<string, unknown>> {
+  return get<Record<string, unknown>>(`/optimization-proposals/${proposalId}/skill-content-running-flows/`);
+}
+
+export async function listGenerationOutputs(projectId: number, taskType?: string): Promise<GenerationOutput[]> {
+  return rows(await get<GenerationOutput[] | { results: GenerationOutput[] }>('/generation-outputs/', {
+    project: projectId, ...(taskType ? { task_type: taskType } : {}),
+  }));
+}
+
+export async function listWorkflowStageSubmissions(projectId: number): Promise<Array<Record<string, unknown>>> {
+  const data = await get<{ results: Array<Record<string, unknown>> }>('/operations/workflow-stage-submissions/', { project: projectId });
+  return data.results ?? [];
+}
+
+export async function preflightWorkflowStageSubmission(payload: {
+  projectId: number; outputId: string; stage: string; workflowId: string;
+}): Promise<Record<string, unknown>> {
+  return get<Record<string, unknown>>('/operations/workflow-stage-submission-preflight/', {
+    project: payload.projectId, output_id: payload.outputId, stage: payload.stage,
+    target: 'existing', workflow_id: payload.workflowId,
+  });
+}
+
+export async function submitWorkflowStageOutput(payload: {
+  outputId: string; stage: string; workflowId: string; replaceOutputId?: string; confirmReplace?: boolean;
+}): Promise<Record<string, unknown>> {
+  return post<Record<string, unknown>>('/operations/workflow-stage-submit/', {
+    output_id: payload.outputId, stage: payload.stage, target: 'existing', workflow_id: payload.workflowId,
+    replace_output_id: payload.replaceOutputId || '', confirm_replace: payload.confirmReplace === true,
+  });
+}
+
+export async function getRegistrationFailures(projectId: number): Promise<{
+  open: number; failed: number; dead_letter: number; alert: boolean;
+  items?: Array<{ id: string; output_id: string; workflow_id: string; stage: string; status: string; attempts: number; last_error: string }>;
+}> {
+  return get('/operations/registration-failures/', { project: projectId, detail: 1 });
+}
+
+export async function retryRegistrationFailures(projectId: number): Promise<{ retried: number }> {
+  return post('/operations/registration-failures-retry/', { project: projectId });
 }
 
 // ---------------------------------------------------------------- AI 候选优化点 + 人工确认（T06 / T07）

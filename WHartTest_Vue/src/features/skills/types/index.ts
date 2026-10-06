@@ -1,6 +1,13 @@
 export interface Skill {
   id: number
   name: string
+  /**
+   * 展示名称：上传/导入时由平台生成、人工确认；为空时页面回退展示 `name`。
+   *
+   * 与 `name` 是两件事——`name` 是 Skill Hub 的跨项目归并键、也是版本包认逻辑
+   * 身份的依据，**不可改**；改名只落在这一层。
+   */
+  display_name: string
   description: string
   skill_content: string
   skill_path: string
@@ -49,6 +56,13 @@ export interface StageResultRun {
 export interface SkillListItem {
   id: number
   name: string
+  /**
+   * 展示名称（上传/导入时人工确认过的那一个）；为空时卡片回退展示 `name`。
+   *
+   * `name` 仍是归并键：列表按它归并出跨项目「正本」，所以归并结果里的
+   * `display_name` 取的是正本那条的值，可能为空。
+   */
+  display_name: string
   description: string
   is_active: boolean
   creator_name: string
@@ -99,6 +113,23 @@ export interface SkillUploadResponse {
   code: number
   message: string
   data: Skill[] | null
+}
+
+/**
+ * `suggest-metadata` 返回的导入建议（平台生成，全部要人工确认后才入库）。
+ *
+ * 名称建议只在"单 Skill 包"时才有值：一个输入框对应不了多条 Skill。
+ */
+export interface SkillMetadataSuggestion {
+  /** 展示名称建议；多 Skill 包时为空串，前端据此把输入置为只读。 */
+  name: string
+  category: string
+  category_label: string
+  description: string
+  /** 包内识别到的 Skill 数量。 */
+  skill_count: number
+  /** 包内各 Skill 的 frontmatter name，用于提示里列出。 */
+  skill_names: string[]
 }
 
 export interface SkillGitImportResponse {

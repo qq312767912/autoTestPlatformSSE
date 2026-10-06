@@ -55,35 +55,52 @@
             <span>{{ group.label }}<em v-if="group.custom" class="catalog__group-custom">自定义</em></span>
             <span class="catalog__group-count">{{ group.items.length }}</span>
           </div>
-          <button
+          <div
             v-for="item in group.items"
             :key="item.id"
-            type="button"
-            class="catalog__item"
-            :class="{ 'catalog__item--active': item.id === selectedSkillId }"
-            @click="emit('select', item.id)"
+            class="catalog__item-wrap"
           >
-            <div class="catalog__item-head">
-              <span class="catalog__item-name" :title="item.name">{{ item.name }}</span>
-              <span v-if="!item.is_active" class="catalog__flag catalog__flag--muted">已停用</span>
-            </div>
-            <div class="catalog__item-desc">{{ item.description || '无描述' }}</div>
-            <div class="catalog__item-meta">
-              <span v-if="item.activeVersion" class="catalog__flag catalog__flag--active">
-                v{{ item.activeVersion.version }} 生效中
-              </span>
-              <span v-else class="catalog__flag catalog__flag--muted">无生效版本</span>
-              <span v-if="item.candidateCount" class="catalog__flag catalog__flag--pending">
-                {{ item.candidateCount }} 个候选
-              </span>
-              <span v-if="item.quarantinedCount" class="catalog__flag catalog__flag--danger">
-                {{ item.quarantinedCount }} 个隔离
-              </span>
-            </div>
-            <div v-if="item.versionsError" class="catalog__item-error">
-              {{ item.versionsError }}
-            </div>
-          </button>
+            <button
+              type="button"
+              class="catalog__item"
+              :class="{ 'catalog__item--active': item.id === selectedSkillId }"
+              @click="emit('select', item.id)"
+            >
+              <div class="catalog__item-head">
+                <span class="catalog__item-name" :title="item.name">{{ item.name }}</span>
+                <span v-if="!item.is_active" class="catalog__flag catalog__flag--muted">已停用</span>
+              </div>
+              <div class="catalog__item-desc">{{ item.description || '无描述' }}</div>
+              <div class="catalog__item-meta">
+                <span v-if="item.activeVersion" class="catalog__flag catalog__flag--active">
+                  v{{ item.activeVersion.version }} 生效中
+                </span>
+                <span v-else class="catalog__flag catalog__flag--muted">无生效版本</span>
+                <span v-if="item.candidateCount" class="catalog__flag catalog__flag--pending">
+                  {{ item.candidateCount }} 个候选
+                </span>
+                <span v-if="item.quarantinedCount" class="catalog__flag catalog__flag--danger">
+                  {{ item.quarantinedCount }} 个隔离
+                </span>
+              </div>
+              <div v-if="item.versionsError" class="catalog__item-error">
+                {{ item.versionsError }}
+              </div>
+            </button>
+            <a-button
+              v-if="canDelete"
+              class="catalog__delete"
+              type="text"
+              status="danger"
+              size="mini"
+              :loading="deletingSkillId === item.id"
+              :aria-label="`移出工坊 ${item.name}`"
+              title="移出进化工坊"
+              @click.stop="emit('delete', item)"
+            >
+              <template #icon><icon-delete /></template>
+            </a-button>
+          </div>
         </div>
       </template>
     </div>
@@ -94,11 +111,12 @@
 import { computed } from 'vue'
 import {
   IconApps,
+  IconDelete,
   IconExclamationCircle,
 } from '@arco-design/web-vue/es/icon'
 
 import type { SkillCatalogEntry } from '../../types/hub'
-import { STAGE_LABELS, STAGE_GROUP_ORDER, UNSTAGED_KEY, isCustomStage, stageLabel, stageOptionText } from '../../utils/stages'
+import { PLATFORM_BASE_STAGE, STAGE_LABELS, STAGE_GROUP_ORDER, UNSTAGED_KEY, isCustomStage, stageLabel, stageOptionText } from '../../utils/stages'
 
 const props = defineProps<{
   entries: SkillCatalogEntry[]
@@ -107,6 +125,8 @@ const props = defineProps<{
   selectedSkillId: number | null
   keyword: string
   stageFilter: string
+  canDelete: boolean
+  deletingSkillId: number | null
 }>()
 
 const emit = defineEmits<{
@@ -114,6 +134,7 @@ const emit = defineEmits<{
   (e: 'refresh'): void
   (e: 'update:keyword', value: string): void
   (e: 'update:stageFilter', value: string): void
+  (e: 'delete', item: SkillCatalogEntry): void
 }>()
 
 const stageOptions = computed(() => {
@@ -126,7 +147,7 @@ const stageOptions = computed(() => {
     if (stage && isCustomStage(stage) && !usedCustom.includes(stage)) usedCustom.push(stage)
   }
   usedCustom.sort()
-  return [...Object.keys(STAGE_LABELS), ...usedCustom].map((value) => ({
+  return [...Object.keys(STAGE_LABELS).filter((value) => value !== PLATFORM_BASE_STAGE), ...usedCustom].map((value) => ({
     value,
     label: stageLabel(value),
     custom: isCustomStage(value),
@@ -256,12 +277,16 @@ const groups = computed(() => {
   border-radius: 2px;
 }
 
+.catalog__item-wrap {
+  position: relative;
+  margin-bottom: 6px;
+}
+
 .catalog__item {
   display: block;
   width: 100%;
   text-align: left;
-  padding: 10px;
-  margin-bottom: 6px;
+  padding: 10px 34px 10px 10px;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -269,6 +294,19 @@ const groups = computed(() => {
   transition: background-color 0.15s, border-color 0.15s;
   font: inherit;
   color: inherit;
+}
+
+.catalog__delete {
+  position: absolute;
+  top: 6px;
+  right: 5px;
+  opacity: 0.42;
+  transition: opacity 0.15s, background-color 0.15s;
+}
+
+.catalog__item-wrap:hover .catalog__delete,
+.catalog__delete:focus-visible {
+  opacity: 1;
 }
 
 .catalog__item:hover {

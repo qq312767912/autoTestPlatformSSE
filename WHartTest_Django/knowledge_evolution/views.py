@@ -2397,6 +2397,37 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
         project_id = int(request.query_params["project"]); self._check(request, project_id)
         return Response(ProjectQualityCockpitService().summarize(project_id))
 
+    @action(detail=False, methods=["post"], url_path="delete-workflow-batch")
+    def delete_workflow_batch(self, request):
+        """从工作台删除一个旧批次，同时保留执行与产出的审计记录。"""
+        from django.utils import timezone
+        from rest_framework.exceptions import ValidationError
+
+        project_id = int(request.data["project"]); self._check(request, project_id)
+        _ensure_test_lead(request.user, project_id)
+        workflow_id = str(request.data.get("workflow_id") or "").strip()
+        if not workflow_id:
+            raise ValidationError({"workflow_id": "必须指定要删除的运行批次"})
+        run, _ = FlywheelRun.objects.get_or_create(
+            project_id=project_id,
+            workflow_id=workflow_id,
+            defaults={
+                "entry_type": "flywheel",
+                "intent": "production",
+                "created_by": request.user,
+            },
+        )
+        metadata = dict(run.metadata or {})
+        metadata.update({
+            "hidden_from_cockpit": True,
+            "deleted_at": timezone.now().isoformat(),
+            "deleted_by": request.user.username,
+        })
+        run.metadata = metadata
+        run.status = "cancelled"
+        run.save(update_fields=["metadata", "status", "updated_at"])
+        return Response({"workflow_id": workflow_id, "deleted": True})
+
     @action(detail=False, methods=["get"], url_path="workflow-stage-catalog")
     def workflow_stage_catalog(self, request):
         """发起流程向导第一步的数据源：按阶段列出可选的 Skill 包（只读）。

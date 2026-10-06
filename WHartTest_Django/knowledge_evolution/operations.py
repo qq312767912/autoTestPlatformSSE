@@ -34,6 +34,7 @@ from .workflow_models import (
     GATE_HUMAN_FINAL_STATES,
     GATE_PASSING_STATES,
     GATE_SCORABLE_STATES,
+    FlywheelRun,
     StageExecutionContext,
     StageExecutionAttempt,
     WorkflowSkillLock,
@@ -1736,9 +1737,17 @@ class ProjectQualityCockpitService:
                 "self_evolution": is_evolvable(stage),
             })
 
+        hidden_workflow_ids = set(
+            FlywheelRun.objects.filter(
+                project_id=project_id,
+                metadata__hidden_from_cockpit=True,
+            ).values_list("workflow_id", flat=True)
+        )
         workflow_outputs = outputs.filter(
             task_type__in=list(ALL_WORKFLOW_STAGES)
-        ).exclude(metadata__protocol__workflow_id="").select_related(
+        ).exclude(metadata__protocol__workflow_id="").exclude(
+            metadata__protocol__workflow_id__in=hidden_workflow_ids
+        ).select_related(
             "capability__active_release"
         ).order_by("created_at")
         workflow_ids = []
@@ -1774,6 +1783,7 @@ class ProjectQualityCockpitService:
             WorkflowSkillLock.objects
             .filter(project_id=project_id)
             .exclude(workflow_id="")
+            .exclude(workflow_id__in=hidden_workflow_ids)
             .order_by("locked_at")
             .values_list("workflow_id", "locked_at")
         ):

@@ -8,6 +8,7 @@ import type {
   SkillListMeta,
   SkillDetailResponse,
   SkillContentResponse,
+  SkillMetadataSuggestion,
   SkillStoreConfig
 } from '../types'
 
@@ -84,14 +85,21 @@ export class SkillService {
 
   /**
    * 上传 Skill zip 文件
+   *
+   * `name` 是展示名称（平台生成、人工确认），留空则不设；它不改变 Skill 的
+   * 逻辑名（`name` 是 Skill Hub 的归并键与版本包身份），只影响页面展示。
+   * 包内多于一个 Skill 时后端会忽略它——一个名字对应不了多条。
    */
-  static async uploadSkill(projectId: number, file: File, category: string, description: string, apiKey?: string): Promise<Skill[]> {
+  static async uploadSkill(projectId: number, file: File, category: string, description: string, apiKey?: string, name?: string): Promise<Skill[]> {
     const formData = new FormData()
     formData.append('file', file)
     formData.append('category', category)
     formData.append('description', description)
     if (apiKey) {
       formData.append('api_key', apiKey)
+    }
+    if (name) {
+      formData.append('name', name)
     }
 
     const response = await request<SkillUploadResponse>({
@@ -116,14 +124,18 @@ export class SkillService {
     category: string,
     description: string,
     branch?: string,
-    apiKey?: string
+    apiKey?: string,
+    name?: string
   ): Promise<Skill[]> {
-    const payload: { git_url: string; category: string; description: string; branch?: string; api_key?: string } = { git_url: gitUrl, category, description }
+    const payload: { git_url: string; category: string; description: string; branch?: string; api_key?: string; name?: string } = { git_url: gitUrl, category, description }
     if (branch) {
       payload.branch = branch
     }
     if (apiKey) {
       payload.api_key = apiKey
+    }
+    if (name) {
+      payload.name = name
     }
 
     const response = await request<SkillGitImportResponse>({
@@ -148,14 +160,18 @@ export class SkillService {
     category: string,
     description: string,
     sha256?: string,
-    apiKey?: string
+    apiKey?: string,
+    name?: string
   ): Promise<Skill[]> {
-    const payload: { zip_url: string; category: string; description: string; sha256?: string; api_key?: string } = { zip_url: zipUrl, category, description }
+    const payload: { zip_url: string; category: string; description: string; sha256?: string; api_key?: string; name?: string } = { zip_url: zipUrl, category, description }
     if (sha256) {
       payload.sha256 = sha256
     }
     if (apiKey) {
       payload.api_key = apiKey
+    }
+    if (name) {
+      payload.name = name
     }
 
     const response = await request<SkillGitImportResponse>({
@@ -171,7 +187,10 @@ export class SkillService {
     throw new Error(api?.message || response.error || '从 zip URL 导入 Skill 失败')
   }
 
-  static async suggestMetadata(projectId: number, input: { file?: File; git_url?: string; branch?: string; name?: string; content?: string }) {
+  static async suggestMetadata(
+    projectId: number,
+    input: { file?: File; git_url?: string; branch?: string; name?: string; content?: string },
+  ): Promise<SkillMetadataSuggestion> {
     let data: FormData | Record<string, string>
     if (input.file) {
       const form = new FormData()
@@ -182,7 +201,7 @@ export class SkillService {
     }
     const response = await request<any>({ url: `/projects/${projectId}/skills/suggest-metadata/`, method: 'POST', data })
     const api = response.data as any
-    if (response.success && api?.data) return api.data as { category: string; category_label: string; description: string }
+    if (response.success && api?.data) return api.data as SkillMetadataSuggestion
     throw new Error(api?.message || response.error || '自动生成失败')
   }
 
@@ -238,6 +257,23 @@ export class SkillService {
     if (!response.success) {
       throw new Error(response.error || '删除 Skill 失败')
     }
+  }
+
+  static async getWorkshopExclusions(projectId: number): Promise<number[]> {
+    const response = await request({ url: `/projects/${projectId}/skills/workshop-materials/`, method: 'GET' })
+    const api = response.data as { data?: { excluded_skill_ids?: number[] } }
+    if (response.success) return api?.data?.excluded_skill_ids ?? []
+    throw new Error(response.error || '读取工坊原材料失败')
+  }
+
+  static async excludeFromWorkshop(projectId: number, skillId: number): Promise<void> {
+    const response = await request({ url: `/projects/${projectId}/skills/workshop-materials/`, method: 'POST', data: { skill_id: skillId } })
+    if (!response.success) throw new Error(response.error || '移出工坊失败')
+  }
+
+  static async restoreToWorkshop(projectId: number, skillId: number): Promise<void> {
+    const response = await request({ url: `/projects/${projectId}/skills/workshop-materials/`, method: 'DELETE', data: { skill_id: skillId } })
+    if (!response.success) throw new Error(response.error || '加入工坊失败')
   }
 
   /**

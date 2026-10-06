@@ -45,6 +45,23 @@ class Skill(models.Model):
         max_length=255,
         help_text='Skill 的唯一标识名称'
     )
+    # 展示名称（上传/导入时人工确认）：与 ``name`` 是两件事，刻意分开。
+    #
+    # ``name`` 承担两个不能动的职责：① Skill Hub 是**公共目录**，列表按 ``name``
+    # 归并出跨项目的「正本」（见 ``skills.canonical``）；② ``SkillVersionService``
+    # 按 ``manifest['name']`` 认逻辑身份，同名包再次上传应当追加版本而不是新建。
+    # 一旦让使用者任意改 ``name``：同一份内容在不同项目被改成不同名字，归并会把它
+    # 拆成两条「正本」；同一个包下次上传又会因为匹配不上而重造一条 Skill——都是
+    # 静默发生的数据污染。
+    #
+    # 所以「改名」只落在展示层：本字段为空时展示回退到 ``name``。
+    display_name = models.CharField(
+        _('展示名称'),
+        max_length=128,
+        blank=True,
+        default='',
+        help_text='上传/导入时由平台生成、人工确认的展示名称；为空时展示 name。不参与逻辑身份与归并',
+    )
     description = models.TextField(
         _('Skill 描述'),
         help_text='描述 Skill 的功能和使用场景'
@@ -108,6 +125,7 @@ class Skill(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.project.name})"
+
 
     def get_full_path(self):
         """获取 Skill 的完整文件系统路径（始终返回绝对路径）"""
@@ -576,6 +594,17 @@ class Skill(models.Model):
 #: - ``quarantined``：人基于安全事件做出的隔离决策，任何时候都不放行；
 #: - ``rejected``：静态校验被驳回，说明落盘包已与入库哈希/校验结论对不上。
 UNRUNNABLE_RELEASE_STATES = ('quarantined', 'rejected')
+
+
+class SkillWorkshopExclusion(models.Model):
+    """项目在进化工坊中移出的原材料；不改变公共 Skill 本身。"""
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='skill_workshop_exclusions')
+    source_skill = models.ForeignKey(Skill, on_delete=models.CASCADE, related_name='workshop_exclusions')
+    removed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    removed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('project', 'source_skill')
 
 
 class SkillVersion(models.Model):

@@ -116,7 +116,9 @@
           :class="{ inactive: !skill.is_active }"
         >
           <div class="skill-header">
-            <div class="skill-name">{{ skill.name }}</div>
+            <!-- 展示名优先：上传/导入时由平台生成、人工确认；没设过就回退逻辑名。
+                 逻辑名（skill.name）是归并键与版本包身份，不在这里展示替换。 -->
+            <div class="skill-name" :title="skill.display_name || skill.name">{{ skill.display_name || skill.name }}</div>
             <!-- 启停是治理动作（后端 = 超管或任一项目测试负责人）。没这个角色的人
                  不给可点的开关 —— 点了必然 403，比"看不到"更让人困惑。 -->
             <a-tooltip :content="text.manageOnly" :disabled="canManage">
@@ -242,10 +244,23 @@
             <span class="form-tip">{{ text.customStageTip }}</span>
           </template>
         </a-form-item>
+        <a-form-item :label="text.nameLabel">
+          <!-- 名称与简介同为"平台生成、人工确认"的导入元数据；多 Skill 包置只读：
+               一个输入框只能对应一条 Skill，套到多条上会互相覆盖。 -->
+          <a-input
+            v-model="uploadName"
+            :max-length="40"
+            :disabled="uploadMultiSkill"
+            :placeholder="text.namePlaceholder"
+          />
+          <template v-if="uploadNameHint" #extra>
+            <span class="form-tip">{{ uploadNameHint }}</span>
+          </template>
+        </a-form-item>
         <a-form-item label="功能简介（平台生成）" required>
           <a-textarea v-model="uploadDescription" :max-length="60" show-word-limit placeholder="选择文件后自动生成，请人工确认" />
         </a-form-item>
-        <a-alert v-if="uploadGenerating" type="info">正在识别 Skill 类型并生成简介…</a-alert>
+        <a-alert v-if="uploadGenerating" type="info">正在识别 Skill 类型并生成名称与简介…</a-alert>
         <input
           ref="fileInputRef"
           type="file"
@@ -303,10 +318,21 @@
             <span class="form-tip">{{ text.customStageTip }}</span>
           </template>
         </a-form-item>
+        <a-form-item :label="text.nameLabel">
+          <a-input
+            v-model="gitName"
+            :max-length="40"
+            :disabled="gitMultiSkill"
+            :placeholder="text.namePlaceholder"
+          />
+          <template v-if="gitNameHint" #extra>
+            <span class="form-tip">{{ gitNameHint }}</span>
+          </template>
+        </a-form-item>
         <a-form-item label="功能简介（平台生成）" required>
           <a-textarea v-model="gitDescription" :max-length="60" show-word-limit placeholder="点击导入后平台先生成，确认后再次点击导入" />
         </a-form-item>
-        <a-alert v-if="gitSuggested" type="success">已生成建议，请确认分类和简介，再次点击“确定”完成导入。</a-alert>
+        <a-alert v-if="gitSuggested" type="success">已生成建议，请确认名称、分类和简介，再次点击“确定”完成导入。</a-alert>
         <a-form-item :label="text.gitRepoUrl" required>
           <a-input
             v-model="gitUrl"
@@ -375,7 +401,7 @@
     <a-modal v-model:visible="showGeneratedModal" title="确认自动生成结果" :width="760" :confirm-loading="savingGenerated" @ok="confirmGeneratedMetadata">
       <a-alert type="info">以下内容由平台模型生成。请逐项确认，确认后才会写入 Skill Hub。</a-alert>
       <div v-for="item in generatedExisting" :key="item.skill.id" class="generated-row">
-        <strong>{{ item.skill.name }}</strong>
+        <strong>{{ item.skill.display_name || item.skill.name }}</strong>
         <a-select v-model="item.category" allow-search allow-create>
           <a-option v-for="opt in stageOptionList" :key="opt.value" :value="opt.value">{{ stageOptionText(opt) }}</a-option>
         </a-select>
@@ -453,6 +479,10 @@ const text = computed(() => (
         manageOnly: 'Only a platform admin or a project test lead can enable/disable or delete a Skill.',
         category: 'Category', categoryPlaceholder: 'Select a stage, or type a name to add your own',
         categoryRequired: 'Select a stage', customStageTip: 'No matching stage? Type a name and it becomes a reusable custom stage (e.g. "Performance").',
+        nameLabel: 'Skill name (platform-generated)',
+        namePlaceholder: 'Generated after you pick a file — leave empty to keep the packaged name',
+        nameMultiHint: (count: number) =>
+          `Contains ${count} Skills; each keeps the name declared in its own SKILL.md.`,
       }
     : {
         skillStore: 'Skill 商店',
@@ -490,6 +520,10 @@ const text = computed(() => (
         manageOnly: '只有平台管理员或项目测试负责人可以启停 / 删除 Skill。',
         category: '所属分类', categoryPlaceholder: '选择阶段，或直接输入以新增', categoryRequired: '请先选择所属分类',
         customStageTip: '没有合适的阶段？直接输入名称即可新建自定义阶段（如「性能测试」），之后可复用。',
+        nameLabel: 'Skill 名称（平台生成）',
+        namePlaceholder: '选择文件后自动生成；留空则沿用包内名称',
+        nameMultiHint: (count: number) =>
+          `该包含 ${count} 个 Skill，名称按各自 SKILL.md 保留，此处不做统一改名。`,
         importFromGit: '从 Git 导入',
         uploadSkill: '上传 Skill',
         emptyState: '暂无 Skills，点击上方按钮上传',
@@ -541,9 +575,31 @@ const uploadCategory = ref<string>()
 const gitCategory = ref<string>()
 const uploadDescription = ref('')
 const gitDescription = ref('')
+/** 展示名称：平台生成后由人确认；留空则沿用包内 name（后端 display_name 落空）。 */
+const uploadName = ref('')
+const gitName = ref('')
+/** 本次选择/导入识别出的包内 Skill 数量：>1 时名称输入置为只读。 */
+const uploadSkillCount = ref(0)
+const gitSkillCount = ref(0)
 const uploadGenerating = ref(false)
 const gitSuggested = ref(false)
 const searchKeyword = ref('')
+
+/**
+ * 包内多于一个 Skill 时，名称输入置为只读。
+ *
+ * 上传表单只有一个名称框，它只能对应一条 Skill；拿一个名字去覆盖多条，结果是
+ * 列表上出现两条同标题的条目，而使用者以为只改了一个。多 Skill 时各自沿用包内
+ * SKILL.md 的 name，导入后在列表里逐条改——后端也有一道同样的兜底。
+ */
+const uploadMultiSkill = computed(() => uploadSkillCount.value > 1)
+const gitMultiSkill = computed(() => gitSkillCount.value > 1)
+const uploadNameHint = computed(() =>
+  uploadMultiSkill.value ? text.value.nameMultiHint(uploadSkillCount.value) : '',
+)
+const gitNameHint = computed(() =>
+  gitMultiSkill.value ? text.value.nameMultiHint(gitSkillCount.value) : '',
+)
 
 // ---------------- 类型筛选（来源 / 能力阶段） ----------------
 // 纯前端过滤：列表拿到的是本项目全量（量级十几条），不必为此加后端参数。
@@ -593,7 +649,9 @@ const stageOptions = computed(() => {
 
 const filteredSkills = computed(() => skills.value.filter((skill) => {
   const keyword = searchKeyword.value.trim().toLocaleLowerCase()
-  if (keyword && !`${skill.name} ${skill.description}`.toLocaleLowerCase().includes(keyword)) return false
+  // 展示名与逻辑名都参与搜索：使用者记得住的是卡片上那个名字，
+  // 但用包内英文标识符来找的人也不少，两个都算命中。
+  if (keyword && !`${skill.display_name || ''} ${skill.name} ${skill.description}`.toLocaleLowerCase().includes(keyword)) return false
   if (sourceFilter.value && skill.source_type !== sourceFilter.value) return false
   if (stageFilter.value && (skill.stage || UNDECLARED_STAGE) !== stageFilter.value) return false
   return true
@@ -797,11 +855,17 @@ const handleFileChange = async (e: Event) => {
     selectedFile.value = target.files[0]
     uploadGenerating.value = true
     uploadDescription.value = ''
+    uploadName.value = ''
+    uploadSkillCount.value = 0
     try {
       const suggestion = await SkillService.suggestMetadata(props.projectId, { file: selectedFile.value })
       uploadCategory.value = suggestion.category
       uploadDescription.value = suggestion.description
-      Message.success('已生成分类与简介，请确认')
+      uploadName.value = suggestion.name || ''
+      uploadSkillCount.value = suggestion.skill_count || 0
+      Message.success(uploadMultiSkill.value
+        ? '已生成分类与简介；该包含多个 Skill，名称按各包保留'
+        : '已生成名称、分类与简介，请确认')
     } catch (e: any) { Message.error(e.message || '自动生成失败') }
     finally { uploadGenerating.value = false }
   }
@@ -817,14 +881,19 @@ const doUpload = async (apiKey?: string) => {
   try {
     if (!uploadCategory.value) { Message.warning(text.value.categoryRequired); return }
     if (!uploadDescription.value.trim()) { Message.warning('请先生成并确认功能简介'); return }
-    const skills = await SkillService.uploadSkill(props.projectId, selectedFile.value, uploadCategory.value, uploadDescription.value.trim(), apiKey)
+    const skills = await SkillService.uploadSkill(
+      props.projectId, selectedFile.value, uploadCategory.value,
+      uploadDescription.value.trim(), apiKey, uploadName.value.trim(),
+    )
     const count = skills.length
-    const names = skills.map(s => s.name).join(', ')
+    const names = skills.map(s => s.display_name || s.name).join(', ')
     Message.success(text.value.uploadSuccess(count, names))
     showUploadModal.value = false
     selectedFile.value = null
     uploadCategory.value = undefined
     uploadDescription.value = ''
+    uploadName.value = ''
+    uploadSkillCount.value = 0
     await fetchSkills()
   } catch (e: any) {
     Message.error(e.message || text.value.uploadFailed)
@@ -894,8 +963,12 @@ const doGitImport = async (apiKey?: string) => {
       const suggestion = await SkillService.suggestMetadata(props.projectId, { git_url: gitUrl.value.trim(), branch: gitBranch.value.trim() || 'main' })
       gitCategory.value = suggestion.category
       gitDescription.value = suggestion.description
+      gitName.value = suggestion.name || ''
+      gitSkillCount.value = suggestion.skill_count || 0
       gitSuggested.value = true
-      Message.info('已生成建议，请确认后再次点击确定')
+      Message.info(gitMultiSkill.value
+        ? '已生成分类与简介；该仓库含多个 Skill，名称按各包保留。确认后再次点击确定'
+        : '已生成名称、分类与简介，请确认后再次点击确定')
     } catch (e: any) { Message.error(e.message || '自动生成失败') }
     finally { importing.value = false }
     return
@@ -911,15 +984,18 @@ const doGitImport = async (apiKey?: string) => {
       gitDescription.value.trim(),
       gitBranch.value.trim() || undefined,
       apiKey,
+      gitName.value.trim(),
     )
     const count = skills.length
-    const names = skills.map(s => s.name).join(', ')
+    const names = skills.map(s => s.display_name || s.name).join(', ')
     Message.success(text.value.importSuccess(count, names))
     showGitImportModal.value = false
     gitUrl.value = ''
     gitBranch.value = ''
     gitCategory.value = undefined
     gitDescription.value = ''
+    gitName.value = ''
+    gitSkillCount.value = 0
     gitSuggested.value = false
     await fetchSkills()
   } catch (e: any) {
