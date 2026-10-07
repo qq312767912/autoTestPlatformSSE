@@ -802,20 +802,43 @@ export async function listWorkflowStageSubmissions(projectId: number): Promise<A
   return data.results ?? [];
 }
 
+/**
+ * 纳管去处真值。**必须与后端 `workflow_models.SUBMISSION_TARGETS` 一致**：
+ * 后端只认 `new_workflow` / `existing_workflow`，写 `'existing'` 会被判
+ * `unknown_target` 直接拒掉——前端曾硬编码过它，导致工作台里那个
+ * 「纳入当前流程」按钮**必然失败**（点击只弹一句"未知的纳管去处"）。
+ * 取值一律从这个联合类型来，别再手写字符串。
+ */
+export type WorkflowSubmissionTarget = 'new_workflow' | 'existing_workflow';
+
+/** 纳管选项真值（去处/状态/阶段/可确认码），由后端下发，前端不自己拼枚举。 */
+export async function getWorkflowSubmissionCatalog(): Promise<{
+  targets: Array<{ value: string; label: string }>;
+  states: Array<{ value: string; label: string }>;
+  stages: Array<{ value: string; label: string }>;
+  confirmable_codes: string[];
+}> {
+  return get('/operations/workflow-submission-catalog/');
+}
+
 export async function preflightWorkflowStageSubmission(payload: {
-  projectId: number; outputId: string; stage: string; workflowId: string;
+  projectId: number; outputId: string; stage: string;
+  target?: WorkflowSubmissionTarget; workflowId?: string;
 }): Promise<Record<string, unknown>> {
   return get<Record<string, unknown>>('/operations/workflow-stage-submission-preflight/', {
     project: payload.projectId, output_id: payload.outputId, stage: payload.stage,
-    target: 'existing', workflow_id: payload.workflowId,
+    target: payload.target || 'existing_workflow', workflow_id: payload.workflowId || '',
   });
 }
 
 export async function submitWorkflowStageOutput(payload: {
-  outputId: string; stage: string; workflowId: string; replaceOutputId?: string; confirmReplace?: boolean;
+  outputId: string; stage: string;
+  target?: WorkflowSubmissionTarget; workflowId?: string;
+  replaceOutputId?: string; confirmReplace?: boolean;
 }): Promise<Record<string, unknown>> {
   return post<Record<string, unknown>>('/operations/workflow-stage-submit/', {
-    output_id: payload.outputId, stage: payload.stage, target: 'existing', workflow_id: payload.workflowId,
+    output_id: payload.outputId, stage: payload.stage,
+    target: payload.target || 'existing_workflow', workflow_id: payload.workflowId || '',
     replace_output_id: payload.replaceOutputId || '', confirm_replace: payload.confirmReplace === true,
   });
 }
