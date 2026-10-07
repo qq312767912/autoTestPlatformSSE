@@ -240,6 +240,7 @@
             <span v-else class="linkage-hint">请联系项目测试负责人开启</span>
           </div>
           <WorkflowEvolutionWorkbench
+            ref="workbenchRef"
             :project-id="projectStore.currentProjectId!"
             @start-workflow="openWorkflowStart"
             @open-stage-output="openStageOutput"
@@ -1026,6 +1027,8 @@ const stageProgressText=(flow:ProjectWorkflowView)=>{
 // ---- 左栏：已发起流程版本列表
 /** 当前选中的流程。默认取左栏第一条（后端已按发起时间倒序），用户点其它条目才切换。 */
 const activeFlowId=ref('');
+/** 工作台句柄：它在子组件内部持有自己的一份 cockpit，「发起流程」成功后必须显式让它重载。 */
+const workbenchRef=ref<InstanceType<typeof WorkflowEvolutionWorkbench>|null>(null);
 const activeFlow=computed<ProjectWorkflowView|undefined>(()=>{
   const flows=cockpit.value.workflows;
   return flows.find(v=>v.workflow_id===activeFlowId.value)||flows[0];
@@ -1432,6 +1435,10 @@ async function confirmWorkflowStart():Promise<boolean>{
     // 发起后自动选中新流程：用户点「发起」的下一秒就是想看这条流程的四个阶段，
     // 让他去左栏里再找一遍是多余的。
     activeFlowId.value=workflowId;
+    // ⚠️ 工作台有**自己**的一份 cockpit（只在 projectId 变化或挂载时加载）。
+    // 上面那句 loadCockpit() 刷的是父页面自己的，工作台拿不到——少了这次显式重载，
+    // 用户点完「发起」看到的是一片空白，必须手动刷新让子组件重新挂载才出内容。
+    await workbenchRef.value?.reload(workflowId);
     const unmanaged=workflowStartResult.value.unmanaged_stages.length;
     // 未锁定的阶段要立刻提醒：等跑到问题跟踪阶段才暴露，前面阶段的算力与人工就白费了。
     if(unmanaged)Message.warning(`流程已发起，但 ${unmanaged} 个阶段未锁定 Skill 版本，产出将没有版本溯源`);

@@ -190,7 +190,19 @@ function requestDeleteFlow(flow:ProjectWorkflowView){Modal.warning({title:'删�
 async function deleteFlow(workflowId:string){actionBusy.value=`delete:${workflowId}`;try{await deleteWorkflowBatch(props.projectId,workflowId);if(selectedFlowId.value===workflowId){selectedFlowId.value='';selectedStageKey.value=''}await loadAll(false);Message.success('运行批次已删除')}catch(error:unknown){const response=(error as {response?:{data?:{detail?:string;message?:string}}})?.response?.data;Message.error(response?.detail||response?.message||'删除批次失败，请确认当前账号具有测试负责人权限')}finally{actionBusy.value=''}}
 function goNextAction(){if(!activeStage.value?.output_id)void executeCurrent();else if(!review.value?.latest_review?.evolvable)emit('open-stage-output',activeFlow.value!.workflow_id,selectedStageKey.value);else if(!confirmedAttributionIds.value.length)activeZone.value='attribution';else activeZone.value='evolution'}
 async function loadAll(showError=true){loading.value=true;try{cockpit.value=await getProjectQualityCockpit(props.projectId);if(!selectedFlowId.value)selectedFlowId.value=cockpit.value.workflows[0]?.workflow_id||'';if(!selectedStageKey.value)selectedStageKey.value=activeFlow.value?.current_stage||activeFlow.value?.stages[0]?.stage||'';const optionalResults=await Promise.allSettled([listOptimizationProposals(props.projectId),listGoldDatasets(props.projectId),listGenerationOutputs(props.projectId),listWorkflowStageSubmissions(props.projectId),getRegistrationFailures(props.projectId),listEvaluationRuns()] as const);const [proposalResult,datasetResult,outputResult,submissionResult,registrationResult,runResult]=optionalResults;if(proposalResult.status==='fulfilled'){skillProposals.value=proposalResult.value.filter(v=>v.proposal_type==='skill_content');selectedProposalId.value=selectedProposalId.value||skillProposals.value[0]?.id||''}if(outputResult.status==='fulfilled')outputs.value=outputResult.value;if(submissionResult.status==='fulfilled')submissions.value=submissionResult.value;if(registrationResult.status==='fulfilled')registration.value=registrationResult.value;if(runResult.status==='fulfilled')runs.value=runResult.value;if(datasetResult.status==='fulfilled'){const versionResults=await Promise.allSettled(datasetResult.value.map(v=>listGoldDatasetVersions(v.id)));goldVersions.value=versionResults.flatMap(v=>v.status==='fulfilled'?v.value:[])}await loadStageContext();await loadPlan();}catch{if(showError)Message.error('加载质量飞轮工作台失败')}finally{loading.value=false}}
-async function loadStageContext(){const flow=activeFlow.value;if(!flow||!selectedStageKey.value)return;attempt.value=null;trace.value=null;review.value=null;diff.value=null;attachments.value=[];const [attemptsResult,reviewResult,diffResult,attachmentResult]=await Promise.allSettled([listStageAttempts(props.projectId,flow.workflow_id,selectedStageKey.value),getStageReviewStatus(props.projectId,flow.workflow_id,selectedStageKey.value),getStageDiff(props.projectId,flow.workflow_id,selectedStageKey.value),listStageAttachments(props.projectId,flow.workflow_id,selectedStageKey.value)]);if(attemptsResult.status==='fulfilled'){attempt.value=attemptsResult.value.slice().sort((a,b)=>b.created_at.localeCompare(a.created_at))[0]||null;if(attempt.value)try{trace.value=await getStageAttemptTrace(attempt.value.id)}catch{trace.value=null}}if(reviewResult.status==='fulfilled')review.value=reviewResult.value;if(diffResult.status==='fulfilled')diff.value=diffResult.value;if(attachmentResult.status==='fulfilled')attachments.value=attachmentResult.value;}
+async function loadStageContext(){
+  const flow=activeFlow.value;if(!flow||!selectedStageKey.value)return;
+  attempt.value=null;trace.value=null;review.value=null;diff.value=null;attachments.value=[];
+  const stage=selectedStageKey.value;
+  // 「人工审查状态」与「差异」两个接口在该阶段**还没有产出**时是按设计返 400 的
+  // （后端原话："阶段暂无产出；请先执行本阶段"），不是故障。而刚发起流程时四个阶段
+  // 全是这个状态，无脑请求会当场刷出一串 400 —— 答案本来就是"还没有"。
+  // 判据用 activeStage.output_id，与模板里「正式产出 已登记/尚未登记」同一个真值，
+  // 不再另立一套判断。
+  const hasOutput=Boolean(activeStage.value?.output_id);
+  const [attemptsResult,reviewResult,diffResult,attachmentResult]=await Promise.allSettled([listStageAttempts(props.projectId,flow.workflow_id,stage),hasOutput?getStageReviewStatus(props.projectId,flow.workflow_id,stage):Promise.resolve(null),hasOutput?getStageDiff(props.projectId,flow.workflow_id,stage):Promise.resolve(null),listStageAttachments(props.projectId,flow.workflow_id,stage)]);
+  if(attemptsResult.status==='fulfilled'){attempt.value=attemptsResult.value.slice().sort((a,b)=>b.created_at.localeCompare(a.created_at))[0]||null;if(attempt.value)try{trace.value=await getStageAttemptTrace(attempt.value.id)}catch{trace.value=null}}if(reviewResult.status==='fulfilled')review.value=reviewResult.value;if(diffResult.status==='fulfilled')diff.value=diffResult.value;if(attachmentResult.status==='fulfilled')attachments.value=attachmentResult.value;
+}
 async function executeCurrent(){if(!activeFlow.value)return;actionBusy.value='execute';try{const flowId=activeFlow.value.workflow_id;const result=await executeWorkflowStage(props.projectId,flowId,selectedStageKey.value);const controlledUrl=result.execution_context_id?`/test-plans?execution_context_id=${encodeURIComponent(result.execution_context_id)}`:'';const legacyUrl=result.module_key==='test_plan_generation'?`/test-plans?workflow_id=${encodeURIComponent(flowId)}`:'';const launchUrl=result.launch_url||controlledUrl||legacyUrl;if(launchUrl){await router.push(launchUrl);void loadAll(false)}else Message.info(result.hint||'阶段已派发，请进入对应 Agent 页面继续执行')}catch(error:unknown){const response=(error as {response?:{data?:{detail?:string;message?:string}}})?.response?.data;Message.error(response?.detail||response?.message||'阶段派发失败，请检查前置门禁')}finally{actionBusy.value=''}}
 async function confirmCurrent(){if(!activeFlow.value)return;actionBusy.value='confirm';try{await confirmWorkflowStage(props.projectId,activeFlow.value.workflow_id,selectedStageKey.value);Message.success('当前阶段已确认放行');await loadAll()}catch{Message.error('确认放行失败')}finally{actionBusy.value=''}}
 async function runAttribution(){if(!activeFlow.value)return;actionBusy.value='attribute';try{await runStageAttribution(props.projectId,activeFlow.value.workflow_id,selectedStageKey.value);diff.value=await getStageDiff(props.projectId,activeFlow.value.workflow_id,selectedStageKey.value);Message.success('已按最新人工差异生成待确认归因')}catch{Message.error('归因生成失败')}finally{actionBusy.value=''}}
@@ -203,6 +215,23 @@ async function evaluateProposal(){if(!activeProposal.value||!evaluationReady.val
 async function transition(action:'submit-approval'|'activate'|'rollback'){if(!activeProposal.value)return;try{await transitionSkillContent(activeProposal.value.id,action);Message.success(action==='activate'?'候选已激活':action==='rollback'?'已回滚到基线':'已提交负责人审批');await loadAll()}catch{Message.error('状态操作失败，请检查权限和门禁条件')}}
 async function admitOutput(output:GenerationOutput){if(!activeFlow.value)return;actionBusy.value=`admit:${output.id}`;try{const analysis=await preflightWorkflowStageSubmission({projectId:props.projectId,outputId:output.id,stage:output.task_type,workflowId:activeFlow.value.workflow_id});const conflict=analysis.stage_conflict as Record<string,unknown>|null;const submit=async(confirmReplace=false)=>{await submitWorkflowStageOutput({outputId:output.id,stage:output.task_type,workflowId:activeFlow.value!.workflow_id,replaceOutputId:String(conflict?.output_id||''),confirmReplace});Message.success('旁路产出已纳入当前受控流程，原产出协议保持不变');await loadAll()};if(analysis.requires_replace_confirmation===true){Modal.confirm({title:'确认替换当前阶段产出',content:'当前阶段已有正式产出。继续会保留旧门禁快照并将其标记为被替换，不会修改旁路产出自身协议。',okText:'确认替换',onOk:()=>submit(true)});}else if(analysis.admissible===true)await submit();else Message.error((analysis.messages as string[]||[]).join('；')||'该产出暂不能纳管');}catch{Message.error('旁路产出预检失败')}finally{actionBusy.value=''}}
 async function retryRegistrations(){actionBusy.value='retry-registration';try{const result=await retryRegistrationFailures(props.projectId);Message.success(`已重试 ${result.retried} 条登记失败`);registration.value=await getRegistrationFailures(props.projectId)}catch{Message.error('登记失败重试未完成，请检查负责人权限')}finally{actionBusy.value=''}}
+/**
+ * 供父页面调用的重载入口（`defineExpose`）。
+ *
+ * 本组件有自己的一份 `cockpit`，只在 `projectId` 变化或挂载时加载。而「发起流程」
+ * 是父页面做的事：它刷新的也是**它自己**的 cockpit。少了这个显式重载，
+ * 用户点完「发起」看到的是一片空白——必须手动刷新、让本组件重新挂载才出内容。
+ *
+ * 传入 `preferredFlowId` 时先把选中项钉到新流程上，再整体重载：
+ * 用户点「发起」的下一秒就是想看这条流程的四个阶段，让他去左栏里再找一遍是多余的。
+ * 放在 `loadAll()` **之前**赋值，这样 `loadAll` 内部的"选中项为空才兜底"不会把
+ * 新流程覆盖掉，也省掉一次重复的阶段上下文请求。
+ */
+async function reload(preferredFlowId=''){
+  if(preferredFlowId){selectedFlowId.value=preferredFlowId;selectedStageKey.value=''}
+  await loadAll();
+}
+defineExpose({reload});
 watch(()=>props.projectId,()=>void loadAll());
 onMounted(()=>void loadAll());
 </script>
