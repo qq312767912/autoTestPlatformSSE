@@ -1645,7 +1645,11 @@ const businessSources=computed(()=>sourceDefinitions.map(source=>({...source,con
 // 只统计「能力能被 Skill 直接迭代升级」的 5 个阶段：代码审查与知识库问答属
 // 平台基础能力，不进 Agent 台账（口径见 specs/agent-ledger/requirements.md §2、§3）。
 // 全部指标由 RetrievalTrace 现场聚合，不新增接口；评分按已定口径暂不纳入。
-const AGENT_STAGE_ORDER:string[]=['case_review','test_plan_generation','testcase_generation','test_execution','report_generation'];
+// ⚠️ 这是**展示顺序**（「Agent 筛选」下拉选项与「Agent 台账」行序共用同一份真值），
+// 不等于主链路定义——主链路仍是 方案生成→用例生成→测试执行→报告产出，此处不改。
+// 用例审查（单次能力，不属主链路）排在用例生成之后：它审查的正是用例生成的产物，
+// 紧邻陈列便于对照；成员集合与「Agent = 5 个 Skill 型阶段」的口径均未变。
+const AGENT_STAGE_ORDER:string[]=['test_plan_generation','testcase_generation','case_review','test_execution','report_generation'];
 const DAY_MS=86400000,TREND_DAYS=14;
 type AgentMetricKey='sessions'|'users'|'tokens'|'latency'|'failed';
 interface AgentKpi{key:AgentMetricKey;label:string;value:string;summaryLabel:string;hint:string;delta:number|null;spark:number[];tone:string;invert?:boolean}
