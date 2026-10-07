@@ -1,7 +1,7 @@
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from projects.models import ProjectMember
-from projects.roles import ensure_test_lead
+from projects.roles import ensure_test_lead, is_test_lead
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -161,19 +161,41 @@ class ProjectFlywheelSettingViewSet(viewsets.ReadOnlyModelViewSet):
             raise ValidationError({"project": "必须指定项目"})
         project_id = int(raw)
         _ensure_project_member(request.user, project_id)
-        return Response(linkage_state(get_object_or_404(Project, pk=project_id)))
+        state = linkage_state(get_object_or_404(Project, pk=project_id))
+        # 顺带告诉前端"我能不能改这个开关"：让按钮可见性与后端判定同源，
+        # 而不是前端自己猜角色——猜错的表现是"按钮点得下去、点了才 403"。
+        state["can_manage"] = is_test_lead(request.user, project_id)
+        return Response(state)
 
     @action(detail=False, methods=["post"], url_path="set")
     def set_flag(self, request):
-        project = get_object_or_404(__import__("projects.models", fromlist=["Project"]).Project,
-                                    pk=request.data.get("project"))
+        """开启/关闭本项目的灰度开关（仅项目测试负责人）。
+
+        返回与 ``state`` **同构**的状态：前端开关一次就能直接重绘，不必
+        "写完再查一次"——两次往返之间页面会短暂显示旧状态。
+        """
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+
+        from projects.models import Project
+        from .rollout import set_linkage_enabled
+
+        raw = request.data.get("project")
+        if raw in (None, ""):
+            raise ValidationError({"project": "必须指定项目"})
+        project = get_object_or_404(Project, pk=int(raw))
         _ensure_test_lead(request.user, project.pk)
-        setting, _ = ProjectFlywheelSetting.objects.update_or_create(
-            project=project, defaults={"enabled": bool(request.data.get("enabled")),
-                                       "rollout_note": str(request.data.get("rollout_note") or ""),
-                                       "updated_by": request.user},
-        )
-        return Response(self.get_serializer(setting).data)
+        try:
+            state = set_linkage_enabled(
+                project, enabled=request.data.get("enabled"),
+                actor=request.user, note=request.data.get("rollout_note"),
+            )
+        except DjangoValidationError as exc:
+            # 开关值无法判定意图属参数问题（400），不是权限问题（403），更不该是 500。
+            raise ValidationError(exc.messages)
+        # 能走到这里必然已通过负责人校验，直接给出可管理标记，省一次角色查询。
+        state["can_manage"] = True
+        return Response(state)
 
 
 class HistoryImportViewSet(ProjectScopedReadOnlyViewSet):

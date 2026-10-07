@@ -87,6 +87,55 @@ def assert_linkage_enabled(project) -> None:
         raise ValidationError(LINKAGE_DISABLED_MESSAGE)
 
 
+#: 开关值无法判定意图时的统一文案（不替调用方猜）。
+LINKAGE_VALUE_INVALID_MESSAGE = "开关值必须是 true 或 false"
+
+
+def _coerce_enabled(value) -> bool:
+    """把传入的开关值解析成布尔；**认不出意图就报错，不替调用方猜**。
+
+    ``bool("false")`` 是 ``True``——前端或脚本只要漏了 JSON 布尔类型，就会把
+    "关闭" 写成 "开启"。灰度开关上的误开比误关危险得多：误关最多多一次配置，
+    误开等于闸门直接失效。所以这里显式拒绝含糊输入。
+    """
+    from django.core.exceptions import ValidationError
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):  # bool 已在上面拦掉
+        if value in (0, 1):
+            return bool(value)
+    elif isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("true", "1", "yes", "on"):
+            return True
+        if text in ("false", "0", "no", "off"):
+            return False
+    raise ValidationError(LINKAGE_VALUE_INVALID_MESSAGE)
+
+
+def set_linkage_enabled(project, *, enabled, actor=None, note=None) -> dict:
+    """开启/关闭项目灰度开关，返回与 ``linkage_state`` **同构**的最新状态。
+
+    写逻辑与读逻辑放在同一模块：``linkage_enabled`` 判的就是这张表。若把"怎么写"
+    散落到各视图里，读与写的默认值和审计字段迟早分叉，而分叉的表现是
+    "界面显示已开启、闸门仍判为关闭"——最难查的一类问题。
+
+    返回最新状态而不是写入结果：调用方（前端开关）拿到它就能直接重绘，
+    不必"写完再查一次"——两次往返之间页面会短暂显示旧状态。
+    """
+    resolved = _coerce_enabled(enabled)
+    ProjectFlywheelSetting.objects.update_or_create(
+        project_id=_project_id(project),
+        defaults={
+            "enabled": resolved,
+            "rollout_note": "" if note is None else str(note),
+            "updated_by": actor if getattr(actor, "pk", None) else None,
+        },
+    )
+    return linkage_state(project)
+
+
 class LaunchReadinessService:
     """上线检查表的**程序化**版本：能自动判的全部自动判。
 

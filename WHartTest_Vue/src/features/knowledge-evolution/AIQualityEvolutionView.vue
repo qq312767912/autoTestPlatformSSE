@@ -216,6 +216,29 @@
         </section>
 
         <section v-else-if="workspace === 'workflow'" class="panel content-panel workflow-panel">
+          <!-- 灰度开关状态条（T14）。放在工作台之前、页面级一行：
+               未开启时它同时回答"谁去开、怎么开"，而不是等用户把发起向导填完
+               再抛一个语焉不详的 403——那种体验里用户只会以为功能坏了。 -->
+          <div v-if="flywheelSwitch" class="linkage-bar" :class="flywheelSwitch.enabled ? 'is-on' : 'is-off'">
+            <icon-check-circle-fill v-if="flywheelSwitch.enabled" />
+            <icon-exclamation-circle-fill v-else />
+            <div class="linkage-copy">
+              <b>{{ flywheelSwitch.enabled ? '质量飞轮联动已开启' : '本项目尚未开启质量飞轮联动' }}</b>
+              <small v-if="flywheelSwitch.enabled">
+                可发起全链路测试、纳管旁路产出并按阶段受控执行<template v-if="flywheelSwitch.updated_by"> · {{ flywheelSwitch.updated_by }} 于 {{ formatDate(flywheelSwitch.updated_at) }} 操作</template>
+              </small>
+              <small v-else>
+                {{ flywheelSwitch.configured ? '此前已开启，现处于停用状态。' : '灰度开关默认关闭，需由本项目的测试负责人开通。' }}未开启不影响业务页面的方案分析与产出发布。
+              </small>
+            </div>
+            <a-button
+              v-if="flywheelSwitch.can_manage"
+              :type="flywheelSwitch.enabled ? 'text' : 'primary'"
+              :loading="switchBusy"
+              @click="toggleLinkage(!flywheelSwitch.enabled)"
+            >{{ flywheelSwitch.enabled ? '关闭联动' : '开启联动' }}</a-button>
+            <span v-else class="linkage-hint">请联系项目测试负责人开启</span>
+          </div>
           <WorkflowEvolutionWorkbench
             :project-id="projectStore.currentProjectId!"
             @start-workflow="openWorkflowStart"
@@ -463,6 +486,15 @@
       :mask-closable="false"
       width="760px"
     >
+      <!-- 开关未开启就在这里拦一句：向导第一步选包、第二步才提交，
+           若等到最后一步才 403，用户已经白填了一屏。 -->
+      <a-alert v-if="flywheelSwitch && !flywheelSwitch.enabled" type="warning" style="margin-bottom:12px">
+        <template #title>本项目的质量飞轮联动尚未开启，提交会被拒绝</template>
+        <div class="linkage-modal-actions">
+          <span>{{ flywheelSwitch.can_manage ? '你可以现在就开通，开通后直接继续发起即可。' : '请联系本项目的测试负责人开通后再发起。' }}</span>
+          <a-button v-if="flywheelSwitch.can_manage" size="mini" type="primary" :loading="switchBusy" @click="toggleLinkage(true)">立即开启</a-button>
+        </div>
+      </a-alert>
       <a-alert type="info">发起时会把四个阶段的 Skill 版本<strong>一次性</strong>锁定。链路跑起来之后再有人激活新版本，也不会改变本次流程已锁定的版本——否则「这条链路的产出对应哪个版本」就无法回答，回滚也界定不了影响范围。</a-alert>
 
       <!-- 第一步就是"逐阶段选包"：发起这个动作的实质就是选版本。
@@ -917,8 +949,8 @@ import { SkillHubConsole, SkillManager } from '@/features/skills';
 import KnowledgeGraphView from '@/features/knowledge-graph/KnowledgeGraphView.vue';
 import WorkflowEvolutionWorkbench from './WorkflowEvolutionWorkbench.vue';
 import { WORKFLOW_STAGES as DEFAULT_WORKFLOW_STAGES } from '@/features/skills/utils/stages';
-import { annotateGoldCase, confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, createTestAssetTaxonomy, confirmHistoryImport, downloadSkillPackage, downloadStageArtifact, downloadStageReviewReport, evaluateWorkflowStage, evolveCaseReview, executeWorkflowStage, freezeGoldDatasetVersion, generateCandidatesFromRun, getAssetCandidateStats, getGenerationOutputLineage, getGoldCase, getProjectQualityCockpit, getStageAttachmentCatalog, getStageAttemptTrace, getStageDiff, getStageOutput, getStageReviewStatus, getWorkflowStageCatalog, getWorkflowStatus, listAnnotationConflicts, listAssetCandidateEvents, listCapabilityReleases, listCaseReviewEvolutionCandidates, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listGoldDatasetVersions, listHistoryImports, listHistoryReplays, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, listStageAttachments, listStageAttempts, listTestAssetTaxonomies, openFlywheelRun, overrideWorkflowStage, preflightCaseReviewEvolution, preflightHistoryImport, proposeCaseReviewOptimizations, publishTestAssetTaxonomy, confirmCaseReviewOptimizations, resolveAnnotationConflict, retryAssetCandidate, retryFailedAssetCandidates, runStageAttribution, scoreWorkflowStage, startHistoryReplay, startWorkflow, submitTestAssetTaxonomy, updateCandidateState, uploadStageAttachment, uploadStageFeedback, uploadStageReview } from './service';
-import type { AnnotationConflict, AssetCandidateEvent, AssetCandidateStats, CapabilityRelease, CaseReviewEvolutionCandidate, CaseReviewEvolutionPreflight, CaseReviewEvolutionResult, EvaluationResult, EvaluationRun, EvaluationSuite, ExecutionSpan, FailureAttribution, FeedbackEvent, GoldCase, GoldDataset, GoldDatasetVersion, HistoryImportBatch, HistoryReplay, KnowledgeCandidate, OptimizationCandidate, OptimizationProposal, OptimizationProposalResult, OutputLineageView, ProjectQualityCockpit, ProjectQualityPerson, ProjectWorkflowView, RetrievalTrace, StageAttachmentCatalog, StageAttachmentView, StageAttemptTraceView, StageDiffView, StageExecutionAttemptView, StageExecutionPlan, StageFeedbackResult, StageOutputView, StageReviewStatusView, StartWorkflowResult, TestAssetTaxonomy, WorkflowCatalogSkill, WorkflowStageCatalog, WorkflowStageGateView } from './types';
+import { annotateGoldCase, confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, createTestAssetTaxonomy, confirmHistoryImport, downloadSkillPackage, downloadStageArtifact, downloadStageReviewReport, evaluateWorkflowStage, evolveCaseReview, executeWorkflowStage, freezeGoldDatasetVersion, generateCandidatesFromRun, getAssetCandidateStats, getFlywheelSwitch, getGenerationOutputLineage, getGoldCase, getProjectQualityCockpit, getStageAttachmentCatalog, getStageAttemptTrace, getStageDiff, getStageOutput, getStageReviewStatus, getWorkflowStageCatalog, getWorkflowStatus, listAnnotationConflicts, listAssetCandidateEvents, listCapabilityReleases, listCaseReviewEvolutionCandidates, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listGoldDatasetVersions, listHistoryImports, listHistoryReplays, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, listStageAttachments, listStageAttempts, listTestAssetTaxonomies, openFlywheelRun, overrideWorkflowStage, preflightCaseReviewEvolution, preflightHistoryImport, proposeCaseReviewOptimizations, publishTestAssetTaxonomy, confirmCaseReviewOptimizations, resolveAnnotationConflict, retryAssetCandidate, retryFailedAssetCandidates, runStageAttribution, scoreWorkflowStage, setFlywheelSwitch, startHistoryReplay, startWorkflow, submitTestAssetTaxonomy, updateCandidateState, uploadStageAttachment, uploadStageFeedback, uploadStageReview } from './service';
+import type { AnnotationConflict, AssetCandidateEvent, AssetCandidateStats, CapabilityRelease, CaseReviewEvolutionCandidate, CaseReviewEvolutionPreflight, CaseReviewEvolutionResult, EvaluationResult, EvaluationRun, EvaluationSuite, ExecutionSpan, FailureAttribution, FeedbackEvent, FlywheelSwitchState, GoldCase, GoldDataset, GoldDatasetVersion, HistoryImportBatch, HistoryReplay, KnowledgeCandidate, OptimizationCandidate, OptimizationProposal, OptimizationProposalResult, OutputLineageView, ProjectQualityCockpit, ProjectQualityPerson, ProjectWorkflowView, RetrievalTrace, StageAttachmentCatalog, StageAttachmentView, StageAttemptTraceView, StageDiffView, StageExecutionAttemptView, StageExecutionPlan, StageFeedbackResult, StageOutputView, StageReviewStatusView, StartWorkflowResult, TestAssetTaxonomy, WorkflowCatalogSkill, WorkflowStageCatalog, WorkflowStageGateView } from './types';
 
 type Workspace='overview'|'single'|'workflow'|'gold'|'evaluation'|'attribution'|'optimization';
 type PrimaryView='agents'|'data'|'graph';
@@ -1278,6 +1310,14 @@ const channelColor=(detail:unknown)=>{
 // ---- 全链路测试：发起流程（入口固定在 数据飞轮 → 控制台 → 全链路测试）
 // 两步向导：① 逐阶段选 Skill 包（选完才能下一步）② 填 workflow_id 并发起。
 const showWorkflowStartModal=ref(false),workflowStarting=ref(false),workflowStartResult=ref<StartWorkflowResult|null>(null);
+/**
+ * 项目灰度开关状态（T14）。
+ *
+ * `null` = 还没读到。**不能把 null 当成"未开启"**：那会让页面在加载中的一瞬间
+ * 就宣称"本项目没灰度"，比不显示更糟；所以模板里一律用 `flywheelSwitch && !enabled`
+ * 判断，未读到就什么都不说。
+ */
+const flywheelSwitch=ref<FlywheelSwitchState|null>(null),switchBusy=ref(false);
 const workflowForm=ref({workflowId:''});
 const workflowStep=ref<1|2>(1),catalogLoading=ref(false);
 const emptyCatalog=():WorkflowStageCatalog=>({stage_order:[],all_stage_order:[],stages:[],skills:[]});
@@ -1320,12 +1360,43 @@ async function loadStageCatalog(){
   }catch{Message.error('加载阶段候选 Skill 失败')}
   finally{catalogLoading.value=false}
 }
+/**
+ * 读当前项目的灰度开关。
+ *
+ * 未开启必须在**渲染入口之前**就知道：让用户把向导填完再吃一个 403，他看到的是
+ * "功能坏了"；提前看到"本项目还没灰度、可以一键开启"，他知道该做什么。
+ */
+async function loadFlywheelSwitch(){
+  if(!projectStore.currentProjectId){flywheelSwitch.value=null;return}
+  try{flywheelSwitch.value=await getFlywheelSwitch(projectStore.currentProjectId)}
+  // 读不到就不显示状态条：把"查询失败"渲染成"未开启"，会误导人去开一个已经开着的开关。
+  catch{flywheelSwitch.value=null}
+}
+/**
+ * 开/关本项目灰度开关。按钮只对测试负责人显示，后端同样会拦一次——前端显隐是为了
+ * 不让人白点，不是权限本身。
+ *
+ * 返回是否成功，供调用方决定要不要接着走：发起流程被开关挡下时，用户点
+ * 「开启并继续」的预期是"开完就继续"，而不是"开完自己再点一次发起"。
+ */
+async function toggleLinkage(enabled:boolean):Promise<boolean>{
+  if(!projectStore.currentProjectId)return false;
+  switchBusy.value=true;
+  try{
+    flywheelSwitch.value=await setFlywheelSwitch(projectStore.currentProjectId,enabled);
+    Message.success(enabled?'已开启质量飞轮联动':'已关闭质量飞轮联动');
+    return true;
+  }catch(e){Message.error((e as Error)?.message||'开关操作失败，请稍后重试');return false}
+  finally{switchBusy.value=false}
+}
 async function openWorkflowStart(){
   // 默认留空：workflow_id 由后端按「质量飞轮」入口派生（T06）。预填一个建议值会让人
   // 以为"必须改点什么才能继续"，而这正是要消掉的"手工维护上下文 ID"负担。
   workflowForm.value={workflowId:''};
   workflowStep.value=1;
   showWorkflowStartModal.value=true;
+  // 开关状态与候选包并行加载：向导能不能走到最后，由这两者共同决定。
+  void loadFlywheelSwitch();
   await loadStageCatalog();
 }
 /**
@@ -1366,7 +1437,15 @@ async function confirmWorkflowStart():Promise<boolean>{
     if(unmanaged)Message.warning(`流程已发起，但 ${unmanaged} 个阶段未锁定 Skill 版本，产出将没有版本溯源`);
     else Message.success('流程已发起，四个阶段的 Skill 版本已一次性锁定');
     return true;
-  }catch{Message.error('发起流程失败：该操作仅限测试负责人');return false}
+  }catch(e){
+    // 不能把任意 403 都写成"仅限测试负责人"：这句话会把"本项目未开启灰度开关"这类
+    // 真实原因盖掉，用户于是跑去查权限——而权限往往是对的，问题在别处。
+    // 后端已经把原因写清楚了，透传它，再顺手刷新开关状态让状态条当场亮出来。
+    const reason=(e as Error)?.message||'请稍后重试';
+    Message.error(`发起流程失败：${reason}`);
+    void loadFlywheelSwitch();
+    return false;
+  }
   finally{workflowStarting.value=false}
 }
 // ---- 用例审查自进化（T23 + T08）：独立能力面板 → 用例审查 → 发起流程
@@ -1775,7 +1854,7 @@ async function loadCockpit(){if(!projectStore.currentProjectId)return;try{cockpi
 async function selectTrace(v:RetrievalTrace){selectedTraceId.value=v.id;try{selectedSpans.value=await listExecutionSpans(v.id)}catch{selectedSpans.value=[];Message.error('加载节点轨迹失败')}}
 async function selectSuite(v:EvaluationSuite){selectedSuiteId.value=v.id;await loadRuns();if(runs.value[0])await selectRun(runs.value[0]);else{selectedRunId.value='';results.value=[]}}
 async function selectRun(v:EvaluationRun){selectedRunId.value=v.id;await loadResults()}
-async function bootstrap(){await loadSuites();if(suites.value[0])await selectSuite(suites.value.find(v=>v.suite_type==='seed')||suites.value[0]);else{selectedSuiteId.value=undefined;selectedRunId.value='';runs.value=[];results.value=[]}await Promise.all([loadFeedback(),loadCandidates(),loadTraces(),loadGovernance(),loadCockpit()]);if(allTraces.value[0])await selectTrace(allTraces.value[0]);else{selectedTraceId.value='';selectedSpans.value=[]}}
+async function bootstrap(){await loadSuites();if(suites.value[0])await selectSuite(suites.value.find(v=>v.suite_type==='seed')||suites.value[0]);else{selectedSuiteId.value=undefined;selectedRunId.value='';runs.value=[];results.value=[]}await Promise.all([loadFeedback(),loadCandidates(),loadTraces(),loadGovernance(),loadCockpit(),loadFlywheelSwitch()]);if(allTraces.value[0])await selectTrace(allTraces.value[0]);else{selectedTraceId.value='';selectedSpans.value=[]}}
 async function refreshAll(){await bootstrap();Message.success('数据已刷新')}
 async function createRun(){if(!selectedSuiteId.value)return;try{await createEvaluationRun({suite:selectedSuiteId.value,name:`评测运行 · ${new Date().toLocaleString('zh-CN')}`,policy_version:'default-policy@v3',model_name:'qwen3-coder-plus'});await loadRuns();Message.success('评测运行已启动')}catch{Message.error('启动评测失败')}}
 async function confirmCreateSuite(){if(!suiteForm.value.name||!projectStore.currentProjectId){Message.warning('请填写名称并选择项目');return}try{await createEvaluationSuite({project:projectStore.currentProjectId,...suiteForm.value,is_active:true} as Partial<EvaluationSuite>);showSuiteModal.value=false;await loadSuites();Message.success('评测集已创建')}catch{Message.error('创建评测集失败')}}
@@ -2085,4 +2164,5 @@ watch(()=>projectStore.currentProjectId,async id=>{
 @media(max-width:1080px){.governance-columns{grid-template-columns:1fr}.history-entry{grid-template-columns:1fr 1fr}.history-entry .arco-btn{grid-column:1/-1}}
 @media(max-width:1080px){.wf-shell{grid-template-columns:1fr}.wf-flows{max-height:240px}.wf-stage-bar{grid-template-columns:repeat(2,minmax(0,1fr))}.wf-card-body,.pin-summary{grid-template-columns:1fr}.pin-block{grid-template-columns:1fr}.pin-selected{grid-column:1}}
 @media(max-width:720px){.trace-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.attachment-form,.review-status-card{grid-template-columns:1fr}}
+.linkage-bar{display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:11px 14px;border:1px solid var(--color-border-2);border-radius:9px;background:var(--color-fill-1)}.linkage-bar.is-off{border-color:rgb(var(--orange-3));background:rgb(var(--orange-1))}.linkage-bar.is-on{border-color:rgb(var(--green-3));background:rgb(var(--green-1))}.linkage-bar>svg{flex:none;font-size:19px}.linkage-bar.is-off>svg{color:var(--orange)}.linkage-bar.is-on>svg{color:#00b42a}.linkage-copy{display:flex;min-width:0;flex:1;flex-direction:column;gap:2px}.linkage-copy b{font-size:13px}.linkage-copy small{color:var(--color-text-3);font-size:11px;line-height:1.55}.linkage-hint{flex:none;color:var(--color-text-3);font-size:11px}.linkage-modal-actions{display:flex;align-items:center;justify-content:space-between;gap:12px}
 </style>

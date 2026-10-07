@@ -1078,3 +1078,27 @@ export interface OutputLineageView {
   closed_loop: boolean;
   sources: LineageSources;
 }
+
+// ---------------------------------------------------------------- 项目灰度开关（T14）
+
+/**
+ * 项目级飞轮灰度开关的状态（与后端 `rollout.linkage_state` 同构）。
+ *
+ * `can_manage` 由后端判定（项目测试负责人 / 平台管理员），前端据此决定开关按钮
+ * 的显隐——**不自己按角色猜**：猜错的后果是按钮点得下去、点了才 403。
+ *
+ * `configured=false` 与 `enabled=false` 必须分开呈现：前者是"本项目从未灰度"，
+ * 后者是"灰度过、现在停用"。两者的处置动作不同（一个是开通、一个是恢复），
+ * 合并成一句"未开启"会让用户不知道该找谁。
+ */
+export interface FlywheelSwitchState {
+  project_id: number;
+  enabled: boolean;
+  configured: boolean;
+  rollout_note: string;
+  updated_by: string;
+  updated_at: string;
+  /** 本期灰度目标阶段（后端真值），用于说明"灰度到哪一步"而不是"全部禁用"。 */
+  pilot_stage: string;
+  can_manage: boolean;
+}

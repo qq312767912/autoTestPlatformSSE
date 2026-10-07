@@ -50,6 +50,7 @@ import type {
   AnnotationConflict,
   HistoryImportBatch,
   HistoryReplay,
+  FlywheelSwitchState,
 } from './types';
 
 const BASE = '/api/knowledge-evolution';
@@ -131,11 +132,18 @@ export async function listHistoryReplays(project:number): Promise<HistoryReplay[
 }
 export async function startHistoryReplay(payload:Record<string,unknown>): Promise<HistoryReplay> { return post('/history-replays/start/', payload); }
 export async function decideHistoryDifference(replayId:string,difference:string,decision:string,note=''): Promise<unknown> { return post(`/history-replays/${replayId}/decide-difference/`,{difference,decision,note}); }
-export async function getFlywheelSetting(project:number): Promise<{project:number;enabled:boolean;rollout_note:string}|null> {
-  const values=rows(await get<Array<{project:number;enabled:boolean;rollout_note:string}>|{results:Array<{project:number;enabled:boolean;rollout_note:string}>}>('/flywheel-settings/', {project}));
-  return values[0]||null;
+/**
+ * 读项目灰度开关。
+ *
+ * 读 `state` 而不是列表接口：只有 `state` 带 `can_manage` 与 `configured`，
+ * 前端据此决定"按钮开不开得出来、未开启该怎么解释"。列表接口返回的是裸
+ * setting，拿它判断按钮显隐等于前端自己猜角色——猜错就是"点了才 403"。
+ */
+export async function getFlywheelSwitch(project:number): Promise<FlywheelSwitchState> {
+  return get<FlywheelSwitchState>('/flywheel-settings/state/', {project});
 }
-export async function setFlywheelSetting(project:number,enabled:boolean,rollout_note=''): Promise<{project:number;enabled:boolean;rollout_note:string}> {
+/** 开/关项目灰度开关（仅测试负责人）。返回与读接口同构，拿到即可直接重绘。 */
+export async function setFlywheelSwitch(project:number,enabled:boolean,rollout_note=''): Promise<FlywheelSwitchState> {
   return post('/flywheel-settings/set/',{project,enabled,rollout_note});
 }
 
