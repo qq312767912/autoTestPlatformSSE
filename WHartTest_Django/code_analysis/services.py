@@ -52,6 +52,10 @@ LOW_VALUE_FILE_PATTERNS = (
     "*.min.js", "*.min.css", "*.map", "*.snap", "*.generated.*", "*.designer.*",
     "dist/**", "build/**", "coverage/**", "vendor/**", "node_modules/**",
     "**/dist/**", "**/build/**", "**/coverage/**", "**/vendor/**", "**/node_modules/**",
+    "**/.kotlin/**", "**/.gradle/**", "*.log",
+    "*.aar", "*.apk", "*.aab", "*.jar", "*.class", "*.dex", "*.so",
+    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.ico", "*.pdf",
+    "*.zip", "*.gz", "*.7z", "*.rar", "*.woff", "*.woff2", "*.ttf", "*.otf",
 )
 
 
@@ -876,6 +880,8 @@ def _ocr_diagnostics(payload):
         "selected": len(selected_items), "completed": len(completed_items),
         "reused": len(reused_items), "failed": len(failed_items),
         "coverage": round(covered_count / len(selected_items) * 100, 1) if selected_items else 0,
+        "reviewed_files": sorted(path for path in completed_paths if path),
+        "failed_files": sorted(path for path in failed_paths if path),
         "failure_type_counts": failure_type_counts, "failure_details": failure_details,
         "groups": group_details,
         "retry": {
@@ -1448,12 +1454,22 @@ def _repository_context_for_prompt(context):
 def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None):
     """只向模型发送受控的小批量Diff；任何失败均降级为机器结果。"""
     if task.mode == "quick" or not analyzable_diffs:
+        task._ai_coverage_snapshot = {
+            "total_batches": 0, "completed_batches": 0, "failed_batches": [],
+            "reviewed_files": [], "failed_files": [],
+        }
         return [], [], [], 0, 0, "快速模式不调用LLM"
     from langgraph_integration.views import create_llm_instance
 
     try:
         config = _get_code_analysis_llm_config()
     except Exception as exc:
+        task._ai_coverage_snapshot = {
+            "total_batches": 0, "completed_batches": 0, "failed_batches": [],
+            "reviewed_files": [],
+            "failed_files": [item.get("path", "") for item in analyzable_diffs],
+            "error": str(exc),
+        }
         return [], [], [], 0, 0, f"代码审查专用 LLM 不可用，已仅生成机器分析结果：{exc}"
 
     # 标准模式必须覆盖本次范围内的全部可分析文件。批次仍用于控制单次上下文，
@@ -1461,7 +1477,7 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
     max_files = len(analyzable_diffs)
     max_chars = 5000 if task.mode == "standard" else 9000
     batches = []
-    current, current_size = [], 0
+    current, current_paths, current_size = [], set(), 0
     for item in analyzable_diffs[:max_files]:
         path = item["path"]
         diff_text = item["diff"] or ""
@@ -1469,10 +1485,11 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
         for chunk_index, snippet in enumerate(chunks, start=1):
             block = f"FILE: {path} (DIFF PART {chunk_index}/{len(chunks)})\n{snippet}"
             if current and current_size + len(block) > 14000:
-                batches.append("\n\n".join(current)); current, current_size = [], 0
-            current.append(block); current_size += len(block)
+                batches.append({"text": "\n\n".join(current), "files": sorted(current_paths)})
+                current, current_paths, current_size = [], set(), 0
+            current.append(block); current_paths.add(path); current_size += len(block)
     if current:
-        batches.append("\n\n".join(current))
+        batches.append({"text": "\n\n".join(current), "files": sorted(current_paths)})
 
     ai_findings, test_points, impact_modules, used = [], [], [], 0
     from requirements.models import RequirementDocument
@@ -1537,10 +1554,19 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
     def analyze_batch(index, batch):
         # 各线程使用独立模型客户端，避免共享 HTTP 会话和回调状态。
         llm = create_llm_instance(config, temperature=0.1)
-        known = [x for x in machine_findings if x.get("file") in batch]
-        prompt = f"{prompt_head}\n业务上下文：\n{business_context}\n已读取的目标版本源码上下文（只读MCP）：\n{json.dumps(prompt_repository_context, ensure_ascii=False)[:18000]}\n机器已确认风险：{json.dumps(known, ensure_ascii=False)}\nDIFF:\n{batch}"
+        batch_text = batch["text"]
+        known = [x for x in machine_findings if x.get("file") in batch["files"]]
+        prompt = f"{prompt_head}\n业务上下文：\n{business_context}\n已读取的目标版本源码上下文（只读MCP）：\n{json.dumps(prompt_repository_context, ensure_ascii=False)[:18000]}\n机器已确认风险：{json.dumps(known, ensure_ascii=False)}\nDIFF:\n{batch_text}"
         response = llm.invoke(prompt)
-        payload = _json_from_response(getattr(response, "content", response))
+        try:
+            payload = _json_from_response(getattr(response, "content", response))
+        except (ValueError, TypeError, json.JSONDecodeError):
+            # 内网模型偶发返回截断/非法 JSON；只重试当前批次。
+            response = llm.invoke(
+                f"{prompt}\n\n上一次输出无法解析为 JSON。请重新审查当前批次，"
+                "仅输出符合约定 schema 的完整 JSON，不要使用 Markdown 代码块。"
+            )
+            payload = _json_from_response(getattr(response, "content", response))
         usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
         tokens = int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0)
         if _review_payload_needs_chinese_retry(payload):
@@ -1553,7 +1579,7 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
             tokens += int(retry_usage.get("total_tokens", retry_usage.get("input_tokens", 0) + retry_usage.get("output_tokens", 0)) or 0)
         return index, payload, tokens
 
-    successful_batches, batch_errors = 0, []
+    successful_batches, successful_batch_indexes, batch_errors = 0, set(), []
     worker_count = min(3, len(batches))
     with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="diff-review") as executor:
         futures = [executor.submit(analyze_batch, index, batch) for index, batch in enumerate(batches)]
@@ -1561,9 +1587,14 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
             try:
                 batch_index, payload, batch_tokens = future.result()
             except Exception as exc:
-                batch_errors.append(f"批次{index + 1}失败：{exc}")
+                batch_errors.append({
+                    "batch": index + 1,
+                    "files": batches[index]["files"],
+                    "reason": str(exc)[:500],
+                })
                 continue
             successful_batches += 1
+            successful_batch_indexes.add(batch_index)
             used += batch_tokens
             impact_modules.extend(payload.get("impact_modules", []))
             for risk_index, risk in enumerate(payload.get("risks", [])):
@@ -1581,11 +1612,29 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
                 risk.update({"key": f"ai:{batch_index}:{risk_index}", "source": "ai_analysis"})
                 ai_findings.append(risk)
             test_points.extend(payload.get("test_requirements", []))
-    selected_coverage = min(len(analyzable_diffs), max_files) / len(analyzable_diffs) * 100
-    batch_coverage = successful_batches / len(batches) if batches else 0
-    coverage = round(selected_coverage * batch_coverage, 1)
+    file_batches = {item["path"]: set() for item in analyzable_diffs[:max_files]}
+    for batch_index, batch in enumerate(batches):
+        for path in batch["files"]:
+            file_batches.setdefault(path, set()).add(batch_index)
+    reviewed_files = sorted(
+        path for path, indexes in file_batches.items()
+        if indexes and indexes.issubset(successful_batch_indexes)
+    )
+    failed_files = sorted(path for path in file_batches if path not in reviewed_files)
+    coverage = round(len(reviewed_files) / len(analyzable_diffs) * 100, 1)
+    task._ai_coverage_snapshot = {
+        "total_batches": len(batches),
+        "completed_batches": successful_batches,
+        "failed_batches": batch_errors,
+        "reviewed_files": reviewed_files,
+        "failed_files": failed_files,
+    }
     if batch_errors:
-        note = f"AI并行分析完成 {successful_batches}/{len(batches)} 个批次；" + "；".join(batch_errors)
+        failures = "；".join(
+            f"批次{item['batch']}失败（{'、'.join(item['files'])}）：{item['reason']}"
+            for item in batch_errors
+        )
+        note = f"AI并行分析完成 {successful_batches}/{len(batches)} 个批次；{failures}"
     else:
         note = "AI已并行完成全部 Diff 批次分析" if coverage == 100 else f"AI仅分析前{max_files}个文件，其余保留机器分析"
     return ai_findings, test_points, impact_modules, used, coverage, note
@@ -1810,11 +1859,11 @@ def _verify_findings_against_target(task, findings, review_client=None):
     return active, rejected, tokens, note
 
 
-def _prioritize_findings_for_report(findings, limit=DEVELOPER_REPORT_FINDING_LIMIT):
-    """全量扫描后只向开发交付核心问题。
+def _prioritize_findings_for_report(findings, limit=None):
+    """按处置类型、风险和证据质量排序。
 
-    所有高风险和已确认缺陷必须保留；剩余名额按风险、处置类型、证据完整度和置信度补齐。
-    候选数和筛除数单独记录，不以截断文件范围换取精简报告。
+    最终报告必须完整保留确定缺陷、待确认风险和改进建议；仅在调用方
+    显式传入 limit 时（如反证模型的有界候选集）才限制数量。
     """
     severity_rank = {"high": 3, "medium": 2, "low": 1}
     disposition_rank = {"confirmed": 3, "needs_confirmation": 2, "advisory": 1}
@@ -1829,8 +1878,17 @@ def _prioritize_findings_for_report(findings, limit=DEVELOPER_REPORT_FINDING_LIM
             float(item.get("confidence") or 0),
         )
 
+    ordered = sorted(findings, key=score, reverse=True)
+    if limit is None:
+        return ordered, {
+            "candidate_count": len(findings),
+            "displayed_count": len(ordered),
+            "suppressed_count": 0,
+            "display_limit": None,
+        }
+
     eligible = [
-        item for item in findings
+        item for item in ordered
         if item.get("disposition") == "confirmed"
         or (
             item.get("disposition") == "needs_confirmation"
@@ -1838,7 +1896,7 @@ def _prioritize_findings_for_report(findings, limit=DEVELOPER_REPORT_FINDING_LIM
             and float(item.get("confidence") or 0) >= 0.75
         )
     ]
-    ordered = sorted(eligible, key=score, reverse=True)
+    ordered = eligible
     essential = [item for item in ordered if item.get("severity") == "high" or item.get("disposition") == "confirmed"]
     essential_keys = {str(item.get("key")) for item in essential}
     remaining = [item for item in ordered if str(item.get("key")) not in essential_keys]
@@ -2114,20 +2172,29 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         for item in diffs:
             path = item.get("new_path") or item.get("old_path") or ""
             configured_excluded = any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
-            low_value = _is_low_value_file(path)
-            excluded = configured_excluded or low_value
             diff = item.get("diff", "")
             additions, deletions = _diff_line_stats(diff)
+            low_value = _is_low_value_file(path)
+            no_text_diff = not str(diff or "").strip()
+            excluded = configured_excluded or low_value or no_text_diff
+            if low_value:
+                exclusion_reason = "低价值或二进制文件"
+            elif configured_excluded:
+                exclusion_reason = "仓库排除规则"
+            elif no_text_diff:
+                exclusion_reason = "无可分析的文本差异"
+            else:
+                exclusion_reason = ""
             total_additions += additions
             total_deletions += deletions
-            files.append({"path": path, "old_path": item.get("old_path"), "new_file": item.get("new_file", False), "deleted_file": item.get("deleted_file", False), "excluded": excluded, "exclusion_reason": "低价值文件" if low_value else ("仓库排除规则" if configured_excluded else ""), "additions": additions, "deletions": deletions, "changed_lines": additions + deletions})
-            if excluded and not item.get("deleted_file"):
+            files.append({"path": path, "old_path": item.get("old_path"), "new_file": item.get("new_file", False), "deleted_file": item.get("deleted_file", False), "excluded": excluded, "exclusion_reason": exclusion_reason, "additions": additions, "deletions": deletions, "changed_lines": additions + deletions})
+            if item.get("deleted_file"):
+                findings.append({"key": f"file_deleted:{path}", "change": "删除文件", "file": path, "severity": "medium", "source": "machine_rule", "confidence": 1.0, "evidence": path, "impact": "依赖该文件的功能可能受到影响"})
+            if excluded:
                 continue
             raw_parts.append(f"diff -- {path}\n{diff}")
             analyzable_diffs.append({"path": path, "diff": diff})
             findings.extend(_parse_diff(diff, path, annotations))
-            if item.get("deleted_file"):
-                findings.append({"key": f"file_deleted:{path}", "change": "删除文件", "file": path, "severity": "medium", "source": "machine_rule", "confidence": 1.0, "evidence": path, "impact": "依赖该文件的功能可能受到影响"})
 
         # 确定性工具优先：只有实际运行的静态检查结果才能标记为 static_scan 风险。
         try:
@@ -2245,17 +2312,28 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         # 全量扫描结论仍计入候选统计；只对最可能进入开发报告的候选做目标 Commit 反证核验，
         # 避免标准模式为大量低证据提示付出不必要的模型调用。
         verification_candidates, _ = _prioritize_findings_for_report(classified_findings, limit=30)
-        findings, rejected_findings, verification_tokens, verification_note = _verify_findings_against_target(
+        verified_findings, rejected_findings, verification_tokens, verification_note = _verify_findings_against_target(
             task, verification_candidates,
             client if task.repository.source_type != "local_git" else None,
         )
+        verification_keys = {str(item.get("key")) for item in verification_candidates}
+        deferred_candidates = [
+            item for item in classified_findings
+            if str(item.get("key")) not in verification_keys
+        ]
+        # 反证有界只是成本控制，不是报告截断器。未进入反证批次的候选仍必须
+        # 进入待确认/改进建议；缺少独立核验的 AI “确定缺陷”按统一规则降级。
+        deferred_findings, _ = _apply_verification_results(deferred_candidates, [])
+        findings = [*verified_findings, *deferred_findings]
+        if deferred_findings:
+            verification_note += f"；另有 {len(deferred_findings)} 条候选未进入有界反证，已保留为待确认或改进建议"
         token_usage += verification_tokens
         findings, finding_screening = _prioritize_findings_for_report(findings)
         finding_screening.update({
             "candidate_count": len(classified_findings),
             "rejected_count": len(rejected_findings),
             "verification_candidate_count": len(verification_candidates),
-            "suppressed_count": max(0, len(classified_findings) - len(findings)),
+            "suppressed_count": max(0, len(classified_findings) - len(rejected_findings) - len(findings)),
         })
         findings = _attach_finding_diff_evidence(findings, analyzable_diffs)
         if task.mode == "standard":
@@ -2296,6 +2374,29 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
             ocr_status = {"status": "partial", "message": ocr_note, "coverage": ocr_coverage, "diagnostics": ocr_diagnostics}
         else:
             ocr_status = {"status": "failed", "message": ocr_note, "coverage": 0, "diagnostics": ocr_diagnostics}
+        ai_review = dict(getattr(task, "_ai_coverage_snapshot", {}) or {})
+        reviewed_paths = set(ai_review.get("reviewed_files") or [])
+        if task.mode == "deep":
+            reviewed_paths.update(ocr_diagnostics.get("reviewed_files") or [])
+        analyzable_paths = {item.get("path", "") for item in analyzable_diffs}
+        if task.mode != "quick" and ai_coverage >= 100 and not reviewed_paths:
+            # 兼容旧的/测试替身分析器：100% 覆盖时可推导全部已完成。
+            reviewed_paths = set(analyzable_paths)
+        failed_paths = analyzable_paths - reviewed_paths if task.mode != "quick" else set()
+        ai_review["reviewed_files"] = sorted(reviewed_paths)
+        ai_review["failed_files"] = sorted(failed_paths)
+        ai_review["reviewed_file_count"] = len(reviewed_paths)
+        ai_review["failed_file_count"] = len(failed_paths)
+        for file_info in files:
+            path = file_info.get("path", "")
+            if file_info.get("excluded"):
+                file_info["review_status"] = "excluded"
+            elif task.mode == "quick":
+                file_info["review_status"] = "machine_only"
+            elif path in reviewed_paths:
+                file_info["review_status"] = "ai_reviewed"
+            else:
+                file_info["review_status"] = "ai_failed"
         task.change_report = _sanitize_json_value({
             "schema_version": CODE_REVIEW_REPORT_SCHEMA_VERSION,
             "summary": {"changed_files": len(files), "analyzed_files": len(analyzable_diffs), "excluded_files": sum(1 for x in files if x["excluded"]), "impact_scope_count": _impact_scope_count(files), "additions": total_additions, "deletions": total_deletions, "changed_lines": total_additions + total_deletions, "risk_count": len(findings), "candidate_risk_count": finding_screening["candidate_count"], "suppressed_risk_count": finding_screening["suppressed_count"], "rejected_risk_count": finding_screening["rejected_count"], "confirmed_count": disposition_counts.get("confirmed", 0), "needs_confirmation_count": disposition_counts.get("needs_confirmation", 0), "advisory_count": disposition_counts.get("advisory", 0), "high_risk_count": sum(1 for x in findings if x["severity"] == "high"), "severity_counts": severity_counts, "source_counts": source_counts, "disposition_counts": disposition_counts},
@@ -2307,7 +2408,7 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
                 "diagnostics": {"degraded_reason": "本次未执行 CRG 上下文增强"},
             }),
             "ocr_status": ocr_status,
-            "coverage": {"scope_files": len(files), "analyzed_files": len(analyzable_diffs), "excluded_files": sum(1 for x in files if x["excluded"]), "machine_percent": 100, "ai_percent": ai_coverage, "finding_screening": finding_screening},
+            "coverage": {"scope_files": len(files), "reviewable_files": len(analyzable_diffs), "analyzed_files": len(analyzable_diffs), "excluded_files": sum(1 for x in files if x["excluded"]), "machine_percent": 100, "ai_percent": ai_coverage, "ai_review": ai_review, "finding_screening": finding_screening},
         })
         drafts = []
         # 代码审查报告中的高、中风险逐条生成风险测试点；低风险不生成专项测试点。

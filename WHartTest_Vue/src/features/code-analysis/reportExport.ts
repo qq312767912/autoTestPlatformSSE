@@ -1,4 +1,4 @@
-import type { AnalysisTask, Finding } from './types';
+import type { AnalysisTask, Finding, ReviewFile } from './types';
 
 export type ReportType = 'change' | 'test';
 
@@ -190,8 +190,19 @@ function buildChangeReport(task: AnalysisTask): string {
   const confirmed = findings.filter(item => findingDisposition(item) === 'confirmed');
   const pending = findings.filter(item => findingDisposition(item) === 'needs_confirmation');
   const advisory = findings.filter(item => findingDisposition(item) === 'advisory');
-  const files = (report.files || []).map(file => `<div class="file-row ${file.excluded ? 'excluded' : ''}"><code>${escapeHtml(file.path || '')}</code><small>${file.excluded ? `未分析：${escapeHtml(file.exclusion_reason || '排除规则')}` : `已扫描 · +${numberValue(file.additions)} / -${numberValue(file.deletions)}`}</small></div>`).join('');
   const coverage = report.coverage || {};
+  const aiReview = coverage.ai_review || {};
+  const fileStatusText = (file: ReviewFile) => {
+    if (file.excluded || file.review_status === 'excluded') return `已排除：${escapeHtml(file.exclusion_reason || '排除规则')}`;
+    if (file.review_status === 'ai_reviewed') return `AI 语义审查完成 · +${numberValue(file.additions)} / -${numberValue(file.deletions)}`;
+    if (file.review_status === 'ai_failed') return `AI 语义审查未完成（仅机器规则） · +${numberValue(file.additions)} / -${numberValue(file.deletions)}`;
+    if (file.review_status === 'machine_only') return `仅机器规则扫描 · +${numberValue(file.additions)} / -${numberValue(file.deletions)}`;
+    return `已进入分析（历史报告未记录 AI 状态） · +${numberValue(file.additions)} / -${numberValue(file.deletions)}`;
+  };
+  const files = (report.files || []).map(file => `<div class="file-row ${file.excluded ? 'excluded' : ''}"><code>${escapeHtml(file.path || '')}</code><small>${fileStatusText(file)}</small></div>`).join('');
+  const failedBatchDetails = (aiReview.failed_batches || []).map(item =>
+    `<li><b>批次 ${numberValue(item.batch)}</b>：${escapeHtml((item.files || []).join('、') || '未记录文件')}；${escapeHtml(item.reason || '未记录失败原因')}</li>`
+  ).join('');
   const diagnostics = report.ocr_status?.diagnostics || {};
   const optimization = diagnostics.optimization || {};
   const fallback = diagnostics.fallback || {};
@@ -217,7 +228,7 @@ function buildChangeReport(task: AnalysisTask): string {
     </section>
     <section class="section needs_confirmation" id="pending"><div class="section-head"><div><h2>待开发确认的风险</h2><p>扫描已覆盖，但需要业务约束、调用方或运行环境信息才能定性；确认后再决定是否修复</p></div><span class="count">${pending.length} 项</span></div>${renderCards(pending) || '<div class="empty">没有待确认风险</div>'}</section>
     <section class="section advisory" id="advisory"><div class="section-head"><div><h2>改进建议</h2><p>不作为缺陷统计，不影响确定缺陷的采纳率</p></div><span class="count">${advisory.length} 项</span></div>${renderCards(advisory) || '<div class="empty">没有改进建议</div>'}</section>
-    <section class="section" id="coverage"><div class="section-head"><div><h2>审查覆盖</h2><p>用于区分“已检查未发现问题”和“未进入分析范围”</p></div><span class="count">${numberValue(coverage.analyzed_files ?? summary.analyzed_files)} / ${numberValue(coverage.scope_files ?? summary.changed_files)} 个文件进入分析</span></div><p class="scope-note">机器规则覆盖 ${numberValue(coverage.machine_percent ?? task.machine_coverage)}%，综合 AI 覆盖 ${numberValue(coverage.ai_percent ?? task.ai_coverage)}%；排除 ${numberValue(coverage.excluded_files ?? summary.excluded_files)} 个文件。${escapeHtml(deepStrategy)}排除文件及原因会在下方单独标明。</p>${report.analysis_note ? `<div class="summary"><h3>实际执行链路</h3><p>${richText(report.analysis_note)}</p></div>` : ''}<div class="file-list">${files || '<div class="empty">未记录变更文件</div>'}</div></section>`;
+    <section class="section" id="coverage"><div class="section-head"><div><h2>审查覆盖</h2><p>分别展示变更范围、机器扫描与 AI 语义审查结果</p></div><span class="count">${numberValue(coverage.reviewable_files ?? coverage.analyzed_files ?? summary.analyzed_files)} / ${numberValue(coverage.scope_files ?? summary.changed_files)} 个文件可语义审查</span></div><p class="scope-note">机器规则覆盖 ${numberValue(coverage.machine_percent ?? task.machine_coverage)}%，AI 语义审查覆盖 ${numberValue(coverage.ai_percent ?? task.ai_coverage)}%；AI 完成 ${numberValue(aiReview.reviewed_file_count)} 个、未完成 ${numberValue(aiReview.failed_file_count)} 个，排除 ${numberValue(coverage.excluded_files ?? summary.excluded_files)} 个。${escapeHtml(deepStrategy)}每个文件的实际状态会在下方单独标明。</p>${failedBatchDetails ? `<div class="summary"><h3>AI 失败批次</h3><ul>${failedBatchDetails}</ul></div>` : ''}${report.analysis_note ? `<div class="summary"><h3>实际执行链路</h3><p>${richText(report.analysis_note)}</p></div>` : ''}<div class="file-list">${files || '<div class="empty">未记录变更文件</div>'}</div></section>`;
   return reportDocument(task, reportName(task, 'change'), body);
 }
 

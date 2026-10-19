@@ -56,7 +56,7 @@ class CodeReviewPromptLanguageTests(SimpleTestCase):
 
 
 class ReviewPipelineToolTests(SimpleTestCase):
-    def test_developer_report_keeps_critical_findings_and_limits_noise(self):
+    def test_developer_report_keeps_all_three_dispositions(self):
         findings = [
             {"key": f"high-{index}", "severity": "high", "disposition": "needs_confirmation", "confidence": .8}
             for index in range(5)
@@ -68,9 +68,23 @@ class ReviewPipelineToolTests(SimpleTestCase):
             for index in range(20)
         ]
         visible, screening = _prioritize_findings_for_report(findings)
-        self.assertEqual(len(visible), 9)
-        self.assertTrue(all(item in visible for item in findings[:9]))
-        self.assertEqual(screening, {"candidate_count": 29, "displayed_count": 9, "suppressed_count": 20, "display_limit": 15})
+        self.assertEqual(len(visible), 29)
+        self.assertTrue(all(item in visible for item in findings))
+        self.assertEqual(screening, {"candidate_count": 29, "displayed_count": 29, "suppressed_count": 0, "display_limit": None})
+
+    def test_verification_limit_does_not_define_final_report_scope(self):
+        findings = [
+            {"key": f"pending-{index}", "severity": "medium", "disposition": "needs_confirmation", "confidence": .8}
+            for index in range(35)
+        ] + [
+            {"key": "advice", "severity": "low", "disposition": "advisory", "confidence": .5}
+        ]
+        verification_candidates, _ = _prioritize_findings_for_report(findings, limit=30)
+        report_findings, screening = _prioritize_findings_for_report(findings)
+        self.assertEqual(len(verification_candidates), 30)
+        self.assertEqual(len(report_findings), 36)
+        self.assertIn("advice", {item["key"] for item in report_findings})
+        self.assertEqual(screening["suppressed_count"], 0)
 
     def test_verification_rejects_counter_evidenced_candidate(self):
         findings = [
@@ -337,6 +351,9 @@ class DiffRuleTests(TestCase):
     def test_low_value_files_are_filtered(self):
         self.assertTrue(_is_low_value_file("frontend/package-lock.json"))
         self.assertTrue(_is_low_value_file("web/dist/app.min.js"))
+        self.assertTrue(_is_low_value_file("app/.kotlin/errors/errors-123.log"))
+        self.assertTrue(_is_low_value_file("libs/vendor-sdk.aar"))
+        self.assertTrue(_is_low_value_file("src/main/res/drawable/logo.png"))
         self.assertFalse(_is_low_value_file("src/orders/service.py"))
         self.assertIn("package-lock.json", LOW_VALUE_FILE_PATTERNS)
 
@@ -974,6 +991,8 @@ class AnalysisLifecycleTests(TransactionTestCase):
         self.assertEqual(task.change_report["summary"]["high_risk_count"], 1)
         self.assertEqual(task.test_report["summary"]["test_point_count"], 1)
         self.assertEqual(task.ai_coverage, 0)
+        self.assertEqual(task.change_report["files"][0]["review_status"], "machine_only")
+        self.assertEqual(task.change_report["coverage"]["ai_review"]["reviewed_file_count"], 0)
         client = APIClient()
         client.force_authenticate(self.user)
         change_download = client.get(f"/api/code-analysis/tasks/{task.id}/download-change-report/")
@@ -1085,6 +1104,8 @@ class AnalysisLifecycleTests(TransactionTestCase):
                 self.assertEqual(risk_design.call_count, calls["risk"], mode)
                 self.assertEqual(fix_patches.call_count, calls["fix"], mode)
                 self.assertEqual(task.change_report["ocr_status"]["status"], "completed" if mode == "deep" else "skipped")
+                expected_file_status = "machine_only" if mode == "quick" else "ai_reviewed"
+                self.assertEqual(task.change_report["files"][0]["review_status"], expected_file_status)
 
     @patch("code_analysis.tasks.retry_code_analysis_ocr.delay")
     def test_standard_analysis_cannot_retry_ocr(self, delay):

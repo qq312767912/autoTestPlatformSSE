@@ -731,6 +731,8 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
         if report_type == "change":
             report = task.change_report or {}
             summary = report.get("summary", {})
+            coverage = report.get("coverage") or {}
+            ai_review = coverage.get("ai_review") or {}
             ocr_status = report.get("ocr_status") or {}
             lines = [
                 f"# {task.title or task.repository.name} - 代码审查报告", "",
@@ -749,6 +751,10 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
                 f"- 高风险：{summary.get('high_risk_count', 0)}",
                 f"- 机器覆盖率：{task.machine_coverage}%",
                 f"- AI覆盖率：{task.ai_coverage}%",
+                f"- 可语义审查文件：{coverage.get('reviewable_files', coverage.get('analyzed_files', 0))}/{coverage.get('scope_files', summary.get('changed_files', 0))}",
+                f"- AI已完成文件：{ai_review.get('reviewed_file_count', 0)}",
+                f"- AI未完成文件：{ai_review.get('failed_file_count', 0)}",
+                f"- 排除文件：{coverage.get('excluded_files', summary.get('excluded_files', 0))}",
                 f"- OCR状态：{ocr_status.get('message') or '历史报告未记录 OCR 状态'}",
                 f"- Token消耗：{task.token_usage}", "",
                 "## 风险与影响", "",
@@ -772,8 +778,24 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
                     lines.extend([f"- 建议修复状态：{'可应用' if item.get('patch_status') == 'applicable' else '仅供参考'}", ""])
                     if item.get("suggested_patch"):
                         lines.extend(["```diff", str(item["suggested_patch"]), "```", ""])
+            failed_batches = ai_review.get("failed_batches") or []
+            if failed_batches:
+                lines.extend(["## AI 失败批次", ""])
+                for item in failed_batches:
+                    lines.append(
+                        f"- 批次 {item.get('batch', '-')}：{'、'.join(item.get('files') or []) or '未记录文件'}；"
+                        f"{item.get('reason') or '未记录失败原因'}"
+                    )
+                lines.append("")
+            status_labels = {
+                "excluded": "已排除", "machine_only": "仅机器规则",
+                "ai_reviewed": "AI 语义审查完成", "ai_failed": "AI 语义审查未完成",
+            }
             lines.extend(["## 变更文件", ""])
-            lines.extend(f"- `{item.get('path', '')}`" for item in report.get("files", []))
+            for item in report.get("files", []):
+                status_text = status_labels.get(item.get("review_status"), "历史报告未记录 AI 状态")
+                reason = f"（{item.get('exclusion_reason')}）" if item.get("excluded") and item.get("exclusion_reason") else ""
+                lines.append(f"- `{item.get('path', '')}`：{status_text}{reason}")
         else:
             report = task.test_report or {}
             summary = report.get("summary", {})
