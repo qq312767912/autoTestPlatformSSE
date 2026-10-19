@@ -1526,7 +1526,9 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
         "最后只基于明确证据评估影响范围并生成回归点。不得把单独出现的闭合标签、截断代码或未提供的上下文判断为模板语法/编译错误；"
         "模板、XML、Vue 等语法问题只有在同一 Diff 中存在明确不匹配证据时才可报告。"
         "对每条高风险或中风险，必须同时给出基于该风险结论的中文测试标题、触发条件和可判定预期；低风险无需给风险测试内容。"
-        "每条风险必须给出可定位的文件和代码证据，并填写 disposition：confirmed 仅用于有明确触发链路和可验证错误结果的缺陷；needs_confirmation 用于需要业务规则、运行环境或调用方信息才能定性的风险；advisory 用于不影响正确性的改进建议。"
+        "每条风险必须给出可定位的文件和代码证据，并填写 disposition：confirmed 仅用于目标版本中仍存在、有明确触发链路和可验证错误结果的缺陷；needs_confirmation 用于需要业务规则、运行环境或调用方信息才能定性的风险；advisory 用于不影响正确性的改进建议。"
+        "不得把本次变更已经修复的旧问题、符合需求的内容/日期/链接更新、正常功能实现、正向效果说明或单纯回归验证点报告为缺陷；"
+        "仅能说明‘可能’‘建议验证’或‘若未同步将出错’时不得使用 confirmed。"
         "同时填写 trigger（如何触发）、recommendation（开发如何修改或验证）；证据不足时不得使用 confirmed。"
         "输出严格JSON：{\"impact_modules\":[{\"module\":\"\",\"change_type\":\"\",\"impact\":\"\",\"regression_scope\":\"\"}],\"risks\":[{\"change\":\"\",\"file\":\"\",\"line_start\":0,\"severity\":\"high|medium|low\","
         "\"disposition\":\"confirmed|needs_confirmation|advisory\",\"confidence\":0.0,\"evidence\":\"\",\"trigger\":\"\",\"impact\":\"\",\"recommendation\":\"\",\"test_title\":\"\",\"test_objective\":\"\",\"test_expected_result\":\"\"}],\"test_requirements\":[{\"title\":\"\","
@@ -1609,6 +1611,29 @@ def _classify_finding(finding):
     return item
 
 
+def _has_direct_target_defect_evidence(finding):
+    """识别无需业务推断即可由目标源码直接判定的缺陷，避免核验服务失败时漏报。"""
+    confidence = float(finding.get("confidence") or 0)
+    if confidence < 0.95 or not finding.get("evidence") or not finding.get("trigger"):
+        return False
+    text = " ".join(str(finding.get(field) or "") for field in ("change", "evidence", "trigger")).lower()
+    remediation = ("已移除", "改为环境变量", "改用环境变量", "不再硬编码", "修复后")
+    if any(marker in text for marker in remediation):
+        return False
+    empty_implementation = (
+        any(marker in text for marker in ("todo", "未实现", "空实现"))
+        and any(marker in text for marker in ("直接返回", "空响应", "return new", "return null"))
+    )
+    plaintext_credential = (
+        any(marker in text for marker in ("硬编码", "明文"))
+        and any(marker in text for marker in (
+            "accesskey", "access-key", "secretkey", "secret-key", "sessioncredentials", "凭证",
+        ))
+        and any(marker in text for marker in ("配置", "代码", "赋值", "字符串", "sessioncredentials"))
+    )
+    return empty_implementation or plaintext_credential
+
+
 def _apply_verification_results(findings, verdicts):
     """合并反证裁决；rejected 候选仅记统计，不交付给开发。"""
     allowed = {"confirmed", "needs_confirmation", "rejected", "advisory"}
@@ -1617,7 +1642,6 @@ def _apply_verification_results(findings, verdicts):
     for finding in findings:
         item = dict(finding)
         verdict = mapped.get(str(item.get("key")), {})
-        decision = verdict.get("verdict") or item.get("disposition") or "needs_confirmation"
         item["verification_reason"] = str(verdict.get("reason") or "")[:2000]
         item["counter_evidence"] = str(verdict.get("counter_evidence") or "")[:3000]
         supporting = verdict.get("supporting_evidence") or []
@@ -1626,10 +1650,31 @@ def _apply_verification_results(findings, verdicts):
         item["supporting_evidence"] = [str(value)[:1000] for value in supporting[:10] if value]
         item["trigger_reachable"] = verdict.get("trigger_reachable") if isinstance(verdict.get("trigger_reachable"), bool) else None
         item["target_commit_verified"] = bool(verdict)
-        item["verification_status"] = {
+        decision = verdict.get("verdict") or item.get("disposition") or "needs_confirmation"
+        direct_evidence_fallback = not verdict and _has_direct_target_defect_evidence(item)
+        if (
+            not verdict and decision == "confirmed"
+            and item.get("source") != "static_scan"
+            and not direct_evidence_fallback
+        ):
+            decision = "needs_confirmation"
+            item["verification_reason"] = "目标 Commit 反证核验未返回有效结论，不能作为确定缺陷"
+        if verdict and decision == "confirmed" and item.get("source") != "static_scan":
+            proof_complete = bool(
+                item["verification_reason"]
+                and item["supporting_evidence"]
+                and item["trigger_reachable"] is True
+            )
+            if not proof_complete:
+                decision = "needs_confirmation"
+                item["verification_reason"] = (
+                    item["verification_reason"]
+                    or "反证核验缺少可达触发路径、支持证据或明确结论，不能作为确定缺陷"
+                )
+        item["verification_status"] = "direct_evidence_fallback" if direct_evidence_fallback else ({
             "confirmed": "supported", "needs_confirmation": "partially_supported",
             "rejected": "refuted", "advisory": "inconclusive",
-        }.get(decision, "inconclusive") if verdict else "verification_failed"
+        }.get(decision, "inconclusive") if verdict else "verification_failed")
         item["verdict"] = decision
         if verdict.get("severity") in {"high", "medium", "low"}:
             item["severity"] = verdict["severity"]
@@ -1670,14 +1715,18 @@ def _related_source_context(mcp, search_hits, current_path, source_cache, max_fi
 
 def _verify_findings_against_target(task, findings, review_client=None):
     """使用目标 Commit 源码和跨文件检索对 AI 候选做独立反证。"""
-    if task.mode == "quick" or not findings:
-        return findings, [], 0, "快速模式未执行 AI 反证审查"
+    if not findings:
+        return [], [], 0, "没有需要执行反证审查的候选问题"
+    if task.mode == "quick":
+        active, rejected = _apply_verification_results(findings, [])
+        return active, rejected, 0, "快速模式未执行 AI 反证审查，缺少直接源码证据的 AI 确定缺陷已降为待确认"
     from langgraph_integration.views import create_llm_instance
     from .review_mcp import CodeReviewMCP
     try:
         config = _get_code_analysis_llm_config()
     except Exception as exc:
-        return findings, [], 0, f"反证审查未执行：{exc}"
+        active, rejected = _apply_verification_results(findings, [])
+        return active, rejected, 0, f"反证审查未执行，缺少直接源码证据的 AI 确定缺陷已降为待确认：{exc}"
 
     mcp = CodeReviewMCP(task, review_client)
     source_cache, search_cache = {}, {}
@@ -1725,8 +1774,12 @@ def _verify_findings_against_target(task, findings, review_client=None):
     def verify_batch(index, batch):
         prompt = (
             "你是代码审查反证员。逐条验证候选问题，必须先尝试用目标 Commit 源码和跨文件检索结果推翻它。"
+            "只判断目标 Commit 当前仍然存在的错误，不得把旧代码的问题、本次变更已经修复的问题、变更内容或正向效果本身当成缺陷。"
+            "符合需求的内容、日期或链接更新，新增加载状态、路由调整等正常实现，以及‘修复后避免/确保/符合需求’类描述，必须 rejected；如仅缺少业务规则证明，则 needs_confirmation。"
             "仅变更了字段、路由、应用注册、组件属性或容器入口，不等于存在缺陷；若相关定义、调用方、配置或兼容逻辑已同步，必须 rejected。"
-            "confirmed 要求完整证据能直接证明可复现错误；needs_confirmation 仅用于代码无法决定的业务或运行环境问题；advisory 仅用于非正确性改进。"
+            "‘可能’‘建议验证’‘若未同步将出错’只能说明验证需求，不能证明缺陷。"
+            "confirmed 必须同时指出目标版本仍然错误的具体代码、可达触发路径、确定的错误结果和支持证据；任一项缺失均不得 confirmed。"
+            "needs_confirmation 仅用于代码无法决定的业务或运行环境问题；advisory 仅用于非正确性改进。"
             "severity 必须独立判断：可导致越权、敏感数据泄露或篡改、不可恢复数据损坏、核心服务大面积不可用的已确认问题为 high；"
             "局部接口 500、可恢复的数据重复或功能局部失效通常为 medium；低概率且影响有限为 low。不得为了报告好看强行产生 high，也不得把已证明的高影响缺陷机械降级。"
             "每个 key 必须返回一项。"

@@ -15,7 +15,7 @@ from langgraph_integration.models import LLMConfig
 from .models import AnalysisTask, AnalysisTaskExecutionLog, CodeAnalysisLLMConfig, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
 from .serializers import GitLabConnectionSerializer, ProjectRepositorySerializer
 from .review_mcp import CodeReviewMCP
-from .services import AI_REVIEW_LANGUAGE_RULE, AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _apply_verification_results, _attach_finding_diff_evidence, _classify_finding, _diff_line_stats, _effective_deep_coverage, _ensure_not_cancelled, _generate_fix_patches, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_fallback_diffs, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _prioritize_findings_for_report, _related_source_context, _reuse_cached_result, _review_payload_needs_chinese_retry, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, remove_ocr_repositories_for_repository, remove_ocr_repository, retry_ocr_analysis, run_analysis
+from .services import AI_REVIEW_LANGUAGE_RULE, AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _apply_verification_results, _attach_finding_diff_evidence, _classify_finding, _diff_line_stats, _effective_deep_coverage, _ensure_not_cancelled, _generate_fix_patches, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_fallback_diffs, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _prioritize_findings_for_report, _related_source_context, _reuse_cached_result, _review_payload_needs_chinese_retry, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, _verify_findings_against_target, remove_ocr_repositories_for_repository, remove_ocr_repository, retry_ocr_analysis, run_analysis
 
 
 class CodeReviewPromptLanguageTests(SimpleTestCase):
@@ -79,12 +79,142 @@ class ReviewPipelineToolTests(SimpleTestCase):
         ]
         active, rejected = _apply_verification_results(findings, [
             {"key": "false-positive", "verdict": "rejected", "severity": "low", "reason": "调用方已同步"},
-            {"key": "real-risk", "verdict": "confirmed", "severity": "high", "reason": "空值路径可复现"},
+            {
+                "key": "real-risk", "verdict": "confirmed", "severity": "high",
+                "reason": "空值路径可复现", "supporting_evidence": ["调用方直接传入空值"],
+                "trigger_reachable": True,
+            },
         ])
         self.assertEqual([item["key"] for item in active], ["real-risk"])
         self.assertEqual(active[0]["disposition"], "confirmed")
         self.assertEqual(active[0]["severity"], "high")
         self.assertEqual([item["key"] for item in rejected], ["false-positive"])
+
+    def test_unverified_ai_confirmation_is_downgraded(self):
+        active, rejected = _apply_verification_results([
+            {
+                "key": "ai-risk", "source": "ai_analysis", "severity": "high",
+                "disposition": "confirmed", "verified": True,
+            },
+        ], [])
+        self.assertFalse(rejected)
+        self.assertEqual(active[0]["disposition"], "needs_confirmation")
+        self.assertFalse(active[0]["verified"])
+        self.assertEqual(active[0]["verification_status"], "verification_failed")
+        self.assertIn("不能作为确定缺陷", active[0]["verification_reason"])
+
+    def test_unverified_static_scan_confirmation_is_preserved(self):
+        active, rejected = _apply_verification_results([
+            {"key": "syntax-error", "source": "static_scan", "disposition": "confirmed"},
+        ], [])
+        self.assertFalse(rejected)
+        self.assertEqual(active[0]["disposition"], "confirmed")
+        self.assertTrue(active[0]["verified"])
+
+    def test_incomplete_ai_confirmation_is_downgraded(self):
+        active, rejected = _apply_verification_results([
+            {"key": "weak-proof", "source": "ai_analysis", "disposition": "needs_confirmation"},
+        ], [{
+            "key": "weak-proof", "verdict": "confirmed", "reason": "建议验证这个路径",
+            "supporting_evidence": [], "trigger_reachable": None,
+        }])
+        self.assertFalse(rejected)
+        self.assertEqual(active[0]["disposition"], "needs_confirmation")
+        self.assertFalse(active[0]["verified"])
+        self.assertEqual(active[0]["verification_status"], "partially_supported")
+
+    def test_quick_mode_cannot_bypass_ai_confirmation_verification(self):
+        active, rejected, tokens, note = _verify_findings_against_target(
+            SimpleNamespace(mode="quick"),
+            [{"key": "ai-risk", "source": "ai_analysis", "disposition": "confirmed"}],
+        )
+        self.assertFalse(rejected)
+        self.assertEqual(tokens, 0)
+        self.assertEqual(active[0]["disposition"], "needs_confirmation")
+        self.assertIn("已降为待确认", note)
+
+    @patch("code_analysis.services._get_code_analysis_llm_config", side_effect=RuntimeError("未配置模型"))
+    def test_missing_verifier_config_cannot_bypass_ai_confirmation(self, _config):
+        active, rejected, tokens, note = _verify_findings_against_target(
+            SimpleNamespace(mode="standard"),
+            [{"key": "ai-risk", "source": "ai_analysis", "disposition": "confirmed"}],
+        )
+        self.assertFalse(rejected)
+        self.assertEqual(tokens, 0)
+        self.assertEqual(active[0]["disposition"], "needs_confirmation")
+        self.assertIn("未配置模型", note)
+
+    def test_empty_verification_candidate_list_returns_cleanly(self):
+        active, rejected, tokens, note = _verify_findings_against_target(
+            SimpleNamespace(mode="standard"), [],
+        )
+        self.assertEqual((active, rejected, tokens), ([], [], 0))
+        self.assertIn("没有需要", note)
+
+    def test_verified_real_defects_remain_confirmed(self):
+        findings = [
+            {
+                "key": "empty-retry", "source": "ai_analysis", "disposition": "confirmed",
+                "change": "retryWorkflow 仅包含 TODO 并直接返回空响应",
+            },
+            {
+                "key": "config-secret", "source": "ai_analysis", "disposition": "confirmed",
+                "change": "生产配置硬编码 AccessKey 和 SecretKey",
+            },
+            {
+                "key": "test-secret", "source": "ai_analysis", "disposition": "confirmed",
+                "change": "测试代码硬编码 RocketMQ 凭证",
+            },
+        ]
+        verdicts = [
+            {
+                "key": "empty-retry", "verdict": "confirmed", "reason": "目标方法仍为空实现",
+                "supporting_evidence": ["有效请求进入方法后直接返回空响应"], "trigger_reachable": True,
+            },
+            {
+                "key": "config-secret", "verdict": "confirmed", "reason": "目标配置仍含明文凭证",
+                "supporting_evidence": ["application-product.yml 直接赋值 access-key 和 secret-key"],
+                "trigger_reachable": True,
+            },
+            {
+                "key": "test-secret", "verdict": "confirmed", "reason": "目标测试源码仍含明文凭证",
+                "supporting_evidence": ["SessionCredentials 构造参数为明文字符串"],
+                "trigger_reachable": True,
+            },
+        ]
+        active, rejected = _apply_verification_results(findings, verdicts)
+        self.assertFalse(rejected)
+        self.assertEqual([item["key"] for item in active], [
+            "empty-retry", "config-secret", "test-secret",
+        ])
+        self.assertTrue(all(item["disposition"] == "confirmed" for item in active))
+        self.assertTrue(all(item["verification_status"] == "supported" for item in active))
+
+    def test_report_real_defects_survive_verifier_failure(self):
+        findings = [
+            {
+                "key": "empty-retry", "source": "ai_analysis", "disposition": "confirmed",
+                "confidence": 1, "change": "retryWorkflow 方法仅包含 TODO，未实现业务逻辑",
+                "evidence": "方法体仅有 TODO，直接返回 new DiscloseEoaBulletinFlowRetryResponse()",
+                "trigger": "调用 retryWorkflow 接口传入有效 requestId",
+            },
+            {
+                "key": "config-secret", "source": "ai_analysis", "disposition": "confirmed",
+                "confidence": 1, "change": "配置文件硬编码 AccessKey 和 SecretKey",
+                "evidence": "application-product.yml 直接明文赋值 access-key 和 secret-key",
+                "trigger": "应用部署时读取配置文件",
+            },
+            {
+                "key": "test-secret", "source": "ai_analysis", "disposition": "confirmed",
+                "confidence": 1, "change": "测试代码中硬编码 RocketMQ 凭证",
+                "evidence": "SessionCredentials 构造参数为明文 AccessKey 和 SecretKey 字符串",
+                "trigger": "测试代码提交至代码仓库",
+            },
+        ]
+        active, rejected = _apply_verification_results(findings, [])
+        self.assertFalse(rejected)
+        self.assertTrue(all(item["disposition"] == "confirmed" for item in active))
+        self.assertTrue(all(item["verification_status"] == "direct_evidence_fallback" for item in active))
 
     def test_verification_reads_related_files_from_search_hits(self):
         mcp = SimpleNamespace(read_file=lambda path: "\n".join(f"line {index}" for index in range(1, 80)))
