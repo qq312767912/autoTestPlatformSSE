@@ -97,3 +97,83 @@ class OptimizationExperiment(models.Model):
     class Meta:
         ordering = ["-created_at"]
         indexes = [models.Index(fields=["proposal", "status"])]
+
+
+class EvolutionExperiment(models.Model):
+    """一次报告驱动的 Baseline/A/B 隔离试验。"""
+
+    STATE_CHOICES = [
+        ("draft", "待生成"), ("ready", "待重跑"), ("running", "重跑中"),
+        ("awaiting_choice", "待人工选优"), ("winner_selected", "已选优"),
+        ("submitted", "已提交发布"), ("failed", "失败"),
+    ]
+    WINNER_CHOICES = [("A", "Candidate A"), ("B", "Candidate B")]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        "projects.Project", on_delete=models.CASCADE, related_name="evolution_experiments",
+    )
+    output = models.ForeignKey(
+        "knowledge_evolution.GenerationOutput", on_delete=models.PROTECT,
+        related_name="evolution_experiments",
+    )
+    baseline_skill_version = models.ForeignKey(
+        "skills.SkillVersion", on_delete=models.PROTECT,
+        related_name="baseline_evolution_experiments",
+    )
+    attributions = models.ManyToManyField(
+        "knowledge_evolution.FailureAttribution", related_name="evolution_experiments",
+    )
+    state = models.CharField(max_length=24, choices=STATE_CHOICES, default="draft", db_index=True)
+    winner_label = models.CharField(max_length=1, choices=WINNER_CHOICES, blank=True)
+    winner_reason = models.TextField(blank=True)
+    baseline_sha256 = models.CharField(max_length=64)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="created_evolution_experiments",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["project", "state"], name="ke_evoexp_project_state_idx"),
+        ]
+
+
+class EvolutionVariant(models.Model):
+    """实验分支快照；每个变体拥有独立 Skill 版本与运行结果。"""
+
+    LABEL_CHOICES = [("baseline", "Baseline"), ("A", "Candidate A"), ("B", "Candidate B")]
+    STATUS_CHOICES = [
+        ("ready", "待运行"), ("running", "运行中"), ("completed", "已完成"),
+        ("failed", "失败"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    experiment = models.ForeignKey(
+        EvolutionExperiment, on_delete=models.CASCADE, related_name="variants",
+    )
+    label = models.CharField(max_length=8, choices=LABEL_CHOICES)
+    mutation_strategy = models.CharField(max_length=64)
+    skill_version = models.ForeignKey(
+        "skills.SkillVersion", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="evolution_variants",
+    )
+    sandbox_key = models.CharField(max_length=128, unique=True)
+    patch = models.JSONField(default=dict, blank=True)
+    asset_snapshots = models.JSONField(default=dict, blank=True)
+    impact_scope = models.JSONField(default=dict, blank=True)
+    rollback_target = models.CharField(max_length=64)
+    fingerprint = models.CharField(max_length=64, unique=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="ready")
+    run_result = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["experiment", "label"]
+        constraints = [
+            models.UniqueConstraint(fields=["experiment", "label"], name="uniq_evolution_variant_label"),
+        ]

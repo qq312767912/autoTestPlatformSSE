@@ -183,7 +183,14 @@ function buildChangeReport(task: AnalysisTask): string {
       ${item.severity === 'high' && findingDisposition(item) === 'confirmed' ? renderSuggestedPatch(item) : ''}
       <div class="detail"><b>触发方式</b><span>${richText(item.trigger || '请开发结合调用链或运行场景确认触发条件')}</span></div>
       <div class="detail"><b>影响</b><span>${richText(item.impact || '需结合代码上下文确认')}</span></div>
+      <div class="detail"><b>反证状态</b><span>${escapeHtml(item.verification_status || '历史报告未记录')}</span></div>
       ${item.verification_reason ? `<div class="detail"><b>核验结论</b><span>${richText(item.verification_reason)}</span></div>` : ''}
+      ${item.source_keys?.length ? `<div class="detail"><b>合并来源</b><span>${escapeHtml(item.source_keys.join('、'))}</span></div>` : ''}
+      ${item.change_kind ? `<div class="detail"><b>变更对齐</b><span>${escapeHtml(item.change_kind)}${item.subject ? ` · ${escapeHtml(item.subject)}` : ''}</span></div>` : ''}
+      ${item.replacement_evidence ? `<div class="detail"><b>替代证据</b><span>${richText(item.replacement_evidence)}</span></div>` : ''}
+      ${item.missing_evidence ? `<div class="detail"><b>缺少的证据</b><span>${richText(item.missing_evidence)}</span></div>` : ''}
+      ${item.severity_reason ? `<div class="detail"><b>定级依据</b><span>${richText(item.severity_reason)}</span></div>` : ''}
+      ${(item.document_references || []).map(document => `<div class="detail"><b>关联文档</b><span>${escapeHtml(document.title || '未命名')}（版本 ${escapeHtml(document.version || '未记录')}）：${escapeHtml(document.excerpt || document.reason || '无可用片段')}</span></div>`).join('')}
       ${findingDisposition(item) === 'needs_confirmation' && item.counter_evidence ? `<div class="detail"><b>待确认依据</b><span>${richText(item.counter_evidence)}</span></div>` : ''}
       <div class="detail"><b>处理建议</b><span>${richText(item.recommendation || '检查相关调用链并补充可复现验证；确认成立后再修改')}</span></div>
     </article>`).join('');
@@ -215,6 +222,7 @@ function buildChangeReport(task: AnalysisTask): string {
       ${metric('总变更行', numberValue(summary.changed_lines))}
       ${metric('核心问题', numberValue(summary.risk_count), 'danger')}
       ${metric('待开发确认', pending.length)}
+      ${metric('反证未完成', numberValue(summary.unverified_risk_count))}
       ${metric('改进建议', advisory.length)}
       ${metric('机器覆盖率', `${numberValue(task.machine_coverage)}%`)}
       ${metric('AI 覆盖率', `${numberValue(task.ai_coverage)}%`)}

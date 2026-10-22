@@ -31,6 +31,8 @@ import type {
   CaseReviewReportFeedbackResult,
   OptimizationDecisionResult,
   OptimizationProposalResult,
+  AttributionTaxonomyV2,
+  EvolutionExperimentView,
   OutputLineageView,
   StageFeedbackResult,
   StageExecutionAttemptView,
@@ -646,11 +648,25 @@ export async function downloadStageArtifact(
   projectId: number,
   workflowId: string,
   stage: string,
+  name = '',
+  key = '',
 ): Promise<string> {
   return downloadAttachment(
     `${BASE}/operations/workflow-stage-artifact/`,
-    { project: projectId, workflow_id: workflowId, stage },
+    { project: projectId, workflow_id: workflowId, stage, ...(name ? { name } : {}), ...(key ? { key } : {}) },
     `${stage}-report.md`,
+  );
+}
+
+export async function downloadGenerationOutputArtifact(
+  outputId: string,
+  name: string,
+  key = '',
+): Promise<string> {
+  return downloadAttachment(
+    `${BASE}/generation-outputs/${outputId}/artifact/`,
+    { name, ...(key ? { key } : {}) },
+    name,
   );
 }
 
@@ -875,6 +891,14 @@ export async function proposeCaseReviewOptimizations(
   return upload<OptimizationProposalResult>('/case-review-evolution/attributions/', form);
 }
 
+export async function getCaseReviewAttributionTaxonomy(
+  projectId: number,
+): Promise<AttributionTaxonomyV2> {
+  return get<AttributionTaxonomyV2>('/case-review-evolution/attribution-taxonomy/', {
+    project: projectId,
+  });
+}
+
 /**
  * 第 ③ 步的后半：人工逐条「采纳 / 改写 / 驳回」。
  *
@@ -885,13 +909,38 @@ export async function proposeCaseReviewOptimizations(
 export async function confirmCaseReviewOptimizations(
   projectId: number,
   reviewId: string,
-  decisions: Array<{ attribution_id: string; action: 'accept' | 'edit' | 'reject'; hypothesis?: string; category?: string }>,
+  decisions: Array<{
+    attribution_id: string;
+    action: 'accept' | 'relabel' | 'edit' | 'reject';
+    hypothesis?: string;
+    category?: string;
+    primary_cause?: string;
+    fine_cause?: string;
+    repair_target?: string;
+  }>,
 ): Promise<OptimizationDecisionResult> {
   return post<OptimizationDecisionResult>('/case-review-evolution/attributions/confirm/', {
     project: projectId,
     review_id: reviewId,
     decisions,
   });
+}
+
+export async function createCaseReviewEvolutionExperiment(
+  projectId:number, reviewId:string, attributionIds:string[],
+):Promise<EvolutionExperimentView>{
+  return post<EvolutionExperimentView>('/case-review-evolution/experiments/',{
+    project:projectId,review_id:reviewId,attribution_ids:attributionIds,
+  });
+}
+export async function rerunCaseReviewEvolutionExperiment(projectId:number,experimentId:string):Promise<EvolutionExperimentView>{
+  return post<EvolutionExperimentView>('/case-review-evolution/experiments/rerun/',{project:projectId,experiment_id:experimentId});
+}
+export async function chooseCaseReviewEvolutionWinner(projectId:number,experimentId:string,label:'A'|'B',reason:string):Promise<EvolutionExperimentView>{
+  return post<EvolutionExperimentView>('/case-review-evolution/experiments/choose-winner/',{project:projectId,experiment_id:experimentId,label,reason});
+}
+export async function submitCaseReviewEvolutionWinner(projectId:number,experimentId:string):Promise<EvolutionExperimentView>{
+  return post<EvolutionExperimentView>('/case-review-evolution/experiments/submit-winner/',{project:projectId,experiment_id:experimentId});
 }
 
 // ---------------------------------------------------------------- 内容来源（T09 / T10）

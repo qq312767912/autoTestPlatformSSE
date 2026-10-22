@@ -84,11 +84,17 @@
             </div>
           </a-form-item>
           <a-form-item v-if="reviewMode === 'specified'" label="审查 Skill" required>
-            <a-select v-model="selectedSkillId" allow-search placeholder="选择一个已启用的 Skill">
-              <a-option v-for="skill in availableSkills" :key="skill.id" :value="skill.id">
-                {{ skill.name }} · {{ skill.description }}
+            <div class="field-stack">
+            <a-select v-model="selectedSkillVersionId" allow-search allow-clear placeholder="选择 Skill 及其具体版本">
+              <a-option v-for="option in availableSkillVersions" :key="option.id" :value="option.id" :label="option.label" :disabled="option.disabled">
+                <div class="review-version-option" :title="option.label">
+                  <div class="review-version-title">{{ option.title }}<span v-if="option.unavailableReason"> · {{ option.unavailableReason }}</span></div>
+                  <div class="review-version-description">{{ option.description }}</div>
+                </div>
               </a-option>
             </a-select>
+            <div class="hint">按具体版本执行；未填写变更描述的历史版本会明确标注。</div>
+            </div>
           </a-form-item>
         </section>
 
@@ -198,6 +204,8 @@ import {
   type TestCaseReviewLlmConfig,
 } from './service';
 import { SkillService } from '@/features/skills/services/skillService';
+import { buildReviewVersionOptions, type ReviewVersionOption } from './versionOptions';
+import { SkillHubService } from '@/features/skills/services/skillHubService';
 import * as codeReviewApi from '@/features/code-analysis/service';
 import { KnowledgeService } from '@/features/knowledge/services/knowledgeService';
 import KnowledgeDocumentScopeSelector from '@/features/knowledge/components/KnowledgeDocumentScopeSelector.vue';
@@ -214,9 +222,9 @@ const selectedFile = ref<File | null>(null);
 const fileList = ref<any[]>([]);
 const businessContext = ref('');
 const reviewMode = ref<'general' | 'specified'>('general');
-const selectedSkillId = ref<number>();
+const selectedSkillVersionId = ref<string>();
 const customRules = ref('');
-const availableSkills = ref<any[]>([]);
+const availableSkillVersions = ref<ReviewVersionOption[]>([]);
 const requirementDocuments = ref<any[]>([]);
 const requirementDocumentIds = ref<string[]>([]);
 const knowledgeBases = ref<KnowledgeBase[]>([]);
@@ -261,10 +269,24 @@ async function load(silent = false) {
   if (!silent) loading.value = true;
   try {
     reviews.value = await listReviews(projectId.value);
-    if (!silent || !availableSkills.value.length) {
+    if (!silent || !availableSkillVersions.value.length) {
       const [skillsResult, docs, bases] = await Promise.all([SkillService.getSkills(projectId.value), codeReviewApi.getProjectDocuments(projectId.value), KnowledgeService.getKnowledgeBases({ project: projectId.value, is_active: true, page_size: 100 })]);
       // getSkills 现在返回 { items, meta }：Skill 目录是公共的，meta 里带"能否补填阶段"等能力声明。
-      availableSkills.value = skillsResult.items.filter(skill => skill.is_active);
+      // 指定审查只展示声明为「用例审查」的 Skill，避免把方案生成、浏览器工具等能力混进来。
+      const reviewSkills = skillsResult.items.filter(skill => skill.is_active && (skill.stage === 'case_review' || skill.name === 'test-case-clarity-review'));
+      const groupedVersions = await Promise.all(reviewSkills.map(async skill => {
+        try {
+          const versions = await SkillHubService.listVersions(projectId.value!, skill.id, true);
+          return buildReviewVersionOptions(skill, versions);
+        } catch {
+          if (!silent) Message.warning(`${skill.display_name || skill.name} 的版本列表读取失败，请重试`);
+          return [];
+        }
+      }));
+      availableSkillVersions.value = groupedVersions.flat();
+      if (selectedSkillVersionId.value && !availableSkillVersions.value.some(option => option.id === selectedSkillVersionId.value && !option.disabled)) {
+        selectedSkillVersionId.value = undefined;
+      }
       requirementDocuments.value = docs;
       knowledgeBases.value = Array.isArray(bases) ? bases : (bases.results || []);
     }
@@ -364,27 +386,29 @@ function diagnoseUpload(option: any) {
 }
 async function submit() {
   if (!projectId.value || !selectedFile.value) return Message.warning('请选择测试用例文件');
-  if (reviewMode.value === 'specified' && !selectedSkillId.value) return Message.warning('请选择用于审查的 Skill');
+  const selection = reviewMode.value === 'specified' ? availableSkillVersions.value.find(option => option.id === selectedSkillVersionId.value) : undefined;
+  if (reviewMode.value === 'specified' && (!selection || selection.disabled)) return Message.warning('请选择一个可用的 Skill 版本');
   submitting.value = true;
   try {
     await createReview(projectId.value, selectedFile.value, {
       businessContext: businessContext.value.trim(),
       reviewMode: reviewMode.value,
-      selectedSkill: selectedSkillId.value,
+      selectedSkill: selection?.skillId,
+      selectedSkillVersion: selection?.id,
       customRules: customRules.value.trim(),
       requirementDocumentIds: requirementDocumentIds.value,
       knowledgeBaseIds: knowledgeBaseIds.value,
       knowledgeDocumentIds: knowledgeDocumentIds.value,
     });
     Message.success('审查任务已创建'); createVisible.value = false; selectedFile.value = null; fileList.value = [];
-    businessContext.value = ''; customRules.value = ''; reviewMode.value = 'general'; selectedSkillId.value = undefined;
+    businessContext.value = ''; customRules.value = ''; reviewMode.value = 'general'; selectedSkillVersionId.value = undefined;
     requirementDocumentIds.value = []; knowledgeBaseIds.value = []; knowledgeDocumentIds.value = []; await load();
   } catch (error: any) {
     // 未配置专用 LLM 时后端返回 409：提示应指向管理员，而不是让用户改表单。
     const detail = error?.response?.data?.detail;
     Message.error(error?.response?.data?.source_file?.[0]
       || (typeof detail === 'string' ? detail : '')
-      || error?.message || '创建失败');
+      || error?.errors?.selected_skill_version?.[0] || error?.error || error?.message || '创建失败');
   }
   finally { submitting.value = false; }
 }
@@ -410,6 +434,10 @@ onBeforeUnmount(() => { if (timer) window.clearInterval(timer); });
 </script>
 
 <style scoped>
+.review-version-option { padding: 4px 0; white-space: normal; line-height: 1.5; }
+.review-version-title { font-weight: 500; }
+.review-version-description { color: var(--color-text-3); font-size: 12px; overflow-wrap: anywhere; }
+
 .review-page{padding:24px;min-height:100%;background:#f5f7fa;color:#1d2939}.hero{display:flex;justify-content:space-between;align-items:flex-end;padding:34px 38px;margin-bottom:20px;border-radius:16px;color:white;background:linear-gradient(120deg,#15395b,#0f766e);box-shadow:0 12px 30px rgba(21,57,91,.16)}.eyebrow{font-size:12px;letter-spacing:2px;color:#99f6e4}.hero h1{font-size:30px;margin:8px 0}.hero p{margin:0;max-width:760px;color:#d8edf0;line-height:1.7}.hero-actions{display:flex;gap:10px;align-items:center;flex:none}.content-card{background:#fff;border:1px solid #e5e9f0;border-radius:14px;padding:24px}.section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}.section-head h2{margin:0 0 5px;font-size:20px}.section-head span,.meta,.step,.hint{font-size:13px;color:#8492a6}.review-list{display:grid;gap:12px}.review-item{display:flex;gap:16px;align-items:flex-start;padding:20px;border:1px solid #e8edf3;border-radius:12px;transition:.2s}.review-item:hover{border-color:#9dd8d2;box-shadow:0 5px 18px rgba(15,118,110,.08)}.file-mark{flex:none;width:48px;height:48px;border-radius:10px;display:grid;place-items:center;background:#e8f7f4;color:#0f766e;font-weight:700}.review-main{min-width:0;flex:1}.review-title-row{display:flex;gap:10px;align-items:center}.review-title-row strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta{margin:6px 0}.skill-line{display:flex;gap:8px;align-items:center;margin:7px 0;font-size:12px}.skill-line span{padding:2px 8px;border-radius:99px;background:#edf7f5;color:#0f766e}.skill-line b{font-weight:500;color:#526173}.step{margin-top:5px}.summary{display:flex;gap:16px;margin-top:10px;font-size:13px}.danger{color:#d4380d}.warning{color:#d46b08}.actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.coverage-warning{margin-top:9px;padding:8px 12px;border:1px solid #ffe0a3;border-radius:8px;background:#fff8e8;color:#b54708;font-size:13px;line-height:1.6}
 .modal-title{display:flex;align-items:center;justify-content:center;gap:9px;font-size:17px}.modal-title-mark{display:grid;place-items:center;width:24px;height:24px;border-radius:8px;background:#e8f7f4;color:#0f766e;font-size:14px;font-weight:800}.review-form-intro{display:flex;flex-direction:column;gap:5px;margin:-4px 0 18px;padding:15px 17px;border:1px solid #dcece8;border-radius:10px;background:linear-gradient(120deg,#f3faf8,#f8fbff)}.review-form-intro strong{font-size:15px;color:#234657}.review-form-intro span{font-size:13px;color:#718096}.review-form{display:grid;gap:14px}.form-section{padding:18px 20px 5px;border:1px solid #e5eaf0;border-radius:12px;background:#fff}.form-section-title{display:flex;align-items:center;gap:11px;margin-bottom:16px}.form-section-title>span{display:grid;place-items:center;width:32px;height:32px;border-radius:9px;background:#15395b;color:#fff;font-size:11px;font-weight:700;letter-spacing:.5px}.form-section-title>div{display:flex;flex-direction:column;gap:2px}.form-section-title strong{font-size:15px;color:#253748}.form-section-title small{font-size:12px;color:#96a2b2}.field-stack{display:flex;flex-direction:column;width:100%;gap:8px}.review-mode-group{display:grid!important;grid-template-columns:1fr 1fr;width:100%}.review-mode-group :deep(.arco-radio-button){display:flex;justify-content:center}.review-upload{display:block;width:100%}.review-upload :deep(.arco-upload){width:100%}.review-upload :deep(.arco-upload-drag){width:100%;min-height:112px;border-radius:10px;background:#f8fafc;border-color:#cad6e2;transition:.2s}.review-upload :deep(.arco-upload-drag:hover){border-color:#0f8f82;background:#f3faf8}.review-form :deep(.arco-form-item){margin-bottom:16px}.review-form :deep(.arco-form-item-content){width:100%}.review-form :deep(.arco-textarea-wrapper){border-radius:8px;background:#f8fafc}.review-form :deep(.arco-select-view){border-radius:8px;background:#f8fafc}
 .review-list{max-height:calc(100vh - 330px);min-height:180px;overflow-y:auto;padding-right:6px}

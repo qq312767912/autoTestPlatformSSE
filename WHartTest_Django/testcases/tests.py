@@ -374,17 +374,19 @@ class TestCaseReviewReportTests(TestCase):
             self.assertFalse(generated["问题明细"].sheet_view.showGridLines)
             self.assertEqual(generated["问题明细"].freeze_panes, "A2")
             self.assertEqual(
-                [generated["问题明细"].cell(1, column).value for column in range(11, 15)],
-                ["问题确认", "问题描述", "修改点", "不采纳原因"],
+                [generated["问题明细"].cell(1, column).value for column in range(11, 19)],
+                ["修改建议", "修改示例", "判定", "问题确认", "反馈结论", "问题描述", "修改点", "不采纳原因"],
             )
             self.assertEqual(
-                [generated["问题明细"].cell(2, column).value for column in range(11, 15)],
-                [None, None, None, None],
+                [generated["问题明细"].cell(2, column).value for column in range(11, 19)],
+                ["补充跳转页面和登录态", "跳转首页且展示当前用户名", "确定缺陷", None, None, None, None, None],
             )
             validations = list(generated["问题明细"].data_validations.dataValidation)
-            self.assertEqual(len(validations), 1)
+            self.assertEqual(len(validations), 2)
             self.assertEqual(validations[0].formula1, '"是,否"')
-            self.assertIn("K2", str(validations[0].sqref))
+            self.assertIn("N2", str(validations[0].sqref))
+            self.assertIn("完全采纳", validations[1].formula1)
+            self.assertIn("O2", str(validations[1].sqref))
 
             self.assertIn("测试确认处理结果", generated.sheetnames)
             confirmation = generated["测试确认处理结果"]
@@ -392,7 +394,7 @@ class TestCaseReviewReportTests(TestCase):
             self.assertEqual(confirmation["A1"].fill.fgColor.rgb, "002F5F5B")
             self.assertEqual(confirmation["B5"].value, 1)
             self.assertEqual(confirmation["B6"].value, "=COUNTA('问题明细'!$A$2:$A$2)")
-            self.assertEqual(confirmation["B7"].value, '=COUNTIF(\'问题明细\'!$K$2:$K$2,"是")')
+            self.assertEqual(confirmation["B7"].value, '=COUNTIF(\'问题明细\'!$N$2:$N$2,"是")')
             self.assertEqual(confirmation["B10"].value, "=IF(B6=0,0,B7/B6)")
             self.assertEqual(confirmation["A13"].value, "判定标准模糊")
             self.assertIn("COUNTIFS", confirmation["C13"].value)

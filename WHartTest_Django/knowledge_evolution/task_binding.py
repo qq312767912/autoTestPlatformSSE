@@ -31,6 +31,9 @@ CASE_REVIEW_STAGE = "case_review"
 
 #: 平台内置用例审查 Skill 的默认名称。项目里登记了同名 Skill 时以登记的那条为准。
 DEFAULT_CASE_REVIEW_SKILL_NAME = "test-case-clarity-review"
+# 平台随镜像发布的规则包也必须有稳定、可展示的版本标识。它不是 Skill Hub
+# 的可进化版本，不参与候选发布，但会写进审查记录，避免用户看到“无版本”。
+BUILTIN_CASE_REVIEW_VERSION = "bundled-1.0.0"
 
 #: 未纳入版本管理时的说明文本。写出来是为了让"这次审查没有版本溯源"成为
 #: 一个**可读的结论**，而不是让下游看到空字符串去猜。
@@ -58,7 +61,7 @@ class TaskSkillBindingService:
     # ------------------------------------------------------------ 用例审查（T14）
 
     @classmethod
-    def bind_case_review(cls, *, review, actor=None, skill=None) -> dict:
+    def bind_case_review(cls, *, review, actor=None, skill=None, skill_version=None) -> dict:
         """锁定并返回本次用例审查使用的 Skill 版本。
 
         三种结局，必须区分开（这是本方法存在的全部意义）：
@@ -109,9 +112,20 @@ class TaskSkillBindingService:
             lock = SkillRuntimeResolver.lock_for_task(
                 project=project, workflow_id=workflow_id,
                 actor=actor if getattr(actor, "pk", None) else None,
-                scope="single", stage="", skill=candidate,
+                scope="single", stage="", skill=candidate, skill_version=skill_version,
             )
         except SkillRuntimeUnavailable as exc:
+            # 项目里残留了同名迁移记录/被隔离副本时，仍应回落到镜像内置规则。
+            # 内置规则是平台保证的最后兜底，不应因为一条不可运行的登记记录把
+            # 原本可用的审查入口直接打成失败；同时在 detail 中给出稳定版本号。
+            if candidate.name == DEFAULT_CASE_REVIEW_SKILL_NAME and skill_version is None:
+                return {
+                    "lock": None, "skill_version": None, "managed": False,
+                    "detail": (
+                        f"本次审查使用平台内置 Skill「{DEFAULT_CASE_REVIEW_SKILL_NAME}」"
+                        f"版本 {BUILTIN_CASE_REVIEW_VERSION}（项目登记版本不可运行，已安全回落）。"
+                    ),
+                }
             raise SkillBindingRefused(
                 f"用例审查 Skill 当前没有可运行的版本，已拒绝启动审查：{exc}"
             ) from exc

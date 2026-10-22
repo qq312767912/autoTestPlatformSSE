@@ -200,6 +200,51 @@ class AttemptTraceService:
         )
         return span
 
+    @classmethod
+    def finish_span(
+        cls, span_id, *, status="completed", output_hash="", error_type="",
+        error_message="", evidence=None, metadata=None,
+    ):
+        """结束一条运行中的 Span，并补齐耗时与受限错误摘要。"""
+        if status not in {"completed", "failed", "skipped"}:
+            raise ValueError("Span 终态必须是 completed、failed 或 skipped")
+        span = ExecutionSpan.objects.filter(pk=span_id).first()
+        if span is None:
+            return None
+        finished_at = timezone.now()
+        started_at = span.started_at or span.created_at
+        span.status = status
+        span.finished_at = finished_at
+        span.latency_ms = max(0, int((finished_at - started_at).total_seconds() * 1000))
+        if output_hash:
+            span.output_hash = str(output_hash)[:64]
+        if error_type:
+            span.error_type = str(error_type)[:100]
+        if error_message:
+            span.error_message = cls.limit_error(error_message)
+        if isinstance(evidence, list):
+            span.evidence = evidence
+        if isinstance(metadata, dict):
+            span.metadata = {**(span.metadata or {}), **cls.redact_mapping(metadata)}
+        span.save(update_fields=[
+            "status", "finished_at", "latency_ms", "output_hash", "error_type",
+            "error_message", "evidence", "metadata",
+        ])
+        return span
+
+    @classmethod
+    def finish_open_spans(cls, attempt, *, status="failed", error_type="", error_message=""):
+        """收口某次执行遗留的 running Span，避免页面永远显示“执行中”。"""
+        spans = ExecutionSpan.objects.filter(
+            trace__task_id=f"attempt:{attempt.pk}", stage=attempt.stage, status="running",
+        )
+        return [
+            cls.finish_span(
+                span.pk, status=status, error_type=error_type, error_message=error_message,
+            )
+            for span in spans
+        ]
+
     @staticmethod
     def _span_model_fields() -> frozenset[str]:
         return frozenset(
@@ -246,9 +291,22 @@ class AttemptTraceService:
 
     @staticmethod
     def spans_for(attempt):
-        return list(
+        live_spans = list(
             ExecutionSpan.objects
             .filter(trace__task_id=f"attempt:{attempt.pk}", stage=attempt.stage)
+            .order_by("sequence", "created_at")
+        )
+        if live_spans:
+            return live_spans
+        # 修复上线前的历史运行只在正式 output trace 中保存了工具 Span。执行中仍优先
+        # 使用 attempt trace；完成后若前者为空，再回落到绑定产出的真实 Span，避免旧记录
+        # 明明有 5 次工具调用却显示“0 步”。
+        output = getattr(attempt, "output", None)
+        if output is None or not getattr(output, "trace_id", None):
+            return []
+        return list(
+            ExecutionSpan.objects
+            .filter(trace_id=output.trace_id, stage=attempt.stage)
             .order_by("sequence", "created_at")
         )
 
@@ -350,8 +408,112 @@ class AttemptTraceService:
                 span.evidence or [], user=user, attempt_project_id=attempt.project_id,
             )
             row["group"] = _group_of(span.step_type)
+            row.update(cls._display_detail(span, attempt))
             rows.append(row)
         return rows
+
+    @classmethod
+    def _display_detail(cls, span, attempt) -> dict:
+        """把底层 Span 翻译成人能读懂的审计摘要，不暴露原始参数或模型思维链。"""
+        metadata = cls.redact_mapping(span.metadata or {})
+        granularity = str(metadata.get("granularity") or "")
+        step_number = metadata.get("step")
+        input_detail = metadata.get("input_summary") or None
+        output_detail = metadata.get("output_detail") or None
+        input_summary = cls._detail_text(input_detail, limit=500)
+        output_summary = cls._detail_text(
+            metadata.get("output_summary") or output_detail, limit=800,
+        )
+        artifacts: list[dict] = []
+        output = getattr(attempt, "output", None)
+        if span.step_type == "validation" and output is not None:
+            for item in ((output.metadata or {}).get("artifacts") or []):
+                if not isinstance(item, dict) or not item.get("name"):
+                    continue
+                artifacts.append({
+                    "name": str(item.get("name"))[:240],
+                    "size": max(0, int(item.get("size") or 0)),
+                    "sha256": str(item.get("sha256") or "")[:64],
+                })
+        result_facts = cls._result_facts(output)
+
+        if span.step_type == "intent":
+            title = "接收并理解阶段任务"
+            description = f"解析 {attempt.stage} 阶段的受控执行上下文"
+        elif span.step_type == "model":
+            title = "模型生成阶段响应"
+            description = "模型根据阶段指令生成下一步动作或最终回复；隐藏思维链不采集"
+        elif span.step_type == "validation":
+            title = "校验并登记正式产出"
+            description = (
+                f"完成结果校验，登记 {len(artifacts)} 个实际产物"
+                if artifacts else "完成结果校验与正式产出登记"
+            )
+        elif span.step_type == "tool":
+            title = f"调用工具：{span.tool_name or 'unknown'}"
+            if granularity == "aggregate":
+                description = f"Agent 工具链共执行 {int(metadata.get('step_count') or 0)} 个步骤"
+            elif step_number:
+                description = f"第 {step_number} 次工具调用已{('完成' if span.status == 'completed' else '结束')}"
+            else:
+                description = "执行 Agent 显式工具调用"
+        else:
+            title = GROUP_LABELS.get(_group_of(span.step_type), span.step_type)
+            description = f"执行 {span.step_type} 节点"
+
+        return {
+            "title": title,
+            "description": description,
+            "input_summary": cls.redact_text(input_summary),
+            "output_summary": cls.redact_text(output_summary),
+            "input_detail": input_detail,
+            "output_detail": output_detail,
+            "artifacts": artifacts,
+            "result_facts": result_facts if span.step_type in {"model", "validation"} else [],
+            "detail_available": bool(input_detail or output_detail or artifacts or result_facts),
+            "detail_note": (
+                "该历史节点仅保留校验指纹，执行时未采集可读参数和结果；重新运行后将记录脱敏明细。"
+                if span.step_type == "tool" and not input_detail and not output_detail
+                else ""
+            ),
+            "timing_recorded": bool(span.started_at and span.finished_at),
+        }
+
+    @classmethod
+    def _detail_text(cls, value, *, limit: int) -> str:
+        if value in (None, "", [], {}):
+            return ""
+        if isinstance(value, str):
+            text = value
+        else:
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        text = cls.redact_text(text)
+        return text[:limit] + ("…" if len(text) > limit else "")
+
+    @classmethod
+    def _result_facts(cls, output) -> list[dict]:
+        """从正式产出提炼可核验数量，不复制整份业务正文。"""
+        if output is None:
+            return []
+        metadata = output.metadata or {}
+        protocol = metadata.get("protocol") or {}
+        payload = metadata.get("stage_result_payload") or {}
+        artifacts = metadata.get("artifacts") or protocol.get("extensions", {}).get("artifacts") or []
+        facts = []
+        candidates = (
+            ("执行步骤", (protocol.get("metrics") or {}).get("step_count"), "次"),
+            ("产出条目", len(payload.get("items") or []), "项"),
+            ("待确认问题", len(payload.get("open_questions") or []), "项"),
+            ("未覆盖项", len(payload.get("uncovered_items") or []), "项"),
+            ("登记文件", len(artifacts), "个"),
+        )
+        for label, value, unit in candidates:
+            if isinstance(value, int):
+                facts.append({"label": label, "value": value, "unit": unit})
+        gate_status = (payload.get("gates") or {}).get("gate_status")
+        if gate_status:
+            facts.append({"label": "质量门禁", "value": str(gate_status)[:40], "unit": ""})
+        return facts
 
     # -------------------------------------------------------- 原文二次鉴权
 

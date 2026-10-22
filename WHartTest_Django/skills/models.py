@@ -249,6 +249,7 @@ class Skill(models.Model):
         }
 
     @classmethod
+    @transaction.atomic
     def create_from_zip(
         cls,
         zip_file,
@@ -257,6 +258,7 @@ class Skill(models.Model):
         api_key: str | None = None,
         source_type: str = 'upload',
         source_metadata: dict | None = None,
+        version_overrides=None,
     ) -> list['Skill']:
         """
         从上传的 zip 文件创建一个或多个 Skill
@@ -296,6 +298,7 @@ class Skill(models.Model):
                 try:
                     skill = cls._create_skill_from_dir(
                         skill_dir, project, creator, api_key=api_key,
+                        version_override=(version_overrides or {}).get(cls.parse_skill_md((Path(skill_dir) / "SKILL.md").read_text(encoding="utf-8"))["name"]),
                         source_type=source_type,
                         source_metadata=source_metadata or {
                             'original_filename': getattr(zip_file, 'name', '') or '',
@@ -313,7 +316,7 @@ class Skill(models.Model):
                 )
 
             if errors:
-                logger.warning("部分 Skills 上传失败: %s", '; '.join(errors))
+                raise ValidationError("包中部分 Skill 导入失败，本次整体取消：" + "; ".join(errors))
 
             return created_skills
 
@@ -374,6 +377,7 @@ class Skill(models.Model):
         api_key: str | None = None,
         source_type: str = 'upload',
         source_metadata: dict | None = None,
+        version_override=None,
     ) -> 'Skill':
         """从包含 SKILL.md 的目录创建 Skill 及其候选版本（T06 的唯一收敛点）。
 
@@ -388,13 +392,14 @@ class Skill(models.Model):
         from .versions import SkillVersionService
 
         skill, _version = SkillVersionService.create_candidate_from_dir(
-            source_dir=skill_root,
+            source_dir=skill_root, version_override=version_override,
             project=project,
             actor=creator,
             source_type=source_type,
             source_metadata=source_metadata or {},
             api_key=api_key,
         )
+        skill._imported_version = _version
         return skill
 
     @staticmethod

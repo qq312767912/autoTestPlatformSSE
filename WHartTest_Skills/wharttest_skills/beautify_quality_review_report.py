@@ -12,6 +12,8 @@ import re
 from pathlib import Path
 
 from openpyxl import load_workbook
+from openpyxl.cell.rich_text import CellRichText, TextBlock
+from openpyxl.cell.text import InlineFont
 from openpyxl.chart import BarChart, Reference
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -44,6 +46,41 @@ THIN_BORDER = Border(
 
 def text(value):
     return str(value or "").strip()
+
+
+def highlight_rewrite_differences(sheet):
+    """Remove model control markers and render changed rewrite fragments in red."""
+    changed_font = InlineFont(color=RED, b=True, u="single")
+    marker = re.compile(r"【改】(.*?)【/改】", flags=re.S)
+    for row in sheet.iter_rows():
+        for cell in row:
+            if text(cell.value) not in {"修改示例", "改写示例"}:
+                continue
+            for data_row in range(cell.row + 1, sheet.max_row + 1):
+                target = sheet.cell(data_row, cell.column)
+                value = text(target.value)
+                matches = list(marker.finditer(value))
+                if not matches:
+                    target.value = value.replace("【改】", "").replace("【/改】", "")
+                    continue
+                rich_text = CellRichText()
+                cursor = 0
+                for match in matches:
+                    if match.start() > cursor:
+                        rich_text.append(value[cursor:match.start()])
+                    if match.group(1):
+                        rich_text.append(TextBlock(changed_font, match.group(1)))
+                    cursor = match.end()
+                if cursor < len(value):
+                    rich_text.append(value[cursor:])
+                target.value = rich_text
+                estimated_lines = sum(
+                    max(1, (sum(2 if ord(char) > 0x2E80 else 1 for char in line) + 63) // 64)
+                    for line in value.splitlines()
+                ) or 1
+                sheet.row_dimensions[data_row].height = min(
+                    409, max(sheet.row_dimensions[data_row].height or 0, estimated_lines * 18)
+                )
 
 
 def merged_row(sheet, row):
@@ -149,12 +186,14 @@ def style_issue_sheet(sheet):
         end = (section_rows[index + 1] - 1) if index + 1 < len(section_rows) else sheet.max_row
         style_body(sheet, row + 1, end)
 
-    widths = [8, 30, 29, 12, 20, 32, 40]
+    widths = [8, 30, 29, 12, 20, 32, 40, 64]
     for col, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(col)].width = width
     sheet.freeze_panes = "B6" if header_rows else "A3"
     if header_rows:
-        sheet.auto_filter.ref = f"A{header_rows[0]}:G{sheet.max_row}"
+        sheet.auto_filter.ref = (
+            f"A{header_rows[0]}:{get_column_letter(sheet.max_column)}{sheet.max_row}"
+        )
     common_sheet_setup(sheet, landscape=True, repeat_rows=f"{header_rows[0]}:{header_rows[0]}" if header_rows else None)
 
 
@@ -275,6 +314,7 @@ def beautify(input_path, output_path):
             style_standard_sheet(sheet, [22, 90])
         else:
             style_standard_sheet(sheet, [18] + [36] * max(sheet.max_column - 1, 0))
+        highlight_rewrite_differences(sheet)
 
     workbook.calculation.fullCalcOnLoad = True
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)

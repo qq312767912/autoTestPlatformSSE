@@ -45,6 +45,7 @@ export async function createReview(projectId: number, file: File, options: {
   businessContext: string;
   reviewMode: 'general' | 'specified';
   selectedSkill?: number;
+  selectedSkillVersion?: string;
   customRules: string;
   requirementDocumentIds: string[];
   knowledgeBaseIds: string[];
@@ -56,6 +57,7 @@ export async function createReview(projectId: number, file: File, options: {
   form.append('review_mode', options.reviewMode);
   form.append('custom_rules', options.customRules);
   if (options.selectedSkill) form.append('selected_skill', String(options.selectedSkill));
+  if (options.selectedSkillVersion) form.append('selected_skill_version', options.selectedSkillVersion);
   form.append('requirement_document_ids', JSON.stringify(options.requirementDocumentIds));
   form.append('knowledge_base_ids', JSON.stringify(options.knowledgeBaseIds));
   form.append('knowledge_document_ids', JSON.stringify(options.knowledgeDocumentIds));

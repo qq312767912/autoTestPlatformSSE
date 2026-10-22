@@ -22,7 +22,13 @@ class TestHostMappingSerializer(serializers.ModelSerializer):
         read_only_fields = ["created_by_name", "updated_by_name", "created_at", "updated_at"]
 
     def validate_hostname(self, value):
-        return normalize_hostname(value)
+        hostname = normalize_hostname(value)
+        queryset = TestHostMapping.objects.filter(hostname=hostname)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("该域名已存在，每个域名只能配置一条映射")
+        return hostname
 
     def validate_ipv4(self, value):
         return validate_safe_ipv4(value)

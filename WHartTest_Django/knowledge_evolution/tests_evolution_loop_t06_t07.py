@@ -199,6 +199,22 @@ class ProposalWithLlmTests(CaseReviewApiBase):
         self.assertEqual(package["package_sha256"], self.version.package_sha256)
         self.assertTrue(any(item["path"] == "SKILL.md" for item in package["files"]))
 
+    def test_legacy_output_uses_review_selected_skill_and_repairs_link(self):
+        """旧产出漏写 skill_version 时，候选生成也必须沿用审查所选 Skill。"""
+        output = GenerationOutput.objects.get(pk=self.review.summary["output_id"])
+        output.skill_version = None
+        output.skill_package_sha256 = ""
+        output.save(update_fields=["skill_version", "skill_package_sha256"])
+        self.review.selected_skill = self.skill
+        self.review.save(update_fields=["selected_skill"])
+
+        response = self._propose()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["package"]["version"], self.version.version)
+        output.refresh_from_db()
+        self.assertEqual(output.skill_version_id, self.version.id)
+
     def test_llm_returning_nothing_usable_is_a_400(self):
         """模型回了一堆不可用的东西 → 400 并说清原因，不落垃圾归因。"""
         response = self._propose(payload={"candidates": [

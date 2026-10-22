@@ -37,7 +37,7 @@ from knowledge_evolution.trace_models import FailureAttribution
 #: 与 ``testcases/review_service.py::_write_report`` 的「问题明细」页列序逐字一致。
 REPORT_HEADERS = [
     "Sheet", "行号", "用例编号/名称", "模块", "原文", "严重程度", "问题类型", "问题说明",
-    "修改建议", "判定", "问题确认", "问题描述", "修改点", "不采纳原因",
+    "修改建议", "判定", "问题确认", "反馈结论", "问题描述", "修改点", "不采纳原因",
 ]
 
 
@@ -125,6 +125,37 @@ class ReportParserTests(TestCase):
         self.assertEqual(scan.defects[0].category, CATEGORY_REWRITTEN)
         self.assertIn("人工重写的问题描述", scan.defects[0].hypothesis)
 
+    def test_feedback_conclusion_and_quality_dimension_are_independent(self):
+        data = make_report([
+            {"问题类型": "前置条件与所属平台不一致", "问题确认": "否", "反馈结论": "待业务确认"},
+            {"问题类型": "预期结果不可验收", "问题确认": "是", "反馈结论": "采纳但需改写", "修改点": "补充状态码"},
+            {"问题类型": "操作步骤不明确", "问题确认": "否", "反馈结论": "重复问题"},
+        ])
+
+        scan = CaseReviewReportParser.parse(data)
+
+        self.assertEqual(scan.conclusion_counts["business_pending"], 1)
+        self.assertEqual(scan.conclusion_counts["accepted_rewritten"], 1)
+        self.assertEqual(scan.conclusion_counts["duplicate"], 1)
+        self.assertEqual(len(scan.feedback_groups), 3)
+        self.assertEqual(scan.defect_total, 1)
+        self.assertEqual(scan.defects[0].feedback_conclusion, "accepted_rewritten")
+        self.assertEqual(scan.defects[0].quality_dimension, "expected_result")
+
+    def test_legacy_negative_reason_is_not_forced_to_false_positive(self):
+        data = make_report([
+            {"问题类型": "前置条件缺失", "问题确认": "否", "不采纳原因": "需要业务确认规则口径"},
+            {"问题类型": "测试数据缺失", "问题确认": "否", "不采纳原因": "当前环境和权限无法验证"},
+            {"问题类型": "措辞问题", "问题确认": "否", "不采纳原因": "原文正确"},
+        ])
+
+        scan = CaseReviewReportParser.parse(data)
+
+        self.assertEqual(scan.conclusion_counts["business_pending"], 1)
+        self.assertEqual(scan.conclusion_counts["unverifiable"], 1)
+        self.assertEqual(scan.conclusion_counts["false_positive"], 1)
+        self.assertEqual(scan.defect_total, 1)
+
     def test_blank_confirmation_is_counted_not_silently_skipped(self):
         """留空必须计数并给警告：漏填会让"这份报告已全部确认"变成没人验证的假设。"""
         data = make_report([
@@ -189,6 +220,20 @@ class ReportParserTests(TestCase):
         self.assertEqual(scan.defects[0].issue_type, "A")
         self.assertEqual(scan.defects[0].count, 2)
         self.assertEqual(scan.defect_total, 3)
+
+    def test_more_than_twelve_groups_are_all_preserved(self):
+        """“12”只能是下游分批大小，不能是报告数据截断上限。"""
+        data = make_report([
+            {"问题类型": f"问题-{index:02d}", "问题确认": "否"}
+            for index in range(15)
+        ])
+
+        scan = CaseReviewReportParser.parse(data)
+
+        self.assertEqual(scan.defect_group_total, 15)
+        self.assertEqual(scan.defect_total, 15)
+        self.assertEqual(len(scan.defects), 15)
+        self.assertFalse(any("只取前" in warning for warning in scan.warnings))
 
     def test_acceptance_score_comes_from_the_last_sheet(self):
         data = make_report(
@@ -282,6 +327,29 @@ class EvolutionFlowTests(SkillHubBaseTests):
         # 派生的实质产物必须能被人读懂，而不是只回一个版本号。
         self.assertTrue(result["diff"])
         self.assertEqual(result["rollback_target"], str(version.id))
+
+    def test_selected_skill_repairs_legacy_output_without_version(self):
+        """历史产出漏写版本时，沿用该次审查明确选择的 Skill，不要求重跑。"""
+        skill, version = self.make_skill_version(name=DEFAULT_CASE_REVIEW_SKILL_NAME)
+        review, output = self.make_completed_review(skill_version=None)
+        review.selected_skill = skill
+        review.save(update_fields=["selected_skill"])
+        data = make_report([
+            {"问题类型": "措辞问题", "问题确认": "否", "不采纳原因": "原文正确"},
+        ], acceptance_rate=0.90)
+
+        described = CaseReviewEvolutionService._describe(review)
+        self.assertTrue(described["evolvable"])
+        self.assertEqual(described["skill_version_id"], str(version.id))
+
+        result = CaseReviewEvolutionService.evolve(
+            review=review, data=data, actor=self.lead,
+        )
+
+        output.refresh_from_db()
+        self.assertEqual(str(output.skill_version_id), str(version.id))
+        self.assertEqual(output.skill_package_sha256, version.package_sha256)
+        self.assertEqual(result["baseline_version"], version.version)
 
     def test_attribution_signals_separate_false_alarm_from_rewrite(self):
         """两类缺陷的人工信号必须相反，而且要落在护栏里对应的那一条上。

@@ -260,7 +260,7 @@ def check_evidence_locations(payload: dict, corpus_path: Path, report: Report) -
 def check_primary_artifacts(payload: dict, artifacts_dir: Path, report: Report) -> None:
     """主产物必须真实存在、且哈希对得上。
 
-    没有这一步，"声明了 test_plan.xlsx"和"真的产出了 test_plan.xlsx"就分不开。
+    没有这一步，"声明了三件人工交付物"和"真的产出了三件套"就分不开。
     """
     for index, artifact in _iter_nodes(payload, "primary_artifacts"):
         path = f"/primary_artifacts/{index}"

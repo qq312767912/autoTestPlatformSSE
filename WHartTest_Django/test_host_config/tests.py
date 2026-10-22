@@ -142,3 +142,43 @@ class BulkImportApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.data["can_import"])
         self.assertEqual(TestHostMapping.objects.get().ipv4, "202.122.117.51")
+
+
+class MappingManagementApiTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_superuser("mapping-admin", "mapping@example.com", "x")
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_duplicate_hostname_returns_clear_error(self):
+        TestHostMapping.objects.create(
+            system_name="系统一", hostname="same.example.com", ipv4="10.0.0.8",
+            created_by=self.user, updated_by=self.user,
+        )
+        response = self.client.post(
+            "/api/test-host-config/mappings/",
+            {"system_name": "系统二", "hostname": "SAME.EXAMPLE.COM.", "ipv4": "10.0.0.9", "enabled": True, "remark": ""},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("每个域名只能配置一条映射", str(response.data))
+
+    def test_bulk_delete_removes_selected_rows_and_bumps_revision_once(self):
+        rows = [
+            TestHostMapping.objects.create(
+                system_name="系统", hostname=f"host-{index}.example.com", ipv4=f"10.0.0.{index}",
+                created_by=self.user, updated_by=self.user,
+            )
+            for index in range(8, 11)
+        ]
+        state = TestHostConfigState.get_state()
+        before = state.draft_revision
+        response = self.client.post(
+            "/api/test-host-config/mappings/bulk-delete/",
+            {"ids": [rows[0].id, rows[2].id]}, format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["deleted"], 2)
+        self.assertEqual(list(TestHostMapping.objects.values_list("id", flat=True)), [rows[1].id])
+        state.refresh_from_db()
+        self.assertEqual(state.draft_revision, before + 1)

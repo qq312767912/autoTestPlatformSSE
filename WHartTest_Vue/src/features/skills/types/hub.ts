@@ -105,6 +105,9 @@ export interface VersionRef {
 }
 
 export interface SkillVersionSummary {
+  download_available?: boolean
+  archived?: boolean
+  can_archive?: boolean
   id: string
   version: string
   state: ReleaseState
@@ -121,6 +124,9 @@ export interface SkillVersionSummary {
   package_sha256: string
   source_type: string
   created_at: string
+  updated_at?: string
+  created_by_name?: string | null
+  change_reason?: string
 }
 
 export interface SkillVersionDetail extends SkillVersionSummary {

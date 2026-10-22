@@ -117,7 +117,7 @@
             <a-tag color="arcoblue">{{ projectName }}</a-tag>
           </div>
           <div class="launch-grid">
-            <button type="button" @click="workspace='single'"><i><icon-experiment/></i><div><b>独立能力评测</b><small>用例审查的单次质量检查</small></div><em>约 5 分钟</em><icon-right/></button>
+            <button type="button" @click="workspace='single'"><i><icon-experiment/></i><div><b>独立能力评测</b><small>从各 Agent 自己的业务入口独立发起</small></div><em>{{ cockpit.single_capabilities.length }} 个 Agent</em><icon-right/></button>
             <button type="button" @click="workspace='workflow'"><i><icon-branch/></i><div><b>全链路测试</b><small>{{ workflowChainText }}</small></div><em>{{ cockpit.workflows.length }} 条流程</em><icon-right/></button>
             <button type="button" @click="workspace='gold'"><i><icon-message/></i><div><b>建设评测数据</b><small>整理反馈、Badcase 与金标数据</small></div><em>{{ pendingFeedback }} 条待复核</em><icon-right/></button>
             <button type="button" @click="workspace='evaluation'"><i><icon-dashboard/></i><div><b>运行自动评测</b><small>选择数据集，执行分层质量扫描</small></div><em>{{ runs.length }} 次运行</em><icon-right/></button>
@@ -127,7 +127,7 @@
         </section>
 
         <section v-else-if="workspace === 'single'" class="panel content-panel">
-          <div class="section-head toolbar"><div><span>单次评测</span><h2>独立能力质量面板</h2><p>用例审查是当前唯一的单次能力 Agent；代码审查与知识库问答属平台基础能力，只做质量观测、不进自进化。</p></div></div>
+          <div class="section-head toolbar"><div><span>独立能力流程</span><h2>Agent 独立测评</h2><p>五个 Agent 分别从自己的业务页发起，单独执行、单独留痕，不会跳转到自动评测或并入全链路流程。</p></div></div>
           <div class="single-grid">
             <article v-for="item in cockpit.single_capabilities" :key="item.stage">
               <header>
@@ -141,13 +141,45 @@
               </div>
               <footer>
                 <span>最近产出 {{ formatDate(item.latest_at || undefined) }}</span>
-                <!-- 「能不能自进化」由后端给（注册表判定），前端不按阶段名认：
-                     代码审查是复合能力、知识库问答是平台工具，两者都不该出现这个入口。 -->
-                <a-button v-if="item.self_evolution" size="small" type="primary" @click="openReviewEvolution">
+                <a-button size="small" type="primary" @click="startIndependentCapability(item.stage)">
                   <template #icon><icon-plus/></template>发起流程
                 </a-button>
               </footer>
             </article>
+          </div>
+
+          <div v-if="reviewEvolutionExperiment" class="start-result evolution-experiment">
+            <div class="start-result-head">
+              <div><b>隔离 A/B 进化实验</b><small>基线 {{ reviewEvolutionExperiment.baseline_version }} · {{ reviewEvolutionExperiment.state }}</small></div>
+              <div class="actions">
+                <a-button size="mini" type="primary" :loading="reviewEvolutionExperimentBusy" :disabled="reviewEvolutionExperiment.state!=='ready'" @click="rerunReviewExperiment">同输入重跑 Baseline/A/B</a-button>
+                <a-button size="mini" @click="reviewEvolutionExperiment=null">收起</a-button>
+              </div>
+            </div>
+            <div class="variant-grid">
+              <article v-for="variant in reviewEvolutionExperiment.variants" :key="variant.id" :class="{winner:reviewEvolutionExperiment.winner_label===variant.label}">
+                <header><b>{{ variant.label==='baseline'?'Baseline':`Candidate ${variant.label}` }}</b><a-tag>{{ variant.status }}</a-tag></header>
+                <small>{{ variant.strategy }} · {{ variant.skill_version||'原版本' }}</small>
+                <div class="variant-metrics">
+                  <span><b>{{ variant.run_result.issue_count ?? '—' }}</b><small>问题</small></span>
+                  <span><b>{{ variant.run_result.latency_ms ?? '—' }}</b><small>ms</small></span>
+                  <span><b>{{ variant.run_result.estimated_output_tokens ?? '—' }}</b><small>输出 Token</small></span>
+                  <span><b>{{ variant.run_result.fixed_hits?.resolved_issue_types?.length ?? '—' }}</b><small>修复命中</small></span>
+                </div>
+                <p v-if="variant.run_result.error" class="warn-line">{{ variant.run_result.error }}</p>
+                <a-button v-if="variant.label!=='baseline'&&reviewEvolutionExperiment.state==='awaiting_choice'" size="mini" @click="reviewEvolutionWinnerLabel=variant.label">选择 {{ variant.label }}</a-button>
+              </article>
+            </div>
+            <div v-if="reviewEvolutionExperiment.state==='awaiting_choice'" class="winner-bar">
+              <a-radio-group v-model="reviewEvolutionWinnerLabel"><a-radio value="A">Candidate A</a-radio><a-radio value="B">Candidate B</a-radio></a-radio-group>
+              <a-input v-model="reviewEvolutionWinnerReason" placeholder="填写人工对比理由"/>
+              <a-button type="primary" :loading="reviewEvolutionExperimentBusy" :disabled="!reviewEvolutionWinnerLabel||!reviewEvolutionWinnerReason.trim()" @click="chooseReviewExperimentWinner">确认 winner</a-button>
+            </div>
+            <div v-if="reviewEvolutionExperiment.state==='winner_selected'" class="winner-bar">
+              <span>已选择 Candidate {{ reviewEvolutionExperiment.winner_label }}：{{ reviewEvolutionExperiment.winner_reason }}</span>
+              <a-button type="primary" :loading="reviewEvolutionExperimentBusy" @click="submitReviewExperimentWinner">提交 Skill Hub 验证与发布审批</a-button>
+            </div>
+            <a-alert v-if="reviewEvolutionExperiment.state==='submitted'" type="success">Winner 已进入 Skill Hub 验证/审批状态机，未自动替换当前活跃版本。</a-alert>
           </div>
 
           <!-- 进化结果常驻页面：只在弹窗里闪一下就没了的话，关掉后连候选版本号和
@@ -512,6 +544,7 @@
                 allow-clear
                 :placeholder="`选择${taskTypeLabels[item.stage] || item.label} Skill 及版本`"
                 class="pin-select"
+                popup-container-class="pin-select-popup"
                 :not-found-content="`没有声明为${taskTypeLabels[item.stage] || item.label}的可用 Skill`"
               >
                 <a-option
@@ -523,12 +556,13 @@
                 >
                   <div class="pin-option">
                     <div class="pin-option-name"><b>{{ skill.skill_name }}</b><a-tag v-if="!skill.runnable" size="small" color="gray">不可运行</a-tag></div>
-                    <small class="pin-option-meta">{{ skill.version || '无版本' }}<template v-if="skill.package_sha256"> · sha {{ skill.package_sha256.slice(0,10) }}</template></small>
+                    <small class="pin-option-meta">{{ skill.version || '无版本' }}<template v-if="skill.package_sha256"> · sha {{ skill.package_sha256.slice(0,10) }}</template><template v-if="skill.created_by_name"> · {{ skill.created_by_name }}</template><template v-if="skill.updated_at"> · {{ formatDate(skill.updated_at) }}</template></small>
+                    <small v-if="skill.change_reason" class="pin-option-reason">更新：{{ skill.change_reason }}</small>
                   </div>
                 </a-option>
               </a-select>
               <div v-if="pinnedSkill(item.stage)" class="pin-selected">
-                <span>已选 {{ pinnedSkill(item.stage)!.skill_name }} · {{ pinnedSkill(item.stage)!.version }}</span>
+                <span>已选 {{ pinnedSkill(item.stage)!.skill_name }} · {{ pinnedSkill(item.stage)!.version }} · {{ pinnedSkill(item.stage)!.created_by_name || '未知用户' }}</span>
                 <code>sha {{ pinnedSkill(item.stage)!.package_sha256.slice(0,10) }}</code>
               </div>
             </section>
@@ -561,10 +595,20 @@
       :ok-text="reviewEvolutionOkText"
       :ok-loading="reviewEvolutionSubmitting || reviewEvolutionProposing || reviewEvolutionConfirming"
       :ok-button-props="{disabled: !reviewEvolutionCanAdvance}"
-      :on-before-ok="onReviewEvolutionOk"
       :mask-closable="false"
       width="820px"
     >
+      <template #footer>
+        <a-button @click="showReviewEvolutionModal=false">取消</a-button>
+        <a-button
+          type="primary"
+          :loading="reviewEvolutionSubmitting || reviewEvolutionProposing || reviewEvolutionConfirming"
+          :disabled="!reviewEvolutionCanAdvance"
+          @click="onReviewEvolutionOk"
+        >
+          {{ reviewEvolutionOkText }}
+        </a-button>
+      </template>
       <template v-if="reviewEvolutionStep===1">
         <a-alert type="info">自进化只作用于<strong>能力能被 Skill 直接迭代升级</strong>的单次能力：从选中的那次审查所用的 Skill 包上<strong>派生一个新候选版本</strong>，不会改动当前活跃版本。</a-alert>
         <a-spin :loading="reviewEvolutionLoading" style="width:100%">
@@ -604,7 +648,7 @@
           <a-form-item
             label="已确认的审查报告（平台导出的 xlsx）"
             required
-            extra="在报告「问题明细」页填好「问题确认」「问题描述」「修改点」「不采纳原因」后再传回来。平台按列名读取，调整列序不影响解析。"
+            extra="在报告「问题明细」页填好「问题确认」「反馈结论」「问题描述」「修改点」「不采纳原因」后再传回来。反馈结论、问题维度和根因归因会分别展示；旧版报告仍可解析。"
           >
             <a-upload
               :auto-upload="false"
@@ -627,14 +671,20 @@
           <div class="preflight-scan">
             <span><b>{{ reviewEvolutionPreflight?.scan.acceptance_score ?? 0 }}%</b><small>报告采纳率</small></span>
             <span><b>{{ reviewEvolutionPreflight?.scan.total_rows || 0 }}</b><small>问题行</small></span>
-            <span><b>{{ reviewEvolutionPreflight?.scan.affirmative || 0 }}</b><small>人工确认</small></span>
-            <span><b>{{ reviewEvolutionPreflight?.scan.negative || 0 }}</b><small>误报</small></span>
+            <span><b>{{ reviewEvolutionPreflight?.scan.confirmed || 0 }}</b><small>已确认结论</small></span>
+            <span><b>{{ reviewEvolutionPreflight?.scan.affirmative || 0 }}</b><small>问题成立</small></span>
+            <span><b>{{ reviewEvolutionPreflight?.scan.negative || 0 }}</b><small>不采纳</small></span>
             <span><b>{{ reviewEvolutionPreflight?.scan.rewritten || 0 }}</b><small>说明被改写</small></span>
             <span><b>{{ reviewEvolutionPreflight?.scan.unconfirmed || 0 }}</b><small>未确认</small></span>
-            <span><b>{{ reviewEvolutionPreflight?.scan.defect_total || 0 }}</b><small>可修复缺陷</small></span>
+            <span><b>{{ reviewEvolutionPreflight?.scan.defect_total || 0 }}</b><small>可进化缺陷</small></span>
+            <span><b>{{ reviewEvolutionPreflight?.scan.defect_group_total || 0 }}</b><small>缺陷分组</small></span>
           </div>
-          <article v-for="item in reviewEvolutionPreflight?.scan.defects || []" :key="`p-${item.category}:${item.issue_type}`" class="preflight-defect">
-            <a-tag :color="item.category==='prompt_error' ? 'orange' : 'blue'" size="small">{{ attributionCategoryText(item.category) }}</a-tag>
+          <p v-if="reviewEvolutionPreflight?.scan.defect_group_total" class="hint-line">
+            上述 {{ reviewEvolutionPreflight.scan.defect_group_total }} 组 / {{ reviewEvolutionPreflight.scan.defect_total }} 条缺陷将全部进入候选生成；数量较多时会分批分析后再语义归并，不做前 N 组截断。
+          </p>
+          <article v-for="item in reviewEvolutionPreflight?.scan.feedback_groups || []" :key="`p-${item.conclusion}:${item.quality_dimension}:${item.issue_type}`" class="preflight-defect">
+            <a-tag :color="feedbackConclusionColor(item.conclusion)" size="small">{{ item.conclusion_label }}</a-tag>
+            <a-tag color="gray" size="small">{{ item.quality_dimension_label }}</a-tag>
             <b>{{ item.issue_type }}</b><span>{{ item.count }} 条</span>
           </article>
           <p v-for="text in reviewEvolutionPreflight?.scan.warnings || []" :key="text" class="warn-line">⚠ {{ text }}</p>
@@ -666,34 +716,52 @@
               读的是 {{ reviewEvolutionProposalPackage.skill_name }} · {{ reviewEvolutionProposalPackage.version }}
               （{{ reviewEvolutionProposalPackage.files.length }} 个文件）
             </span>
+            <span v-if="reviewEvolutionProposalStats" class="sha">
+              已完整处理 {{ reviewEvolutionProposalStats.source_group_count }} 组 / {{ reviewEvolutionProposalStats.source_defect_total }} 条，
+              分 {{ reviewEvolutionProposalStats.batch_count }} 批归并
+            </span>
             <a-button size="mini" :loading="reviewEvolutionProposing" @click="runReviewProposal">
               {{ reviewEvolutionCandidates.length ? '重新生成' : '生成候选优化点' }}
             </a-button>
           </div>
+          <a-alert v-if="reviewEvolutionDiscardedCount" type="warning" style="margin-top:10px">
+            有 {{ reviewEvolutionDiscardedCount }} 条 AI 建议因分类组合无效或证据不可定位被拦截，未进入人工确认与后续进化。
+          </a-alert>
 
           <div v-if="reviewEvolutionCandidates.length" class="candidate-list">
             <article v-for="item in reviewEvolutionCandidates" :key="item.attribution_id" :class="['candidate-item',reviewEvolutionDecisions[item.attribution_id]?.action||'']">
               <header>
-                <a-tag size="small" color="orange">{{ attributionCategoryText(item.category) }}</a-tag>
+                <a-tag size="small" color="orange">原始信号：{{ attributionCategoryText(item.category) }}</a-tag>
                 <b>{{ item.issue_type || '未命名问题类型' }}</b>
                 <span>置信度 {{ Math.round((item.confidence||0)*100) }}%</span>
                 <a-tag v-if="reviewEvolutionDecisions[item.attribution_id]?.action==='accept'" size="small" color="green">已采纳</a-tag>
-                <a-tag v-else-if="reviewEvolutionDecisions[item.attribution_id]?.action==='edit'" size="small" color="blue">已改写</a-tag>
+                <a-tag v-else-if="reviewEvolutionDecisions[item.attribution_id]?.action==='relabel'" size="small" color="blue">已重标</a-tag>
                 <a-tag v-else-if="reviewEvolutionDecisions[item.attribution_id]?.action==='reject'" size="small" color="gray">已驳回</a-tag>
               </header>
+              <div class="diagnosis-chain">
+                <span><small>主因</small><b>{{ primaryCauseText(item.primary_cause) }}</b></span><i>→</i>
+                <span><small>细因</small><b>{{ fineCauseText(item.primary_cause,item.fine_cause) }}</b></span><i>→</i>
+                <span><small>修复对象</small><b>{{ repairTargetText(item.repair_target) }}</b></span>
+                <a-tag :color="item.evidence_status==='verified'?'green':'red'">{{ item.evidence_status==='verified'?'证据已定位':'证据未通过' }}</a-tag>
+              </div>
               <p class="candidate-hypothesis">{{ item.hypothesis }}</p>
-              <!-- 改写要能在原话上改，而不是让人对着空白框重写。
-                   给候选原文做初始值，改完提交的是这一条的新措辞。 -->
-              <a-textarea
-                v-if="reviewEvolutionDecisions[item.attribution_id]?.action==='edit'"
-                v-model="reviewEvolutionDecisions[item.attribution_id]!.hypothesis"
-                :auto-size="{minRows:2,maxRows:5}"
-                placeholder="改写这条优化点"
-              />
+              <div v-if="reviewEvolutionDecisions[item.attribution_id]?.action==='relabel'" class="relabel-editor">
+                <a-select v-model="reviewEvolutionDecisions[item.attribution_id]!.primary_cause" placeholder="选择主因" @change="onRelabelPrimaryChange(item.attribution_id)">
+                  <a-option v-for="option in primaryCauseOptions" :key="option.value" :value="option.value">{{ option.label }}</a-option>
+                </a-select>
+                <a-select v-model="reviewEvolutionDecisions[item.attribution_id]!.fine_cause" placeholder="选择细因" @change="onRelabelFineChange(item.attribution_id)">
+                  <a-option v-for="option in fineCauseOptions(reviewEvolutionDecisions[item.attribution_id]!.primary_cause)" :key="option.value" :value="option.value">{{ option.label }}</a-option>
+                </a-select>
+                <a-select v-model="reviewEvolutionDecisions[item.attribution_id]!.repair_target" placeholder="选择修复对象">
+                  <a-option v-for="option in repairTargetOptions(reviewEvolutionDecisions[item.attribution_id]!.primary_cause,reviewEvolutionDecisions[item.attribution_id]!.fine_cause)" :key="option.value" :value="option.value">{{ option.label }}</a-option>
+                </a-select>
+                <a-textarea v-model="reviewEvolutionDecisions[item.attribution_id]!.hypothesis" :auto-size="{minRows:2,maxRows:5}" placeholder="补充或改写优化假设" />
+              </div>
               <div class="candidate-actions">
                 <a-button size="mini" status="success" @click="decideCandidate(item,'accept')">采纳</a-button>
-                <a-button size="mini" @click="decideCandidate(item,'edit')">改写</a-button>
+                <a-button size="mini" @click="decideCandidate(item,'relabel')">重标</a-button>
                 <a-button size="mini" status="danger" @click="decideCandidate(item,'reject')">驳回</a-button>
+                <a-button size="mini" @click="openReviewEvolutionEvidence(item)">查看证据 {{ item.evidence?.length||0 }}</a-button>
               </div>
             </article>
           </div>
@@ -741,6 +809,61 @@
         </p>
       </template>
     </a-modal>
+    <a-modal
+      :visible="!!reviewEvolutionEvidenceCandidate"
+      title="归因证据链"
+      width="86vw"
+      :footer="false"
+      :unmount-on-close="true"
+      modal-class="evidence-modal"
+      @cancel="closeReviewEvolutionEvidence"
+    >
+      <template v-if="reviewEvolutionEvidenceCandidate">
+        <div class="evidence-summary">
+          <div>
+            <span>当前归因</span>
+            <b>{{ reviewEvolutionEvidenceCandidate.issue_type }}</b>
+          </div>
+          <a-tag :color="reviewEvolutionEvidenceCandidate.evidence_status==='verified'?'green':'red'">
+            {{ reviewEvolutionEvidenceCandidate.evidence_status==='verified'?'证据已定位':'证据未通过' }}
+          </a-tag>
+          <p>{{ reviewEvolutionEvidenceCandidate.hypothesis }}</p>
+        </div>
+        <div v-if="reviewEvolutionEvidenceCandidate.evidence?.length" class="evidence-workbench">
+          <aside class="evidence-index" aria-label="证据索引">
+            <header><b>证据索引</b><span>{{ reviewEvolutionEvidenceCandidate.evidence.length }} 条</span></header>
+            <button
+              v-for="(evidence,index) in reviewEvolutionEvidenceCandidate.evidence"
+              :key="evidence.evidence_id"
+              type="button"
+              :class="{active:reviewEvolutionSelectedEvidenceId===evidence.evidence_id}"
+              @click="reviewEvolutionSelectedEvidenceId=evidence.evidence_id"
+            >
+              <span>{{ String(index+1).padStart(2,'0') }}</span>
+              <div><b>{{ evidence.type }}</b><small>{{ evidence.source_id }}</small></div>
+              <a-tag size="small" :color="evidence.locatable?'green':'red'">{{ evidence.locatable?'可定位':'不可定位' }}</a-tag>
+            </button>
+          </aside>
+          <section v-if="reviewEvolutionSelectedEvidence" class="evidence-detail">
+            <header>
+              <div><span>证据详情</span><h3>{{ reviewEvolutionSelectedEvidence.type }}</h3></div>
+              <a-tag :color="reviewEvolutionSelectedEvidence.locatable?'green':'red'">{{ reviewEvolutionSelectedEvidence.locatable?'可定位':'不可定位' }}</a-tag>
+            </header>
+            <div class="evidence-detail-body">
+              <small>证据摘要</small>
+              <p>{{ reviewEvolutionSelectedEvidence.summary }}</p>
+            </div>
+            <dl>
+              <div><dt>来源定位</dt><dd>{{ reviewEvolutionSelectedEvidence.source_id }}</dd></div>
+              <div><dt>证据指纹</dt><dd class="sha">{{ reviewEvolutionSelectedEvidence.source_hash }}</dd></div>
+              <div v-if="reviewEvolutionSelectedEvidence.payload_ref"><dt>载荷引用</dt><dd>{{ reviewEvolutionSelectedEvidence.payload_ref }}</dd></div>
+            </dl>
+            <p class="evidence-position-note">从左侧切换证据，可在同一视野内逐条核对，无需退出当前归因。</p>
+          </section>
+        </div>
+        <a-empty v-else description="没有可展示的证据；该候选不应被采纳"/>
+      </template>
+    </a-modal>
     <a-modal v-model:visible="showStageScoreModal" title="人工评分" ok-text="提交评分" :ok-loading="stageScoreBusy" @ok="confirmStageScore">
       <a-alert type="info">评分是<strong>百分制</strong>：达到阈值判通过并放行下一阶段，低于阈值判未通过。分数、评分人与备注都会被永久记录——「谁认为这一阶段合格」在事后必须能查。</a-alert>
       <a-form layout="vertical" style="margin-top:16px">
@@ -770,6 +893,13 @@
             <a-tag :color="gateColor(stageOutput.gate.status)">{{ gateText(stageOutput.gate.status) }}</a-tag>
             <span>{{ stageOutput.gate.reason || '门禁暂无说明' }}</span>
             <span v-if="stageOutput.gate.decided_by">操作人 {{ stageOutput.gate.decided_by }}</span>
+          </div>
+          <div v-if="stageOutput.artifact_files?.length" class="stage-artifact-files">
+            <div class="stage-artifact-files-title">本阶段实际产出文件</div>
+            <div v-for="file in stageOutput.artifact_files" :key="file.name" class="stage-artifact-file">
+              <span>{{ file.name }}</span>
+              <a-button size="mini" @click="downloadStageArtifactFile(file)">下载</a-button>
+            </div>
           </div>
           <a-tabs v-model:active-key="stageResultTab" class="stage-workbench-tabs">
             <a-tab-pane key="output" title="产出物">
@@ -856,8 +986,16 @@
                     <article v-for="span in stageTrace.spans" :key="span.id" :class="span.status">
                       <i>{{ span.sequence }}</i>
                       <div class="trace-main">
-                        <header><b>{{ stageTrace.summary.labels[span.group] || span.step_type }}</b><a-tag size="small" :color="span.status==='failed'?'red':span.status==='running'?'orange':'green'">{{ span.status }}</a-tag></header>
-                        <p>{{ span.agent_name || 'Agent' }}<template v-if="span.tool_name"> · 工具 {{ span.tool_name }}</template><template v-if="span.latency_ms"> · {{ span.latency_ms }} ms</template></p>
+                        <header><div><small>{{ stageTrace.summary.labels[span.group] || span.step_type }}</small><b>{{ span.title || span.tool_name || span.step_type }}</b></div><a-tag size="small" :color="span.status==='failed'?'red':span.status==='running'?'orange':'green'">{{ span.status }}</a-tag></header>
+                        <p>{{ span.description }}</p>
+                        <div class="trace-node-meta"><span>{{ span.agent_name || 'Agent' }}</span><span v-if="span.tool_name">工具 {{ span.tool_name }}</span><span>{{ span.timing_recorded ? `${span.latency_ms} ms` : '耗时未记录' }}</span><span v-if="span.input_hash">入 {{ span.input_hash.slice(0,10) }}</span><span v-if="span.output_hash">出 {{ span.output_hash.slice(0,10) }}</span></div>
+                        <div v-if="span.input_summary && !span.input_detail" class="trace-node-summary"><small>输入摘要</small><code>{{ span.input_summary }}</code></div>
+                        <div v-if="span.output_summary && !span.output_detail" class="trace-node-summary"><small>结果摘要</small><span>{{ span.output_summary }}</span></div>
+                        <div v-if="span.result_facts?.length" class="trace-node-facts"><span v-for="fact in span.result_facts" :key="fact.label"><small>{{ fact.label }}</small><b>{{ fact.value }}{{ fact.unit }}</b></span></div>
+                        <details v-if="span.input_detail" class="trace-node-detail" open><summary>实际输入（已脱敏）</summary><pre>{{ traceDetail(span.input_detail) }}</pre></details>
+                        <details v-if="span.output_detail" class="trace-node-detail" open><summary>实际结果（已脱敏）</summary><pre>{{ traceDetail(span.output_detail) }}</pre></details>
+                        <div v-if="span.artifacts?.length" class="trace-node-summary"><small>登记产物</small><span>{{ span.artifacts.map(file=>file.name).join('、') }}</span></div>
+                        <div v-if="span.detail_note" class="trace-detail-note"><b>明细不可恢复</b><span>{{ span.detail_note }}</span></div>
                         <div v-if="span.evidence?.length" class="trace-evidence">
                           <small>读取的知识证据</small>
                           <blockquote v-for="(evidence,index) in span.evidence" :key="index">{{ displayEvidence(evidence) }}</blockquote>
@@ -950,8 +1088,9 @@ import { SkillHubConsole, SkillManager } from '@/features/skills';
 import KnowledgeGraphView from '@/features/knowledge-graph/KnowledgeGraphView.vue';
 import WorkflowEvolutionWorkbench from './WorkflowEvolutionWorkbench.vue';
 import { WORKFLOW_STAGES as DEFAULT_WORKFLOW_STAGES } from '@/features/skills/utils/stages';
-import { annotateGoldCase, confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, createTestAssetTaxonomy, confirmHistoryImport, downloadSkillPackage, downloadStageArtifact, downloadStageReviewReport, evaluateWorkflowStage, evolveCaseReview, executeWorkflowStage, freezeGoldDatasetVersion, generateCandidatesFromRun, getAssetCandidateStats, getFlywheelSwitch, getGenerationOutputLineage, getGoldCase, getProjectQualityCockpit, getStageAttachmentCatalog, getStageAttemptTrace, getStageDiff, getStageOutput, getStageReviewStatus, getWorkflowStageCatalog, getWorkflowStatus, listAnnotationConflicts, listAssetCandidateEvents, listCapabilityReleases, listCaseReviewEvolutionCandidates, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listGoldDatasetVersions, listHistoryImports, listHistoryReplays, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, listStageAttachments, listStageAttempts, listTestAssetTaxonomies, openFlywheelRun, overrideWorkflowStage, preflightCaseReviewEvolution, preflightHistoryImport, proposeCaseReviewOptimizations, publishTestAssetTaxonomy, confirmCaseReviewOptimizations, resolveAnnotationConflict, retryAssetCandidate, retryFailedAssetCandidates, runStageAttribution, scoreWorkflowStage, setFlywheelSwitch, startHistoryReplay, startWorkflow, submitTestAssetTaxonomy, updateCandidateState, uploadStageAttachment, uploadStageFeedback, uploadStageReview } from './service';
-import type { AnnotationConflict, AssetCandidateEvent, AssetCandidateStats, CapabilityRelease, CaseReviewEvolutionCandidate, CaseReviewEvolutionPreflight, CaseReviewEvolutionResult, EvaluationResult, EvaluationRun, EvaluationSuite, ExecutionSpan, FailureAttribution, FeedbackEvent, FlywheelSwitchState, GoldCase, GoldDataset, GoldDatasetVersion, HistoryImportBatch, HistoryReplay, KnowledgeCandidate, OptimizationCandidate, OptimizationProposal, OptimizationProposalResult, OutputLineageView, ProjectQualityCockpit, ProjectQualityPerson, ProjectWorkflowView, RetrievalTrace, StageAttachmentCatalog, StageAttachmentView, StageAttemptTraceView, StageDiffView, StageExecutionAttemptView, StageExecutionPlan, StageFeedbackResult, StageOutputView, StageReviewStatusView, StartWorkflowResult, TestAssetTaxonomy, WorkflowCatalogSkill, WorkflowStageCatalog, WorkflowStageGateView } from './types';
+import { annotateGoldCase, confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, createTestAssetTaxonomy, confirmHistoryImport, downloadSkillPackage, downloadStageArtifact, downloadStageReviewReport, evaluateWorkflowStage, evolveCaseReview, executeWorkflowStage, freezeGoldDatasetVersion, generateCandidatesFromRun, getAssetCandidateStats, getCaseReviewAttributionTaxonomy, getFlywheelSwitch, getGenerationOutputLineage, getGoldCase, getProjectQualityCockpit, getStageAttachmentCatalog, getStageAttemptTrace, getStageDiff, getStageOutput, getStageReviewStatus, getWorkflowStageCatalog, getWorkflowStatus, listAnnotationConflicts, listAssetCandidateEvents, listCapabilityReleases, listCaseReviewEvolutionCandidates, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listGoldDatasetVersions, listHistoryImports, listHistoryReplays, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, listStageAttachments, listStageAttempts, listTestAssetTaxonomies, openFlywheelRun, overrideWorkflowStage, preflightCaseReviewEvolution, preflightHistoryImport, proposeCaseReviewOptimizations, publishTestAssetTaxonomy, confirmCaseReviewOptimizations, resolveAnnotationConflict, retryAssetCandidate, retryFailedAssetCandidates, runStageAttribution, scoreWorkflowStage, setFlywheelSwitch, startHistoryReplay, startWorkflow, submitTestAssetTaxonomy, updateCandidateState, uploadStageAttachment, uploadStageFeedback, uploadStageReview } from './service';
+import { chooseCaseReviewEvolutionWinner, createCaseReviewEvolutionExperiment, rerunCaseReviewEvolutionExperiment, submitCaseReviewEvolutionWinner } from './service';
+import type { AnnotationConflict, AssetCandidateEvent, AssetCandidateStats, AttributionTaxonomyV2, CapabilityRelease, CaseReviewEvolutionCandidate, CaseReviewEvolutionPreflight, CaseReviewEvolutionResult, EvaluationResult, EvaluationRun, EvaluationSuite, EvolutionExperimentView, ExecutionSpan, FailureAttribution, FeedbackEvent, FlywheelSwitchState, GoldCase, GoldDataset, GoldDatasetVersion, HistoryImportBatch, HistoryReplay, KnowledgeCandidate, OptimizationCandidate, OptimizationProposal, OptimizationProposalResult, OutputLineageView, ProjectQualityCockpit, ProjectQualityPerson, ProjectWorkflowView, RetrievalTrace, StageAttachmentCatalog, StageAttachmentView, StageAttemptTraceView, StageDiffView, StageExecutionAttemptView, StageExecutionPlan, StageFeedbackResult, StageOutputView, StageReviewStatusView, StartWorkflowResult, TestAssetTaxonomy, WorkflowCatalogSkill, WorkflowStageCatalog, WorkflowStageGateView } from './types';
 
 type Workspace='overview'|'single'|'workflow'|'gold'|'evaluation'|'attribution'|'optimization';
 type PrimaryView='agents'|'data'|'graph';
@@ -1221,6 +1360,7 @@ async function rerunStageAttribution(){
   finally{stageAttributionBusy.value=false}
 }
 const displayEvidence=(item:Record<string,unknown>)=>String(item.quote||item.text||item.snippet||item.title||item.source_id||item.document_id||'已记录证据（无可展示原句）');
+const traceDetail=(value:unknown)=>typeof value==='string'?value:JSON.stringify(value,null,2);
 const formatBytes=(value:number)=>value>=1048576?`${(value/1048576).toFixed(1)} MB`:`${Math.max(1,Math.round(value/1024))} KB`;
 // ---- 阶段报告出口 / 反馈入口（R1/R2）：两个动作都**挂在产出上**，没有产出就没有"这一版"
 const stageArtifactBusy=ref(''),stageFeedbackBusy=ref('');
@@ -1244,6 +1384,14 @@ async function downloadStageReportByOutput(view:{workflow_id:string;stage:string
     // 后端的"暂无产出可下载"是业务拒绝（400），不是服务故障——原文照显才查得下去。
     Message.error(errorText(error,'下载阶段报告失败'));
   }finally{stageArtifactBusy.value=''}
+}
+async function downloadStageArtifactFile(file:{name:string;key:string}){
+  const view=stageOutput.value,projectId=projectStore.currentProjectId;
+  if(!view||!projectId)return;
+  try{
+    const filename=await downloadStageArtifact(projectId,view.workflow_id,view.stage,file.name,file.key);
+    Message.success(`已下载 ${filename}`);
+  }catch(error:any){Message.error(errorText(error,'下载产出文件失败'))}
 }
 const stageFeedbackInput=ref<HTMLInputElement|null>(null);
 const stageFeedbackTarget=ref<{workflowId:string;stage:string}|null>(null);
@@ -1465,6 +1613,10 @@ const reviewEvolutionThreshold=ref(70),reviewEvolutionSelected=ref('');
 const reviewEvolutionFileList=ref<FileItem[]>([]);
 const reviewEvolutionPreflight=ref<CaseReviewEvolutionPreflight|null>(null);
 const reviewEvolutionResult=ref<CaseReviewEvolutionResult|null>(null);
+const reviewEvolutionExperiment=ref<EvolutionExperimentView|null>(null);
+const reviewEvolutionExperimentBusy=ref(false);
+const reviewEvolutionWinnerLabel=ref<''|'A'|'B'>('');
+const reviewEvolutionWinnerReason=ref('');
 const selectedReview=computed(()=>reviewEvolutionItems.value.find(v=>v.review_id===reviewEvolutionSelected.value));
 const reviewEvolutionFile=computed<File|null>(()=>reviewEvolutionFileList.value[0]?.file||null);
 const preflightBlockers=computed(()=>reviewEvolutionPreflight.value?.blockers||[]);
@@ -1474,8 +1626,15 @@ const reviewEvolutionProposing=ref(false),reviewEvolutionConfirming=ref(false);
 const reviewEvolutionCandidates=ref<OptimizationCandidate[]>([]);
 const reviewEvolutionDegraded=ref(false),reviewEvolutionDegradedDetail=ref('');
 const reviewEvolutionProposalPackage=ref<OptimizationProposalResult['package']|null>(null);
+const reviewEvolutionProposalStats=ref<Pick<OptimizationProposalResult,'source_group_count'|'source_defect_total'|'batch_count'>|null>(null);
+const reviewEvolutionTaxonomy=ref<AttributionTaxonomyV2|null>(null);
+const reviewEvolutionDiscardedCount=ref(0);
+const reviewEvolutionEvidenceCandidate=ref<OptimizationCandidate|null>(null);
+const reviewEvolutionSelectedEvidenceId=ref('');
+const reviewEvolutionSelectedEvidence=computed(()=>reviewEvolutionEvidenceCandidate.value?.evidence?.find(item=>item.evidence_id===reviewEvolutionSelectedEvidenceId.value)??reviewEvolutionEvidenceCandidate.value?.evidence?.[0]??null);
 /** 逐条决定，按 attribution_id 存（不用下标：下标只在某一次响应里有意义）。 */
-const reviewEvolutionDecisions=ref<Record<string,{action:'accept'|'edit'|'reject';hypothesis:string}>>({});
+type ReviewDecision={action:'accept'|'relabel'|'reject';hypothesis:string;primary_cause:string;fine_cause:string;repair_target:string};
+const reviewEvolutionDecisions=ref<Record<string,ReviewDecision>>({});
 const reviewEvolutionConfirmedIds=ref<string[]>([]);
 const reviewEvolutionConfirmHint=ref('');
 const reviewEvolutionRejectedCount=computed(()=>Object.values(reviewEvolutionDecisions.value).filter(v=>v.action==='reject').length);
@@ -1512,9 +1671,15 @@ function errorText(error:any,fallback:string):string{
   const detail=error?.response?.data?.detail;
   if(typeof detail==='string'&&detail)return detail;
   if(detail&&typeof detail==='object')return Object.values(detail).flat().join('；');
+  const responseData=error?.response?.data;
+  if(responseData&&typeof responseData==='object'){
+    const values=Object.values(responseData).flat().filter(value=>typeof value==='string');
+    if(values.length)return values.join('；');
+  }
+  if(typeof error?.error==='string'&&error.error)return error.error;
   return error?.message||fallback;
 }
-async function openReviewEvolution(){
+async function openReviewEvolution(preferredReviewId=''){
   reviewEvolutionStep.value=1;
   reviewEvolutionSelected.value='';
   reviewEvolutionFileList.value=[];
@@ -1522,7 +1687,7 @@ async function openReviewEvolution(){
   reviewEvolutionResult.value=null;
   resetReviewProposal();
   showReviewEvolutionModal.value=true;
-  await loadReviewEvolutionItems();
+  await loadReviewEvolutionItems(preferredReviewId);
 }
 /** 清空第 ③ 步的候选与决定。换报告/换项目时必须清：留着上一轮的结论去派生，
  *  派生的依据就是另一份报告的东西。 */
@@ -1532,23 +1697,49 @@ function resetReviewProposal(){
   reviewEvolutionDegraded.value=false;
   reviewEvolutionDegradedDetail.value='';
   reviewEvolutionProposalPackage.value=null;
+  reviewEvolutionProposalStats.value=null;
+  reviewEvolutionDiscardedCount.value=0;
+  reviewEvolutionEvidenceCandidate.value=null;
   reviewEvolutionConfirmedIds.value=[];
   reviewEvolutionConfirmHint.value='';
 }
-async function loadReviewEvolutionItems(){
+async function loadReviewEvolutionItems(preferredReviewId=''){
   if(!projectStore.currentProjectId)return;
   reviewEvolutionLoading.value=true;
   try{
     const data=await listCaseReviewEvolutionCandidates(projectStore.currentProjectId);
+    reviewEvolutionTaxonomy.value=await getCaseReviewAttributionTaxonomy(projectStore.currentProjectId);
     reviewEvolutionItems.value=data.items;
     reviewEvolutionThreshold.value=data.threshold;
     // 默认选中第一条可进化的：人点「发起流程」就是要发起，
     // 让他在一堆不可进化的条目里自己找那一条是多余的。
-    const first=reviewEvolutionItems.value.find(v=>v.evolvable);
+    const preferred=preferredReviewId
+      ? reviewEvolutionItems.value.find(v=>v.review_id===preferredReviewId&&v.evolvable)
+      : undefined;
+    const first=preferred||reviewEvolutionItems.value.find(v=>v.evolvable);
     if(first)reviewEvolutionSelected.value=first.review_id;
   }catch(error:any){Message.error(errorText(error,'加载用例审查项目失败'))}
   finally{reviewEvolutionLoading.value=false}
 }
+
+/** 从用例审查「质量反馈」进入时，直接打开当前审查的自进化向导。 */
+async function openReviewEvolutionFromRoute(){
+  if(route.query.action!=='case-review-evolution'||!projectStore.currentProjectId)return;
+  primaryView.value='data';
+  quickMode.value='console';
+  workspace.value='single';
+  const reviewId=String(route.query.review_id||'');
+  await openReviewEvolution(reviewId);
+  const query={...route.query};
+  delete query.action;
+  delete query.review_id;
+  await router.replace({path:'/knowledge-evolution',query});
+}
+watch(
+  [()=>route.query.action,()=>route.query.review_id,()=>projectStore.currentProjectId],
+  ()=>{void openReviewEvolutionFromRoute()},
+  {immediate:true},
+);
 async function onReviewReportChange(fileList:FileItem[]){
   reviewEvolutionFileList.value=(fileList||[]).slice(-1);
   // 换了文件，之前的预检结论就不成立了——留着它会让人拿着 A 的解析结果去提交 B。
@@ -1618,6 +1809,13 @@ async function runReviewProposal(){
     reviewEvolutionDegradedDetail.value=result.detail||'';
     reviewEvolutionCandidates.value=result.candidates||[];
     reviewEvolutionProposalPackage.value=result.package||null;
+    reviewEvolutionProposalStats.value={
+      source_group_count:result.source_group_count,
+      source_defect_total:result.source_defect_total,
+      batch_count:result.batch_count,
+    };
+    reviewEvolutionTaxonomy.value=result.taxonomy||reviewEvolutionTaxonomy.value;
+    reviewEvolutionDiscardedCount.value=result.discarded_count||0;
     // 重新生成会换掉候选 id，旧决定不能再留——它指向的条目已经不存在了。
     reviewEvolutionDecisions.value={};
     reviewEvolutionConfirmHint.value='';
@@ -1626,10 +1824,36 @@ async function runReviewProposal(){
   }catch(error:any){
     reviewEvolutionCandidates.value=[];
     reviewEvolutionProposalPackage.value=null;
+    reviewEvolutionProposalStats.value=null;
     Message.error(errorText(error,'生成候选优化点失败'));
   }finally{reviewEvolutionProposing.value=false}
 }
-function decideCandidate(item:OptimizationCandidate,action:'accept'|'edit'|'reject'){
+const primaryCauseOptions=computed(()=>reviewEvolutionTaxonomy.value?.primary_causes||[]);
+function primaryCauseText(value:string):string{return primaryCauseOptions.value.find(v=>v.value===value)?.label||value||'未分类'}
+function fineCauseOptions(primary:string){return primaryCauseOptions.value.find(v=>v.value===primary)?.fine_causes||[]}
+function fineCauseText(primary:string,value:string):string{return fineCauseOptions(primary).find(v=>v.value===value)?.label||value||'未分类'}
+function repairTargetOptions(primary:string,fine:string){return fineCauseOptions(primary).find(v=>v.value===fine)?.repair_targets||[]}
+function repairTargetText(value:string):string{
+  for(const primary of primaryCauseOptions.value)for(const fine of primary.fine_causes){const target=fine.repair_targets.find(v=>v.value===value);if(target)return target.label}
+  return value||'未分类';
+}
+function onRelabelPrimaryChange(attributionId:string){
+  const decision=reviewEvolutionDecisions.value[attributionId];if(!decision)return;
+  const fine=fineCauseOptions(decision.primary_cause)[0];decision.fine_cause=fine?.value||'';decision.repair_target=fine?.repair_targets[0]?.value||'';
+}
+function onRelabelFineChange(attributionId:string){
+  const decision=reviewEvolutionDecisions.value[attributionId];if(!decision)return;
+  decision.repair_target=repairTargetOptions(decision.primary_cause,decision.fine_cause)[0]?.value||'';
+}
+function openReviewEvolutionEvidence(item:OptimizationCandidate){
+  reviewEvolutionEvidenceCandidate.value=item;
+  reviewEvolutionSelectedEvidenceId.value=item.evidence?.[0]?.evidence_id||'';
+}
+function closeReviewEvolutionEvidence(){
+  reviewEvolutionEvidenceCandidate.value=null;
+  reviewEvolutionSelectedEvidenceId.value='';
+}
+function decideCandidate(item:OptimizationCandidate,action:'accept'|'relabel'|'reject'){
   const current=reviewEvolutionDecisions.value[item.attribution_id];
   // 再点一次同一个动作 = 取消决定，回到"未定夺"：误点后没有退路，人就只能刷新页面。
   if(current&&current.action===action){
@@ -1638,7 +1862,12 @@ function decideCandidate(item:OptimizationCandidate,action:'accept'|'edit'|'reje
   }
   reviewEvolutionDecisions.value={
     ...reviewEvolutionDecisions.value,
-    [item.attribution_id]:{action,hypothesis:action==='edit'?(current?.hypothesis||item.hypothesis):item.hypothesis},
+    [item.attribution_id]:{
+      action,hypothesis:action==='relabel'?(current?.hypothesis||item.hypothesis):item.hypothesis,
+      primary_cause:current?.primary_cause||item.primary_cause,
+      fine_cause:current?.fine_cause||item.fine_cause,
+      repair_target:current?.repair_target||item.repair_target,
+    },
   };
 }
 /** 第 ③ → ④：把人工决定落库（accept/edit → confirmed，reject → rejected）。
@@ -1649,7 +1878,10 @@ async function confirmReviewDecisions():Promise<boolean>{
   if(!projectStore.currentProjectId||!reviewEvolutionSelected.value)return false;
   const decisions=Object.entries(reviewEvolutionDecisions.value).map(([attribution_id,value])=>({
     attribution_id,action:value.action,
-    ...(value.action==='edit'?{hypothesis:value.hypothesis}:{}),
+    ...(value.action==='relabel'?{
+      hypothesis:value.hypothesis,primary_cause:value.primary_cause,
+      fine_cause:value.fine_cause,repair_target:value.repair_target,
+    }:{}),
   }));
   if(!decisions.length)return true;
   reviewEvolutionConfirming.value=true;
@@ -1672,28 +1904,52 @@ async function confirmReviewDecisions():Promise<boolean>{
   }finally{reviewEvolutionConfirming.value=false}
 }
 async function submitReviewEvolution():Promise<boolean>{
-  const file=reviewEvolutionFile.value;
-  if(!projectStore.currentProjectId||!file||!reviewEvolutionSelected.value)return false;
+  if(!projectStore.currentProjectId||!reviewEvolutionSelected.value)return false;
   reviewEvolutionSubmitting.value=true;
   try{
-    reviewEvolutionResult.value=await evolveCaseReview(
-      projectStore.currentProjectId,reviewEvolutionSelected.value,file,
-      {
-        threshold:reviewEvolutionThreshold.value,
-        // 主路径只拿人工确认过的候选当依据；降级路径不传，后端会回落到"采信报告里的结论"。
-        attributionIds:reviewEvolutionDegraded.value?undefined:reviewEvolutionConfirmedIds.value,
-      },
+    if(reviewEvolutionDegraded.value){
+      Message.error('完整 A/B 进化需要先生成并人工确认结构化归因；当前 LLM 降级路径不能跳过 Critic 与证据闸口');
+      return false;
+    }
+    reviewEvolutionExperiment.value=await createCaseReviewEvolutionExperiment(
+      projectStore.currentProjectId,reviewEvolutionSelected.value,reviewEvolutionConfirmedIds.value,
     );
     showReviewEvolutionModal.value=false;
     reviewEvolutionStep.value=1;
     resetReviewProposal();
-    await loadCockpit();
-    Message.success(`已派生候选版本 ${reviewEvolutionResult.value.candidate.version}（草稿，待评测与审批）`);
+    Message.success('已从同一精确基线派生 Candidate A/B；请运行同输入对照评测');
     return true;
   }catch(error:any){
     Message.error(errorText(error,'发起自进化失败'));
     return false;
   }finally{reviewEvolutionSubmitting.value=false}
+}
+async function rerunReviewExperiment(){
+  if(!projectStore.currentProjectId||!reviewEvolutionExperiment.value)return;
+  reviewEvolutionExperimentBusy.value=true;
+  try{
+    reviewEvolutionExperiment.value=await rerunCaseReviewEvolutionExperiment(projectStore.currentProjectId,reviewEvolutionExperiment.value.experiment_id);
+    Message.success('Baseline/A/B 同输入重跑完成，请人工选择 winner');
+  }catch(error:any){Message.error(errorText(error,'A/B 重跑失败'))}
+  finally{reviewEvolutionExperimentBusy.value=false}
+}
+async function chooseReviewExperimentWinner(){
+  if(!projectStore.currentProjectId||!reviewEvolutionExperiment.value||!reviewEvolutionWinnerLabel.value)return;
+  reviewEvolutionExperimentBusy.value=true;
+  try{
+    reviewEvolutionExperiment.value=await chooseCaseReviewEvolutionWinner(projectStore.currentProjectId,reviewEvolutionExperiment.value.experiment_id,reviewEvolutionWinnerLabel.value,reviewEvolutionWinnerReason.value);
+    Message.success(`已选择 Candidate ${reviewEvolutionWinnerLabel.value}`);
+  }catch(error:any){Message.error(errorText(error,'选择 winner 失败'))}
+  finally{reviewEvolutionExperimentBusy.value=false}
+}
+async function submitReviewExperimentWinner(){
+  if(!projectStore.currentProjectId||!reviewEvolutionExperiment.value)return;
+  reviewEvolutionExperimentBusy.value=true;
+  try{
+    reviewEvolutionExperiment.value=await submitCaseReviewEvolutionWinner(projectStore.currentProjectId,reviewEvolutionExperiment.value.experiment_id);
+    await loadCockpit();Message.success('Winner 已提交 Skill Hub 验证与发布审批');
+  }catch(error:any){Message.error(errorText(error,'提交发布审批失败'))}
+  finally{reviewEvolutionExperimentBusy.value=false}
 }
 async function downloadReviewCandidate(){
   const result=reviewEvolutionResult.value;
@@ -1722,7 +1978,7 @@ const traces=computed(()=>allTraces.value.filter(v=>(!traceTaskType.value||v.tas
 const filteredGoldDatasets=computed(()=>goldTaskType.value?goldDatasets.value.filter(v=>v.task_type===goldTaskType.value):goldDatasets.value);
 const traceAttributions=computed(()=>{const outputIds=new Set(allTraces.value.find(v=>v.id===selectedTraceId.value)?.output_ids||[]);return attributions.value.filter(v=>(v.span&&selectedSpans.value.some(s=>s.id===v.span))||(v.output&&outputIds.has(v.output)))});
 const failedTraces=computed(()=>allTraces.value.filter(v=>v.status!=='completed'));
-const tabs=computed(()=>[{key:'overview' as const,label:'飞轮总览',desc:'指标与待办',icon:IconDashboard},{key:'single' as const,label:'单次能力',desc:'审查与问答',icon:IconExperiment,count:cockpit.value.single_capabilities.length},{key:'workflow' as const,label:'全链路测试',desc:'四阶段门禁',icon:IconBranch,count:cockpit.value.workflows.length},{key:'gold' as const,label:'金标资产',desc:'按业务分类',icon:IconMessage,count:pendingFeedback.value},{key:'evaluation' as const,label:'自动评测',desc:'L0–L3 分层扫描',icon:IconExperiment,count:runs.value.length},{key:'attribution' as const,label:'轨迹归因',desc:'节点与反证',icon:IconBranch,count:failedTraces.value.length},{key:'optimization' as const,label:'优化发布',desc:'影子、灰度、回滚',icon:IconSafe,count:pendingOptimizationCount.value}]);
+const tabs=computed(()=>[{key:'overview' as const,label:'飞轮总览',desc:'指标与待办',icon:IconDashboard},{key:'single' as const,label:'单次能力',desc:'5 个 Agent',icon:IconExperiment,count:cockpit.value.single_capabilities.length},{key:'workflow' as const,label:'全链路测试',desc:'四阶段门禁',icon:IconBranch,count:cockpit.value.workflows.length},{key:'gold' as const,label:'金标资产',desc:'按业务分类',icon:IconMessage,count:pendingFeedback.value},{key:'evaluation' as const,label:'自动评测',desc:'L0–L3 分层扫描',icon:IconExperiment,count:runs.value.length},{key:'attribution' as const,label:'轨迹归因',desc:'节点与反证',icon:IconBranch,count:failedTraces.value.length},{key:'optimization' as const,label:'优化发布',desc:'影子、灰度、回滚',icon:IconSafe,count:pendingOptimizationCount.value}]);
 const loopSteps=computed(()=>[{title:'建设金标集',desc:`${goldDatasets.value.length} 个金标集 · ${feedbackEvents.value.length} 条反馈`,state:pendingFeedback.value?'待复核':'可用',color:pendingFeedback.value?'orange':'green',target:'gold' as const},{title:'自动化评测',desc:`${completedRuns.value.length} 次完成 · ${failedResults.value.length} 个失败`,state:runs.value.length?'可运行':'待建集',color:runs.value.length?'blue':'gray',target:'evaluation' as const},{title:'轨迹回流归因',desc:`${traces.value.length} 条轨迹 · ${attributions.value.length} 条归因`,state:failedTraces.value.length?'待定位':'正常',color:failedTraces.value.length?'red':'green',target:'attribution' as const},{title:'自主优化验证',desc:`${pendingOptimizationCount.value} 项待处理`,state:pendingOptimizationCount.value?'待审批':'受控',color:pendingOptimizationCount.value?'orange':'green',target:'optimization' as const}]);
 const sourceDefinitions=Object.entries(taskTypeLabels).map(([key,label])=>({key,label,traceType:key}));
 const businessSources=computed(()=>sourceDefinitions.map(source=>({...source,connected:true,count:allTraces.value.filter(v=>v.task_type===source.traceType).length})));
@@ -1864,6 +2120,22 @@ async function selectRun(v:EvaluationRun){selectedRunId.value=v.id;await loadRes
 async function bootstrap(){await loadSuites();if(suites.value[0])await selectSuite(suites.value.find(v=>v.suite_type==='seed')||suites.value[0]);else{selectedSuiteId.value=undefined;selectedRunId.value='';runs.value=[];results.value=[]}await Promise.all([loadFeedback(),loadCandidates(),loadTraces(),loadGovernance(),loadCockpit(),loadFlywheelSwitch()]);if(allTraces.value[0])await selectTrace(allTraces.value[0]);else{selectedTraceId.value='';selectedSpans.value=[]}}
 async function refreshAll(){await bootstrap();Message.success('数据已刷新')}
 async function createRun(){if(!selectedSuiteId.value)return;try{await createEvaluationRun({suite:selectedSuiteId.value,name:`评测运行 · ${new Date().toLocaleString('zh-CN')}`,policy_version:'default-policy@v3',model_name:'qwen3-coder-plus'});await loadRuns();Message.success('评测运行已启动')}catch{Message.error('启动评测失败')}}
+const independentCapabilityRoutes:Record<string,string>={
+  test_plan_generation:'/test-plans',
+  testcase_generation:'/testcases',
+  case_review:'/testcase-reviews',
+  test_execution:'/testcases',
+  report_generation:'/langgraph-chat?module_key=report_generation',
+};
+async function startIndependentCapability(stage:string){
+  if(stage==='case_review'){
+    await openReviewEvolution();
+    return;
+  }
+  const target=independentCapabilityRoutes[stage];
+  if(!target){Message.error('该能力暂无可发起的独立流程');return}
+  await router.push(target);
+}
 async function confirmCreateSuite(){if(!suiteForm.value.name||!projectStore.currentProjectId){Message.warning('请填写名称并选择项目');return}try{await createEvaluationSuite({project:projectStore.currentProjectId,...suiteForm.value,is_active:true} as Partial<EvaluationSuite>);showSuiteModal.value=false;await loadSuites();Message.success('评测集已创建')}catch{Message.error('创建评测集失败')}}
 async function confirmCreateCandidates(){if(!selectedRunId.value)return;try{const t=candidateForm.value.threshold,r=await generateCandidatesFromRun(selectedRunId.value,{thresholds:{l0:t,l1:t,l2:t,l3:t},min_failure_count:candidateForm.value.minFailureCount});showCandidateModal.value=false;await loadCandidates();Message.success(`已生成 ${r.created_count} 个候选`)}catch{Message.error('生成候选失败')}}
 async function approve(v:KnowledgeCandidate){try{await updateCandidateState(v.id,'accepted','测试负责人审核通过');await loadCandidates();Message.success('候选已通过')}catch{Message.error('审批失败')}}
@@ -1903,6 +2175,11 @@ function traceChannels(v:RetrievalTrace){const keys=Object.keys(v.channels||{});
 function traceLatency(v:RetrievalTrace){const values=Object.entries(v.timings||{}).filter(([,n])=>typeof n==='number') as [string,number][];if(!values.length)return'-';const total=values.reduce((sum,[,n])=>sum+n,0);return total>=1000?`${(total/1000).toFixed(2)}s`:`${Math.round(total)}ms`}
 const stepTypeText=(v:string)=>({intent:'意图理解',planning:'复杂规划',retrieval:'知识检索',graph_retrieval:'图谱检索',prompt:'Prompt组装',model:'模型推理',tool:'工具调用',validation:'结果校验',handoff:'Agent交接',human_edit:'人工修改',downstream:'下游执行'} as Record<string,string>)[v]||v;
 const attributionStateText=(v:string)=>({proposed:'待确认',confirmed:'已确认',rejected:'已排除'} as Record<string,string>)[v]||v,attributionCategoryText=(v:string)=>({intent_error:'意图理解失败',planning_error:'复杂规划失败',knowledge_missing:'知识缺失',knowledge_stale:'知识过期',retrieval_error:'检索失败',prompt_error:'Prompt失败',tool_error:'工具失败',generation_error:'生成失败',downstream_execution_error:'下游执行失败'} as Record<string,string>)[v]||v;
+const feedbackConclusionColor=(value:string)=>({
+  accepted:'green',accepted_rewritten:'blue',false_positive:'orange',business_pending:'gold',
+  unverifiable:'purple',not_applicable:'gray',duplicate:'cyan',known_or_fixed:'green',
+  unconfirmed:'red',other:'gray',
+} as Record<string,string>)[value]||'gray';
 const proposalTypeText=(v:string)=>({prompt:'Prompt',knowledge:'知识',retrieval_policy:'检索策略',skill:'Skill/工具'} as Record<string,string>)[v]||v,releaseStateText=(v:string)=>({draft:'草稿',shadow:'灰度中',awaiting_approval:'待审批',active:'已生效',rejected:'已拒绝',rolled_back:'已回滚',retired:'已退役',materialized:'已物化'} as Record<string,string>)[v]||v;
 function releaseStateColor(v:string){if(v==='active')return'green';if(['rejected','rolled_back'].includes(v))return'red';if(['shadow','awaiting_approval'].includes(v))return'orange';return'blue'}
 function gateSummary(v:CapabilityRelease){const report=v.gate_report||{};if(report.passed===true)return'已通过影子硬门禁';if(report.passed===false)return'未通过影子硬门禁';return'待执行影子对比'}
@@ -1973,6 +2250,9 @@ watch(()=>projectStore.currentProjectId,async id=>{
 .output-meta{display:flex;flex-wrap:wrap;gap:14px;padding-bottom:10px;color:var(--color-text-3);font-size:12px;border-bottom:1px solid var(--color-border-2)}
 .output-meta .sha{font-family:ui-monospace,MENLO,monospace}
 .output-gate{display:flex;align-items:center;gap:10px;padding:10px 0;color:var(--color-text-2);font-size:12px}
+.stage-artifact-files{margin:10px 0 14px;padding:12px 14px;background:var(--color-fill-2);border:1px solid var(--color-border-2);border-radius:6px}
+.stage-artifact-files-title{margin-bottom:8px;color:var(--color-text-1);font-size:13px;font-weight:600}
+.stage-artifact-file{display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-top:1px solid var(--color-border-2);color:var(--color-text-2);font-size:13px}
 .output-content{margin:0;padding:12px;max-height:420px;overflow:auto;border-radius:7px;background:var(--color-fill-1);color:var(--color-text-1);font-size:12px;line-height:1.75;white-space:pre-wrap;word-break:break-word}
 .gold-type-nav{display:flex;gap:7px;margin-bottom:14px;padding-bottom:12px;overflow:auto;border-bottom:1px solid var(--color-border-2)}.gold-type-nav button{flex:none;padding:7px 10px;border:1px solid var(--color-border-2);border-radius:7px;color:var(--color-text-2);background:var(--color-bg-2);cursor:pointer}.gold-type-nav button.active{border-color:var(--blue);color:var(--blue);background:rgb(var(--arcoblue-1))}.gold-type-nav b{margin-left:5px}
 @media(max-width:1200px){.metrics{grid-template-columns:repeat(2,1fr)}.source-grid{grid-template-columns:repeat(2,1fr)}.stage-stepper{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.step-link{display:none}.single-grid{grid-template-columns:1fr}}
@@ -2058,7 +2338,8 @@ watch(()=>projectStore.currentProjectId,async id=>{
 .pin-block header b{font-size:13px}
 .pin-block header small{overflow:hidden;color:#86909c;font-size:11px;text-overflow:ellipsis;white-space:nowrap}
 .pin-select{width:100%}
-.pin-option{display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;padding:2px 0}.pin-option-name{display:flex;min-width:0;align-items:center;gap:6px}.pin-option-name b{overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.pin-option-meta{flex:none;color:#86909c;font-size:10px;white-space:nowrap}
+.pin-option{display:flex;flex-direction:column;align-items:flex-start;gap:2px;width:100%;max-width:680px;padding:4px 0}.pin-option-name{display:flex;min-width:0;align-items:center;gap:6px}.pin-option-name b{font-size:12px;white-space:normal;overflow-wrap:anywhere}.pin-option-meta,.pin-option-reason{display:block;max-width:100%;color:#86909c;font-size:10px;line-height:1.45;white-space:normal;overflow-wrap:anywhere}.pin-option-reason{color:#165dff}
+:global(.pin-select-popup){min-width:680px!important;max-width:min(760px,calc(100vw - 32px))}.pin-select-popup :deep(.arco-select-option){height:auto!important;min-height:42px;white-space:normal}
 .pin-selected{grid-column:2;display:flex;align-items:center;justify-content:space-between;gap:10px;color:#4e5969;font-size:11px}
 .pin-selected code{padding:1px 5px;border-radius:4px;color:#86909c;background:#f2f3f5;font-size:10px}
 .pin-warn{margin:12px 0 0;padding:9px 11px;border:1px dashed #ff7d00;border-radius:8px;color:#4e5969;background:#fff7e8;font-size:12px;line-height:1.7}
@@ -2149,6 +2430,8 @@ watch(()=>projectStore.currentProjectId,async id=>{
 .trace-chain>article>i{display:flex;z-index:1;align-items:center;justify-content:center;width:26px;height:26px;border:2px solid #94bfff;border-radius:50%;color:#165dff;background:#fff;font-size:11px;font-style:normal}
 .trace-chain>article:not(:last-child)::before{position:absolute;top:24px;bottom:0;left:12px;width:2px;background:#e5e6eb;content:''}.trace-chain>article.failed>i{border-color:#f76560;color:#cb2634}
 .trace-main{padding:9px 11px;border:1px solid var(--color-border-2);border-radius:8px;background:var(--color-bg-2)}.trace-main header{display:flex;align-items:center;justify-content:space-between}.trace-main p{margin:5px 0 0;color:var(--color-text-3);font-size:11px}.trace-main .trace-error{color:#cb2634}
+.trace-main header>div small,.trace-main header>div b{display:block}.trace-main header>div small{color:var(--color-text-3);font-size:9px}.trace-node-meta{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}.trace-node-meta span{padding:2px 6px;border:1px solid var(--color-border-2);background:var(--color-fill-1);font-size:9px}.trace-node-summary{display:grid;grid-template-columns:70px minmax(0,1fr);gap:8px;margin-top:7px;padding:7px 8px;border-left:2px solid #94bfff;background:var(--color-bg-1);font-size:10px}.trace-node-summary small{font-weight:700}.trace-node-summary code{overflow-wrap:anywhere;white-space:pre-wrap}
+.trace-node-facts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.trace-node-facts span{min-width:90px;padding:7px 9px;border:1px solid var(--color-border-2);background:var(--color-bg-1)}.trace-node-facts small,.trace-node-facts b{display:block}.trace-node-facts small{color:var(--color-text-3);font-size:9px}.trace-node-facts b{margin-top:2px;font-size:12px}.trace-node-detail{margin-top:7px;border:1px solid var(--color-border-2);background:var(--color-bg-1)}.trace-node-detail summary{padding:7px 9px;color:var(--color-text-2);font-size:10px;font-weight:700;cursor:pointer}.trace-node-detail pre{overflow:auto;max-height:260px;margin:0;padding:9px;border-top:1px solid var(--color-border-2);background:var(--color-fill-1);font-size:10px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}.trace-detail-note{display:flex;gap:8px;margin-top:7px;padding:8px 9px;border-left:2px solid #e07a24;background:#fff8ee;color:#725430;font-size:10px}.trace-detail-note b{flex:none}
 .trace-evidence{margin-top:8px}.trace-evidence small{color:var(--color-text-3);font-size:11px}.trace-evidence blockquote{margin:5px 0 0;padding:7px 9px;border-left:3px solid #4080ff;color:var(--color-text-2);background:var(--color-fill-1);font-size:12px;line-height:1.6}
 .review-actions{display:flex;gap:8px;margin:14px 0}.review-status-card{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:12px;padding:11px 13px;border:1px solid var(--color-border-2);border-radius:8px;background:var(--color-fill-1)}.review-status-card b,.review-status-card small{display:block}.review-status-card small,.review-status-card span{margin-top:3px;color:var(--color-text-3);font-size:11px}
 .attachment-panel{margin-top:18px;padding-top:14px;border-top:1px solid var(--color-border-2)}.attachment-panel h4{margin:0;font-size:13px}.attachment-form{display:grid;grid-template-columns:180px minmax(0,1fr) auto;gap:8px;margin-top:10px}.attachment-list{display:grid;gap:6px;margin-top:10px}.attachment-list article{display:grid;grid-template-columns:minmax(0,1fr) 1fr;gap:10px;padding:8px 10px;border-radius:7px;background:var(--color-fill-1)}.attachment-list b,.attachment-list small{display:block}.attachment-list small,.attachment-list span{margin-top:2px;color:var(--color-text-3);font-size:11px}
@@ -2160,16 +2443,27 @@ watch(()=>projectStore.currentProjectId,async id=>{
 .candidate-list{display:grid;gap:8px;max-height:340px;margin-top:10px;overflow:auto}
 .candidate-item{padding:10px 12px;border:1px solid var(--color-border-2);border-left:3px solid var(--color-border-3);border-radius:8px;background:var(--color-bg-2)}
 .candidate-item.accept{border-left-color:#16a34a}
-.candidate-item.edit{border-left-color:#165dff}
+.candidate-item.relabel{border-left-color:#165dff}
 .candidate-item.reject{opacity:.6;border-left-color:#86909c}
 .candidate-item header{display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:12px}
 .candidate-item header b{font-size:12px}
 .candidate-item header span{margin-left:auto;color:var(--color-text-3);font-size:11px}
 .candidate-hypothesis{margin:6px 0 0;color:var(--color-text-2);font-size:12px;line-height:1.7;white-space:pre-wrap}
-.candidate-actions{display:flex;gap:8px;margin-top:8px}
+.diagnosis-chain{display:flex;align-items:stretch;gap:8px;margin-top:9px;padding:8px;border:1px solid var(--color-border-2);background:var(--color-fill-1)}
+.diagnosis-chain>span{display:flex;min-width:110px;flex-direction:column}.diagnosis-chain small{color:var(--color-text-3);font-size:9px}.diagnosis-chain b{margin-top:2px;font-size:11px}.diagnosis-chain i{align-self:center;color:var(--color-text-3);font-style:normal}.diagnosis-chain>.arco-tag{align-self:center;margin-left:auto}
+.relabel-editor{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:9px}.relabel-editor .arco-textarea-wrapper{grid-column:1/-1}
+.candidate-actions{display:flex;gap:8px;margin-top:8px}.candidate-actions .arco-btn:last-child{margin-left:auto}
+.evidence-summary{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 16px;padding:14px 16px;border-left:4px solid #165dff;background:var(--color-fill-1)}
+.evidence-summary>div{display:flex;min-width:0;align-items:baseline;gap:10px}.evidence-summary>div span{flex:none;color:var(--color-text-3);font-size:11px}.evidence-summary>div b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}.evidence-summary>.arco-tag{align-self:start}.evidence-summary p{grid-column:1/-1;margin:0;color:var(--color-text-2);font-size:13px;line-height:1.7}
+:deep(.evidence-modal){max-width:1280px}.evidence-workbench{display:grid;grid-template-columns:minmax(280px,32%) minmax(0,1fr);height:min(68vh,720px);min-height:480px;margin-top:14px;border:1px solid var(--color-border-2);background:var(--color-bg-2)}
+.evidence-index{min-width:0;overflow:auto;border-right:1px solid var(--color-border-2);background:var(--color-fill-1)}.evidence-index>header{position:sticky;top:0;z-index:1;display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--color-border-2);background:var(--color-bg-2)}.evidence-index>header span{color:var(--color-text-3);font-size:11px}.evidence-index>button{display:grid;width:100%;grid-template-columns:28px minmax(0,1fr) auto;align-items:center;gap:9px;padding:11px 12px;border:0;border-bottom:1px solid var(--color-border-2);background:transparent;color:inherit;text-align:left;cursor:pointer}.evidence-index>button:hover{background:var(--color-fill-2)}.evidence-index>button.active{box-shadow:inset 3px 0 #165dff;background:#e8f3ff}.evidence-index>button>span{color:var(--color-text-3);font-family:"SFMono-Regular",Consolas,monospace;font-size:10px}.evidence-index>button div{min-width:0}.evidence-index>button b,.evidence-index>button small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.evidence-index>button b{font-size:12px}.evidence-index>button small{margin-top:3px;color:var(--color-text-3);font-size:10px}
+.evidence-detail{display:flex;min-width:0;overflow:auto;flex-direction:column;padding:22px 26px}.evidence-detail>header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-bottom:16px;border-bottom:1px solid var(--color-border-2)}.evidence-detail>header span{color:#165dff;font-size:10px;font-weight:600;letter-spacing:.12em}.evidence-detail h3{margin:4px 0 0;font-size:18px}.evidence-detail-body{margin-top:20px;padding:20px;border:1px solid #bedaff;background:#f7faff}.evidence-detail-body small{color:var(--color-text-3);font-size:10px}.evidence-detail-body p{margin:9px 0 0;color:var(--color-text-1);font-size:14px;line-height:1.9;white-space:pre-wrap}.evidence-detail dl{display:grid;gap:0;margin:18px 0 0;border:1px solid var(--color-border-2)}.evidence-detail dl div{display:grid;grid-template-columns:110px minmax(0,1fr);border-bottom:1px solid var(--color-border-2)}.evidence-detail dl div:last-child{border-bottom:0}.evidence-detail dt,.evidence-detail dd{margin:0;padding:10px 12px}.evidence-detail dt{background:var(--color-fill-1);color:var(--color-text-3);font-size:11px}.evidence-detail dd{overflow-wrap:anywhere;font-size:12px}.evidence-position-note{margin:auto 0 0;padding-top:20px;color:var(--color-text-3);font-size:11px}
+.evolution-experiment{margin-top:16px}.variant-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:12px}.variant-grid>article{padding:12px;border:1px solid var(--color-border-2);background:var(--color-bg-2)}.variant-grid>article.winner{border-color:#165dff;box-shadow:inset 3px 0 #165dff}.variant-grid header{display:flex;align-items:center;justify-content:space-between}.variant-grid>article>small{display:block;margin-top:5px;color:var(--color-text-3)}.variant-metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-top:10px}.variant-metrics span{padding:7px;background:var(--color-fill-1)}.variant-metrics b,.variant-metrics small{display:block}.variant-metrics small{color:var(--color-text-3);font-size:9px}.winner-bar{display:grid;grid-template-columns:auto minmax(260px,1fr) auto;align-items:center;gap:10px;margin-top:12px;padding:10px;border:1px solid #94bfff;background:#f7faff}
 .governance-columns{display:grid;grid-template-columns:1.1fr .9fr;gap:18px;margin-top:14px}.governance-columns h3{margin:0 0 10px;font-size:14px}.section-inline{display:flex;align-items:center;justify-content:space-between}.asset-strip .clickable{cursor:pointer}.governance-list{display:grid;gap:8px;margin-top:10px}.governance-list>article{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:10px;padding:11px 13px;border:1px solid #e5e6eb;border-radius:8px;background:#fafafa}.governance-list b,.governance-list small{display:block}.governance-list small{margin-top:3px;color:#86909c;font-size:11px}.history-entry{display:grid;grid-template-columns:1fr 1fr 1fr 1fr auto;gap:8px;margin:14px 0}.preflight-card{display:flex;align-items:center;flex-wrap:wrap;gap:14px;padding:13px;border:1px solid #94bfff;border-radius:8px;background:#f7faff}.preflight-card span{color:#4e5969;font-size:12px}.preflight-card pre{width:100%;max-height:180px;overflow:auto}.replay-list{margin-top:18px}
 @media(max-width:1080px){.governance-columns{grid-template-columns:1fr}.history-entry{grid-template-columns:1fr 1fr}.history-entry .arco-btn{grid-column:1/-1}}
 @media(max-width:1080px){.wf-shell{grid-template-columns:1fr}.wf-flows{max-height:240px}.wf-stage-bar{grid-template-columns:repeat(2,minmax(0,1fr))}.wf-card-body,.pin-summary{grid-template-columns:1fr}.pin-block{grid-template-columns:1fr}.pin-selected{grid-column:1}}
 @media(max-width:720px){.trace-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.attachment-form,.review-status-card{grid-template-columns:1fr}}
+@media(max-width:900px){.variant-grid{grid-template-columns:1fr}.winner-bar{grid-template-columns:1fr}}
+@media(max-width:900px){.evidence-workbench{grid-template-columns:1fr;height:min(72vh,760px)}.evidence-index{max-height:230px;border-right:0;border-bottom:1px solid var(--color-border-2)}.evidence-detail{padding:16px}.evidence-detail dl div{grid-template-columns:88px minmax(0,1fr)}}
 .linkage-bar{display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:11px 14px;border:1px solid var(--color-border-2);border-radius:9px;background:var(--color-fill-1)}.linkage-bar.is-off{border-color:rgb(var(--orange-3));background:rgb(var(--orange-1))}.linkage-bar.is-on{border-color:rgb(var(--green-3));background:rgb(var(--green-1))}.linkage-bar>svg{flex:none;font-size:19px}.linkage-bar.is-off>svg{color:var(--orange)}.linkage-bar.is-on>svg{color:#00b42a}.linkage-copy{display:flex;min-width:0;flex:1;flex-direction:column;gap:2px}.linkage-copy b{font-size:13px}.linkage-copy small{color:var(--color-text-3);font-size:11px;line-height:1.55}.linkage-hint{flex:none;color:var(--color-text-3);font-size:11px}.linkage-modal-actions{display:flex;align-items:center;justify-content:space-between;gap:12px}
 </style>

@@ -212,6 +212,7 @@ class KnowledgeEvolutionTestCase(TestCase):
         self.assertTrue(trace.channels["knowledge"]["enabled"])
         self.assertEqual(output.model_version, "test-model")
         self.assertEqual(output.prompt_version, "12")
+        self.assertEqual(trace.channels["agent"]["steps"], 3)
         tool_span = trace.spans.get(
             step_type="tool", tool_name="save_testcases",
             metadata__granularity="real_tool_call",
@@ -219,3 +220,37 @@ class KnowledgeEvolutionTestCase(TestCase):
         self.assertEqual(tool_span.status, "completed")
         self.assertTrue(tool_span.input_hash and tool_span.output_hash)
         self.assertNotIn("secret", str(tool_span.metadata))
+
+    def test_agent_output_step_count_falls_back_to_real_tool_calls(self):
+        request = SimpleNamespace(
+            user=self.user,
+            _flywheel_module_key="test_plan_generation",
+            _flywheel_workflow_id="",
+            _flywheel_parent_output_ids=[],
+            _flywheel_capability_id="",
+            _selected_skill_version=None,
+        )
+        ids = async_to_sync(AgentLoopStreamAPIView()._record_module_output)(
+            request=request,
+            project=self.project,
+            session_id="plan-step-count",
+            user_message="生成方案",
+            all_messages=[
+                AIMessage(content="", tool_calls=[{
+                    "id": "tool-1", "name": "read_skill_content", "args": {},
+                }]),
+                ToolMessage(content="loaded", tool_call_id="tool-1", name="read_skill_content"),
+                AIMessage(content="方案已生成"),
+            ],
+            model_name="test-model",
+            prompt_id=99,
+            total_tokens=12,
+            step_count=0,
+            use_knowledge_base=False,
+            knowledge_base_ids=[],
+        )
+
+        trace = RetrievalTrace.objects.get(pk=ids[0])
+        output = GenerationOutput.objects.get(pk=ids[1])
+        self.assertEqual(trace.channels["agent"]["steps"], 1)
+        self.assertEqual(output.prompt_version, "test-plan-stage-v2")

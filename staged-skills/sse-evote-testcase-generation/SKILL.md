@@ -17,7 +17,7 @@ permissions:
 
 ## 前置门禁与输入
 
-- 必须提供同一 `workflow_id` 下已通过质量门禁的 `test_plan.xlsx` 与方案项 ID；缺少产出引用或门禁未通过时停止，不绕过。
+- 必须提供同一 `workflow_id` 下已通过质量门禁的方案 Excel 与方案项 ID。方案 Excel 从 `stage_result.json.primary_artifacts` 中按 `{项目名}_测试方案_V{版本}.xlsx` 识别，不写死 `test_plan.xlsx`；缺少产出引用或门禁未通过时停止，不绕过。
 - 有历史 `test_cases.xlsx` 时必须读取，用于复用模块层级、编号风格与已有编号范围。
 - 用例写法以 `references/用例编写规范.md` 为准，业务基准以 `references/投票业务规则库.md` 为准。
 

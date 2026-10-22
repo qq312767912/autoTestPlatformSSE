@@ -502,6 +502,8 @@ export interface WorkflowCatalogSkill {
   release_state: string;
   package_sha256: string;
   updated_at: string;
+  created_by_name?: string;
+  change_reason?: string;
 }
 
 export interface WorkflowStageCatalog {
@@ -601,6 +603,7 @@ export interface StageOutputView {
    * 前端**不自己猜**：猜出来的结果会表现为"有按钮点了 404"。
    */
   artifact?: StageArtifactView | null;
+  artifact_files?: Array<{ name: string; size: number; sha256: string; key: string }>;
   /** 采纳率按版本横向列出 —— 「采纳率作为版本间对比评分维度」的落地。 */
   acceptance_history?: AcceptanceHistoryItem[];
   gate: {
@@ -642,9 +645,22 @@ export interface StageTraceSpan {
   tool_name: string;
   latency_ms: number;
   token_usage: number;
+  input_hash: string;
+  output_hash: string;
   error_summary: string;
   evidence: Array<Record<string, unknown>>;
   metadata: Record<string, unknown>;
+  title: string;
+  description: string;
+  input_summary: string;
+  output_summary: string;
+  input_detail: unknown;
+  output_detail: unknown;
+  artifacts: Array<{ name: string; size: number; sha256: string }>;
+  result_facts: Array<{ label: string; value: string | number; unit: string }>;
+  detail_available: boolean;
+  detail_note: string;
+  timing_recorded: boolean;
   started_at?: string | null;
   finished_at?: string | null;
 }
@@ -847,6 +863,10 @@ export interface CaseReviewEvolutionCandidate {
 /** 报告里一类被人工确认的缺陷（按归因类别 + 报告问题类型聚合）。 */
 export interface CaseReviewEvolutionDefect {
   category: string;
+  feedback_conclusion: string;
+  feedback_conclusion_label: string;
+  quality_dimension: string;
+  quality_dimension_label: string;
   issue_type: string;
   count: number;
   /** 会被原样写进 SKILL.md 受管护栏的要求句，界面展示它等于让人预览"包会被改成什么样"。 */
@@ -863,7 +883,17 @@ export interface CaseReviewEvolutionScan {
   unconfirmed: number;
   confirmed: number;
   defect_total: number;
+  defect_group_total: number;
   defects: CaseReviewEvolutionDefect[];
+  feedback_groups: Array<{
+    conclusion: string;
+    conclusion_label: string;
+    quality_dimension: string;
+    quality_dimension_label: string;
+    issue_type: string;
+    count: number;
+  }>;
+  conclusion_counts: Record<string, number>;
   warnings: string[];
   source_name: string;
   /** 报告最后一个 Sheet 里的采纳率（0–1）。 */
@@ -981,13 +1011,44 @@ export interface StageFeedbackResult {
 /** AI 提出的**候选**优化点。`state` 恒为 `proposed`，人工确认后才进派生。 */
 export interface OptimizationCandidate {
   attribution_id: string;
+  /** 原始失败信号，不是最终修复分类。 */
   category: string;
+  primary_cause: string;
+  fine_cause: string;
+  repair_target: string;
+  evidence_status: 'unverified' | 'verified' | 'unresolvable' | string;
+  impact_scope: Record<string, unknown>;
   issue_type: string;
   hypothesis: string;
   /** ≤0.8：AI 假设不得伪装成 `confidence=1.0` 的人工结论。 */
   confidence: number;
   state: string;
   source: string;
+  evidence?: AttributionEvidenceV2[];
+  counterevidence?: Array<Record<string, unknown>>;
+}
+
+export interface AttributionEvidenceV2 {
+  evidence_id: string;
+  type: string;
+  source_id: string;
+  source_hash: string;
+  summary: string;
+  locatable: boolean;
+  payload_ref?: string;
+}
+
+export interface AttributionTaxonomyV2 {
+  schema_version: string;
+  primary_causes: Array<{
+    value: string;
+    label: string;
+    fine_causes: Array<{
+      value: string;
+      label: string;
+      repair_targets: Array<{ value: string; label: string }>;
+    }>;
+  }>;
 }
 
 /** 「生成候选优化点」的返回。无 LLM 时 `degraded=true`（HTTP 200，不是错误）。 */
@@ -1006,6 +1067,12 @@ export interface OptimizationProposalResult {
     files: Array<{ path: string; chars: number }>;
   };
   history_count?: number;
+  source_group_count?: number;
+  source_defect_total?: number;
+  batch_count?: number;
+  discarded_count?: number;
+  discarded_candidates?: Array<{ index: number; reason: string; detail?: string }>;
+  taxonomy?: AttributionTaxonomyV2;
 }
 
 /** 人工确认结果。逐条返回：一条写错不该把其余已经做完的确认全丢掉。 */
@@ -1020,6 +1087,27 @@ export interface OptimizationDecisionResult {
   }>;
   confirmed_count: number;
   confirmed_ids: string[];
+}
+
+export interface EvolutionExperimentView {
+  experiment_id: string;
+  state: 'draft'|'ready'|'running'|'awaiting_choice'|'winner_selected'|'submitted'|'failed'|string;
+  baseline_version: string;
+  baseline_sha256: string;
+  winner_label: ''|'A'|'B'|string;
+  winner_reason: string;
+  variants: Array<{
+    id: string; label: 'baseline'|'A'|'B'; strategy: string; sandbox_key: string;
+    status: string; skill_version_id: string; skill_version: string; package_sha256: string;
+    patch: Record<string, unknown>; impact_scope: Record<string, unknown>;
+    rollback_target: string;
+    run_result: {
+      input_hash?: string; output_hash?: string; issue_count?: number; pending_count?: number;
+      latency_ms?: number; estimated_input_tokens?: number; estimated_output_tokens?: number;
+      fixed_hits?: { resolved_issue_types?: string[]; remaining_issue_types?: string[] };
+      error?: string; output?: Record<string, unknown>;
+    };
+  }>;
 }
 
 // ---------------------------------------------------------------- 内容来源（T09 / T10）

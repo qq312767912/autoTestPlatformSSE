@@ -31,8 +31,12 @@
           <a-option value="true">已启用</a-option><a-option value="false">已停用</a-option>
         </a-select>
         <a-button @click="refreshAll"><template #icon><icon-refresh /></template>刷新</a-button>
+        <a-button :disabled="!mappings.length" @click="exportMappings"><template #icon><icon-download /></template>{{ selectedKeys.length ? `导出选中 (${selectedKeys.length})` : '导出当前结果' }}</a-button>
+        <a-popconfirm v-if="canDelete" :content="`确认删除选中的 ${selectedKeys.length} 条配置？删除后需重新发布才会从各节点移除。`" @ok="removeSelectedMappings">
+          <a-button status="danger" :disabled="!selectedKeys.length" :loading="bulkDeleting"><template #icon><icon-delete /></template>批量删除<span v-if="selectedKeys.length"> ({{ selectedKeys.length }})</span></a-button>
+        </a-popconfirm>
       </div>
-      <a-table :data="mappings" :loading="loading" row-key="id" :pagination="{ pageSize: 15 }" :scroll="{ x: 1050 }">
+      <a-table v-model:selected-keys="selectedKeys" :row-selection="{ type: 'checkbox', showCheckedAll: true }" :data="mappings" :loading="loading" row-key="id" :pagination="{ pageSize: 15 }" :scroll="{ x: 1050 }">
         <template #columns>
           <a-table-column title="系统名称" data-index="system_name" :width="150" />
           <a-table-column title="域名" data-index="hostname" :width="240"><template #cell="{ record }"><code>{{ record.hostname }}</code></template></a-table-column>
@@ -58,7 +62,12 @@
     <a-drawer :visible="editorVisible" :width="480" :title="editingId ? '编辑映射' : '新增映射'" @cancel="editorVisible = false" @ok="saveMapping" :ok-loading="saving">
       <a-form ref="formRef" :model="form" layout="vertical">
         <a-form-item field="system_name" label="系统名称" :rules="[{ required: true, message: '请输入系统名称' }]"><a-input v-model="form.system_name" :max-length="100" /></a-form-item>
-        <a-form-item field="hostname" label="域名" :rules="hostnameRules"><a-input v-model="form.hostname" placeholder="trade.internal.example" /></a-form-item>
+        <a-form-item field="hostname" label="域名" :rules="hostnameRules">
+          <a-input v-model="form.hostname" placeholder="trade.internal.example" />
+          <template #extra>
+            <span :class="{ 'duplicate-warning': duplicateHostname }">{{ duplicateHostname ? `该域名已存在（${duplicateHostname.ipv4}），请编辑原配置或更换域名` : '域名全局唯一；重复域名不会创建第二条映射' }}</span>
+          </template>
+        </a-form-item>
         <a-form-item field="ipv4" label="IPv4" :rules="ipv4Rules"><a-input v-model="form.ipv4" placeholder="10.10.20.30" /></a-form-item>
         <a-form-item field="enabled" label="状态"><a-switch v-model="form.enabled" checked-text="启用" unchecked-text="停用" /></a-form-item>
         <a-form-item field="remark" label="备注"><a-textarea v-model="form.remark" :max-length="500" show-word-limit :auto-size="{ minRows: 3, maxRows: 6 }" /></a-form-item>
@@ -132,10 +141,10 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import type { FormInstance, FieldRule } from '@arco-design/web-vue';
 import { Message } from '@arco-design/web-vue';
-import { IconComputer, IconHistory, IconPlus, IconRefresh, IconUpload } from '@arco-design/web-vue/es/icon';
+import { IconComputer, IconDelete, IconDownload, IconHistory, IconPlus, IconRefresh, IconUpload } from '@arco-design/web-vue/es/icon';
 import { useAuthStore } from '@/store/authStore';
 import {
-  bulkImportMappings, createMapping, deleteMapping, getDiagnosis, getDiff, getOverview, listMappings,
+  bulkDeleteMappings, bulkImportMappings, createMapping, deleteMapping, getDiagnosis, getDiff, getOverview, listMappings,
   listNodes, listVersions, publishMappings, rollbackVersion, startDiagnosis, updateMapping,
 } from '../service';
 import type {
@@ -146,6 +155,7 @@ import type {
 const authStore = useAuthStore();
 const emptyCounts = () => ({ synced: 0, pending: 0, failed: 0, offline: 0 });
 const mappings = ref<TestHostMapping[]>([]);
+const selectedKeys = ref<number[]>([]);
 const nodes = ref<TestHostNode[]>([]);
 const versions = ref<TestHostVersion[]>([]);
 const overview = reactive<TestHostOverview>({ draft_revision: 0, published_version: null, published_checksum: '', published_at: null, published_by: '', pending_changes: 0, node_counts: emptyCounts() });
@@ -161,6 +171,7 @@ const versionsVisible = ref(false);
 const diagnosisVisible = ref(false);
 const bulkVisible = ref(false);
 const bulkLoading = ref(false);
+const bulkDeleting = ref(false);
 const bulkText = ref('');
 const bulkSystemName = ref('批量导入');
 const bulkPreview = ref<any>({ rows: [], errors: [], conflicts: [] });
@@ -176,6 +187,11 @@ const canPublish = computed(() => authStore.hasPermission('test_host_config.publ
 const canRollback = computed(() => authStore.hasPermission('test_host_config.rollback_testhostconfig'));
 const canDiagnose = computed(() => authStore.hasPermission('test_host_config.diagnose_testhostmapping'));
 const unhealthyNodes = computed(() => overview.node_counts.failed + overview.node_counts.offline + overview.node_counts.pending);
+const duplicateHostname = computed(() => {
+  const hostname = form.hostname.trim().toLowerCase().replace(/\.$/, '');
+  if (!hostname) return undefined;
+  return mappings.value.find(item => item.id !== editingId.value && item.hostname.toLowerCase().replace(/\.$/, '') === hostname);
+});
 
 const hostnameRules: FieldRule[] = [
   { required: true, message: '请输入域名' },
@@ -193,7 +209,11 @@ function showError(error: unknown) { Message.error(error instanceof Error ? erro
 
 async function loadMappings() {
   loading.value = true;
-  try { mappings.value = await listMappings({ search: filters.search || undefined, enabled: filters.enabled || undefined }); }
+  try {
+    mappings.value = await listMappings({ search: filters.search || undefined, enabled: filters.enabled || undefined });
+    const availableIds = new Set(mappings.value.map(item => item.id));
+    selectedKeys.value = selectedKeys.value.filter(id => availableIds.has(id));
+  }
   catch (error) { showError(error); }
   finally { loading.value = false; }
 }
@@ -208,6 +228,7 @@ function openEditor(record?: TestHostMapping) {
 async function saveMapping() {
   const errors = await formRef.value?.validate();
   if (errors) return;
+  if (duplicateHostname.value) return Message.warning('该域名已存在，请编辑原配置或更换域名');
   saving.value = true;
   try {
     if (editingId.value) await updateMapping(editingId.value, form); else await createMapping(form);
@@ -215,6 +236,35 @@ async function saveMapping() {
   } catch (error) { showError(error); } finally { saving.value = false; }
 }
 async function removeMapping(id: number) { try { await deleteMapping(id); Message.success('已删除，发布后生效'); await refreshAll(); } catch (error) { showError(error); } }
+async function removeSelectedMappings() {
+  if (!selectedKeys.value.length) return;
+  bulkDeleting.value = true;
+  try {
+    const result = await bulkDeleteMappings(selectedKeys.value);
+    Message.success(`已删除 ${result.deleted} 条配置，发布后生效`);
+    selectedKeys.value = [];
+    await refreshAll();
+  } catch (error) { showError(error); } finally { bulkDeleting.value = false; }
+}
+function exportMappings() {
+  const selected = new Set(selectedKeys.value);
+  const rows = selected.size ? mappings.value.filter(item => selected.has(item.id)) : mappings.value;
+  if (!rows.length) return Message.warning('没有可导出的域名配置');
+  const content = [
+    '# WHartTest 测试域名配置',
+    `# 导出时间：${new Date().toLocaleString()}`,
+    ...rows.map(item => `${item.ipv4}\t${item.hostname}${item.remark ? ` # ${item.remark.replace(/[\r\n]+/g, ' ')}` : ''}`),
+    '',
+  ].join('\n');
+  const url = URL.createObjectURL(new Blob([content], { type: 'text/plain;charset=utf-8' }));
+  const link = document.createElement('a');
+  const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, '').replace('T', '-');
+  link.href = url;
+  link.download = `test-host-mappings-${timestamp}.hosts`;
+  link.click();
+  URL.revokeObjectURL(url);
+  Message.success(`已导出 ${rows.length} 条域名配置`);
+}
 async function previewBulk() {
   if (!bulkText.value.trim()) return Message.warning('请粘贴 hosts 配置');
   bulkLoading.value = true;
@@ -255,7 +305,13 @@ onBeforeUnmount(closeDiagnosis);
 </script>
 
 <style scoped>
-.host-config-page { padding: 24px; color: var(--color-text-1); }
+.host-config-page {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 24px;
+  overflow-y: auto;
+  color: var(--color-text-1);
+}
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 18px; }
 .page-heading h1 { margin: 0; font-size: 24px; line-height: 1.4; }
 .page-heading p { margin: 6px 0 0; color: var(--color-text-3); }
@@ -267,7 +323,8 @@ onBeforeUnmount(closeDiagnosis);
 .status-cell-wide strong { font-size: 14px; }
 .success { color: #00b42a; }.warning { color: #ff7d00; }.danger, .danger-text { color: #f53f3f; }
 .table-panel { background: var(--color-bg-2); border: 1px solid var(--color-border-2); padding: 16px; }
-.toolbar { display: flex; gap: 12px; margin-bottom: 16px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.duplicate-warning { color: #f53f3f; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: var(--color-text-1); }
 small { color: var(--color-text-3); }
 .diff-group { margin-top: 18px; }.diff-group h3 { font-size: 15px; margin: 0 0 8px; }

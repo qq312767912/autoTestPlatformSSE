@@ -42,7 +42,8 @@
               <div><span>当前阶段</span><h3>{{ stageLabel(selectedStageKey) }}</h3></div>
               <div class="stage-actions">
                 <a-button v-if="activeStage?.output_id" @click="$emit('open-stage-output',activeFlow.workflow_id,selectedStageKey)">深度查看</a-button>
-                <a-button v-if="!activeStage?.output_id" type="primary" :loading="actionBusy==='execute'" :disabled="!['ready','running'].includes(activeStage?.status||'')" @click="executeCurrent"><template #icon><icon-play-arrow/></template>跳转到 Agent 执行</a-button>
+                <a-button v-if="!activeStage?.output_id" type="primary" :loading="actionBusy==='execute'" :disabled="!['ready','running'].includes(activeStage?.status||'')" @click="executeCurrent()"><template #icon><icon-play-arrow/></template>跳转到 Agent 执行</a-button>
+                <a-button v-else status="warning" :loading="actionBusy==='rerun'" @click="requestRerunCurrent"><template #icon><icon-refresh/></template>重跑本阶段</a-button>
                 <a-button v-if="activeStage?.output_id && activeStage.confirmable" type="primary" status="success" :loading="actionBusy==='confirm'" @click="confirmCurrent">确认进入下一阶段</a-button>
               </div>
             </div>
@@ -91,10 +92,13 @@
 
             <template v-else-if="activeZone==='trace'">
               <div class="zone-heading"><div><span>证据图谱</span><h3>Agent 执行证据链</h3><p>展示显式步骤、工具和知识原句；不采集模型隐藏思维链。</p></div></div>
+              <a-alert v-if="traceIsFallback && traceAttempt" type="warning" style="margin-top:12px">
+                最新执行 {{ attempt?.status }} 且未产生轨迹；当前展示上一次有效证据链（{{ traceAttempt.created_at.slice(0,16).replace('T',' ') }}）。
+              </a-alert>
               <div v-if="trace?.spans.length" class="evidence-lane">
                 <article v-for="span in trace.spans" :key="span.id" :class="span.status">
                   <div class="lane-node"><i>{{ span.sequence }}</i><em/></div>
-                  <div><header><b>{{ trace.summary.labels[span.group]||span.step_type }}</b><a-tag size="small" :color="span.status==='failed'?'red':span.status==='running'?'orange':'green'">{{ span.status }}</a-tag></header><p>{{ span.agent_name||'Agent' }}<template v-if="span.tool_name"> · {{ span.tool_name }}</template> · {{ span.latency_ms||0 }} ms</p><blockquote v-for="(evidence,i) in span.evidence" :key="i">{{ evidenceText(evidence) }}</blockquote><small v-if="span.error_summary">{{ span.error_summary }}</small></div>
+                  <div class="lane-card"><header><div><small>{{ trace.summary.labels[span.group]||span.step_type }}</small><b>{{ span.title||span.tool_name||span.step_type }}</b></div><a-tag size="small" :color="span.status==='failed'?'red':span.status==='running'?'orange':'green'">{{ span.status }}</a-tag></header><p class="lane-description">{{ span.description }}</p><div class="lane-meta"><span>{{ span.agent_name||'Agent' }}</span><span v-if="span.tool_name">工具 {{ span.tool_name }}</span><span>{{ span.timing_recorded?`${span.latency_ms} ms`:'耗时未记录' }}</span><span v-if="span.input_hash">入 {{ span.input_hash.slice(0,10) }}</span><span v-if="span.output_hash">出 {{ span.output_hash.slice(0,10) }}</span></div><div v-if="span.result_facts?.length" class="lane-facts"><span v-for="fact in span.result_facts" :key="fact.label"><small>{{ fact.label }}</small><b>{{ fact.value }}{{ fact.unit }}</b></span></div><details v-if="span.input_detail" class="lane-detail" open><summary>实际输入（已脱敏）</summary><pre>{{ traceDetail(span.input_detail) }}</pre></details><details v-if="span.output_detail" class="lane-detail" open><summary>实际结果（已脱敏）</summary><pre>{{ traceDetail(span.output_detail) }}</pre></details><div v-else-if="span.output_summary" class="lane-summary"><small>结果摘要</small><p>{{ span.output_summary }}</p></div><div v-if="span.artifacts?.length" class="lane-artifacts"><small>登记产物</small><span v-for="file in span.artifacts" :key="file.name">{{ file.name }} · {{ Math.max(1,Math.round(file.size/1024)) }} KB</span></div><div v-if="span.detail_note" class="lane-unavailable"><b>明细不可恢复</b><span>{{ span.detail_note }}</span></div><blockquote v-for="(evidence,i) in span.evidence" :key="i">{{ evidenceText(evidence) }}</blockquote><small v-if="span.error_summary" class="lane-error">{{ span.error_summary }}</small></div>
                 </article>
               </div>
               <a-empty v-else description="当前阶段暂无执行 Span"/>
@@ -150,7 +154,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, markRaw, onMounted, ref, watch } from 'vue';
+import { computed, markRaw, onUnmounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message, Modal } from '@arco-design/web-vue';
 import { IconBranch, IconDelete, IconExperiment, IconFile, IconPlayArrow, IconPlus, IconRefresh, IconRobot, IconSafe } from '@arco-design/web-vue/es/icon';
@@ -162,7 +166,7 @@ const emit=defineEmits<{(e:'start-workflow'):void;(e:'open-stage-output',workflo
 const router=useRouter();
 const emptyCockpit=():ProjectQualityCockpit=>({people:{leads:[],executors:[]},gold_by_type:{},single_capabilities:[],workflows:[],stage_order:[]});
 const cockpit=ref<ProjectQualityCockpit>(emptyCockpit()),loading=ref(false),selectedFlowId=ref(''),selectedStageKey=ref(''),activeZone=ref('overview'),actionBusy=ref('');
-const attempt=ref<StageExecutionAttemptView|null>(null),trace=ref<StageAttemptTraceView|null>(null),review=ref<StageReviewStatusView|null>(null),diff=ref<StageDiffView|null>(null),attachments=ref<StageAttachmentView[]>([]);
+const attempt=ref<StageExecutionAttemptView|null>(null),traceAttempt=ref<StageExecutionAttemptView|null>(null),trace=ref<StageAttemptTraceView|null>(null),review=ref<StageReviewStatusView|null>(null),diff=ref<StageDiffView|null>(null),attachments=ref<StageAttachmentView[]>([]);
 const skillProposals=ref<OptimizationProposal[]>([]),selectedProposalId=ref(''),plan=ref<SkillContentPlanView|null>(null),goldVersions=ref<GoldDatasetVersion[]>([]),runs=ref<EvaluationRun[]>([]),showEvaluationForm=ref(false),evaluationForm=ref({gold:'',baseline:'',candidate:''});
 const outputs=ref<GenerationOutput[]>([]),submissions=ref<Array<Record<string,unknown>>>([]);
 const registration=ref<{open:number;failed:number;dead_letter:number;alert:boolean;items?:Array<{id:string;output_id:string;workflow_id:string;stage:string;status:string;attempts:number;last_error:string}>}>({open:0,failed:0,dead_letter:0,alert:false,items:[]});
@@ -176,6 +180,7 @@ const frozenVersions=computed(()=>goldVersions.value.filter(v=>v.state==='frozen
 const completedRuns=computed(()=>runs.value.filter(v=>v.status==='completed'));
 const unmanagedOutputs=computed(()=>{const admitted=new Set(submissions.value.map(v=>String(v.output_id||'')));return outputs.value.filter(v=>!admitted.has(v.id)&&!String((v.metadata||{}).workflow_id||''));});
 const evaluationReady=computed(()=>Boolean(evaluationForm.value.gold&&evaluationForm.value.baseline&&evaluationForm.value.candidate));
+const traceIsFallback=computed(()=>Boolean(attempt.value&&traceAttempt.value&&attempt.value.id!==traceAttempt.value.id));
 const passing=['passed','confirmed','overridden'];
 const passedCount=(flow:ProjectWorkflowView)=>flow.stages.filter(v=>passing.includes(v.status)).length;
 const flowPercent=(flow:ProjectWorkflowView)=>flow.stages.length?Math.round(passedCount(flow)/flow.stages.length*100):0;
@@ -183,6 +188,7 @@ const stageLabel=(value:string)=>({test_plan_generation:'方案生成',test_case
 const statusLabel=(value:string)=>({pending:'待测评',unscored:'无评分',passed:'已通过',failed:'未通过',confirmed:'人工确认',overridden:'负责人放行',ready:'可执行',blocked:'待前置',running:'执行中'} as Record<string,string>)[value]||value||'未知';
 const stageState=(stage:WorkflowStageGateView)=>passing.includes(stage.status)?'done':stage.status==='failed'?'failed':stage.status==='running'?'running':'pending';
 const evidenceText=(evidence:Record<string,unknown>)=>String(evidence.quote||evidence.text||evidence.snippet||evidence.title||evidence.source_id||'证据定位已记录');
+const traceDetail=(value:unknown)=>typeof value==='string'?value:JSON.stringify(value,null,2);
 const nextAction=computed(()=>{if(!activeStage.value?.output_id)return{index:'01',title:'派发当前阶段',detail:'创建执行尝试并携带服务端可信上下文进入原 Agent 页面。',button:'开始执行'};if(!review.value?.latest_review?.evolvable)return{index:'02',title:'完成人工确认',detail:'下载确认稿，填写四个人工列；可先保存草稿，正式提交后才可进化。',button:'打开确认'};if(!confirmedAttributionIds.value.length)return{index:'03',title:'确认失败归因',detail:'基于原始产出、人工修改、补充文件和证据链确认问题责任层。',button:'进入归因'};return{index:'04',title:'创建 Skill 候选',detail:'从已确认归因生成最小内容补丁，再进入冻结集对照评测。',button:'进入进化'};});
 function selectFlow(id:string){selectedFlowId.value=id;selectedStageKey.value=activeFlow.value?.current_stage||activeFlow.value?.stages[0]?.stage||'';void loadStageContext()}
 function selectStage(stage:string){selectedStageKey.value=stage;void loadStageContext()}
@@ -192,7 +198,7 @@ function goNextAction(){if(!activeStage.value?.output_id)void executeCurrent();e
 async function loadAll(showError=true){loading.value=true;try{cockpit.value=await getProjectQualityCockpit(props.projectId);if(!selectedFlowId.value)selectedFlowId.value=cockpit.value.workflows[0]?.workflow_id||'';if(!selectedStageKey.value)selectedStageKey.value=activeFlow.value?.current_stage||activeFlow.value?.stages[0]?.stage||'';const optionalResults=await Promise.allSettled([listOptimizationProposals(props.projectId),listGoldDatasets(props.projectId),listGenerationOutputs(props.projectId),listWorkflowStageSubmissions(props.projectId),getRegistrationFailures(props.projectId),listEvaluationRuns()] as const);const [proposalResult,datasetResult,outputResult,submissionResult,registrationResult,runResult]=optionalResults;if(proposalResult.status==='fulfilled'){skillProposals.value=proposalResult.value.filter(v=>v.proposal_type==='skill_content');selectedProposalId.value=selectedProposalId.value||skillProposals.value[0]?.id||''}if(outputResult.status==='fulfilled')outputs.value=outputResult.value;if(submissionResult.status==='fulfilled')submissions.value=submissionResult.value;if(registrationResult.status==='fulfilled')registration.value=registrationResult.value;if(runResult.status==='fulfilled')runs.value=runResult.value;if(datasetResult.status==='fulfilled'){const versionResults=await Promise.allSettled(datasetResult.value.map(v=>listGoldDatasetVersions(v.id)));goldVersions.value=versionResults.flatMap(v=>v.status==='fulfilled'?v.value:[])}await loadStageContext();await loadPlan();}catch{if(showError)Message.error('加载质量飞轮工作台失败')}finally{loading.value=false}}
 async function loadStageContext(){
   const flow=activeFlow.value;if(!flow||!selectedStageKey.value)return;
-  attempt.value=null;trace.value=null;review.value=null;diff.value=null;attachments.value=[];
+  attempt.value=null;traceAttempt.value=null;trace.value=null;review.value=null;diff.value=null;attachments.value=[];
   const stage=selectedStageKey.value;
   // 「人工审查状态」与「差异」两个接口在该阶段**还没有产出**时是按设计返 400 的
   // （后端原话："阶段暂无产出；请先执行本阶段"），不是故障。而刚发起流程时四个阶段
@@ -201,9 +207,44 @@ async function loadStageContext(){
   // 不再另立一套判断。
   const hasOutput=Boolean(activeStage.value?.output_id);
   const [attemptsResult,reviewResult,diffResult,attachmentResult]=await Promise.allSettled([listStageAttempts(props.projectId,flow.workflow_id,stage),hasOutput?getStageReviewStatus(props.projectId,flow.workflow_id,stage):Promise.resolve(null),hasOutput?getStageDiff(props.projectId,flow.workflow_id,stage):Promise.resolve(null),listStageAttachments(props.projectId,flow.workflow_id,stage)]);
-  if(attemptsResult.status==='fulfilled'){attempt.value=attemptsResult.value.slice().sort((a,b)=>b.created_at.localeCompare(a.created_at))[0]||null;if(attempt.value)try{trace.value=await getStageAttemptTrace(attempt.value.id)}catch{trace.value=null}}if(reviewResult.status==='fulfilled')review.value=reviewResult.value;if(diffResult.status==='fulfilled')diff.value=diffResult.value;if(attachmentResult.status==='fulfilled')attachments.value=attachmentResult.value;
+  if(attemptsResult.status==='fulfilled'){
+    const attempts=attemptsResult.value.slice().sort((a,b)=>b.created_at.localeCompare(a.created_at));
+    attempt.value=attempts[0]||null;
+    if(attempt.value){
+      try{
+        const latestTrace=await getStageAttemptTrace(attempt.value.id);
+        const latestIsActive=!['completed','failed','cancelled','timed_out'].includes(attempt.value.status);
+        if(latestTrace.spans.length||latestIsActive){
+          trace.value=latestTrace;traceAttempt.value=attempt.value;
+        }else{
+          for(const candidate of attempts.slice(1)){
+            try{
+              const candidateTrace=await getStageAttemptTrace(candidate.id);
+              if(candidateTrace.spans.length){trace.value=candidateTrace;traceAttempt.value=candidate;break}
+            }catch{continue}
+          }
+          if(!trace.value){trace.value=latestTrace;traceAttempt.value=attempt.value}
+        }
+      }catch{trace.value=null;traceAttempt.value=null}
+    }
+  }
+  if(reviewResult.status==='fulfilled')review.value=reviewResult.value;if(diffResult.status==='fulfilled')diff.value=diffResult.value;if(attachmentResult.status==='fulfilled')attachments.value=attachmentResult.value;
 }
-async function executeCurrent(){if(!activeFlow.value)return;actionBusy.value='execute';try{const flowId=activeFlow.value.workflow_id;const result=await executeWorkflowStage(props.projectId,flowId,selectedStageKey.value);const controlledUrl=result.execution_context_id?`/test-plans?execution_context_id=${encodeURIComponent(result.execution_context_id)}`:'';const legacyUrl=result.module_key==='test_plan_generation'?`/test-plans?workflow_id=${encodeURIComponent(flowId)}`:'';const launchUrl=result.launch_url||controlledUrl||legacyUrl;if(launchUrl){await router.push(launchUrl);void loadAll(false)}else Message.info(result.hint||'阶段已派发，请进入对应 Agent 页面继续执行')}catch(error:unknown){const response=(error as {response?:{data?:{detail?:string;message?:string}}})?.response?.data;Message.error(response?.detail||response?.message||'阶段派发失败，请检查前置门禁')}finally{actionBusy.value=''}}
+function requestRerunCurrent(){
+  if(!activeFlow.value||!activeStage.value)return;
+  const activeAttempt=attempt.value&&!['completed','failed','cancelled','timed_out'].includes(attempt.value.status);
+  Modal.warning({
+    title:`重跑${stageLabel(selectedStageKey.value)}`,
+    content:activeAttempt
+      ?'当前阶段已有一条未结束的执行尝试。继续将重新签发该尝试的执行入口，不会并行创建重复任务。'
+      :'系统会新建一次执行尝试。旧产出、人工反馈和执行证据会保留；新产出回写后，本阶段需要重新评审确认。',
+    okText:activeAttempt?'继续执行':'确认重跑',
+    cancelText:'取消',
+    hideCancel:false,
+    onOk:()=>executeCurrent(true),
+  });
+}
+async function executeCurrent(rerun=false){if(!activeFlow.value)return;actionBusy.value=rerun?'rerun':'execute';try{const flowId=activeFlow.value.workflow_id;const result=await executeWorkflowStage(props.projectId,flowId,selectedStageKey.value);const controlledUrl=result.execution_context_id&&result.module_key==='test_plan_generation'?`/test-plans?execution_context_id=${encodeURIComponent(result.execution_context_id)}`:'';const legacyUrl=result.module_key==='test_plan_generation'?`/test-plans?workflow_id=${encodeURIComponent(flowId)}`:'';const launchUrl=result.launch_url||controlledUrl||legacyUrl;if(launchUrl){await router.push(launchUrl);void loadAll(false)}else{Message.success(rerun?'本阶段已重新派发':'本阶段已派发');Message.info(result.hint||'请进入对应业务页面继续执行');await loadAll(false)}}catch(error:unknown){const response=(error as {response?:{data?:{detail?:string;message?:string}}})?.response?.data;Message.error(response?.detail||response?.message||(rerun?'阶段重跑失败，请检查前置门禁':'阶段派发失败，请检查前置门禁'))}finally{actionBusy.value=''}}
 async function confirmCurrent(){if(!activeFlow.value)return;actionBusy.value='confirm';try{await confirmWorkflowStage(props.projectId,activeFlow.value.workflow_id,selectedStageKey.value);Message.success('当前阶段已确认放行');await loadAll()}catch{Message.error('确认放行失败')}finally{actionBusy.value=''}}
 async function runAttribution(){if(!activeFlow.value)return;actionBusy.value='attribute';try{await runStageAttribution(props.projectId,activeFlow.value.workflow_id,selectedStageKey.value);diff.value=await getStageDiff(props.projectId,activeFlow.value.workflow_id,selectedStageKey.value);Message.success('已按最新人工差异生成待确认归因')}catch{Message.error('归因生成失败')}finally{actionBusy.value=''}}
 async function decideAttribution(id:string,action:'confirm'|'reject'){try{await decideStageAttribution(id,action);if(activeFlow.value)diff.value=await getStageDiff(props.projectId,activeFlow.value.workflow_id,selectedStageKey.value);Message.success(action==='confirm'?'归因已确认':'归因已驳回')}catch{Message.error('归因决策失败')}}
@@ -232,8 +273,18 @@ async function reload(preferredFlowId=''){
   await loadAll();
 }
 defineExpose({reload});
-watch(()=>props.projectId,()=>void loadAll());
-onMounted(()=>void loadAll());
+// immediate watch 是唯一的首屏加载入口，避免 watch + onMounted 并发请求互相覆盖，
+// 造成“第一次为空、手动刷新才出现流程”的假空白。
+watch(()=>props.projectId,()=>void loadAll(),{immediate:true});
+
+let liveRefreshBusy=false;
+const liveRefreshTimer=window.setInterval(async()=>{
+  const isRunning=attempt.value&&!['completed','failed','cancelled','timed_out'].includes(attempt.value.status);
+  if(!isRunning||liveRefreshBusy)return;
+  liveRefreshBusy=true;
+  try{await loadAll(false)}finally{liveRefreshBusy=false}
+},3000);
+onUnmounted(()=>window.clearInterval(liveRefreshTimer));
 </script>
 
 <style scoped>
@@ -244,6 +295,8 @@ onMounted(()=>void loadAll());
 .stage-console{margin-top:8px;padding:14px 16px;border-left:4px solid var(--signal);background:#eef3f4}.stage-title{display:flex;align-items:center;justify-content:space-between}.stage-title h3{margin:2px 0}.stage-title span{font-family:"IBM Plex Mono",monospace;font-size:9px;color:#71808a}.stage-actions{display:flex;gap:8px}.stage-facts{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px}.stage-facts article{padding:9px 10px;border:1px solid #d5dfe1;background:#fff}.stage-facts small,.stage-facts b,.stage-facts span{display:block}.stage-facts small{color:#7a858e;font-size:9px}.stage-facts b{margin-top:4px;font-size:12px}.stage-facts span{overflow:hidden;margin-top:2px;color:#7a858e;font-size:10px;text-overflow:ellipsis;white-space:nowrap}
 .work-zones{display:grid;grid-template-columns:repeat(5,1fr);margin-top:14px;border-bottom:1px solid #cfd5d6}.work-zones button{display:grid;grid-template-columns:18px 1fr;gap:1px 7px;padding:10px 9px;border:0;border-bottom:3px solid transparent;background:transparent;text-align:left;cursor:pointer}.work-zones button svg{grid-row:1/3}.work-zones button span{font-size:11px;font-weight:700}.work-zones button small{font-size:9px;color:#869099}.work-zones button.active{border-color:var(--signal);color:var(--signal);background:#eef5f7}.zone-body{min-height:350px;padding:16px 0}.zone-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.zone-heading h3{margin:2px 0;font-size:16px}.zone-heading p{margin:3px 0;color:#74808a;font-size:11px}.overview-grid{display:grid;grid-template-columns:1.2fr .8fr;gap:10px}.overview-grid>section{padding:14px;border:1px solid #dce0df;background:#faf9f5}.overview-grid .span-two{grid-column:1/-1}.metric-strip,.review-board{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:14px}.metric-strip article,.review-board article{padding:10px;background:#fff;border-left:2px solid var(--signal)}.metric-strip b,.metric-strip small,.review-board b,.review-board small,.review-board span{display:block}.metric-strip b,.review-board b{font-size:18px}.metric-strip small,.review-board small,.review-board span{color:#7a858e;font-size:9px}.next-action{display:grid;grid-template-columns:42px 1fr auto;align-items:center;gap:12px;padding-top:10px}.next-action>i{font-family:"IBM Plex Mono",monospace;font-size:28px;color:var(--signal);font-style:normal}.next-action p{margin:4px 0;color:#6d7780;font-size:11px}.ops-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.ops-grid>div{border:1px solid #d9dedd;background:#fff}.ops-grid>div>header{display:flex;justify-content:space-between;padding:8px 10px;background:#eceae3;font-size:10px}.ops-grid article{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;border-top:1px solid #ecece8}.ops-grid article b,.ops-grid article small{display:block}.ops-grid article b{font-size:10px}.ops-grid article small{overflow:hidden;max-width:340px;margin-top:2px;color:#7b858c;font-size:9px;text-overflow:ellipsis;white-space:nowrap}.ops-grid .danger{color:#b93b3b}
 .evidence-lane{display:grid;margin-top:14px}.evidence-lane>article{display:grid;grid-template-columns:38px 1fr;gap:10px}.lane-node{position:relative}.lane-node i{display:flex;z-index:2;position:relative;align-items:center;justify-content:center;width:28px;height:28px;border:2px solid var(--signal);border-radius:50%;background:#fff;font-family:"IBM Plex Mono",monospace;font-size:10px;font-style:normal}.lane-node em{position:absolute;top:26px;bottom:-10px;left:13px;width:2px;background:#cad4d7}.evidence-lane>article:last-child em{display:none}.evidence-lane>article>div:last-child{margin-bottom:10px;padding:10px;border:1px solid #d9dfe0;background:#faf9f5}.evidence-lane header{display:flex;justify-content:space-between}.evidence-lane p{margin:4px 0;color:#77818a;font-size:10px}.evidence-lane blockquote{margin:6px 0;padding:6px 8px;border-left:3px solid #b7cbd3;background:#fff;font-size:11px}.evidence-lane article.failed small{color:#b93b3b}
+.lane-card header>div small,.lane-card header>div b{display:block}.lane-card header>div small{margin-bottom:3px;color:#60727c;font-family:"IBM Plex Mono","SFMono-Regular",monospace;font-size:9px;letter-spacing:.08em;text-transform:uppercase}.lane-card header>div b{color:var(--ink);font-size:13px}.lane-description{max-width:880px;color:#46545d!important;font-size:11px!important;line-height:1.6}.lane-meta{display:flex;flex-wrap:wrap;gap:5px;margin:7px 0}.lane-meta span{padding:3px 7px;border:1px solid #d5dfe1;background:#eef3f4;color:#53636d;font-family:"IBM Plex Mono","SFMono-Regular",monospace;font-size:9px}.lane-summary,.lane-artifacts{display:grid;grid-template-columns:76px minmax(0,1fr);gap:8px;margin-top:7px;padding:8px 9px;border-left:2px solid #93aeb9;background:#fff}.lane-summary small,.lane-artifacts small{color:#60727c;font-size:9px;font-weight:700}.lane-summary code{overflow-wrap:anywhere;color:#2e3b43;font-size:10px;white-space:pre-wrap}.lane-summary p{margin:0!important;color:#2e3b43!important;line-height:1.5}.lane-artifacts>span{display:block;color:#2e3b43;font-size:10px}.lane-artifacts>span+span{grid-column:2}.lane-error{display:block;margin-top:7px;color:#b93b3b!important}
+.lane-facts{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}.lane-facts>span{min-width:92px;padding:7px 9px;border:1px solid #d5e5ee;background:#fff}.lane-facts small,.lane-facts b{display:block}.lane-facts small{color:#71808a;font-size:9px}.lane-facts b{margin-top:2px;font-size:12px}.lane-detail{margin-top:7px;border:1px solid #d5e5ee;background:#fff}.lane-detail summary{padding:7px 9px;color:#355365;font-size:10px;font-weight:700;cursor:pointer}.lane-detail pre{overflow:auto;max-height:260px;margin:0;padding:9px;border-top:1px solid #e2ebf1;color:#25343d;background:#f7fafc;font-family:"IBM Plex Mono","SFMono-Regular",monospace;font-size:10px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}.lane-unavailable{display:flex;gap:8px;margin-top:7px;padding:8px 9px;border-left:2px solid #c98b42;background:#fff8ee;color:#725430;font-size:10px}.lane-unavailable b{flex:none}
 .file-ledger{margin-top:14px}.file-ledger header,.file-ledger article{display:grid;grid-template-columns:1.3fr .7fr .6fr 1fr;gap:8px;padding:8px 10px;border-bottom:1px solid #e1e3df;font-size:10px}.file-ledger header{font-weight:700;background:#eceae3}.attribution-summary{display:flex;gap:20px;margin:12px 0;padding:10px;border-top:1px solid #d7dddc;border-bottom:1px solid #d7dddc;font-size:11px}.attribution-list{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.attribution-list article{padding:10px;border:1px solid #d9dedd;border-left:3px solid var(--warn);background:#faf9f5}.attribution-list article.confirmed{border-left-color:var(--ok)}.attribution-list article.rejected{opacity:.62;border-left-color:#a2a7a7}.attribution-list header,.attribution-list footer{display:flex;justify-content:space-between;gap:6px}.attribution-list p{font-size:11px;line-height:1.6}.attribution-list>article>small{color:#a25524;font-size:9px}
 .evolution-layout{display:grid;grid-template-columns:220px minmax(0,1fr);gap:12px;margin-top:12px}.proposal-index{border-right:1px solid #d5dada;padding-right:10px}.proposal-index button{display:block;width:100%;margin-bottom:7px;padding:9px;border:1px solid transparent;background:#f3f1ea;text-align:left}.proposal-index button.active{border-color:#8ea8b2;background:#fff}.proposal-index small,.proposal-index b,.proposal-index span{display:block}.proposal-index small{font-family:"IBM Plex Mono",monospace;font-size:9px;color:var(--signal)}.proposal-index b{margin:4px 0;font-size:11px}.proposal-index span{color:#77818a;font-size:9px}.proposal-console>header{display:flex;justify-content:space-between}.proposal-console h4{margin:3px 0}.version-track{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;align-items:center;gap:7px;margin:12px 0}.version-track article{padding:9px;border:1px solid #d7dcdb;background:#faf9f5}.version-track small,.version-track b{display:block}.version-track small{font-size:9px;color:#79838b}.version-track b{margin-top:3px;font-family:"IBM Plex Mono",monospace;font-size:11px}.patch-list{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:10px;background:#eef3f4;font-size:10px}.patch-list code{padding:3px 6px;background:#fff}.gate-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-top:10px}.gate-grid article{display:flex;gap:8px;padding:8px;border:1px solid #e0d2c7;background:#fff8f0}.gate-grid article.ok{border-color:#c3d8c8;background:#f2f8f3}.gate-grid article>i{width:7px;height:7px;margin-top:4px;border-radius:50%;background:var(--warn)}.gate-grid article.ok>i{background:var(--ok)}.gate-grid b,.gate-grid small{display:block}.gate-grid b{font-size:10px}.gate-grid small{color:#7b858c;font-size:9px}.gate-grid>p{grid-column:1/-1;color:#a25524;font-size:10px}.evolution-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}.evaluation-form{display:grid;grid-template-columns:repeat(3,1fr) auto;gap:7px;margin-top:10px;padding:10px;border-top:1px dashed #b9c3c4;background:#faf9f5}
 .context-inspector{padding:16px;border-left:1px solid #d9d5ca}.context-inspector h3{margin:5px 0 14px}.context-inspector dl{margin:0}.context-inspector dt{margin-top:10px;color:#7b858c;font-size:9px;text-transform:uppercase}.context-inspector dd{overflow:hidden;margin:3px 0;font-size:11px;text-overflow:ellipsis}.context-inspector .mono{font-family:"IBM Plex Mono",monospace}.audit-rule{display:flex;gap:8px;margin-top:20px;padding:10px;border:1px solid #d9c8b5;background:#fff8ee}.audit-rule svg{flex:none;color:var(--warn)}.audit-rule p{margin:0}.audit-rule b,.audit-rule span{display:block}.audit-rule b{font-size:10px}.audit-rule span{margin-top:3px;color:#7d6c5e;font-size:9px;line-height:1.5}

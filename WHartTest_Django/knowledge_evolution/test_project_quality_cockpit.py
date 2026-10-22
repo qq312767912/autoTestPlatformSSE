@@ -51,6 +51,22 @@ class ProjectQualityCockpitTests(TestCase):
         self.assertEqual(stages[0]["status"], "pending")
         self.assertEqual(stages[1]["status"], "blocked")
 
+    def test_cockpit_exposes_only_the_five_agent_capabilities(self):
+        response = self.client.get(
+            "/api/knowledge-evolution/operations/cockpit/", {"project": self.project.id}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["stage"] for item in response.data["single_capabilities"]],
+            [
+                "test_plan_generation",
+                "testcase_generation",
+                "case_review",
+                "test_execution",
+                "report_generation",
+            ],
+        )
+
     def test_cockpit_workflow_carries_the_metadata_the_version_list_needs(self):
         """左侧流程版本列表要的四项元信息必须来自后端，不能靠前端从 stages 里猜。
 

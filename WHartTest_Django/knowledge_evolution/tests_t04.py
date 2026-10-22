@@ -21,7 +21,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from knowledge_evolution.operations import StageExecutionAttemptService
 from knowledge_evolution.tests_t09_t13 import SkillHubBaseTests, TEST_MEDIA_ROOT
-from knowledge_evolution.workflow_models import StageExecutionAttempt
+from knowledge_evolution.workflow_models import StageDerivedArtifact, StageExecutionAttempt
 from orchestrator_integration.agent_loop_view import AgentLoopStreamAPIView
 
 STAGE = "test_plan_generation"
@@ -78,6 +78,28 @@ class AdvanceOnPublishTests(AttemptWriteBackBase):
 
         attempt.refresh_from_db()
         self.assertEqual(attempt.status, "running")
+
+    def test_publish_registers_stage_result_derived_artifacts(self):
+        from knowledge_evolution.tests_t07 import _payload
+
+        attempt = self._dispatch()
+        StageExecutionAttemptService.mark_running(attempt)
+        output = self.make_output(
+            task_type=STAGE, workflow_id="wf-t04", skill_version=None,
+        )
+        payload = _payload()
+        payload["items"][0]["module"] = "账户准入"
+        output.metadata = {**(output.metadata or {}), "stage_result_payload": payload}
+        output.save(update_fields=["metadata"])
+        request = SimpleNamespace(_flywheel_attempt=attempt, user=self.lead)
+
+        async_to_sync(AgentLoopStreamAPIView()._advance_attempt_on_publish)(
+            request, ("trace-id", str(output.pk)),
+        )
+
+        self.assertEqual(
+            StageDerivedArtifact.objects.filter(output=output).count(), 3,
+        )
 
 
 class FailureRecordingTests(AttemptWriteBackBase):

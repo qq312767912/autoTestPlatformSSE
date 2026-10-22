@@ -174,7 +174,23 @@ class SkillVersionService:
     # ------------------------------------------------------------ 创建
 
     @classmethod
-    def create_candidate_from_dir(
+    def create_candidate_from_dir(cls, *, source_dir, version_override=None, **kwargs):
+        import tempfile
+        from .import_preview import rewrite_version
+        if not Path(source_dir).is_dir():
+            raise ValidationError("候选包目录不存在")
+        with tempfile.TemporaryDirectory(prefix="skill-import-") as temporary:
+            root = Path(temporary) / "package"
+            shutil.copytree(source_dir, root)
+            if version_override:
+                from .validation import parse_manifest
+                manifest, _ = parse_manifest(root)
+                if manifest.get("version") != version_override:
+                    rewrite_version(root, version_override)
+            return cls._create_candidate_from_staged_dir(source_dir=root, **kwargs)
+
+    @classmethod
+    def _create_candidate_from_staged_dir(
         cls, *, source_dir, project, actor=None, source_type: str = "upload",
         source_metadata: dict | None = None, change_reason: str = "",
         expected_benefit: str = "", impact_scope: str = "",
@@ -203,19 +219,25 @@ class SkillVersionService:
         # 否则导出（已脱敏）后重新上传会算出不同哈希，无法幂等命中同一版本。
         package_sha256 = report.package_sha256
 
-        cls._inject_api_key(source_dir=source_dir, skill_name=name, api_key=api_key)
+        input_package_sha256 = package_sha256
 
         with transaction.atomic():
             skill, created_skill = cls._get_or_create_skill(
                 project=project, actor=actor, manifest=manifest, source_dir=source_dir,
+                canonical=source_type in {"upload", "git", "store"},
             )
 
             # 幂等：同一 Skill 下同一份内容只入库一次。
             existing = SkillVersion.objects.filter(
                 skill=skill, package_sha256=package_sha256
+            ).first() or SkillVersion.objects.filter(
+                skill=skill, source_metadata__input_package_sha256=package_sha256
             ).first()
             if existing is not None:
                 logger.info("重复包命中已有版本，幂等返回：skill=%s sha=%s", skill.id, package_sha256[:12])
+                if "hub_deleted_at" in (existing.source_metadata or {}):
+                    raise ValidationError("该包已在已删除版本中，请先恢复该版本或修改上传版本号")
+                skill._imported_existing = True
                 return skill, existing
 
             # 版本号：manifest 没声明时由平台补全。存量指令型 Skill 大多没有 version，
@@ -223,7 +245,13 @@ class SkillVersionService:
             declared_version = (manifest.get("version") or "").strip()
             version = declared_version or cls._auto_version(skill)
             if not declared_version:
-                manifest = {**manifest, "version": version, "version_inferred": True}
+                from .import_preview import rewrite_version
+                rewrite_version(source_dir, version)
+                report = scan_package_dir(source_dir)
+                if not report.ok:
+                    raise ValidationError("自动补全版本后的包未通过校验")
+                manifest = {**report.manifest, "version_inferred": True}
+                package_sha256 = report.package_sha256
 
             # 版本号冲突：同一 Skill 下版本号唯一，内容不同就必须换号，不能覆盖。
             if SkillVersion.objects.filter(skill=skill, version=version).exists():
@@ -236,6 +264,7 @@ class SkillVersionService:
                 project_id=project.id, skill_id=skill.id,
                 version=version, package_sha256=package_sha256,
             )
+            cls._inject_api_key(source_dir=source_dir, skill_name=name, api_key=api_key)
             cls._materialize(source_dir=source_dir, package_path=package_path)
 
             release = CapabilityRelease.objects.create(
@@ -266,6 +295,7 @@ class SkillVersionService:
                 source_type=source_type,
                 source_metadata={
                     **(source_metadata or {}),
+                    "input_package_sha256": input_package_sha256,
                     "change_reason": change_reason,
                     "expected_benefit": expected_benefit,
                     "impact_scope": impact_scope,
@@ -294,25 +324,29 @@ class SkillVersionService:
     def create_candidate_from_preflight(
         cls, *, token: str, project, actor=None, source_metadata: dict | None = None,
         change_reason: str = "", expected_benefit: str = "", impact_scope: str = "",
-        api_key: str | None = None,
+        api_key: str | None = None, version_override=None,
     ) -> tuple:
         """消费预检令牌并创建候选版本（令牌过期/篡改/哈希不符都会拒绝）。"""
         payload, staging_dir = SkillPackageValidationService.consume_preflight(token=token)
+        succeeded = False
         try:
             metadata = {
                 **(source_metadata or {}),
                 "original_filename": payload.get("original_filename", ""),
                 "preflight_token_id": payload.get("token_id", ""),
             }
-            return cls.create_candidate_from_dir(
+            result = cls.create_candidate_from_dir(
                 source_dir=staging_dir, project=project, actor=actor,
                 source_type="upload", source_metadata=metadata,
                 change_reason=change_reason, expected_benefit=expected_benefit,
-                impact_scope=impact_scope, api_key=api_key,
+                impact_scope=impact_scope, api_key=api_key, version_override=version_override,
             )
+            succeeded = True
+            return result
         finally:
-            # 无论成功与否都释放暂存区，避免残留未引用的临时包。
-            shutil.rmtree(staging_dir, ignore_errors=True)
+            # 版本冲突时保留原暂存包和令牌，支持界面改号后重试；TTL负责清理。
+            if succeeded:
+                shutil.rmtree(staging_dir, ignore_errors=True)
 
     # ------------------------------------------------------------ 辅助
 
@@ -361,9 +395,17 @@ class SkillVersionService:
         }
 
     @staticmethod
-    def _get_or_create_skill(*, project, actor, manifest: dict, source_dir: Path) -> tuple:
+    def _get_or_create_skill(*, project, actor, manifest: dict, source_dir: Path, canonical=False) -> tuple:
         """按项目 + Skill 名称取逻辑身份；不存在则新建（保留旧字段以兼容旧运行时）。"""
-        skill = Skill.objects.filter(project=project, name=manifest["name"]).first()
+        if canonical:
+            from django.db.models import Count
+            from projects.models import Project
+            from .canonical import pick_canonical
+            list(Project.objects.select_for_update().order_by("pk").values_list("pk", flat=True))
+            rows = list(Skill.objects.filter(name=manifest["name"]).annotate(n_versions=Count("versions")).select_related("active_version"))
+            skill = pick_canonical(rows).get(manifest["name"])
+        else:
+            skill = Skill.objects.filter(project=project, name=manifest["name"]).first()
         if skill is not None:
             return skill, False
 

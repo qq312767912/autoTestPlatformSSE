@@ -77,6 +77,10 @@
         </div>
 
         <a-form :model="form" layout="vertical">
+          <a-form-item label="本次上传版本（可修改，不覆盖历史包）">
+            <a-input v-model="candidateVersion" placeholder="留空时自动分配" />
+          </a-form-item>
+          <div>包内版本：{{ report?.manifest?.version || '未声明' }}</div>
           <a-form-item label="变更原因（会展示给审批人）">
             <a-textarea v-model="form.change_reason" :rows="2" :max-length="500" show-word-limit />
           </a-form-item>
@@ -145,6 +149,7 @@ const step = ref(0)
 const preflighting = ref(false)
 const saving = ref(false)
 const error = ref('')
+const candidateVersion = ref('')
 const form = ref({ change_reason: '', expected_benefit: '', impact_scope: '' })
 
 // 关闭时清空：残留的上一次预检令牌会在 30 分钟后过期，留着只会误导用户。
@@ -209,6 +214,7 @@ async function runPreflight() {
   try {
     const result = await SkillHubService.preflight(props.projectId, file.value)
     report.value = result
+    candidateVersion.value = String(result.manifest?.version || '')
     if (result.ok) {
       // 预检通过：进入第二步填写变更说明。令牌就在报告里，第二步直接用它。
       step.value = 1
@@ -234,6 +240,7 @@ async function saveCandidate() {
   try {
     const created = await SkillHubService.createCandidate(props.projectId, {
       token,
+      version_override: candidateVersion.value || undefined,
       change_reason: form.value.change_reason,
       expected_benefit: form.value.expected_benefit,
       impact_scope: form.value.impact_scope,

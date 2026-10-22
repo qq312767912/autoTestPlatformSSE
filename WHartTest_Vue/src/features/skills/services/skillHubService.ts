@@ -76,6 +76,7 @@ export function toErrorMessage(error: unknown, fallback: string): string {
 
 export interface CandidatePayload {
   token: string
+  version_override?: string
   change_reason?: string
   expected_benefit?: string
   impact_scope?: string
@@ -132,12 +133,16 @@ export class SkillHubService {
 
   // ---------------------------------------------------------------- 版本
 
-  static async listVersions(projectId: number, skillId: number): Promise<SkillVersionSummary[]> {
+  static async listVersions(projectId: number, skillId: number, includeArchived = false): Promise<SkillVersionSummary[]> {
     const data = await callSkills<SkillVersionSummary[] | null>({
-      url: `/projects/${projectId}/skills/${skillId}/versions/`,
+      url: `/projects/${projectId}/skills/${skillId}/versions/?include_archived=${includeArchived}`,
       method: 'GET',
     })
     return Array.isArray(data) ? data : []
+  }
+
+  static async archiveVersion(projectId: number, skillId: number, versionId: string, restore = false) {
+    return callSkills({url: `/projects/${projectId}/skills/${skillId}/versions/${versionId}/${restore ? 'restore' : 'archive'}/`, method: 'POST'})
   }
 
   static async getVersion(

@@ -106,6 +106,13 @@ class FailureAttribution(models.Model):
     )
     workflow_id = models.CharField(max_length=128, blank=True, db_index=True)
     category = models.CharField(max_length=40, choices=CATEGORY_CHOICES, db_index=True)
+    # V2 三元组归因。category 保留为原始失败信号，不再承担修复路由。
+    primary_cause = models.CharField(max_length=40, blank=True, db_index=True)
+    fine_cause = models.CharField(max_length=64, blank=True, db_index=True)
+    repair_target = models.CharField(max_length=32, blank=True, db_index=True)
+    evidence_status = models.CharField(max_length=20, default="unverified", db_index=True)
+    impact_scope = models.JSONField(default=dict, blank=True)
+    diagnosis_version = models.CharField(max_length=32, blank=True, default="")
     #: 责任层。由 category 派生（见 ``CATEGORY_LAYER_MAP``）。
     #:
     #: 默认值刻意留空而不是 ``skill_tool``：字段若带非空默认值，Django 会在构造实例时
@@ -133,6 +140,8 @@ class FailureAttribution(models.Model):
             models.Index(fields=["project", "category", "state"]),
             models.Index(fields=["workflow_id", "state"]),
             models.Index(fields=["project", "layer", "state"]),
+            models.Index(fields=["project", "primary_cause", "state"], name="ke_attr_primary_state_idx"),
+            models.Index(fields=["project", "repair_target", "state"], name="ke_attr_repair_state_idx"),
         ]
 
     def save(self, *args, **kwargs):

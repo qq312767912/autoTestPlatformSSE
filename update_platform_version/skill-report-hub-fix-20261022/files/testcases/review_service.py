@@ -1,0 +1,1015 @@
+"""基于 test-case-clarity-review Skill 的测试用例文件审查。"""
+
+import csv
+import hashlib
+import json
+import logging
+import re
+import threading
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from pathlib import Path
+from time import monotonic, sleep
+
+from django.core.files.base import ContentFile
+from django.utils import timezone
+from langchain_core.messages import HumanMessage, SystemMessage
+from openpyxl import Workbook, load_workbook
+from openpyxl.cell.rich_text import CellRichText, TextBlock
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.cell.text import InlineFont
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
+
+from requirements.services import create_llm_instance, safe_llm_invoke
+
+from .models import TestCaseReview, TestCaseReviewLLMConfig
+
+logger = logging.getLogger(__name__)
+
+FALLBACK_SKILL = """审查测试用例的可执行性与验收清晰度。不要凭空补造业务规则；未知标准标记为待业务确认。按风险检查前置条件、测试数据、步骤、预期、业务结果、边界异常、数据一致性、证据与可维护性。"""
+TESTCASE_REVIEW_CHUNK_SIZE = 20
+TESTCASE_REVIEW_CHUNK_ATTEMPTS = 3
+TESTCASE_REVIEW_MAX_ATTEMPTS = 5
+TESTCASE_REVIEW_MAX_WORKERS = 2
+TESTCASE_REVIEW_TOTAL_BUDGET_SECONDS = 45 * 60
+TESTCASE_REVIEW_CIRCUIT_BREAKER = 3
+TESTCASE_REVIEW_RETRY_BASE_DELAY = 2
+TESTCASE_REVIEW_RETRY_MAX_DELAY = 30
+
+
+def _get_testcase_review_llm_config():
+    """只解析用例审查专属配置，禁止隐式回退到平台通用 LLM。
+
+    用例审查要求模型按提示词稳定输出 JSON，与对话/编排对模型的偏好不同。
+    若这里回退到通用配置，改通用配置会悄悄改变审查行为，且管理员无法为审查
+    单独选一个"吐 JSON 更稳"的模型，因此宁可显式失败。
+    """
+    config = TestCaseReviewLLMConfig.objects.filter(is_active=True).first()
+    if not config:
+        raise ValueError("尚未配置并启用用例审查专用 LLM，请联系平台管理员配置")
+    if not config.api_key:
+        raise ValueError("用例审查专用 LLM 缺少 API Key，请联系平台管理员补全")
+    return config
+
+
+def _chunk_attempt_limit(config):
+    """单批最大尝试次数：尊重专用配置的 max_retries，但设有下限与上限。
+
+    内网模型网关会出现瞬时 5xx（如 502 upstream_unavailable）。历史实现每批
+    只尝试 2 次且间隔固定 2 秒，一次上游抖动就让整项任务失败，故这里设下限；
+    同时设上限，避免单批长时间占用模型。
+    """
+    try:
+        configured = int(getattr(config, "max_retries", 0) or 0) + 1
+    except (TypeError, ValueError):
+        configured = TESTCASE_REVIEW_CHUNK_ATTEMPTS
+    return max(TESTCASE_REVIEW_CHUNK_ATTEMPTS, min(configured, TESTCASE_REVIEW_MAX_ATTEMPTS))
+
+
+def _retry_delay(attempt):
+    """指数退避：2、4、8……并封顶，避免在上游故障窗口内高频重试。"""
+    return min(TESTCASE_REVIEW_RETRY_MAX_DELAY, TESTCASE_REVIEW_RETRY_BASE_DELAY * (2 ** (attempt - 1)))
+
+
+HEADER_ALIASES = {
+    "identity": ("编号", "用例id", "用例编号", "用例名称", "测试用例", "caseid", "casename"),
+    "module": ("模块", "所属用例库", "一级模块", "功能模块"),
+    "precondition": ("前置条件", "前置", "测试数据", "前提条件"),
+    "steps": ("步骤", "步骤描述", "操作步骤", "测试步骤"),
+    "expected": ("预期", "预期结果", "期望结果", "期望输出", "验收标准"),
+    "priority": ("优先级", "原优先级", "用例等级"),
+}
+
+SOURCE_REVIEW_FIELDS = {
+    "priority": ("优先级", "原优先级", "用例等级"),
+    "precondition": ("前置条件", "前置", "测试数据", "前提条件"),
+    "steps": ("步骤", "步骤描述", "操作步骤", "测试步骤"),
+    "expected": ("预期", "预期结果", "期望结果", "期望输出", "验收标准"),
+    "combined": ("原文（前置/步骤/预期）", "原文", "前置/步骤/预期"),
+}
+
+
+def _normalized_header(value):
+    return re.sub(r"[\s_\-/:：]+", "", str(value or "")).lower()
+
+
+def _header_categories(cells):
+    categories = set()
+    for cell in cells:
+        normalized = _normalized_header(cell)
+        if not normalized:
+            continue
+        for category, aliases in HEADER_ALIASES.items():
+            if any(_normalized_header(alias) == normalized for alias in aliases):
+                categories.add(category)
+                break
+    return categories
+
+
+def _is_case_header(cells):
+    categories = _header_categories(cells)
+    return (
+        {"steps", "expected"}.issubset(categories)
+        or ("identity" in categories and bool(categories & {"steps", "expected", "precondition"}))
+    )
+
+
+def _case_rows(sheet_name, source_rows):
+    """在一个工作表中识别一个或多个用例表头，过滤封面、评审记录和分组标题行。"""
+    rows = []
+    headers = None
+    for row_number, cells in source_rows:
+        if _is_case_header(cells):
+            headers = cells
+            continue
+        if headers is None:
+            continue
+        width = max(len(headers), len(cells))
+        padded_headers = [*headers, *([""] * (width - len(headers)))]
+        padded_cells = [*cells, *([""] * (width - len(cells)))]
+        columns = {
+            header: value
+            for header, value in zip(padded_headers, padded_cells)
+            if header and value
+        }
+        # 只有一个值的行通常是“Chrome 系列”等分组标题，不是用例。
+        if len(columns) < 2:
+            continue
+        rows.append({
+            "sheet": sheet_name,
+            "row": row_number,
+            "cells": cells,
+            "columns": columns,
+            "headers": [header for header in padded_headers if header],
+        })
+    return rows
+
+
+def _source_text_by_location(rows):
+    """建立源用例原文索引，供报告直接展示，避免读者另开源文件定位。"""
+    aliases = {
+        category: {_normalized_header(alias) for alias in values}
+        for category, values in SOURCE_REVIEW_FIELDS.items()
+    }
+    indexed = {}
+    for row in rows:
+        columns = row.get("columns") or {}
+        values = {}
+        for header, value in columns.items():
+            normalized = _normalized_header(header)
+            for category, names in aliases.items():
+                if normalized in names and category not in values:
+                    values[category] = str(value or "").strip()
+        headers = {_normalized_header(header) for header in row.get("headers", [])}
+        has_component_fields = any(headers & aliases[category] for category in ("precondition", "steps", "expected"))
+        if not has_component_fields and values.get("combined"):
+            # 某些审查记录/汇总表已经把原始前置、步骤、预期合并在“原文”单元格中；
+            # 直接展示完整单元格，不能用模型生成的摘要替代。
+            source_text = values["combined"]
+        else:
+            parts = []
+            for category, label in (("precondition", "前置"), ("steps", "步骤"), ("expected", "预期")):
+                value = values.get(category, "")
+                has_field = bool(headers & aliases[category])
+                missing = "（原表为空）" if has_field else "（原表未提供）"
+                parts.append(f"{label}：{value if value else missing}")
+            source_text = "\n\n".join(parts)
+        try:
+            location = (str(row.get("sheet") or ""), int(row.get("row") or 0))
+        except (TypeError, ValueError):
+            continue
+        indexed[location] = {
+            "source_priority": values.get("priority", ""),
+            "source_text": source_text,
+        }
+    return indexed
+
+
+def build_skill_snapshot(skill=None):
+    """固化本次审查所用 Skill，避免执行期间 Skill 被编辑或删除。"""
+    if skill and skill.skill_content:
+        content = skill.skill_content
+        try:
+            skill_path = skill.get_full_path()
+            if not skill_path:
+                return content
+            references = Path(skill_path) / "references"
+            if references.exists():
+                for path in sorted(references.rglob("*.md")):
+                    content += f"\n\n# 参考规则：{path.name}\n" + path.read_text(encoding="utf-8")
+        except Exception:
+            logger.exception("读取 Skill 参考规则失败: %s", skill.name)
+        return content
+    bundled = Path("/app/bundled_skills/test-case-clarity-review")
+    skill_md = bundled / "SKILL.md"
+    rules_md = bundled / "references" / "review-rules.md"
+    if skill_md.exists():
+        return skill_md.read_text(encoding="utf-8") + ("\n\n" + rules_md.read_text(encoding="utf-8") if rules_md.exists() else "")
+    return FALLBACK_SKILL
+
+
+def _skill_prompt(review):
+    return review.skill_snapshot or build_skill_snapshot(review.selected_skill)
+
+
+def _lock_review_skill(review):
+    """在审查启动时锁定用例审查 Skill 版本（T14）。
+
+    锁定必须发生在**读取文件、调用模型之前**：一旦开跑才发现没有可用版本，
+    已经产生的中间状态（进度、部分结果）就成了没有版本溯源的孤儿产出，
+    而飞轮后半段（金标、归因、派生）全都要求产出能定位到具体版本。
+
+    项目登记了用例审查 Skill 却一个可运行版本都没有（Skill 被停用、版本被隔离
+    或校验被驳回）时这里会抛 ``SkillBindingRefused``，任务被标记失败并携带可读
+    原因；项目根本没有登记该 Skill 时返回未绑定结果，审查回落到平台内置规则
+    （见 ``knowledge_evolution.task_binding`` 的三分支说明）。
+
+    注意**上传/导入的包不需要先激活**：未激活的版本照样是可运行版本，
+    激活只是可选的钉版手段。
+    """
+    from knowledge_evolution.task_binding import TaskSkillBindingService
+
+    binding = TaskSkillBindingService.bind_case_review(
+        review=review, actor=review.creator,
+        skill_version=(review.summary or {}).get("selected_skill_version"),
+    )
+    version = binding.get("skill_version")
+    if version and version.get_full_path():
+        root = Path(version.get_full_path())
+        content = (root / "SKILL.md").read_text(encoding="utf-8")
+        for path in sorted((root / "references").rglob("*.md")):
+            content += f"\n\n# 参考规则：{path.name}\n" + path.read_text(encoding="utf-8")
+        review.skill_snapshot = content
+    review.current_step = binding["detail"]
+    review.save(update_fields=["skill_snapshot", "current_step", "updated_at"])
+    logger.info("用例审查 %s 版本绑定：%s", review.pk, binding["detail"])
+    return binding
+
+
+def _read_rows(path):
+    suffix = Path(path).suffix.lower()
+    rows = []
+    if suffix == ".xlsx":
+        workbook = load_workbook(path, read_only=True, data_only=True)
+        try:
+            for sheet in workbook.worksheets:
+                source_rows = []
+                for row_number, values in enumerate(sheet.iter_rows(values_only=True), 1):
+                    cells = [str(value).strip() if value is not None else "" for value in values]
+                    if any(cells):
+                        source_rows.append((row_number, cells))
+                rows.extend(_case_rows(sheet.title, source_rows))
+        finally:
+            workbook.close()
+    else:
+        with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+            source_rows = []
+            for row_number, values in enumerate(csv.reader(handle), 1):
+                cells = [str(value).strip() for value in values]
+                if any(cells):
+                    source_rows.append((row_number, cells))
+            rows.extend(_case_rows("CSV", source_rows))
+    return rows
+
+
+def _extract_json(text):
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", (text or "").strip(), flags=re.I | re.S)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", cleaned, flags=re.S)
+        if not match:
+            raise ValueError("模型未返回可解析的 JSON")
+        return json.loads(match.group(0))
+
+
+def _review_chunk(llm, skill_prompt, rows, business_context):
+    from .skill_report import declared_sheets
+    report_definitions = declared_sheets(skill_prompt)
+    schema = {
+        "issues": [{
+            "sheet": "Sheet", "row": 2, "case_id": "编号或名称", "module": "模块",
+            "original": "原文", "severity": "高|中|低", "issue_type": "问题类型",
+            "description": "问题说明", "suggestion": "具体修改建议", "judgement": "确定缺陷|待业务确认|优化建议",
+            "rewrite": "修改示例：按‘前置：…\\n\\n步骤：\\n1. …\\n2. …\\n\\n预期：\\n1. …’分段；相对原文新增或改写的每段文字用【改】…【/改】包住；未知规则用【待业务确认：…】占位；确实无需改写时为空字符串",
+        }],
+        "report_sheets": [dict(definition, rows=[{column["key"]: "依据本批输入填写" for column in definition["columns"]}]) for definition in report_definitions] or [{"name": "仅当Skill要求新增工作表时填写表名", "columns": [{"key": "finding", "title": "分析结果"}], "rows": [{"finding": "基于输入的分析"}], "tab_color": "F4B183", "highlight": []}],
+        "pending_confirmations": ["待确认事项"], "governance_suggestions": ["治理建议"],
+    }
+    prompt = (
+        "请严格按下方 Skill 审查这些测试用例行。只输出一个 JSON 对象，不要 Markdown。"
+        "同一根因在同一用例内合并；高风险必须语义复核；识别并跳过表头，不要把表头当作测试用例。"
+        "每条问题都应生成 rewrite，写成可供测试人员直接参考的用例改写示例，不要仅复述 suggestion。必须严格分成‘前置：’、‘步骤：’、‘预期：’三段，段落之间空一行；步骤和预期使用逐行编号。基于原文有变化或新增的最小连续文本片段，必须用【改】…【/改】包住，未变化的原文不要标记；标记不得嵌套，且必须成对。导出报告时标记会移除并将标记内文本着色。不得补造未知业务规则，缺少依据时用【待业务确认：具体缺失信息】占位；仅当确实无需修改时允许为空。"
+        "每行 columns 已按识别到的原表头映射，cells 保留原列顺序。\n"
+        "扩展报告：MUST遵循本次Skill要求的额外工作表，返回report_sheets数组。Skill无额外表要求时返回空数组。"
+        "Skill声明report.sheets时MUST沿用其name、columns.key和highlight，逐表填写rows对象数组。"
+        "Skill只用文字要求新增sheet时MUST自行定义name、columns(key/title)、rows、tab_color及highlight；"
+        "高亮规则以column、equals或contains、fill(六位颜色)、color、bold声明。"
+        "不同批次同表MUST使用相同列key。只填写输入支持的分析，未知项明确写待确认，NEVER编造覆盖证据。\n"
+        f"业务背景：{business_context or '未提供；未知业务规则必须标为待业务确认'}\n"
+        f"输出结构示例：{json.dumps(schema, ensure_ascii=False)}\n"
+        f"待审查数据：{json.dumps(rows, ensure_ascii=False)}"
+    )
+    # 此处只调用一次：重试次数与指数退避统一由 run_testcase_review 的外层循环管理。
+    # 若两层同时重试，单批最坏耗时会放大成 (1 + max_retries) 倍超时时间，
+    # 无法用总时间预算约束，反而更容易撞上 Celery 时限。
+    response = safe_llm_invoke(
+        llm,
+        [SystemMessage(content=skill_prompt), HumanMessage(content=prompt)],
+        max_retries=1,
+        retry_delay=2,
+    )
+    return _extract_json(response.content)
+
+
+def _write_report(review, rows, issues, pending, governance, uncovered=None, chunks=None, extra_reports=None):
+    uncovered = uncovered or {}
+    chunks = chunks or []
+    workbook = Workbook()
+    info = workbook.active
+    info.title = "审查摘要"
+    counts = Counter(str(item.get("severity") or "中") for item in issues)
+    type_counts = Counter(str(item.get("issue_type") or "其他") for item in issues)
+    module_counts = Counter(str(item.get("module") or "未标注模块") for item in issues)
+    issue_rows = {(str(item.get("sheet")), int(item.get("row") or 0)) for item in issues}
+    estimated_cases = len(rows)
+    uncovered_rows = sum(len(chunks[index - 1]) for index in uncovered if 0 < index <= len(chunks))
+    top_issue = type_counts.most_common(1)[0][0] if type_counts else "未发现明确问题"
+    summary_rows = [
+        ("源文件", review.source_name), ("扫描时间", timezone.localtime().strftime("%Y-%m-%d %H:%M:%S")),
+        ("用例数量（按表头后非空行估算）", estimated_cases), ("扫描非空行数", len(rows)),
+        ("存在问题的用例/行", len(issue_rows)), ("问题总数", len(issues)),
+        ("高风险", counts.get("高", 0)), ("中风险", counts.get("中", 0)), ("低风险", counts.get("低", 0)),
+        ("最常见问题", top_issue),
+        ("审查方式", review.get_review_mode_display()), ("使用 Skill", review.skill_name),
+        ("业务背景", review.business_context or "未提供"), ("自定义审查规则", review.custom_rules or "未提供"),
+        ("审查口径", f"{review.skill_name} + 用户自定义审查规则"),
+        ("未覆盖批次", f"{len(uncovered)}/{len(chunks)}" if chunks else str(len(uncovered))),
+        ("未覆盖用例行数", uncovered_rows),
+    ]
+    info.merge_cells("A1:B1")
+    info["A1"] = "测试用例质量审查报告"
+    info.merge_cells("A2:B2")
+    info["A2"] = "审查结果仅用于提升用例的可执行性与验收清晰度，未知业务规则需由业务方确认。"
+    info.append(["基本信息", "内容"])
+    for key, value in summary_rows:
+        info.append([key, value])
+    info.column_dimensions["A"].width = 24
+    info.column_dimensions["B"].width = 90
+
+    distribution = workbook.create_sheet("问题分布")
+    distribution.append(["维度", "分类", "数量"])
+    for label, counter in (("严重程度", counts), ("问题类型", type_counts), ("模块", module_counts)):
+        for name, count in counter.most_common():
+            distribution.append([label, name, count])
+
+    detail = workbook.create_sheet("问题明细")
+    headers = [
+        "Sheet", "行号", "用例编号/名称", "模块", "原优先级", "原文（前置/步骤/预期）",
+        "原文", "严重程度", "问题类型", "问题说明", "修改建议", "修改示例", "判定", "问题确认",
+        "反馈结论", "问题描述", "修改点", "不采纳原因",
+    ]
+    detail.append(headers)
+    source_by_location = _source_text_by_location(rows)
+    for item in issues:
+        try:
+            location = (str(item.get("sheet") or ""), int(item.get("row") or 0))
+        except (TypeError, ValueError):
+            location = (str(item.get("sheet") or ""), 0)
+        source = source_by_location.get(location, {})
+        detail.append(
+            [item.get("sheet", ""), item.get("row", ""), item.get("case_id", ""),
+             item.get("module", ""), source.get("source_priority", ""),
+             source.get("source_text", ""), item.get("original", ""),
+             item.get("severity", ""), item.get("issue_type", ""),
+             item.get("description", ""), item.get("suggestion", ""), "",
+             item.get("judgement", ""), "", "", "", "", ""]
+        )
+        _write_rewrite_cell(detail.cell(detail.max_row, 12), item.get("rewrite", ""))
+    confirmation_validation = DataValidation(
+        type="list", formula1='"是,否"', allow_blank=True,
+        errorTitle="无效的问题确认值", error='请从下拉列表中选择“是”或“否”。',
+        promptTitle="问题确认", prompt='确认采纳请选“是”，不采纳请选“否”。',
+    )
+    confirmation_validation.showErrorMessage = True
+    confirmation_validation.showInputMessage = True
+    if issues:
+        detail.add_data_validation(confirmation_validation)
+        confirmation_validation.add(f"N2:N{len(issues) + 1}")
+    conclusion_validation = DataValidation(
+        type="list",
+        formula1='"完全采纳,采纳但需改写,误报,待业务确认,暂无法验证,不适用,重复问题,已知/已修复,未确认,其他"',
+        allow_blank=True,
+        errorTitle="无效的反馈结论",
+        error="请从下拉列表中选择反馈结论。",
+        promptTitle="反馈结论",
+        prompt="选择本条意见的实际处理结论；问题维度与根因归因由平台另行分析。",
+    )
+    conclusion_validation.showErrorMessage = True
+    conclusion_validation.showInputMessage = True
+    if issues:
+        detail.add_data_validation(conclusion_validation)
+        conclusion_validation.add(f"O2:O{len(issues) + 1}")
+
+    examples = workbook.create_sheet("改写示例")
+    examples.append(["用例编号/名称", "原文", "改写示例"])
+    for item in issues:
+        if item.get("rewrite") and item.get("severity") in {"高", "中"}:
+            examples.append([item.get("case_id", ""), item.get("original", ""), ""])
+            _write_rewrite_cell(examples.cell(examples.max_row, 3), item.get("rewrite", ""))
+
+    confirms = workbook.create_sheet("待确认事项")
+    confirms.append(["序号", "待确认内容"])
+    for index, value in enumerate(dict.fromkeys(pending), 1):
+        confirms.append([index, value])
+    governance_sheet = workbook.create_sheet("治理建议")
+    governance_sheet.append(["序号", "建议"])
+    for index, value in enumerate(dict.fromkeys(governance), 1):
+        governance_sheet.append([index, value])
+
+    confirmation_sheet = workbook.create_sheet("测试确认处理结果")
+    confirmation_sheet.merge_cells("A1:F1")
+    confirmation_sheet["A1"] = "测试确认处理结果"
+    confirmation_sheet.merge_cells("A2:F2")
+    confirmation_sheet["A2"] = "本页数据根据“问题明细”中的“问题确认”自动统计：“是”为采纳，“否”为不采纳。"
+    confirmation_sheet.append([])
+    confirmation_sheet.append(["总体统计", "数值"])
+    issue_end_row = max(2, len(issues) + 1)
+    confirmation_sheet.append(["共审查用例数", estimated_cases])
+    confirmation_sheet.append(["审查提供意见", f"=COUNTA('问题明细'!$A$2:$A${issue_end_row})"])
+    confirmation_sheet.append(["采纳", f'=COUNTIF(\'问题明细\'!$N$2:$N${issue_end_row},"是")'])
+    confirmation_sheet.append(["不采纳", f'=COUNTIF(\'问题明细\'!$N$2:$N${issue_end_row},"否")'])
+    confirmation_sheet.append(["待确认", "=B6-B7-B8"])
+    confirmation_sheet.append(["采纳率", "=IF(B6=0,0,B7/B6)"])
+    confirmation_sheet.append([])
+    confirmation_sheet.append(["问题类型", "审查意见数", "采纳", "不采纳", "待确认", "采纳率"])
+    for issue_type in type_counts:
+        row_number = confirmation_sheet.max_row + 1
+        confirmation_sheet.append([
+            issue_type,
+            f'=COUNTIF(\'问题明细\'!$I$2:$I${issue_end_row},A{row_number})',
+            f'=COUNTIFS(\'问题明细\'!$I$2:$I${issue_end_row},A{row_number},\'问题明细\'!$N$2:$N${issue_end_row},"是")',
+            f'=COUNTIFS(\'问题明细\'!$I$2:$I${issue_end_row},A{row_number},\'问题明细\'!$N$2:$N${issue_end_row},"否")',
+            f"=B{row_number}-C{row_number}-D{row_number}",
+            f"=IF(B{row_number}=0,0,C{row_number}/B{row_number})",
+        ])
+
+    navy = "1D3F66"
+    blue = "2F75B5"
+    pale_blue = "EAF2F8"
+    stripe = "F7FAFC"
+    border_color = "D6E0EA"
+    thin_border = Border(
+        left=Side(style="thin", color=border_color), right=Side(style="thin", color=border_color),
+        top=Side(style="thin", color=border_color), bottom=Side(style="thin", color=border_color),
+    )
+    risk_styles = {
+        "高": ("FCE8E6", "B42318"),
+        "中": ("FFF2D6", "B54708"),
+        "低": ("E8F3FF", "175CD3"),
+    }
+
+    for sheet in workbook.worksheets:
+        sheet.sheet_view.showGridLines = False
+        sheet.sheet_properties.pageSetUpPr.fitToPage = True
+        sheet.page_setup.fitToWidth = 1
+        sheet.page_setup.fitToHeight = 0
+        sheet.sheet_properties.tabColor = blue
+        header_row = 3 if sheet is info else 1
+        sheet.freeze_panes = f"A{header_row + 1}" if sheet.max_row > header_row else None
+        if sheet is not info and sheet.max_row > 1:
+            sheet.auto_filter.ref = sheet.dimensions
+        for cell in sheet[header_row]:
+            cell.font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor=blue)
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = thin_border
+        sheet.row_dimensions[header_row].height = 26
+        for column in range(1, sheet.max_column + 1):
+            sheet.column_dimensions[get_column_letter(column)].width = min(max(14, max(len(str(sheet.cell(row, column).value or "")) for row in range(1, min(sheet.max_row, 100) + 1)) + 2), 60)
+        for row_index in range(header_row + 1, sheet.max_row + 1):
+            fill = PatternFill("solid", fgColor=stripe if row_index % 2 == 0 else "FFFFFF")
+            for cell in sheet[row_index]:
+                cell.font = Font(name="Arial", size=10, color="26384A")
+                cell.fill = fill
+                cell.border = thin_border
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+            if sheet is detail:
+                raw_text = max(
+                    (str(sheet.cell(row_index, column).value or "") for column in (6, 12)),
+                    key=len,
+                )
+                estimated_lines = sum(
+                    max(1, (sum(2 if ord(char) > 0x2E80 else 1 for char in line) + 71) // 72)
+                    for line in raw_text.splitlines()
+                ) or 1
+                # Excel 单行高度上限约 409.5pt；尽量展开原文，单元格仍保留完整内容。
+                sheet.row_dimensions[row_index].height = min(409, max(72, estimated_lines * 18))
+            else:
+                sheet.row_dimensions[row_index].height = 72 if sheet is examples else 24
+
+    info["A1"].fill = PatternFill("solid", fgColor=navy)
+    info["A1"].font = Font(name="Arial", size=18, bold=True, color="FFFFFF")
+    info["A1"].alignment = Alignment(vertical="center")
+    info["B1"].fill = PatternFill("solid", fgColor=navy)
+    info.row_dimensions[1].height = 44
+    info["A2"].fill = PatternFill("solid", fgColor=pale_blue)
+    info["B2"].fill = PatternFill("solid", fgColor=pale_blue)
+    info["A2"].font = Font(name="Arial", size=10, italic=True, color="52677D")
+    info["A2"].alignment = Alignment(vertical="center", wrap_text=True)
+    info.row_dimensions[2].height = 34
+    for row_index in range(4, info.max_row + 1):
+        info.cell(row_index, 1).font = Font(name="Arial", size=10, bold=True, color="27445E")
+        if info.cell(row_index, 1).value in risk_styles:
+            fill_color, font_color = risk_styles[info.cell(row_index, 1).value]
+            for cell in info[row_index]:
+                cell.fill = PatternFill("solid", fgColor=fill_color)
+            info.cell(row_index, 2).font = Font(name="Arial", size=11, bold=True, color=font_color)
+
+    detail.page_setup.orientation = "landscape"
+    detail.sheet_properties.tabColor = "C73E1D"
+    detail.freeze_panes = "E2"
+    for column, width in {
+        "A": 16, "B": 9, "C": 28, "D": 20, "E": 12, "F": 72,
+        "G": 42, "H": 12, "I": 24, "J": 48, "K": 48, "L": 64,
+        "M": 18, "N": 14, "O": 48, "P": 36, "Q": 36,
+    }.items():
+        detail.column_dimensions[column].width = width
+    for row_index in range(2, detail.max_row + 1):
+        priority = str(detail.cell(row_index, 5).value or "")
+        if priority:
+            detail.cell(row_index, 5).alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
+        detail.cell(row_index, 6).alignment = Alignment(vertical="top", wrap_text=True)
+        severity = str(detail.cell(row_index, 8).value or "")
+        if severity in risk_styles:
+            fill_color, font_color = risk_styles[severity]
+            cell = detail.cell(row_index, 8)
+            cell.fill = PatternFill("solid", fgColor=fill_color)
+            cell.font = Font(name="Arial", size=10, bold=True, color=font_color)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        judgement = str(detail.cell(row_index, 13).value or "")
+        judgement_colors = {"确定缺陷": ("FCE8E6", "B42318"), "待业务确认": ("FFF2D6", "B54708"), "优化建议": ("EAF2F8", "175CD3")}
+        if judgement in judgement_colors:
+            fill_color, font_color = judgement_colors[judgement]
+            cell = detail.cell(row_index, 13)
+            cell.fill = PatternFill("solid", fgColor=fill_color)
+            cell.font = Font(name="Arial", size=10, bold=True, color=font_color)
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    confirmation_sheet.sheet_properties.tabColor = "4F7F78"
+    confirmation_sheet.freeze_panes = "A4"
+    confirmation_sheet.auto_filter.ref = (
+        f"A12:F{confirmation_sheet.max_row}" if confirmation_sheet.max_row > 12 else None
+    )
+    confirmation_sheet.column_dimensions["A"].width = 28
+    for column in "BCDE":
+        confirmation_sheet.column_dimensions[column].width = 16
+    confirmation_sheet.column_dimensions["F"].width = 16
+    confirmation_sheet["A1"].fill = PatternFill("solid", fgColor="2F5F5B")
+    confirmation_sheet["A1"].font = Font(name="Arial", size=18, bold=True, color="FFFFFF")
+    confirmation_sheet["A1"].alignment = Alignment(vertical="center")
+    confirmation_sheet.row_dimensions[1].height = 40
+    confirmation_sheet["A2"].fill = PatternFill("solid", fgColor="EAF2F1")
+    confirmation_sheet["A2"].font = Font(name="Arial", size=10, italic=True, color="365E5A")
+    confirmation_sheet["A2"].alignment = Alignment(vertical="center", wrap_text=True)
+    confirmation_sheet.row_dimensions[2].height = 32
+    for header_row in (4, 12):
+        for cell in confirmation_sheet[header_row]:
+            cell.font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="2F5F5B")
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = thin_border
+    for row_index in range(5, confirmation_sheet.max_row + 1):
+        if row_index in {11, 12}:
+            continue
+        for cell in confirmation_sheet[row_index]:
+            cell.border = thin_border
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+    confirmation_sheet["B10"].number_format = "0.00%"
+    for row_index in range(13, confirmation_sheet.max_row + 1):
+        confirmation_sheet.cell(row_index, 6).number_format = "0.00%"
+
+    workbook.calculation.fullCalcOnLoad = True
+    workbook.calculation.forceFullCalc = True
+    workbook.calculation.calcMode = "auto"
+
+    for row_index in range(2, distribution.max_row + 1):
+        if distribution.cell(row_index, 1).value == "严重程度":
+            severity = str(distribution.cell(row_index, 2).value or "")
+            if severity in risk_styles:
+                fill_color, font_color = risk_styles[severity]
+                for cell in distribution[row_index]:
+                    cell.fill = PatternFill("solid", fgColor=fill_color)
+                distribution.cell(row_index, 3).font = Font(name="Arial", size=10, bold=True, color=font_color)
+
+    from .skill_report import declared_sheets, render_sheets
+    report_meta = render_sheets(workbook, declared_sheets(getattr(review, "skill_snapshot", "")), extra_reports or [])
+    if report_meta["report_warnings"]:
+        info.append(["扩展报告提示", "；".join(report_meta["report_warnings"])])
+    from io import BytesIO
+    output = BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    stem = Path(review.source_name).stem
+    filename = f"{stem}_测试用例质量审查报告.xlsx"
+    review.report_file.save(filename, ContentFile(output.read()), save=False)
+    return {
+        "total_rows": estimated_cases, "scanned_rows": len(rows), "problem_cases": len(issue_rows),
+        "issue_count": len(issues), "high": counts.get("高", 0), "medium": counts.get("中", 0),
+        "low": counts.get("低", 0),
+        "uncovered_chunks": len(uncovered), "uncovered_rows": uncovered_rows,
+        "total_chunks": len(chunks),
+        **report_meta,
+    }
+
+
+def _write_rewrite_cell(cell, value):
+    """去掉模型的改写标记，并在 Excel 富文本中高亮有变化的片段。"""
+    text = str(value or "").strip()
+    if not text:
+        cell.value = ""
+        return
+    marker_pattern = re.compile(r"【改】(.*?)【/改】", flags=re.S)
+    changed_font = InlineFont(color="C00000", b=True, u="single")
+    rich_text = CellRichText()
+    cursor = 0
+    matches = list(marker_pattern.finditer(text))
+    for match in matches:
+        if match.start() > cursor:
+            rich_text.append(text[cursor:match.start()])
+        changed_text = match.group(1)
+        if changed_text:
+            rich_text.append(TextBlock(changed_font, changed_text))
+        cursor = match.end()
+    if cursor < len(text):
+        rich_text.append(text[cursor:])
+    # 格式偏差时至少保留清楚的分段文本；不给整段误标成“已修改”。
+    if not matches:
+        cell.value = text.replace("【改】", "").replace("【/改】", "")
+    else:
+        cell.value = rich_text
+
+
+def run_testcase_review(review_id):
+    review = TestCaseReview.objects.get(pk=review_id)
+    if review.status == "cancelled":
+        return {"cancelled": True}
+    # 先锁版本再改状态：拒绝启动时任务仍停在 pending，不会留下一个
+    # "running 但从未真正开始"的孤儿记录，运维侧也就不会去追一个不存在的执行。
+    binding = _lock_review_skill(review)
+    review.status = "running"
+    review.started_at = timezone.now()
+    review.current_step = "读取测试用例"
+    review.progress = 5
+    review.save(update_fields=["status", "started_at", "current_step", "progress", "updated_at"])
+    rows = _read_rows(review.source_file.path)
+    if not rows:
+        raise ValueError("文件中没有可审查的非空内容")
+    config = _get_testcase_review_llm_config()
+    skill_prompt = _skill_prompt(review)
+    context_parts = []
+    if review.requirement_document_ids:
+        from requirements.models import RequirementDocument
+        docs = RequirementDocument.objects.filter(project=review.project, id__in=review.requirement_document_ids).values_list("title", "content")
+        context_parts.extend(f"【需求文档：{title}】\n{(content or '')[:8000]}" for title, content in docs)
+    if review.knowledge_document_ids:
+        from knowledge.models import Document
+        docs = Document.objects.filter(knowledge_base__project=review.project, status="completed", id__in=review.knowledge_document_ids).values_list("title", "content")
+        context_parts.extend(f"【知识库文档：{title}】\n{(content or '')[:8000]}" for title, content in docs)
+    document_context = "\n\n".join(context_parts)[:20000]
+    if document_context:
+        skill_prompt += "\n\n# 本次审查参考文档（只能据此判断，不得臆造）\n" + document_context
+    if review.custom_rules.strip():
+        skill_prompt += "\n\n# 本次用户指定的审查规则（在不违反质量边界的前提下优先执行）\n" + review.custom_rules.strip()
+    issues, pending, governance, extra_reports = [], [], [], []
+    # 分片大小与并发度是一对取舍：分片小则单批 JSON 输出短、不易触发网关
+    # 120 秒上游超时，但分片小会成倍增加批次数。历史实现一度改成「10 行 +
+    # 串行」，480 条用例产生 48 批串行调用，总耗时逼近 Celery 软时限。
+    # 这里取 20 行 + 2 路并发，在两者之间取得平衡。
+    chunk_size = TESTCASE_REVIEW_CHUNK_SIZE
+    chunks = [rows[i:i + chunk_size] for i in range(0, len(rows), chunk_size)]
+    review_timeout = max(30, min(int(config.request_timeout or 120), 600))
+    attempts = _chunk_attempt_limit(config)
+    workers = max(1, min(TESTCASE_REVIEW_MAX_WORKERS, len(chunks)))
+    deadline = monotonic() + TESTCASE_REVIEW_TOTAL_BUDGET_SECONDS
+
+    def review_one(index, chunk):
+        if TestCaseReview.objects.filter(pk=review_id, status="cancelled").exists():
+            raise RuntimeError("任务已取消")
+        # 底层 SDK 重试保持关闭：重试与退避统一由本层管理，单批最坏耗时才能
+        # 按 attempts × review_timeout 估算，进而受总时间预算约束。
+        llm = create_llm_instance(
+            config,
+            temperature=0.1,
+            timeout=review_timeout,
+            max_retries=0,
+        )
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return _review_chunk(llm, skill_prompt, chunk, review.business_context)
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "用例审查分片失败 review=%s chunk=%s/%s attempt=%s/%s error=%s: %s",
+                    review.id, index, len(chunks), attempt, attempts,
+                    type(exc).__name__, exc,
+                )
+                if attempt < attempts:
+                    sleep(_retry_delay(attempt))
+        raise RuntimeError(
+            f"第 {index}/{len(chunks)} 批模型调用失败（已尝试 {attempts} 次）："
+            f"{type(last_error).__name__}: {last_error}"
+        ) from last_error
+
+    review.current_step = (
+        f"Skill 审查 0/{len(chunks)}（并发 {workers}，"
+        f"单批上限 {review_timeout} 秒）"
+    )
+    review.progress = 10
+    review.save(update_fields=["current_step", "progress", "updated_at"])
+    signature = hashlib.sha256(json.dumps({
+        "rows": rows,
+        "skill": skill_prompt,
+        "business_context": review.business_context,
+        "custom_rules": review.custom_rules,
+        "chunk_size": chunk_size,
+        "report_contract": "skill-sheets/v1",
+    }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    checkpoint = (review.summary or {}).get("_checkpoint") or {}
+    ordered_results = {
+        int(index): result
+        for index, result in (checkpoint.get("results") or {}).items()
+    } if checkpoint.get("signature") == signature else {}
+    # 批次失败只记录、不中断整项任务：一次上游抖动不应让已跑完的批次白跑。
+    uncovered = {}
+    state_lock = threading.Lock()
+
+    def persist_progress():
+        processed = len(ordered_results) + len(uncovered)
+        review.summary = {"_checkpoint": {
+            "signature": signature,
+            "total_chunks": len(chunks),
+            "results": {str(key): value for key, value in ordered_results.items()},
+            "uncovered": {str(key): value for key, value in uncovered.items()},
+        }}
+        review.current_step = (
+            f"Skill 审查 {processed}/{len(chunks)}（并发 {workers}，"
+            f"单批上限 {review_timeout} 秒）"
+        )
+        review.progress = 10 + int(processed / len(chunks) * 75)
+        review.save(update_fields=["summary", "current_step", "progress", "updated_at"])
+
+    waiting = [index for index in range(1, len(chunks) + 1) if index not in ordered_results]
+    cursor = 0
+    consecutive_failures = 0
+    circuit_broken = False
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        while cursor < len(waiting):
+            if TestCaseReview.objects.filter(pk=review_id, status="cancelled").exists():
+                executor.shutdown(wait=False, cancel_futures=True)
+                return {"cancelled": True}
+            if monotonic() >= deadline:
+                break
+            wave = waiting[cursor:cursor + workers]
+            cursor += len(wave)
+            futures = {
+                executor.submit(review_one, index, chunks[index - 1]): index
+                for index in wave
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    with state_lock:
+                        uncovered[index] = f"{type(exc).__name__}: {exc}"
+                        consecutive_failures += 1
+                        # 连续多批失败且迄今无任何成功批次，说明是网关整体不可用
+                        # （而不是个别分片偶发失败）：提前终止，不必逐批耗尽重试。
+                        if not ordered_results and consecutive_failures >= TESTCASE_REVIEW_CIRCUIT_BREAKER:
+                            circuit_broken = True
+                    logger.error(
+                        "用例审查分片最终失败 review=%s chunk=%s/%s：%s",
+                        review.id, index, len(chunks), exc,
+                    )
+                else:
+                    with state_lock:
+                        ordered_results[index] = result
+                        consecutive_failures = 0
+                with state_lock:
+                    persist_progress()
+            if circuit_broken:
+                logger.error(
+                    "用例审查连续 %s 批失败且无任何成功批次，判定模型网关不可用，提前终止 "
+                    "review=%s（已送审 %s/%s 批）",
+                    consecutive_failures, review.id, cursor, len(waiting),
+                )
+                break
+    for index in waiting[cursor:]:
+        uncovered.setdefault(
+            index,
+            "模型网关连续失败，已提前终止" if circuit_broken
+            else f"总时间预算 {TESTCASE_REVIEW_TOTAL_BUDGET_SECONDS // 60} 分钟耗尽，该批未送审",
+        )
+    with state_lock:
+        persist_progress()
+
+    if TestCaseReview.objects.filter(pk=review_id, status="cancelled").exists():
+        return {"cancelled": True}
+
+    if not ordered_results:
+        first_error = next(iter(uncovered.values()), "未知原因")
+        raise RuntimeError(
+            f"共 {len(uncovered)}/{len(chunks)} 批模型调用失败，未生成报告。首个错误：{first_error}"
+        )
+
+    # 按原始分片顺序汇总，保证报告顺序稳定可追溯。
+    for index in range(1, len(chunks) + 1):
+        result = ordered_results.get(index)
+        if not result:
+            continue
+        issues.extend(result.get("issues") or [])
+        pending.extend(result.get("pending_confirmations") or [])
+        governance.extend(result.get("governance_suggestions") or [])
+        extra_reports.append(result.get("report_sheets", []))
+    review.current_step = "生成 Excel 报告"
+    review.progress = 90
+    review.summary = _write_report(review, rows, issues, pending, governance, uncovered, chunks, extra_reports)
+    review.status = "completed"
+    review.progress = 100
+    review.current_step = (
+        f"审查完成（{len(ordered_results)}/{len(chunks)} 批已覆盖）"
+        if uncovered else "审查完成"
+    )
+    review.completed_at = timezone.now()
+    review.error_message = ""
+    review.save()
+
+    # 记录到平台统一产出协议，进入数据飞轮
+    # 注意：summary 已被 _write_report 整体覆盖，问题明细只能在这里直接传入。
+    _publish_to_evolution(
+        review, issues=issues, pending=pending, governance=governance,
+        total_chunks=len(chunks), uncovered_chunks=len(uncovered),
+        skill_version=binding.get("skill_version"),
+    )
+
+    return review.summary
+
+
+def build_review_findings(review, issues):
+    """把审查问题明细转成统一产出协议的 findings。
+
+    飞轮的金标、分层评测与逐条反馈都以 finding 为最小单位，因此这里必须
+    同时保留「可定位」（sheet/row/case_id）与「可判定」（severity/disposition）。
+    """
+    findings = []
+    for index, item in enumerate(issues or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        try:
+            line_start = int(item.get("row") or 0)
+        except (TypeError, ValueError):
+            line_start = 0
+        findings.append({
+            "index": index,
+            "key": f"{item.get('sheet')}:{item.get('row')}:{item.get('case_id')}",
+            "file": str(review.source_name),
+            "line_start": line_start,
+            "case_id": str(item.get("case_id") or ""),
+            "module": str(item.get("module") or ""),
+            "issue_type": str(item.get("issue_type") or ""),
+            "severity": str(item.get("severity") or "中"),
+            "disposition": str(item.get("judgement") or "needs_confirmation"),
+            "reason": str(item.get("description") or "")[:500],
+            "suggestion": str(item.get("suggestion") or "")[:500],
+            "original": str(item.get("original") or "")[:500],
+        })
+    return findings
+
+
+def _recover_issues_from_checkpoint(review):
+    """历史记录补录用：从断点里恢复问题明细。
+
+    `_write_report` 会用报告摘要整体覆盖 summary，因此正常流程结束后
+    checkpoint 已经不存在，只能作为兜底。
+    """
+    checkpoint = (review.summary or {}).get("_checkpoint") or {}
+    issues, pending, governance, extra_reports = [], [], [], []
+    for key in sorted((checkpoint.get("results") or {}).keys(), key=int):
+        result = checkpoint["results"][str(key)] or {}
+        issues.extend(result.get("issues") or [])
+        pending.extend(result.get("pending_confirmations") or [])
+        governance.extend(result.get("governance_suggestions") or [])
+        extra_reports.append(result.get("report_sheets", []))
+    return issues, pending, governance, int(checkpoint.get("total_chunks") or 0), len(checkpoint.get("uncovered") or {})
+
+
+def _resolve_review_workflow_id(review) -> str:
+    """用例审查该归到哪条流程链（T06 / R2）。
+
+    优先级：显式指定 > 汇入被审需求文档的链 > 返回空串表示"由入口自建一条"。
+
+    为什么优先"汇入需求链"：从需求文档发起的四阶段链里，用例审查是"用例"这一环的
+    质量动作。若它自开一条链，同一份需求的产出就散落在两个 workflow_id 下，
+    流程视图再也拼不回一条可追溯链——而"单一可追溯链"正是 T06 的验收口径。
+    """
+    explicit = str((review.summary or {}).get("flywheel_workflow_id") or "").strip()
+    if explicit:
+        return explicit
+    document_ids = [str(item) for item in (review.requirement_document_ids or []) if str(item)]
+    if len(document_ids) == 1:
+        return f"req:{document_ids[0]}"
+    return ""
+
+
+def _publish_to_evolution(review, issues=None, pending=None, governance=None,
+                          total_chunks=None, uncovered_chunks=None, skill_version=None):
+    """把已完成的用例审查结果发布到数据飞轮，幂等。
+
+    issues 由调用方直接传入真实明细；未传入时才回退到 checkpoint，
+    供历史记录补录使用。
+
+    ``skill_version`` 是本次审查锁定的 Skill 版本（T14）。它必须一路带到产出上：
+    飞轮后续的反馈绑定、金标候选、归因与候选派生都从产出的 ``skill_version`` /
+    ``skill_package_sha256`` 往下读，断在这里会让整条闭环失去版本锚点。
+    """
+    try:
+        from knowledge_evolution.protocol import ADAPTERS, publish_output
+        if issues is None:
+            issues, pending, governance, total_chunks, uncovered_chunks = (
+                _recover_issues_from_checkpoint(review)
+            )
+        issues = list(issues or [])
+        pending = list(pending or [])
+        governance = list(governance or [])
+        if total_chunks is None:
+            total_chunks = int((review.summary or {}).get("total_chunks") or 0)
+        if uncovered_chunks is None:
+            uncovered_chunks = int((review.summary or {}).get("uncovered_chunks") or 0)
+        duration_ms = 0
+        if review.started_at and review.completed_at:
+            duration_ms = max(0, round((review.completed_at - review.started_at).total_seconds() * 1000))
+        findings = build_review_findings(review, issues)
+        # 测试管理入口：先登记/选择流程上下文，再让产出挂到这条链上（T06 / R1、R2）。
+        # 登记失败不能阻断发布本身——审查结果已经算出来了，硬失败只会让人白跑一次；
+        # 退回按审查标识溯源，链路仍可读，只是缺"汇入需求链"这一层。
+        try:
+            from knowledge_evolution.flywheel_context import FlywheelContextService
+
+            workflow_id = FlywheelContextService.open(
+                project=review.project,
+                entry_type="test_management",
+                source_id=str(review.pk),
+                workflow_id=_resolve_review_workflow_id(review),
+                actor=review.creator,
+                requirement_document_ids=review.requirement_document_ids or [],
+            )["workflow_id"]
+        except Exception:
+            logger.exception("用例审查未能登记飞轮流程上下文，退回按审查标识溯源")
+            workflow_id = str(review.pk)
+        envelope = ADAPTERS["case_review"].build(
+            project=review.project,
+            user=review.creator,
+            source_id=str(review.pk),
+            # 单能力任务也带上 workflow_id：Skill 版本锁是按
+            # (project, workflow_id, lock_key) 定位的，不带它事后就找不到
+            # "这次审查当时用的是哪一份包"。
+            workflow_id=workflow_id,
+            input_summary=review.business_context or f"测试用例审查：{review.source_name}",
+            output={
+                "summary": {k: v for k, v in (review.summary or {}).items() if k != "_checkpoint"},
+                # 与代码审查一致：正文必须携带结论明细本体。只存计数会让
+                # 飞轮的 L1 裁判拿不到「问题说明/修改建议」，评测恒判不合格。
+                "findings": findings,
+                "pending": [str(item) for item in pending],
+                "governance": [str(item) for item in governance],
+                "issues_count": len(issues),
+                "pending_count": len(pending),
+                "governance_count": len(governance),
+            },
+            findings=findings,
+            evidence=[{"source_type": "testcase_review", "source_id": str(review.pk), "location": review.source_name}],
+            metrics={
+                "latency_ms": duration_ms,
+                "token_usage": 0,
+                "chunks": int(total_chunks or 0),
+                "uncovered_chunks": int(uncovered_chunks or 0),
+                "issues_count": len(issues),
+                "pending_count": len(pending),
+            },
+            producer={
+                "policy_version": f"testcase-review-v1",
+                "prompt_version": review.skill_name,
+                "model_version": "",
+            },
+            skill_version=skill_version,
+        )
+        evolution_ids = publish_output(envelope)
+        if evolution_ids:
+            review.summary = {**(review.summary or {}), "trace_id": evolution_ids[0], "output_id": evolution_ids[1]}
+            review.save(update_fields=["summary"])
+    except Exception:
+        logger.exception("用例审查结果未能记录到数据飞轮")

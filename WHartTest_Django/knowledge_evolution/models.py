@@ -439,7 +439,9 @@ from .history_models import (  # noqa: E402,F401
 from .gate_models import EvaluationGateSnapshot  # noqa: E402,F401
 
 # 受控优化候选与实验
-from .optimization_models import OptimizationExperiment, OptimizationProposal  # noqa: E402,F401
+from .optimization_models import (  # noqa: E402,F401
+    EvolutionExperiment, EvolutionVariant, OptimizationExperiment, OptimizationProposal,
+)
 
 # 任务 14–16：能力候选、影子门禁、发布与回滚
 from .capability_models import (  # noqa: E402,F401

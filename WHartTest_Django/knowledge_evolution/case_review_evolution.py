@@ -67,13 +67,44 @@ REQUIRED_COLUMNS = ("问题类型", "问题确认")
 #: 可选列。缺了只是信息少一点，不影响判定。
 OPTIONAL_COLUMNS = (
     "Sheet", "行号", "用例编号/名称", "模块", "原文", "严重程度",
-    "问题说明", "修改建议", "判定", "问题描述", "修改点", "不采纳原因",
+    "问题说明", "修改建议", "判定", "反馈结论", "问题描述", "修改点", "不采纳原因",
 )
 
 #: 「问题确认」列表示"人工认可这条问题成立"的取值。
 AFFIRMATIVE_VALUES = {"是", "y", "yes", "true", "1", "成立", "采纳"}
 #: 表示"这条问题是误报"的取值。
 NEGATIVE_VALUES = {"否", "n", "no", "false", "0", "不成立", "不采纳"}
+
+FEEDBACK_CONCLUSION_LABELS = {
+    "accepted": "完全采纳",
+    "accepted_rewritten": "采纳但需改写",
+    "false_positive": "误报",
+    "business_pending": "待业务确认",
+    "unverifiable": "暂无法验证",
+    "not_applicable": "不适用",
+    "duplicate": "重复问题",
+    "known_or_fixed": "已知/已修复",
+    "unconfirmed": "未确认",
+    "other": "其他",
+}
+FEEDBACK_CONCLUSION_ALIASES = {
+    _normalize(label): key for key, label in FEEDBACK_CONCLUSION_LABELS.items()
+}
+FEEDBACK_CONCLUSION_ALIASES.update({
+    "采纳": "accepted", "完全接受": "accepted",
+    "采纳但需修改": "accepted_rewritten", "采纳需改写": "accepted_rewritten",
+    "不成立": "false_positive", "不采纳": "false_positive",
+    "待确认": "business_pending", "业务待确认": "business_pending",
+    "无法验证": "unverifiable", "无法核验": "unverifiable",
+    "重复": "duplicate", "已修复": "known_or_fixed", "已知问题": "known_or_fixed",
+})
+
+QUALITY_DIMENSION_LABELS = {
+    "precondition": "前置条件", "steps": "操作步骤", "expected_result": "预期结果",
+    "test_data": "测试数据", "environment_permission": "环境/权限",
+    "platform_consistency": "平台一致性", "case_naming": "用例命名",
+    "copy_quality": "文案表达", "business_rule": "业务规则", "other": "其他",
+}
 
 #: 人工认可但改写了描述/建议时，说明 AI 生成的表述不可直接执行。
 CATEGORY_FALSE_ALARM = "prompt_error"
@@ -96,14 +127,47 @@ SIGNAL_BY_CATEGORY = {
 #: 前 3 条里带 ``feedback_signals`` 的写进包，写成几十条会把 SKILL.md 撑爆。
 MAX_EVIDENCE_SAMPLES = 5
 
-#: 单次派生最多聚出多少条归因。上限不是为了省资源，而是为了让护栏小节保持可读 ——
-#: 一份报告动辄几十条误报，全量转写等于把报告抄进 SKILL.md，护栏就没人看了。
-MAX_DEFECT_GROUPS = 12
-
 #: 采纳率的**参考线**（百分制）。名字沿用旧称以免打断既有引用，
 #: 但语义已变：它是"低于此值值得看一眼"的提示线，**不是**进化的准入条件。
 #: 数值与 ``report_parsing.DEFAULT_ACCEPTANCE_REFERENCE`` 同源，只有一处真值。
 DEFAULT_HUMAN_SCORE_THRESHOLD = DEFAULT_ACCEPTANCE_REFERENCE
+
+
+def _infer_negative_conclusion(reason: str) -> str:
+    """旧报告没有「反馈结论」时，按不采纳原因做保守兼容映射。"""
+    text = _normalize(reason)
+    rules = (
+        (("待确认", "业务确认", "需求确认", "规则未明确", "口径未明确"), "business_pending"),
+        (("环境", "权限", "账号", "数据不足", "无法验证", "无法核验", "暂不具备"), "unverifiable"),
+        (("不适用", "非本系统", "非本模块", "非本轮", "不在范围"), "not_applicable"),
+        (("重复",), "duplicate"),
+        (("已知", "已修复", "已有缺陷", "已有问题"), "known_or_fixed"),
+        (("误报", "不成立", "原文正确", "原文已", "已有等价"), "false_positive"),
+    )
+    for keywords, conclusion in rules:
+        if any(keyword in text for keyword in keywords):
+            return conclusion
+    return "other" if text else "false_positive"
+
+
+def _quality_dimension(issue_type: str) -> str:
+    """从报告问题类型归一成稳定的问题维度，保留原问题类型供细分展示。"""
+    text = _normalize(issue_type)
+    rules = (
+        (("前置", "前提", "依赖"), "precondition"),
+        (("步骤", "操作", "入口"), "steps"),
+        (("预期", "断言", "验收", "结果"), "expected_result"),
+        (("数据", "参数", "边界值"), "test_data"),
+        (("环境", "权限", "账号"), "environment_permission"),
+        (("平台", "端", "模块一致"), "platform_consistency"),
+        (("名称", "命名"), "case_naming"),
+        (("文案", "措辞", "表述", "错别字"), "copy_quality"),
+        (("业务", "规则", "流程"), "business_rule"),
+    )
+    for keywords, dimension in rules:
+        if any(keyword in text for keyword in keywords):
+            return dimension
+    return "other"
 
 
 @dataclass(frozen=True)
@@ -115,6 +179,10 @@ class ConfirmedDefect:
     count: int
     samples: tuple = ()
     hypothesis: str = ""
+    feedback_conclusion: str = ""
+    feedback_conclusion_label: str = ""
+    quality_dimension: str = "other"
+    quality_dimension_label: str = "其他"
 
     def as_dict(self) -> dict:
         return {
@@ -122,8 +190,27 @@ class ConfirmedDefect:
             "issue_type": self.issue_type,
             "count": self.count,
             "hypothesis": self.hypothesis,
+            "feedback_conclusion": self.feedback_conclusion,
+            "feedback_conclusion_label": self.feedback_conclusion_label,
+            "quality_dimension": self.quality_dimension,
+            "quality_dimension_label": self.quality_dimension_label,
             "samples": [dict(item) for item in self.samples],
         }
+
+
+@dataclass(frozen=True)
+class FeedbackGroup:
+    """页面展示的人工反馈分组；它不等同于可用于 Skill 派生的技术归因。"""
+
+    conclusion: str
+    conclusion_label: str
+    quality_dimension: str
+    quality_dimension_label: str
+    issue_type: str
+    count: int
+
+    def as_dict(self) -> dict:
+        return self.__dict__.copy()
 
 
 @dataclass(frozen=True)
@@ -136,6 +223,8 @@ class ReportScan:
     unconfirmed: int = 0
     rewritten: int = 0
     defects: tuple = ()
+    feedback_groups: tuple = ()
+    conclusion_counts: dict = field(default_factory=dict)
     warnings: tuple = ()
     source_name: str = ""
     acceptance_rate: float = 0.0
@@ -153,6 +242,10 @@ class ReportScan:
     def defect_total(self) -> int:
         return sum(item.count for item in self.defects)
 
+    @property
+    def defect_group_total(self) -> int:
+        return len(self.defects)
+
     def as_dict(self) -> dict:
         return {
             "total_rows": self.total_rows,
@@ -162,7 +255,10 @@ class ReportScan:
             "unconfirmed": self.unconfirmed,
             "confirmed": self.confirmed,
             "defect_total": self.defect_total,
+            "defect_group_total": self.defect_group_total,
             "defects": [item.as_dict() for item in self.defects],
+            "feedback_groups": [item.as_dict() for item in self.feedback_groups],
+            "conclusion_counts": dict(self.conclusion_counts),
             "warnings": list(self.warnings),
             "source_name": self.source_name,
             "acceptance_rate": self.acceptance_rate,
@@ -226,6 +322,8 @@ class CaseReviewReportParser:
 
         total = affirmative = negative = rewritten = unconfirmed = 0
         buckets: dict[tuple, dict] = {}
+        feedback_buckets: dict[tuple, int] = {}
+        conclusion_counts = {key: 0 for key in FEEDBACK_CONCLUSION_LABELS}
 
         for row in rows:
             if row is None or all(_cell_text(cell) == "" for cell in row):
@@ -234,23 +332,39 @@ class CaseReviewReportParser:
 
             confirmed_raw = row[index_of["问题确认"]] if index_of["问题确认"] < len(row) else ""
             signal = _normalize(confirmed_raw)
-            if signal in NEGATIVE_VALUES:
-                negative += 1
-                category = CATEGORY_FALSE_ALARM
+            explicit_conclusion = FEEDBACK_CONCLUSION_ALIASES.get(_normalize(value_of(row, "反馈结论")))
+            has_rewrite = bool(value_of(row, "问题描述") or value_of(row, "修改点"))
+            if explicit_conclusion:
+                conclusion = explicit_conclusion
+            elif signal in NEGATIVE_VALUES:
+                conclusion = _infer_negative_conclusion(value_of(row, "不采纳原因"))
             elif signal in AFFIRMATIVE_VALUES:
-                affirmative += 1
-                # 只有在人工改写了描述或建议时才算生成缺陷；没改写就是判断与表述都被认可。
-                if value_of(row, "问题描述") or value_of(row, "修改点"):
-                    rewritten += 1
-                    category = CATEGORY_REWRITTEN
-                else:
-                    continue
+                conclusion = "accepted_rewritten" if has_rewrite else "accepted"
             else:
-                unconfirmed += 1
-                continue
+                conclusion = "unconfirmed"
 
             issue_type = value_of(row, "问题类型") or "未标注类型"
-            key = (category, issue_type)
+            dimension = _quality_dimension(issue_type)
+            conclusion_counts[conclusion] += 1
+            feedback_key = (conclusion, dimension, issue_type)
+            feedback_buckets[feedback_key] = feedback_buckets.get(feedback_key, 0) + 1
+
+            if signal in NEGATIVE_VALUES:
+                negative += 1
+            elif signal in AFFIRMATIVE_VALUES:
+                affirmative += 1
+            else:
+                unconfirmed += 1
+
+            if conclusion == "accepted_rewritten":
+                rewritten += 1
+                category = CATEGORY_REWRITTEN
+            elif conclusion == "false_positive":
+                category = CATEGORY_FALSE_ALARM
+            else:
+                continue
+
+            key = (category, conclusion, dimension, issue_type)
             bucket = buckets.setdefault(key, {"samples": [], "count": 0})
             bucket["count"] += 1
             if len(bucket["samples"]) < MAX_EVIDENCE_SAMPLES:
@@ -283,9 +397,26 @@ class CaseReviewReportParser:
                     category=category, issue_type=issue_type,
                     count=bucket["count"], samples=bucket["samples"],
                 ),
+                feedback_conclusion=conclusion,
+                feedback_conclusion_label=FEEDBACK_CONCLUSION_LABELS[conclusion],
+                quality_dimension=dimension,
+                quality_dimension_label=QUALITY_DIMENSION_LABELS[dimension],
             )
-            for (category, issue_type), bucket in sorted(
+            for (category, conclusion, dimension, issue_type), bucket in sorted(
                 buckets.items(), key=lambda item: (-item[1]["count"], item[0])
+            )
+        )
+        feedback_groups = tuple(
+            FeedbackGroup(
+                conclusion=conclusion,
+                conclusion_label=FEEDBACK_CONCLUSION_LABELS[conclusion],
+                quality_dimension=dimension,
+                quality_dimension_label=QUALITY_DIMENSION_LABELS[dimension],
+                issue_type=issue_type,
+                count=count,
+            )
+            for (conclusion, dimension, issue_type), count in sorted(
+                feedback_buckets.items(), key=lambda item: (-item[1], item[0])
             )
         )
 
@@ -295,18 +426,17 @@ class CaseReviewReportParser:
                 f"有 {unconfirmed} 条问题未在「问题确认」列填写结论，已忽略；"
                 "这些条目不会进入自进化依据"
             )
-        if len(defects) > MAX_DEFECT_GROUPS:
-            warnings.append(
-                f"确认出的 {len(defects)} 组缺陷超出上限，只取前 {MAX_DEFECT_GROUPS} 组"
-            )
-
         return ReportScan(
             total_rows=total,
             affirmative=affirmative,
             negative=negative,
             rewritten=rewritten,
             unconfirmed=unconfirmed,
-            defects=defects[:MAX_DEFECT_GROUPS],
+            # 解析层必须保留人工确认的全部信息。候选数量控制属于下游的
+            # “分批生成 + 语义归并”，不能用切片的方式在这里丢数据。
+            defects=defects,
+            feedback_groups=feedback_groups,
+            conclusion_counts=conclusion_counts,
             warnings=tuple(warnings),
             acceptance_rate=round(acceptance_value, 6),
             acceptance_sheet=acceptance_sheet_name,
@@ -418,7 +548,7 @@ class CaseReviewEvolutionService:
     def _describe(cls, review) -> dict:
         summary = review.summary or {}
         output = cls._output_of(review)
-        skill_version = getattr(output, "skill_version", None) if output else None
+        skill_version = cls._skill_version_of(review, output)
 
         blockers: list = []
         if output is None:
@@ -488,6 +618,33 @@ class CaseReviewEvolutionService:
             .first()
         )
 
+    @staticmethod
+    def _skill_version_of(review, output, *, persist: bool = False):
+        """返回审查实际选用的 Skill 版本，并兼容早期断链产出。
+
+        新任务应从 ``GenerationOutput.skill_version`` 读取精确版本；但已有审查可能
+        已保存 ``selected_skill``，产出却因旧链路漏写版本而为空。此时按审查时明确
+        选择的 Skill 解析当前可运行版本，让人工报告仍能进入自进化流程。真正发起
+        派生时顺手补齐产出绑定，后续反馈、归因和历史查询都回到同一条版本链上。
+        """
+        if output is None:
+            return None
+        if output.skill_version_id:
+            return output.skill_version
+
+        selected_skill = getattr(review, "selected_skill", None)
+        if selected_skill is None:
+            return None
+
+        from skills.runtime import SkillRuntimeResolver
+
+        skill_version = SkillRuntimeResolver.runnable_version(selected_skill)
+        if skill_version is not None and persist:
+            output.skill_version = skill_version
+            output.skill_package_sha256 = skill_version.package_sha256
+            output.save(update_fields=["skill_version", "skill_package_sha256"])
+        return skill_version
+
     # ------------------------------------------------------------ 发起自进化
 
     @classmethod
@@ -530,9 +687,9 @@ class CaseReviewEvolutionService:
         output = cls._output_of(review)
         if output is None:
             raise ValidationError("该审查没有飞轮产出记录，无法归因（产出缺失时无从判断是谁的错）")
-        skill_version = output.skill_version
+        skill_version = cls._skill_version_of(review, output, persist=True)
         if skill_version is None:
-            raise ValidationError("该审查未锁定 Skill 版本，改进无处落地；请先用指定 Skill 模式重跑一次审查")
+            raise ValidationError("该审查没有可用的已选 Skill 版本，改进无处落地；请先确认审查所选 Skill 仍可运行")
 
         skill = skill_version.skill
         if skill.active_version_id and str(skill.active_version_id) != str(skill_version.id):
@@ -635,12 +792,15 @@ class CaseReviewEvolutionService:
         output = cls._output_of(review)
         if output is None:
             raise ValidationError("该审查没有飞轮产出记录，无法关联质量反馈")
+        skill_version = cls._skill_version_of(review, output, persist=True)
+        if skill_version is None:
+            raise ValidationError("该审查没有可用的已选 Skill 版本，无法关联质量反馈")
         threshold = DEFAULT_HUMAN_SCORE_THRESHOLD if threshold is None else float(threshold)
         scan = CaseReviewReportParser.parse(data)
         feedback = cls._record_human_score(
             review=review,
             output=output,
-            skill_version=output.skill_version,
+            skill_version=skill_version,
             score=scan.acceptance_score,
             threshold=threshold,
             actor=actor,
@@ -656,8 +816,7 @@ class CaseReviewEvolutionService:
             "threshold": threshold,
             "acceptance_reference": threshold,
             "scan": scan.as_dict(),
-            "version_acceptance": cls.acceptance_history(output.skill_version.skill)
-            if output.skill_version_id and output.skill_version.skill_id else [],
+            "version_acceptance": cls.acceptance_history(skill_version.skill),
         }
 
     @classmethod
@@ -680,8 +839,18 @@ class CaseReviewEvolutionService:
         if not data:
             raise ValidationError("必须上传已确认的审查报告")
 
+        # 早期用例审查已把实际选用的 Skill 记在 review.selected_skill，
+        # 但 GenerationOutput.skill_version 可能因旧链路漏写而为空。预检和派生
+        # 已经能按审查任务回填精确版本；候选生成必须共用同一套规则，
+        # 否则会出现“项目可进化，但读不到 Skill 包”的自相矛盾。
+        skill_version = cls._skill_version_of(review, output, persist=True)
+        if skill_version is None:
+            raise ValidationError("该审查没有可用的已选 Skill 版本，无法读取包正文生成候选")
+
         scan = CaseReviewReportParser.parse(data)
-        result = ReportOptimizationAdvisor().propose(output=output, scan=scan, actor=actor)
+        result = ReportOptimizationAdvisor().propose(
+            output=output, scan=scan, skill_version=skill_version, actor=actor,
+        )
         return {
             "review_id": str(review.pk),
             "scan": scan.as_dict(),
@@ -692,7 +861,8 @@ class CaseReviewEvolutionService:
     @classmethod
     def decide_optimization(
         cls, *, review, attribution_id, action: str, actor,
-        hypothesis: str = "", category: str = "",
+        hypothesis: str = "", category: str = "", primary_cause: str = "",
+        fine_cause: str = "", repair_target: str = "",
     ) -> dict:
         """人工对一条候选优化点做结论（采纳 / 改写 / 驳回）。"""
         from .report_optimization import ReportOptimizationAdvisor
@@ -708,6 +878,8 @@ class CaseReviewEvolutionService:
         return ReportOptimizationAdvisor.decide(
             attribution=attribution, actor=actor, action=action,
             hypothesis=hypothesis, category=category,
+            primary_cause=primary_cause, fine_cause=fine_cause,
+            repair_target=repair_target,
         )
 
     @classmethod

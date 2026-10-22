@@ -340,6 +340,12 @@ def _semantic_issues(payload: dict, *, expected_stage: str = "") -> list[StageRe
         ))
 
     items = [item for item in _as_list(payload.get("items")) if isinstance(item, dict)]
+    if expected_stage == "test_plan_generation" and not items:
+        issues.append(StageResultIssue(
+            path="/items",
+            message="测试方案必须包含至少一条结构化测试点",
+            code="missing_test_points",
+        ))
     seen_item_ids: set[str] = set()
     for index, item in enumerate(items):
         item_id = _non_empty_str(item.get("id"))
@@ -359,6 +365,27 @@ def _semantic_issues(payload: dict, *, expected_stage: str = "") -> list[StageRe
                 code="duplicate_item_id",
             ))
         seen_item_ids.add(item_id)
+
+        if expected_stage == "test_plan_generation":
+            required_test_point_fields = (
+                ("module", "所属模块"),
+                ("scenario_type", "场景类型"),
+                ("priority", "优先级"),
+                ("expected", "预期结果"),
+            )
+            for field, label in required_test_point_fields:
+                if not _non_empty_str(item.get(field)):
+                    issues.append(StageResultIssue(
+                        path=f"/items/{index}/{field}",
+                        message=f"测试点缺少{label}",
+                        code="incomplete_test_point",
+                    ))
+            if not _as_list(item.get("requirement_ids")):
+                issues.append(StageResultIssue(
+                    path=f"/items/{index}/requirement_ids",
+                    message="测试点缺少关联需求 ID",
+                    code="incomplete_test_point",
+                ))
 
     evidence = [entry for entry in _as_list(payload.get("evidence")) if isinstance(entry, dict)]
     known_evidence: set[str] = set()

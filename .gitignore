@@ -121,3 +121,22 @@ WHartTest_Actuator/config.toml
 # 独立仓库（各自有 .git 和远程），不随父仓库提交
 WHartTest_Desktop/
 WHartTest_Website/
+
+# 含内网模型明文凭据的本地测速脚本，禁止提交
+update_platform_version/benchmark-intranet-llms.py
+llm-benchmark-results/
+
+# Local agent workspaces, UI traces and offline dependency binaries
+.codex-ppt-work/
+.playwright-cli/
+.workbuddy/
+*.whl
+*.zip.sha256
+
+# Container snapshots retained locally for hotfix rollback
+update_platform_version/**/before/
+update_platform_version/**/frontend-before/
+update_platform_version/**/before-index.html
+
+# Local offline dependency verification marker
+update_platform_version/onnxruntime-musl/verified

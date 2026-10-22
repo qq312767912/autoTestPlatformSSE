@@ -99,6 +99,17 @@ class SkillSerializer(serializers.ModelSerializer):
 
 class SkillUploadSerializer(SkillCategoryMixin, serializers.Serializer):
     """Skill 上传序列化器"""
+    version_overrides = serializers.JSONField(required=False, default=dict)
+
+    def validate_version_overrides(self, value):
+        from .import_preview import check_version
+        if not isinstance(value, dict) or len(value) > 50:
+            raise serializers.ValidationError("version_overrides 必须是名称到版本号的对象")
+        try:
+            return {str(name): check_version(version) for name, version in value.items()}
+        except Exception as exc:
+            raise serializers.ValidationError(str(exc))
+
     file = serializers.FileField(
         help_text='包含一个或多个 SKILL.md 的 zip 文件'
     )
@@ -227,6 +238,10 @@ class SkillListSerializer(serializers.ModelSerializer):
     stage_label = serializers.SerializerMethodField()
     stage_source = serializers.SerializerMethodField()
     version = serializers.SerializerMethodField()
+    version_sha256 = serializers.SerializerMethodField()
+    version_created_by_name = serializers.SerializerMethodField()
+    version_updated_at = serializers.SerializerMethodField()
+    version_change_reason = serializers.SerializerMethodField()
     copies = serializers.SerializerMethodField()
     version_count = serializers.SerializerMethodField()
     has_evolution = serializers.SerializerMethodField()
@@ -246,7 +261,8 @@ class SkillListSerializer(serializers.ModelSerializer):
             'creator_name', 'created_at',
             # 描述性元数据：筛选器与卡片标签用，不参与任何可用性判定。
             'source_type', 'source_type_label',
-            'stage', 'stage_label', 'stage_source', 'version',
+            'stage', 'stage_label', 'stage_source', 'version', 'version_sha256',
+            'version_created_by_name', 'version_updated_at', 'version_change_reason',
             # 同名副本数（Skill Hub 是公共目录，同名归并成一条展示后，
             # 要把"库里其实有几份"显式告诉使用者，而不是把多重性藏起来）。
             'copies', 'version_count', 'has_evolution',
@@ -267,9 +283,7 @@ class SkillListSerializer(serializers.ModelSerializer):
         import re
 
         raw = re.sub(r'\s+', ' ', str(obj.description or '')).strip()
-        first = re.split(r'(?<=[。！？.!?])\s*', raw, maxsplit=1)[0] if raw else ''
-        summary = first or f'提供 {obj.name} 相关的自动化能力。'
-        return summary if len(summary) <= 64 else f'{summary[:61].rstrip()}…'
+        return raw or f'提供 {obj.name} 相关的自动化能力。'
 
     def get_source_type(self, obj):
         version = self._version(obj)
@@ -297,24 +311,13 @@ class SkillListSerializer(serializers.ModelSerializer):
         return stage
 
     def _stage_of(self, obj):
-        """返回 ``(阶段标识符, 来源)``；来源取值 ``manifest`` / ``declared`` / ``''``。
-
-        ⚠️ **顺序不能反：版本包 manifest 声明的阶段优先。** 这是 ``get_stage``、
-        ``DeclaredStageTests`` 与本模块共同声明的口径（``manifest.stage`` >
-        ``declared_stage`` > 未声明）。原实现先判 ``declared``，会让管理员的一次补填
-        **静默盖掉包里自己的声明**，与文档和测试都相反 —— 同一个 Skill 上两个来源
-        打架时，包是更硬的事实（版本包不可变），补填只是存量包缺声明时的回落。
-        """
-        version = self._version(obj)
-        declared_in_manifest = str(
-            ((version.manifest if version is not None else None) or {}).get('stage') or ''
-        )
-        if declared_in_manifest:
-            return declared_in_manifest, 'manifest'
+        """平台手工展示阶段优先；留空时使用版本包原声明。"""
         declared = str(getattr(obj, 'declared_stage', '') or '')
         if declared:
             return declared, 'declared'
-        return '', ''
+        version = self._version(obj)
+        packaged = str(((version.manifest if version is not None else None) or {}).get('stage') or '')
+        return (packaged, 'manifest') if packaged else ('', '')
 
     def get_stage_source(self, obj):
         """阶段是从哪来的，供前端区分「包自己声明的」和「管理员补的」。"""
@@ -335,6 +338,22 @@ class SkillListSerializer(serializers.ModelSerializer):
     def get_version(self, obj):
         version = self._version(obj)
         return version.version if version is not None else ''
+
+    def get_version_sha256(self, obj):
+        version = self._version(obj)
+        return version.package_sha256 if version is not None else ''
+
+    def get_version_created_by_name(self, obj):
+        version = self._version(obj)
+        return version.created_by.username if version is not None and version.created_by_id else ''
+
+    def get_version_updated_at(self, obj):
+        version = self._version(obj)
+        return version.updated_at.isoformat() if version is not None and version.updated_at else ''
+
+    def get_version_change_reason(self, obj):
+        version = self._version(obj)
+        return str((version.source_metadata or {}).get('change_reason') or '') if version is not None else ''
 
     def get_copies(self, obj):
         """该名字在库里的副本数（1 表示只有一条，>1 说明是归并展示）。"""
@@ -432,6 +451,12 @@ class SkillStageBindingSerializer(serializers.Serializer):
             raise serializers.ValidationError(str(exc))
 
 
+class SkillDisplayMetadataSerializer(SkillStageBindingSerializer):
+    """Public card metadata; package name and immutable version contents are untouched."""
+    display_name = serializers.CharField(required=False, allow_blank=True, max_length=128, trim_whitespace=True)
+    description = serializers.CharField(required=False, allow_blank=True, max_length=1000, trim_whitespace=True)
+
+
 # ---------------------------------------------------------------------------
 # Skill 版本（T02/T06/T07）
 # ---------------------------------------------------------------------------
@@ -441,6 +466,23 @@ class SkillVersionSerializer(serializers.ModelSerializer):
     """版本详情。``state`` 来自关联发布单元，不是本模型字段，因此显式声明只读。"""
 
     state = serializers.CharField(read_only=True)
+    download_available = serializers.SerializerMethodField()
+    archived = serializers.SerializerMethodField()
+    can_archive = serializers.SerializerMethodField()
+
+    def get_download_available(self, obj):
+        root = obj.get_full_path()
+        return bool(root and (Path(root) / "SKILL.md").is_file())
+
+    def get_archived(self, obj):
+        return "hub_deleted_at" in (obj.source_metadata or {})
+
+    def get_can_archive(self, obj):
+        if self.get_archived(obj):
+            return False
+        from django.db.models import Q
+        return not SkillVersion.objects.filter(skill__name=obj.skill.name, version=obj.version, package_sha256=obj.package_sha256).filter(Q(active_for_skills__isnull=False) | Q(release__state='active')).exists()
+
     # 发布单元主键。控制台要拿它去调 ``capability-releases/{id}/approval-view/``
     # 与 ``bindings/``；没有这个字段，前端只能按 (name, version) 去猜关联关系，
     # 而关联本来就在库里，不该由前端重建。
@@ -451,18 +493,22 @@ class SkillVersionSerializer(serializers.ModelSerializer):
     )
     stage = serializers.SerializerMethodField()
     entrypoint = serializers.SerializerMethodField()
+    change_reason = serializers.SerializerMethodField()
 
     class Meta:
         model = SkillVersion
         fields = [
             'id', 'skill', 'skill_name', 'version', 'state', 'release_id',
+            'download_available', 'archived', 'can_archive',
             'package_sha256', 'manifest', 'validation_report',
             'source_type', 'source_metadata', 'previous_version',
             'stage', 'entrypoint',
+            'change_reason',
             'created_by', 'created_by_name', 'created_at', 'updated_at',
         ]
         read_only_fields = [
             'id', 'skill', 'skill_name', 'version', 'state', 'release_id',
+            'download_available', 'archived', 'can_archive',
             'package_sha256', 'manifest', 'validation_report',
             'source_type', 'source_metadata', 'previous_version',
             'stage', 'entrypoint',
@@ -475,15 +521,23 @@ class SkillVersionSerializer(serializers.ModelSerializer):
     def get_entrypoint(self, obj) -> str:
         return obj.manifest_entrypoint()
 
+    def get_change_reason(self, obj) -> str:
+        return str((obj.source_metadata or {}).get('change_reason') or '')
+
 
 class SkillVersionListSerializer(serializers.ModelSerializer):
     """版本列表（轻量）：不含 manifest 与校验报告，避免列表接口体积膨胀。"""
 
     state = serializers.CharField(read_only=True)
+    created_by_name = serializers.CharField(source='created_by.username', read_only=True, allow_null=True)
+    change_reason = serializers.SerializerMethodField()
 
     class Meta:
         model = SkillVersion
-        fields = ['id', 'version', 'state', 'package_sha256', 'source_type', 'created_at']
+        fields = ['id', 'version', 'state', 'package_sha256', 'source_type', 'created_at', 'updated_at', 'created_by_name', 'change_reason']
+
+    def get_change_reason(self, obj):
+        return str((obj.source_metadata or {}).get('change_reason') or '')
 
 
 class SkillPreflightSerializer(serializers.Serializer):
@@ -501,6 +555,7 @@ class SkillPreflightSerializer(serializers.Serializer):
 
 
 class SkillCandidateCreateSerializer(serializers.Serializer):
+    version_override = serializers.CharField(required=False, allow_blank=True, max_length=100)
     """用预检令牌创建候选版本。"""
 
     token = serializers.CharField(help_text='预检接口返回的短期令牌')

@@ -91,6 +91,7 @@ services:
       - ./WHartTest_Django/knowledge_evolution:/app/knowledge_evolution:ro
       - ./WHartTest_Django/code_analysis:/app/code_analysis:ro
       - ./WHartTest_Django/orchestrator_integration:/app/orchestrator_integration:ro
+      - ./WHartTest_Django/testcases/review_service.py:/app/testcases/review_service.py:ro
       - ./WHartTest_Django/wharttest_django/settings.py:/app/wharttest_django/settings.py:ro
       - ./WHartTest_Django/wharttest_django/urls.py:/app/wharttest_django/urls.py:ro
       - ./WHartTest_Django/supervisord.conf:/app/supervisord.conf:ro

@@ -86,6 +86,22 @@ FLYWHEEL_MODULE_KEYS = frozenset(ALL_TASK_TYPES)
 #: 取并集（新四阶段 + 历史四阶段），存量流程与新建流程共用同一套判断。
 WORKFLOW_MODULE_KEYS = frozenset(ALL_WORKFLOW_STAGES)
 
+TEST_PLAN_STAGE_PROMPT_VERSION = "test-plan-stage-v2"
+TEST_PLAN_STAGE_SYSTEM_PROMPT = """
+# 测试方案生成阶段固定质量契约
+
+你的职责是基于已确认的需求与技术材料生成可执行、可追溯的测试方案。本段只规定阶段职责和交付质量，不绑定任何具体 Skill；实际使用的 Skill 版本由本轮执行上下文动态注入。
+
+必须完成：
+1. 输出测试目标、范围与非范围、风险、策略、环境与数据、进入/退出准则、进度及交付物。
+2. 输出非空测试点清单。每条测试点必须有稳定 ID、所属模块、标题或测试目标、场景类型、优先级、关联需求 ID、预期结果；材料不足时记录为不确定项，禁止臆造。
+3. 测试点必须同时写入主产物与 stage_result.json 的 items；不得只在总结或自然语言正文中提及。
+4. 人工交付物必须同时生成且非空：`{项目名}_测试方案_V{版本}.xlsx`、`{项目名}_测试方案说明_V{版本}.md`、`requirements_parsed.json`。项目名取当前项目显示名称并清理文件名非法字符；版本优先取已确认输入，缺失时使用 `1.0`。
+5. Excel 必须固定包含以下工作表（可在不改变含义的前提下使用更完整的名称）：`测试点明细`、`测试目标与范围`、`测试策略`、`环境与数据`、`进入与退出准则`、`风险与待确认项`、`需求功能点与覆盖`。测试点明细不得以概述代替。
+6. 另外提交符合 `stage-result/v1` 的 `stage_result.json`。它只是质量飞轮内部协议文件，不计入三件人工交付物。`primary_artifacts` 必须登记上述三件交付物的文件名与 SHA-256。
+7. 最终回复只列出三件人工交付物和 `stage_result.json`及一句说明，不粘贴完整正文。
+""".strip()
+
 
 def _is_gated_workflow_request(module_key: str, workflow_id: str) -> bool:
     """Only explicit workflow advancement is allowed to affect normal output."""
@@ -93,6 +109,120 @@ def _is_gated_workflow_request(module_key: str, workflow_id: str) -> bool:
         module_key in WORKFLOW_MODULE_KEYS
         and str(workflow_id or "").strip()
     )
+
+
+def _discover_persisted_skill_artifacts(project_id: object, source_id: str) -> list[dict[str, object]]:
+    """从本轮 Skill 的隔离目录登记真实产物，供历史查看与下载使用。
+
+    Agent 最终回复只是摘要，不能作为文件来源；文件以 ``SKILL_OUTPUT_DIR``
+    下实际落盘内容为准。目录名以 source_id 开头并带随机后缀，保证重跑不覆盖旧批次。
+    优先读取 stage_result.json 的 primary_artifacts，避免把 input/SKILL.md 等中间文件
+    当成人工交付件；若协议文件尚未生成，则保留常见交付格式作为兜底。
+    """
+    try:
+        from django.conf import settings
+        root = os.path.join(str(getattr(settings, "MEDIA_ROOT", "") or ""), "skill_runtime", "artifacts", str(project_id))
+        if not os.path.isdir(root) or not source_id:
+            return []
+        candidates = [os.path.join(root, name) for name in os.listdir(root) if name.startswith(str(source_id) + "_")]
+        candidates = [path for path in candidates if os.path.isdir(path)]
+        if not candidates:
+            return []
+        # 同一会话会为图片提取、脚本执行、最终交付分别建隔离目录。只拿“最新目录”
+        # 会被最后更新的图片临时目录抢走，明明已有 stage_result 也登记成空。
+        # 优先选择真正提交了结构化结果的最新目录；没有时才回落到普通交付目录。
+        structured_candidates = [
+            path for path in candidates
+            if os.path.isfile(os.path.join(path, "stage_result.json"))
+        ]
+        deliverable_candidates = [
+            path for path in candidates
+            if any(
+                name.lower().endswith((".xlsx", ".xls", ".md", ".json"))
+                for name in os.listdir(path)
+            )
+        ]
+        run_dir = max(
+            structured_candidates or deliverable_candidates or candidates,
+            key=os.path.getmtime,
+        )
+        names: list[str] = []
+        stage_result = os.path.join(run_dir, "stage_result.json")
+        if os.path.isfile(stage_result):
+            try:
+                with open(stage_result, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                names = [str(item.get("name") or "") for item in payload.get("primary_artifacts", []) if isinstance(item, dict)]
+                names.append("stage_result.json")
+            except Exception:
+                names = []
+        if not names:
+            names = [name for name in os.listdir(run_dir) if name.lower().endswith((".xlsx", ".xls", ".md", ".json"))]
+        result: list[dict[str, object]] = []
+        for name in dict.fromkeys(names):
+            path = os.path.join(run_dir, os.path.basename(name))
+            if not os.path.isfile(path):
+                continue
+            digest = hashlib.sha256()
+            size = 0
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    size += len(chunk)
+            relative = os.path.relpath(path, str(getattr(settings, "MEDIA_ROOT", "") or ""))
+            result.append({"name": os.path.basename(path), "path": relative, "size": size, "sha256": digest.hexdigest(), "key": relative})
+        return result
+    except Exception:
+        logger.exception("登记 Skill 真实产物失败 source_id=%s", source_id)
+        return []
+
+
+def _normalize_stage_result_payload(payload):
+    """兼容已发布 Skill 的 v1 字段别名，不补造证据或业务结论。"""
+    if not isinstance(payload, dict):
+        return payload
+    normalized = dict(payload)
+    normalized.setdefault(
+        "schema_version", normalized.get("schema") or normalized.get("protocol") or "",
+    )
+    # 没有可核验原句时必须是空数组，不能把 source_refs 冒充为 verified evidence。
+    normalized.setdefault("evidence", [])
+    normalized_items = []
+    for raw_item in normalized.get("items") or []:
+        if not isinstance(raw_item, dict):
+            normalized_items.append(raw_item)
+            continue
+        item = dict(raw_item)
+        item.setdefault("id", item.get("item_id") or item.get("test_point_id") or "")
+        item.setdefault("expected", item.get("expected_result") or "")
+        normalized_items.append(item)
+    normalized["items"] = normalized_items
+    normalized["platform_normalization"] = {
+        "version": "stage-result-aliases/v1",
+        "evidence_defaulted_empty": "evidence" not in payload,
+    }
+    return normalized
+
+
+def _load_stage_result_from_artifacts(artifacts: list[dict[str, object]], expected_stage: str):
+    """读取并校验本轮 stage_result；返回负载与校验结论。"""
+    from django.conf import settings
+    from knowledge_evolution.stage_outputs import STAGE_RESULT_FILENAME, read_stage_result_file
+
+    for artifact in artifacts:
+        if str(artifact.get("name") or "") != STAGE_RESULT_FILENAME:
+            continue
+        raw_path = str(artifact.get("path") or "")
+        path = raw_path if os.path.isabs(raw_path) else os.path.join(str(settings.MEDIA_ROOT), raw_path)
+        with open(path, "rb") as handle:
+            raw_payload = json.loads(handle.read().decode("utf-8"))
+        payload = _normalize_stage_result_payload(raw_payload)
+        validation = read_stage_result_file(
+            json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            expected_stage=expected_stage,
+        )
+        return validation.payload if isinstance(validation.payload, dict) else payload, validation
+    return None, None
 
 from .auth_state_binding import (
     AuthStateBindingError,
@@ -856,6 +986,70 @@ class AgentLoopStreamAPIView(View):
     # 最大步骤数（用于前端显示）
     MAX_STEPS = 500
 
+    async def _start_tool_span(self, request, call, *, model_name=""):
+        """工具开始时立即写 Span；观测失败不得影响实际工具执行。"""
+        attempt = getattr(request, "_flywheel_attempt", None)
+        if attempt is None:
+            return None
+        from django.utils import timezone
+        from knowledge_evolution.attribution import AttemptTraceService
+
+        name = str(call.get("name") or "unknown") if isinstance(call, dict) else str(getattr(call, "name", "unknown"))
+        args = call.get("args", call.get("arguments", {})) if isinstance(call, dict) else getattr(call, "args", {})
+        raw = json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+        try:
+            return await sync_to_async(AttemptTraceService.record_span)(
+                attempt=attempt, step_type="tool", status="running",
+                tool_name=name, model_version=model_name,
+                input_hash=hashlib.sha256(raw.encode()).hexdigest(),
+                started_at=timezone.now(),
+                metadata={
+                    "call_id": str(call.get("id") or "") if isinstance(call, dict) else str(getattr(call, "id", "") or ""),
+                    "input_summary": self._summarize_tool_args(args),
+                },
+            )
+        except Exception:
+            logger.exception("AgentLoopStreamAPI: 实时 Span 写入失败 tool=%s", name)
+            return None
+
+    async def _finish_tool_span(
+        self, span_id, tool_message, *, output_summary="", output_detail=None,
+    ):
+        if not span_id:
+            return
+        from knowledge_evolution.attribution import AttemptTraceService
+
+        raw = json.dumps(getattr(tool_message, "content", ""), ensure_ascii=False, sort_keys=True, default=str)
+        message_status = str(getattr(tool_message, "status", "") or "").lower()
+        failed = message_status in {"error", "failed"}
+        try:
+            await sync_to_async(AttemptTraceService.finish_span)(
+                span_id,
+                status="failed" if failed else "completed",
+                output_hash=hashlib.sha256(raw.encode()).hexdigest(),
+                error_type="tool_error" if failed else "",
+                error_message=raw if failed else "",
+                metadata={
+                    "output_summary": str(output_summary or "")[:500],
+                    "output_detail": self._summarize_tool_value(output_detail),
+                },
+            )
+        except Exception:
+            logger.exception("AgentLoopStreamAPI: 实时 Span 收口失败 span=%s", span_id)
+
+    async def _finish_open_attempt_spans(self, request, exc, *, status="failed"):
+        attempt = getattr(request, "_flywheel_attempt", None)
+        if attempt is None:
+            return
+        from knowledge_evolution.attribution import AttemptTraceService
+
+        try:
+            await sync_to_async(AttemptTraceService.finish_open_spans)(
+                attempt, status=status, error_type=type(exc).__name__, error_message=str(exc),
+            )
+        except Exception:
+            logger.exception("AgentLoopStreamAPI: 遗留 Span 收口失败 attempt=%s", attempt.pk)
+
     @staticmethod
     def _tool_execution_spans(messages):
         """从 LangChain 真实消息链提取工具调用，只留哈希和受限错误摘要。"""
@@ -945,20 +1139,41 @@ class AgentLoopStreamAPIView(View):
         }
 
     @staticmethod
+    def _summarize_tool_value(value, *, depth=0):
+        """生成可审计但有界的工具数据快照；最终仍由 Span 写入口统一脱敏。"""
+        if depth >= 3:
+            if isinstance(value, dict):
+                return f"{{{len(value)} 键，已折叠}}"
+            if isinstance(value, (list, tuple)):
+                return f"[{len(value)} 项，已折叠]"
+        if isinstance(value, dict):
+            result = {}
+            for key, item in list(value.items())[:20]:
+                result[str(key)] = AgentLoopStreamAPIView._summarize_tool_value(
+                    item, depth=depth + 1,
+                )
+            if len(value) > 20:
+                result["_omitted"] = f"另有 {len(value) - 20} 个字段"
+            return result
+        if isinstance(value, (list, tuple)):
+            result = [
+                AgentLoopStreamAPIView._summarize_tool_value(item, depth=depth + 1)
+                for item in list(value)[:12]
+            ]
+            if len(value) > 12:
+                result.append(f"另有 {len(value) - 12} 项")
+            return result
+        if value is None or isinstance(value, (int, float, bool)):
+            return value
+        text = str(value)
+        return text[:1000] + ("…" if len(text) > 1000 else "")
+
+    @staticmethod
     def _summarize_tool_args(args) -> dict:
-        """工具参数摘要：只留标量键的前 200 字，避免把大 payload 复制进飞轮。"""
+        """工具参数审计快照：保留有限层级与条目，敏感字段在写入时统一遮蔽。"""
         if not isinstance(args, dict):
             return {}
-        summary = {}
-        for key, value in list(args.items())[:8]:
-            if isinstance(value, (str, int, float, bool)) or value is None:
-                text = str(value)
-                summary[str(key)] = text[:200]
-            elif isinstance(value, list):
-                summary[str(key)] = f"[{len(value)} 项]"
-            elif isinstance(value, dict):
-                summary[str(key)] = f"{{{len(value)} 键}}"
-        return summary
+        return AgentLoopStreamAPIView._summarize_tool_value(args)
 
     @staticmethod
     def _bind_stage_skill(*, project, workflow_id, stage, actor=None):
@@ -1049,6 +1264,17 @@ class AgentLoopStreamAPIView(View):
                     project=project, workflow_id=workflow_id, stage=module_key,
                     actor=request.user,
                 )
+            execution_spans = self._tool_execution_spans(all_messages)
+            recorded_step_count = max(int(step_count or 0), len(execution_spans))
+            prompt_version = (
+                TEST_PLAN_STAGE_PROMPT_VERSION
+                if module_key == "test_plan_generation"
+                else str(prompt_id or "default")
+            )
+            artifacts = _discover_persisted_skill_artifacts(project.pk, session_id)
+            stage_result_payload, stage_result_validation = _load_stage_result_from_artifacts(
+                artifacts, module_key,
+            )
             envelope = adapter.build(
                 project=project,
                 user=request.user,
@@ -1059,9 +1285,9 @@ class AgentLoopStreamAPIView(View):
                 parent_output_ids=getattr(request, "_flywheel_parent_output_ids", []),
                 capability=capability or getattr(request, "_flywheel_capability", None),
                 skill_version=skill_version,
-                metrics={"token_usage": total_tokens, "step_count": step_count},
+                metrics={"token_usage": total_tokens, "step_count": recorded_step_count},
                 channels={
-                    "agent": {"enabled": True, "steps": step_count},
+                    "agent": {"enabled": True, "steps": recorded_step_count},
                     "knowledge": {
                         "enabled": bool(use_knowledge_base and knowledge_base_ids),
                         "knowledge_base_ids": list(knowledge_base_ids or []),
@@ -1073,20 +1299,24 @@ class AgentLoopStreamAPIView(View):
                 },
                 producer={
                     "policy_version": f"{module_key}-agent-v1",
-                    "prompt_version": str(prompt_id or "default"),
+                    "prompt_version": prompt_version,
                     "model_version": model_name,
                 },
                 extensions={
                     "session_id": session_id,
                     "knowledge_enabled": bool(use_knowledge_base and knowledge_base_ids),
                     "knowledge_base_ids": list(knowledge_base_ids or []),
-                    "execution_spans": self._tool_execution_spans(all_messages),
+                    "execution_spans": execution_spans,
                     # 普通产出只做旁路沉淀：不校验、也不创建阶段门禁。
                     # 只有显式携带 workflow_id 的质量飞轮任务属于受控链路。
                     "enforce_quality_gate": gated_workflow,
                     "register_workflow_gate": gated_workflow,
+                    "artifacts": artifacts,
+                    "stage_result_payload": stage_result_payload,
                 },
             )
+            if stage_result_validation is not None:
+                envelope.attach_stage_result(stage_result_validation)
             result = await sync_to_async(publish_output)(envelope)
             # T04：产出正式发布之后立刻把 attempt 推进到 output_published → completed
             # 并绑定 output。放在这里而不是放在 SSE 发送处，是因为只有这里才知道
@@ -1126,6 +1356,23 @@ class AgentLoopStreamAPIView(View):
             await sync_to_async(StageExecutionAttemptService.complete)(
                 attempt, output=output,
             )
+            # 正式产出发布后立即生成并登记质量摘要、证据图谱与确认报告。
+            # 派生失败是观测面问题，不回滚已成功的业务产出和 attempt。
+            from knowledge_evolution import derived_artifacts
+            payload = (output.metadata or {}).get("stage_result_payload")
+            if isinstance(payload, dict):
+                try:
+                    await sync_to_async(derived_artifacts.register_for_output)(
+                        output,
+                        stage_result_payload=payload,
+                        actor=getattr(request, "user", None),
+                        attempt=attempt,
+                        best_effort=True,
+                    )
+                except Exception:
+                    logger.exception(
+                        "AgentLoopStreamAPI: 派生摘要与图谱登记失败 output=%s", output_id,
+                    )
         except Exception:
             logger.exception(
                 "AgentLoopStreamAPI: 执行尝试回写产出失败 attempt=%s output=%s",
@@ -1153,6 +1400,7 @@ class AgentLoopStreamAPIView(View):
                 error_code=type(exc).__name__,
                 error_summary=summary,
             )
+            await self._finish_open_attempt_spans(request, exc)
         except Exception:
             # 已经终态的 attempt 再标记失败会抛错——那是正常情况（比如产出发完之后
             # 会话标题总结炸了），不是需要打扰用户的问题。
@@ -1410,8 +1658,17 @@ class AgentLoopStreamAPIView(View):
 
             # 8. 获取系统提示词
             effective_prompt, prompt_source = await get_effective_system_prompt_async(
-                request.user, prompt_id, project
+                request.user,
+                None if request._flywheel_module_key == "test_plan_generation" else prompt_id,
+                project,
             )
+
+            if request._flywheel_module_key == "test_plan_generation":
+                effective_prompt = (
+                    (effective_prompt or "")
+                    + "\n\n"
+                    + TEST_PLAN_STAGE_SYSTEM_PROMPT
+                )
 
             if request._selected_skill_version is not None:
                 selected = request._selected_skill_version
@@ -1511,6 +1768,7 @@ class AgentLoopStreamAPIView(View):
                 # 14. 步骤跟踪状态
                 step_count = 0
                 current_tool_calls = []
+                tool_span_ids = {}
                 interrupt_detected = False
                 user_stopped = False
                 evolution_ids = None
@@ -1696,6 +1954,17 @@ class AgentLoopStreamAPIView(View):
                                                     else getattr(tc, "name", "unknown")
                                                     for tc in current_tool_calls
                                                 ]
+                                                for tool_call in current_tool_calls:
+                                                    call_id = str(
+                                                        tool_call.get("id") or ""
+                                                        if isinstance(tool_call, dict)
+                                                        else getattr(tool_call, "id", "") or ""
+                                                    )
+                                                    span = await self._start_tool_span(
+                                                        request, tool_call, model_name=model_name,
+                                                    )
+                                                    if span is not None:
+                                                        tool_span_ids[call_id or str(span.pk)] = str(span.pk)
                                                 yield create_sse_data(
                                                     {
                                                         "type": "step_start",
@@ -1721,10 +1990,20 @@ class AgentLoopStreamAPIView(View):
                                                 ) or getattr(
                                                     tool_msg, "tool_name", "unknown"
                                                 )
-
+                                                call_id = str(getattr(tool_msg, "tool_call_id", "") or "")
+                                                span_id = tool_span_ids.pop(call_id, None)
+                                                if span_id is None and tool_span_ids:
+                                                    # 某些工具适配器不回传 call_id；按未完成顺序兜底收口。
+                                                    fallback_key = next(iter(tool_span_ids))
+                                                    span_id = tool_span_ids.pop(fallback_key)
                                                 # 使用辅助函数处理 MCP 工具输出
                                                 content, summary = (
                                                     process_mcp_tool_output(content)
+                                                )
+                                                await self._finish_tool_span(
+                                                    span_id, tool_msg,
+                                                    output_summary=summary,
+                                                    output_detail=content,
                                                 )
 
                                                 yield create_sse_data(
@@ -1768,6 +2047,7 @@ class AgentLoopStreamAPIView(View):
                                     )
 
                 except Exception as e:
+                    await self._mark_attempt_failed(request, e)
                     friendly_error = get_user_friendly_llm_error(e)
                     if friendly_error:
                         logger.warning(
@@ -1790,6 +2070,23 @@ class AgentLoopStreamAPIView(View):
                         )
                         yield create_sse_data(
                             {"type": "error", "message": f"Streaming error: {str(e)}"}
+                        )
+                    yield "data: [DONE]\n\n"
+                    return
+
+                if user_stopped and request._flywheel_attempt is not None:
+                    from knowledge_evolution.operations import StageExecutionAttemptService
+                    try:
+                        await sync_to_async(StageExecutionAttemptService.cancel)(
+                            request._flywheel_attempt, error_summary="用户停止生成",
+                        )
+                        await self._finish_open_attempt_spans(
+                            request, RuntimeError("用户停止生成"), status="skipped",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "AgentLoopStreamAPI: 用户停止后取消 attempt 失败 attempt=%s",
+                            request._flywheel_attempt.pk,
                         )
 
                 # 16. 处理结束状态
@@ -1907,6 +2204,21 @@ class AgentLoopStreamAPIView(View):
 
                 yield "data: [DONE]\n\n"
 
+        except asyncio.CancelledError:
+            # 浏览器刷新/断开会取消异步生成器。CancelledError 不属于 Exception，
+            # 必须显式收口，否则 attempt 与 Span 会永久停在 running。
+            disconnect = RuntimeError("客户端连接已断开")
+            attempt = getattr(request, "_flywheel_attempt", None)
+            if attempt is not None:
+                from knowledge_evolution.operations import StageExecutionAttemptService
+                try:
+                    await sync_to_async(StageExecutionAttemptService.cancel)(
+                        attempt, error_summary=str(disconnect),
+                    )
+                except Exception:
+                    logger.exception("AgentLoopStreamAPI: 连接断开后取消 attempt 失败")
+                await self._finish_open_attempt_spans(request, disconnect, status="skipped")
+            raise
         except Exception as e:
             # T04：Agent 中途失败时也必须有记录。没有这条，飞轮上只能看到"已派发"，
             # 而一个永远不动的"已派发"和一个"正在跑"是分不出来的——用户只能干等。
@@ -1997,7 +2309,9 @@ class AgentLoopStreamAPIView(View):
         include_requirement_images = str(
             body_data.get("include_requirement_images", "false")
         ).lower() in {"1", "true", "yes", "on"}
-        prompt_id = body_data.get("prompt_id")
+        # 方案生成阶段使用平台固定质量契约。请求即使携带旧页面留下的 prompt_id
+        # 也必须忽略，避免同一 Skill 因个人提示词不同而产出结构漂移。
+        prompt_id = None if request._flywheel_module_key == "test_plan_generation" else body_data.get("prompt_id")
         file_ids = body_data.get("file_ids", [])
 
         # 调试日志：知识库参数

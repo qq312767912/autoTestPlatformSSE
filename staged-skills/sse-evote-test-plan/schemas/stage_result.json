@@ -21,8 +21,8 @@
 
     "primary_artifacts": {
       "type": "array",
-      "minItems": 1,
-      "description": "主产物声明。必须包含 test_plan.xlsx——前端不再靠文件名正则猜哪个是正主。",
+      "minItems": 3,
+      "description": "三件人工交付物声明。stage_result.json 是飞轮内部协议，不放入本列表。",
       "items": {
         "type": "object",
         "required": ["name", "sha256"],
@@ -38,11 +38,29 @@
         },
         "additionalProperties": true
       },
-      "contains": {
-        "type": "object",
-        "properties": { "name": { "const": "test_plan.xlsx" } },
-        "required": ["name"]
-      }
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "properties": { "name": { "pattern": "^.+_测试方案_V[^/]+\\.xlsx$" } },
+            "required": ["name"]
+          }
+        },
+        {
+          "contains": {
+            "type": "object",
+            "properties": { "name": { "pattern": "^.+_测试方案说明_V[^/]+\\.md$" } },
+            "required": ["name"]
+          }
+        },
+        {
+          "contains": {
+            "type": "object",
+            "properties": { "name": { "const": "requirements_parsed.json" } },
+            "required": ["name"]
+          }
+        }
+      ]
     },
 
     "requirements": {

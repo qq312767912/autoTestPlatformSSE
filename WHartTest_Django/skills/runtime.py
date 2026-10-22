@@ -95,7 +95,7 @@ class SkillRuntimeResolver:
 
         candidate = getattr(skill, "active_version", None)
         if candidate is not None and cls._matches_stage(candidate, stage):
-            candidate_ok = candidate.is_runnable
+            candidate_ok = candidate.is_runnable and "hub_deleted_at" not in (candidate.source_metadata or {})
             if candidate_ok:
                 return candidate
             # 活跃指针指向的版本已不可运行（被隔离/驳回）：不回落到它，
@@ -106,7 +106,7 @@ class SkillRuntimeResolver:
                 getattr(skill, "name", ""), getattr(candidate, "version", ""), candidate.state,
             )
 
-        queryset = SkillVersion.objects.filter(skill_id=getattr(skill, "pk", skill))
+        queryset = SkillVersion.objects.filter(skill_id=getattr(skill, "pk", skill)).exclude(source_metadata__has_key="hub_deleted_at")
         if stage:
             queryset = queryset.filter(manifest__stage=stage)
         # 用排除法而不是"枚举所有可用状态"：新增发布状态时不会因为漏列而被静默误拒。
@@ -153,7 +153,7 @@ class SkillRuntimeResolver:
 
         queryset = (
             Skill.objects
-            .filter(project_id=project_id, is_active=True)
+            .filter(is_active=True)
             # ``active_version__skill`` 也要一起取：判定用 ``version.is_runnable``，
             # 它会读回 ``skill.is_active``；不预先取就会在解析热路径上多打一次库。
             .select_related(
@@ -163,6 +163,8 @@ class SkillRuntimeResolver:
         )
         if skill is not None:
             queryset = queryset.filter(pk=getattr(skill, "pk", skill))
+        else:
+            queryset = queryset.filter(project_id=project_id)
         if name:
             queryset = queryset.filter(name=name)
         if capability is not None:
@@ -180,7 +182,7 @@ class SkillRuntimeResolver:
             )
             if version is None:
                 continue
-            if version.skill.project_id != project_id:
+            if skill is None and version.skill.project_id != project_id:
                 continue
             resolved = version
             break
@@ -251,6 +253,8 @@ class SkillRuntimeResolver:
                 raise SkillRuntimeUnavailable("所选 Skill 版本不存在")
             if skill is not None and version.skill_id != getattr(skill, "pk", skill):
                 raise SkillRuntimeUnavailable("所选 Skill 版本不属于指定 Skill")
+            if "hub_deleted_at" in (version.source_metadata or {}):
+                raise SkillRuntimeUnavailable("所选 Skill 版本已删除，请恢复或重新选择")
             if not version.is_runnable:
                 raise SkillRuntimeUnavailable("所选 Skill 版本当前不可运行")
             if stage and not allow_stage_mismatch and not cls._matches_stage(version, stage):

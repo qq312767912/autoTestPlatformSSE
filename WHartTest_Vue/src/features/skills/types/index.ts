@@ -1,5 +1,18 @@
+export interface SkillUploadPreview {
+  name: string
+  declared_version: string
+  target_skill_id: number | null
+  existing_versions: string[]
+  suggested_version: string
+  conflict: boolean
+  duplicate_version: string
+  package_sha256: string
+}
+
 export interface Skill {
   id: number
+  uploaded_version?: { id: string; version: string; state: string }
+  duplicate?: boolean
   name: string
   /**
    * 展示名称：上传/导入时由平台生成、人工确认；为空时页面回退展示 `name`。
@@ -54,6 +67,7 @@ export interface StageResultRun {
 }
 
 export interface SkillListItem {
+  version_id?: string
   id: number
   name: string
   /**
@@ -85,6 +99,10 @@ export interface SkillListItem {
    */
   stage_source: string
   version: string
+  version_sha256: string
+  version_created_by_name: string
+  version_updated_at: string
+  version_change_reason: string
   /**
    * 同名副本数。Skill Hub 是公共目录，列表按名字归并成一条「正本」展示；
    * 库里其实可能有多份（存量迁移与商店安装会按项目各落一份）。

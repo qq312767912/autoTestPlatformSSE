@@ -152,7 +152,9 @@ class SkillCandidateDeriver:
     _VERSION_LINE = re.compile(r"^(version\s*:\s*)(\S+)\s*$", re.MULTILINE)
 
     @classmethod
-    def advance_package_version(cls, package_dir: Path, *, skill_version) -> str:
+    def advance_package_version(
+        cls, package_dir: Path, *, skill_version, version_label: str = "",
+    ) -> str:
         """把**工作副本**包内 manifest 的版本号推进到下一个未占用号，返回新号。
 
         为什么必须换号：``SkillVersion`` 的唯一约束是 ``(skill, version)``，
@@ -173,6 +175,9 @@ class SkillCandidateDeriver:
         except (OSError, UnicodeDecodeError):
             return ""
         next_version = SkillVersionService.next_version(skill_version.skill)
+        if version_label:
+            safe_label = re.sub(r"[^0-9A-Za-z.-]+", "-", version_label).strip(".-")
+            next_version = f"{next_version}-exp.{safe_label}"
         match = _FRONTMATTER.match(content)
         if not match:
             # 没有 frontmatter 的包在静态校验阶段就会被拦下，这里不做任何改动，
@@ -332,7 +337,7 @@ class SkillEvolutionService:
     def derive_candidate(
         cls, *, skill_version, attributions, actor, patch: dict | None = None,
         change_reason: str = "", expected_benefit: str = "", impact_scope: str = "",
-        api_key: str | None = None,
+        api_key: str | None = None, variant_label: str = "", allow_v2_routes: bool = False,
     ) -> dict:
         """派生候选包并落成新的 draft 版本，返回诊断信息。
 
@@ -354,7 +359,7 @@ class SkillEvolutionService:
             item.category for item in items
             if item.category not in SKILL_ADDRESSABLE_CATEGORIES
         })
-        if unsupported:
+        if unsupported and not allow_v2_routes:
             hints = "；".join(
                 f"{category}：{ALTERNATIVE_CHANNELS.get(category, '不属于 Skill 包可修复范围')}"
                 for category in unsupported
@@ -399,7 +404,7 @@ class SkillEvolutionService:
             )
             # 版本推进只作用于工作副本：补丁保持确定性，版本号在这里才落。
             applied_version = SkillCandidateDeriver.advance_package_version(
-                working, skill_version=skill_version,
+                working, skill_version=skill_version, version_label=variant_label,
             )
 
             # 静态校验在**落盘之前**做：不合格的候选不该在库里留下任何痕迹。
@@ -425,6 +430,8 @@ class SkillEvolutionService:
                     "derivation": "deterministic-guardrail",
                     "derivation_fingerprint": fingerprint,
                     "applied_version": applied_version,
+                    "variant_label": variant_label,
+                    "allow_v2_routes": allow_v2_routes,
                 },
                 change_reason=reason,
                 expected_benefit=expected_benefit or (

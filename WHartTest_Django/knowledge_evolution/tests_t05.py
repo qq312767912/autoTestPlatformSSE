@@ -35,6 +35,7 @@ def _l3_payload() -> dict:
                 "title": "非白名单账户反向校验",
                 "requirement_ids": ["REQ-12"],
                 "evidence_ids": ["EV-001"],
+                "module": "账户权限校验",
                 "scenario_type": "negative",
                 "priority": "P0",
                 "expected": "非白名单账户被拒绝并记录审计日志",
@@ -151,6 +152,21 @@ class FieldLevelErrorTests(SimpleTestCase):
         self.assertFalse(result.ok)
         self.assertIn("/primary_artifacts", self._paths(result))
         self.assertEqual(result.level, "L0")
+
+    def test_test_plan_requires_non_empty_test_points(self):
+        payload = _l3_payload()
+        payload["items"] = []
+        result = so.validate_stage_result(payload, expected_stage="test_plan_generation")
+        self.assertFalse(result.ok)
+        self.assertIn("missing_test_points", {issue.code for issue in result.issues})
+
+    def test_test_plan_requires_complete_test_point_fields(self):
+        payload = _l3_payload()
+        payload["items"][0].pop("module", None)
+        result = so.validate_stage_result(payload, expected_stage="test_plan_generation")
+        self.assertFalse(result.ok)
+        self.assertIn("/items/0/module", self._paths(result))
+        self.assertIn("incomplete_test_point", {issue.code for issue in result.issues})
 
     def test_missing_stable_id_is_reported(self):
         payload = _l3_payload()

@@ -749,6 +749,8 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
                 f"- 总变更行：{summary.get('changed_lines', 0)}",
                 f"- 风险总数：{summary.get('risk_count', 0)}",
                 f"- 高风险：{summary.get('high_risk_count', 0)}",
+                f"- 已反证风险：{summary.get('verified_risk_count', 0)}",
+                f"- 未完成反证风险：{summary.get('unverified_risk_count', 0)}",
                 f"- 机器覆盖率：{task.machine_coverage}%",
                 f"- AI覆盖率：{task.ai_coverage}%",
                 f"- 可语义审查文件：{coverage.get('reviewable_files', coverage.get('analyzed_files', 0))}/{coverage.get('scope_files', summary.get('changed_files', 0))}",
@@ -768,12 +770,21 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
                     f"### {index}. [{item.get('severity', 'unknown').upper()}] {item.get('change', '')}", "",
                     f"- 文件：`{item.get('file', '')}`",
                     f"- 来源：{item.get('source', '')}",
+                    f"- 来源候选：{', '.join(str(key) for key in item.get('source_keys', []) if key) or item.get('key', '')}",
                     f"- 置信度：{item.get('confidence', '-')}",
                     "- 风险凭据：", "",
                     "```", str(item.get("evidence", "")), "```", "",
                     f"- 影响：{item.get('impact', '')}",
+                    f"- 变更对齐：{item.get('change_kind') or '未记录'}；对象：{item.get('subject') or '未定位'}",
+                    f"- 替代证据：{item.get('replacement_evidence') or '未发现/未核实'}",
+                    f"- 反证状态：{item.get('verification_status') or '历史报告未记录'}",
+                    f"- 核验结论：{item.get('verification_reason') or '未记录'}",
+                    f"- 缺少的证据：{item.get('missing_evidence') or '未记录'}",
+                    f"- 定级依据：{item.get('severity_reason') or '按已核验证据及影响范围判定'}",
                     f"- 建议：{item.get('recommendation') or '覆盖相关正常流程、异常分支及调用链后再决定是否修复'}", "",
                 ])
+                for document in item.get("document_references") or []:
+                    lines.append(f"- 关联文档：{document.get('title') or '未命名'}（版本 {document.get('version') or '未记录'}，更新 {document.get('updated_at') or '未记录'}）：{document.get('excerpt') or document.get('reason') or '无可用片段'}")
                 if item.get("severity") == "high":
                     lines.extend([f"- 建议修复状态：{'可应用' if item.get('patch_status') == 'applicable' else '仅供参考'}", ""])
                     if item.get("suggested_patch"):

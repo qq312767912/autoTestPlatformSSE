@@ -1,3 +1,5 @@
+import os
+
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from projects.models import ProjectMember
@@ -1311,6 +1313,30 @@ class GenerationOutputViewSet(ProjectScopedReadOnlyViewSet):
     def get_queryset(self):
         return self.scoped(GenerationOutput.objects.select_related("project", "trace"))
 
+    @action(detail=True, methods=["get"], url_path="artifact")
+    def artifact(self, request, pk=None):
+        """下载历史产出记录中登记的真实文件，不依赖当前飞轮批次。"""
+        from django.http import FileResponse
+        from rest_framework.exceptions import ValidationError
+        from .operations import WorkflowGateService
+
+        output = self.get_object()
+        name = str(request.query_params.get("name") or "").strip()
+        key = str(request.query_params.get("key") or "").strip()
+        selected = None
+        for entry in ((output.metadata or {}).get("artifacts") or []):
+            if not isinstance(entry, dict):
+                continue
+            if (key and str(entry.get("key") or "") == key) or (name and str(entry.get("name") or "") == name):
+                selected = entry
+                break
+        path = WorkflowGateService._resolve_artifact_path((selected or {}).get("path")) if selected else None
+        if not path or not os.path.isfile(path):
+            raise ValidationError("历史产出文件不存在或已被清理")
+        filename = os.path.basename(str(selected.get("name") or os.path.basename(path)))
+        response = FileResponse(open(path, "rb"), as_attachment=True, filename=filename)
+        return response
+
     @action(detail=True, methods=["get"], url_path="lineage")
     def lineage(self, request, pk=None):
         """`「这条产出是怎么来的」：闭环七段 + 内容来源（只读）。
@@ -1991,6 +2017,14 @@ class CaseReviewEvolutionViewSet(viewsets.ViewSet):
             "items": CaseReviewEvolutionService.list_candidates(project=project),
         })
 
+    @action(detail=False, methods=["get"], url_path="attribution-taxonomy")
+    def attribution_taxonomy(self, request):
+        """V2 三元组归因词表；前端不另维护一份枚举。"""
+        from .evolution_taxonomy import taxonomy_view
+
+        self._project(request)
+        return Response(taxonomy_view())
+
     @action(detail=False, methods=["post"], url_path="preflight")
     def preflight(self, request):
         """解析上传的报告并给出全部前置判定——**不落库**。
@@ -2037,7 +2071,15 @@ class CaseReviewEvolutionViewSet(viewsets.ViewSet):
             "below_reference": score < threshold,
             "scan": scan.as_dict(),
             "attribution_preview": [
-                {"category": item.category, "issue_type": item.issue_type, "count": item.count}
+                {
+                    "category": item.category,
+                    "issue_type": item.issue_type,
+                    "count": item.count,
+                    "feedback_conclusion": item.feedback_conclusion,
+                    "feedback_conclusion_label": item.feedback_conclusion_label,
+                    "quality_dimension": item.quality_dimension,
+                    "quality_dimension_label": item.quality_dimension_label,
+                }
                 for item in scan.defects
             ],
             "blockers": blockers,
@@ -2229,6 +2271,9 @@ class CaseReviewEvolutionViewSet(viewsets.ViewSet):
                     action=str(item.get("action") or ""), actor=request.user,
                     hypothesis=str(item.get("hypothesis") or ""),
                     category=str(item.get("category") or ""),
+                    primary_cause=str(item.get("primary_cause") or ""),
+                    fine_cause=str(item.get("fine_cause") or ""),
+                    repair_target=str(item.get("repair_target") or ""),
                 ))
             except DjangoValidationError as exc:
                 # 逐条返回而不是整批失败：一次提交里有一条写错（比如 id 已被重新生成
@@ -2245,6 +2290,88 @@ class CaseReviewEvolutionViewSet(viewsets.ViewSet):
             "confirmed_count": len(confirmed),
             "confirmed_ids": [item["attribution_id"] for item in confirmed],
         })
+
+    @action(detail=False, methods=["post"], url_path="experiments")
+    def experiments(self, request):
+        """从同一精确基线生成 Baseline/A/B 三个隔离实验分支。"""
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from .case_review_evolution import CaseReviewEvolutionService
+        from .evolution_execution import EvolutionExecutionService, experiment_view
+        from .trace_models import FailureAttribution
+
+        project = self._project(request)
+        review = self._review(request, project)
+        output = CaseReviewEvolutionService._output_of(review)
+        skill_version = CaseReviewEvolutionService._skill_version_of(review, output, persist=True)
+        ids = self._attribution_ids(request)
+        attributions = FailureAttribution.objects.filter(
+            id__in=ids, output=output, output__project=project,
+        )
+        try:
+            experiment = EvolutionExecutionService.create_experiment(
+                output=output, skill_version=skill_version,
+                attributions=attributions, actor=request.user,
+            )
+        except DjangoValidationError as exc:
+            return Response({"detail": _validation_text(exc)}, status=400)
+        return Response(experiment_view(experiment), status=201)
+
+    @action(detail=False, methods=["post"], url_path="experiments/rerun")
+    def experiment_rerun(self, request):
+        """以原审查文件和相同参数同步重跑 Baseline/A/B。"""
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from .evolution_execution import EvolutionExecutionService, experiment_view
+        from .optimization_models import EvolutionExperiment
+
+        project = self._project(request)
+        experiment = get_object_or_404(
+            EvolutionExperiment, pk=request.data.get("experiment_id"), project=project,
+        )
+        try:
+            EvolutionExecutionService.rerun_same_input(experiment=experiment)
+        except DjangoValidationError as exc:
+            return Response({"detail": _validation_text(exc)}, status=400)
+        experiment.refresh_from_db()
+        return Response(experiment_view(experiment))
+
+    @action(detail=False, methods=["post"], url_path="experiments/choose-winner")
+    def experiment_choose_winner(self, request):
+        """人工选定 A/B winner；未完成三路重跑时服务端硬拒绝。"""
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from .evolution_execution import EvolutionExecutionService, experiment_view
+        from .optimization_models import EvolutionExperiment
+
+        project = self._project(request)
+        experiment = get_object_or_404(
+            EvolutionExperiment, pk=request.data.get("experiment_id"), project=project,
+        )
+        try:
+            EvolutionExecutionService.choose_winner(
+                experiment=experiment, label=str(request.data.get("label") or ""),
+                reason=str(request.data.get("reason") or ""),
+            )
+        except DjangoValidationError as exc:
+            return Response({"detail": _validation_text(exc)}, status=400)
+        experiment.refresh_from_db()
+        return Response(experiment_view(experiment))
+
+    @action(detail=False, methods=["post"], url_path="experiments/submit-winner")
+    def experiment_submit_winner(self, request):
+        """将人工 winner 送入 Skill Hub 的既有验证/审批状态机。"""
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from .evolution_execution import EvolutionExecutionService, experiment_view
+        from .optimization_models import EvolutionExperiment
+
+        project = self._project(request)
+        experiment = get_object_or_404(
+            EvolutionExperiment, pk=request.data.get("experiment_id"), project=project,
+        )
+        try:
+            EvolutionExecutionService.submit_winner(experiment=experiment, actor=request.user)
+        except DjangoValidationError as exc:
+            return Response({"detail": _validation_text(exc)}, status=400)
+        experiment.refresh_from_db()
+        return Response(experiment_view(experiment))
 
     def _review(self, request, project):
         from testcases.models import TestCaseReview
@@ -2685,6 +2812,20 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
         # 正文可能很长，接口只回前 4000 字 + 真实长度：页面据此提示"已截断"，
         # 而不是让人以为报告只有这么长。
         excerpt = content[:4000]
+        artifact_files = []
+        for entry in ((output.metadata or {}).get("artifacts") or []):
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            path = WorkflowGateService._resolve_artifact_path(entry.get("path"))
+            if not name or not path:
+                continue
+            artifact_files.append({
+                "name": name,
+                "size": entry.get("size") or 0,
+                "sha256": str(entry.get("sha256") or ""),
+                "key": str(entry.get("key") or ""),
+            })
         return Response({
             "stage": stage,
             "stage_label": WorkflowGateService.STAGE_LABELS.get(stage, stage),
@@ -2705,6 +2846,7 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
             # 能不能下载报告由后端说了算：文件是否存在、是登记产物还是回落模板，
             # 前端无从判断。给结论而不是让它自己猜，才不会出现"有按钮点了 404"。
             "artifact": WorkflowGateService.stage_artifact_payload(output, stage=stage),
+            "artifact_files": artifact_files,
             # 采纳率按版本横向列出：采纳率是"人对这一版的评价"，只有放到版本序列里
             # 才读得出"skill 是一点点优化出来的"。
             "acceptance_history": (
@@ -2752,6 +2894,8 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
         project_id = int(request.query_params["project"]); self._check(request, project_id)
         workflow_id = str(request.query_params.get("workflow_id") or "")
         stage = str(request.query_params.get("stage") or "")
+        artifact_key = str(request.query_params.get("key") or "")
+        artifact_name = str(request.query_params.get("name") or "")
         if stage not in ALL_WORKFLOW_STAGE_SET:
             raise ValidationError(f"未知的阶段：{stage}")
 
@@ -2766,7 +2910,19 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
                 f"请先执行本阶段"
             )
 
-        artifact = WorkflowGateService.stage_artifact(output)
+        artifact = WorkflowGateService.stage_artifact(output, key=artifact_key)
+        if artifact is None and artifact_name:
+            for entry in ((output.metadata or {}).get("artifacts") or []):
+                if not isinstance(entry, dict) or str(entry.get("name") or "") != artifact_name:
+                    continue
+                resolved = WorkflowGateService._resolve_artifact_path(entry.get("path"))
+                if resolved:
+                    artifact = {
+                        "name": artifact_name,
+                        "path": resolved,
+                        "sha256": str(entry.get("sha256") or ""),
+                    }
+                break
         if artifact is not None:
             try:
                 with open(artifact["path"], "rb") as handle:
@@ -3186,7 +3342,9 @@ class FlywheelOperationsViewSet(viewsets.ViewSet):
             if not path:
                 continue
             try:
-                with open(path, "rb") as handle:
+                from django.conf import settings
+                resolved_path = path if os.path.isabs(path) else os.path.join(str(settings.MEDIA_ROOT), path)
+                with open(resolved_path, "rb") as handle:
                     return json.loads(handle.read().decode("utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                 # 文件在、读不动：当作"取不到"而不是抛错——上层会给出

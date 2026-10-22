@@ -101,8 +101,10 @@ class SkillPackageStaticTests(SimpleTestCase):
         for key in ("document_id", "document_version", "chunk_id", "quote"):
             self.assertIn(key, evidence_rules["required"], f"Skill schema 未收紧 evidence.{key}")
 
-        # 主产物必须含 test_plan.xlsx：否则声明里"有主产物"仍要靠文件名猜。
-        self.assertIn("contains", skill_schema["properties"]["primary_artifacts"])
+        # 三件人工交付物必须全部由 schema 约束，不靠前端猜测。
+        primary_rules = skill_schema["properties"]["primary_artifacts"]
+        self.assertEqual(primary_rules["minItems"], 3)
+        self.assertEqual(len(primary_rules["allOf"]), 3)
 
     def test_skill_md_documents_the_protocol_on_both_sides(self):
         """SKILL.md 与 references/TestPlan.md 都要写清"怎么产出信封"。"""
@@ -168,7 +170,7 @@ class SelfCheckScriptTests(SimpleTestCase):
         payload["primary_artifacts"] = [{"name": "方案.docx", "sha256": "0" * 64}]
         result = self._run(payload)
         self.assertEqual(result.returncode, 1)
-        # 声明里必须含 test_plan.xlsx，否则前端又要靠文件名正则猜哪个是正主。
+        # 声明里必须同时包含三件人工交付物。
         self.assertIn("/primary_artifacts", result.stdout)
 
     def test_quote_not_found_in_chunk_is_rejected(self):
@@ -188,13 +190,13 @@ class SelfCheckScriptTests(SimpleTestCase):
     def test_artifact_hash_is_verified_against_disk(self):
         artifacts = self.work / "artifacts"
         artifacts.mkdir()
-        plan = artifacts / "test_plan.xlsx"
-        plan.write_bytes(b"plan-bytes")
-
         import hashlib
 
         payload = json.loads(json.dumps(self.valid))
-        payload["primary_artifacts"][0]["sha256"] = hashlib.sha256(b"plan-bytes").hexdigest()
+        artifact_bytes = (b"plan-bytes", b"guide-bytes", b"requirements-bytes")
+        for artifact, content in zip(payload["primary_artifacts"], artifact_bytes):
+            (artifacts / artifact["name"]).write_bytes(content)
+            artifact["sha256"] = hashlib.sha256(content).hexdigest()
         result = self._run(payload, "--artifacts-dir", str(artifacts))
         self.assertEqual(result.returncode, 0, result.stdout)
 
@@ -240,7 +242,10 @@ class SampleAgreesWithPlatformTests(SimpleTestCase):
 
     def test_sample_declares_the_primary_artifact_and_traceable_evidence(self):
         normalized = so.StageResult.from_payload(self.payload, "L3")
-        self.assertIn("test_plan.xlsx", [item.get("name") for item in normalized.primary_artifacts])
+        names = [item.get("name") for item in normalized.primary_artifacts]
+        self.assertIn("上证e投票_测试方案_V1.0.xlsx", names)
+        self.assertIn("上证e投票_测试方案说明_V1.0.md", names)
+        self.assertIn("requirements_parsed.json", names)
 
         evidence_by_id = {entry["id"]: entry for entry in normalized.evidence}
         for item in normalized.items:

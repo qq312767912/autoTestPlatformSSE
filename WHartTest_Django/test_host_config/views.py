@@ -50,6 +50,27 @@ class TestHostMappingViewSet(viewsets.ModelViewSet):
             super().perform_destroy(instance)
             bump_draft_revision()
 
+    @action(detail=False, methods=["post"], url_path="bulk-delete")
+    def bulk_delete(self, request):
+        ids = request.data.get("ids")
+        if not isinstance(ids, list) or not ids:
+            return Response({"detail": "请至少选择一条域名配置"}, status=status.HTTP_400_BAD_REQUEST)
+        if len(ids) > 1000:
+            return Response({"detail": "单次最多删除 1000 条域名配置"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            normalized_ids = {int(value) for value in ids if not isinstance(value, bool)}
+        except (TypeError, ValueError):
+            return Response({"detail": "域名配置 ID 格式不正确"}, status=status.HTTP_400_BAD_REQUEST)
+        if not normalized_ids or any(value <= 0 for value in normalized_ids):
+            return Response({"detail": "域名配置 ID 格式不正确"}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            queryset = TestHostMapping.objects.filter(pk__in=normalized_ids)
+            deleted = queryset.count()
+            queryset.delete()
+            if deleted:
+                bump_draft_revision()
+        return Response({"deleted": deleted, "requested": len(normalized_ids)})
+
     @action(detail=False, methods=["post"], url_path="bulk-import")
     def bulk_import(self, request):
         text = str(request.data.get("text") or "")

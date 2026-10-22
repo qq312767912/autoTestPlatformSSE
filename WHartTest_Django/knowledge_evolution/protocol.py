@@ -221,12 +221,17 @@ def publish_output(envelope: OutputEnvelope):
         token_usage=envelope.metrics.get("token_usage", 0),
         metadata={
             "protocol": payload,
+            # Skill 运行目录里的真实文件清单必须和正文一起落库。
+            # 仅把文件名写进 agent 文本会导致飞轮只能展示 JSON，无法下载原始 xlsx/md。
+            "artifacts": envelope.extensions.get("artifacts") or [],
             "idempotency_key": envelope.idempotency_key,
             # 与业务产物同存一条记录：飞轮要能直接回答"这条产出当时的信封合不合规"，
             # 而不是事后重算——重算需要重建当时的 Skill 版本与文件，多半已经不在。
             "stage_result_submitted": envelope.stage_result,
             "stage_result_validation": envelope.stage_result_validation or {},
             "compatibility_level": envelope.compatibility_level,
+            # 结构化结果与产出同存，派生摘要/图谱不再依赖运行目录是否仍然存在。
+            "stage_result_payload": envelope.extensions.get("stage_result_payload"),
         },
         policy_version=envelope.producer.get("policy_version", "platform-output/v1"),
         prompt_version=envelope.producer.get("prompt_version", "platform-output/v1"),

@@ -40,6 +40,12 @@ export async function deleteMapping(id: number): Promise<void> {
   if (!response.success) throw new Error(response.error || '删除失败');
 }
 
+export function bulkDeleteMappings(ids: number[]) {
+  return dataOrThrow<{ deleted: number; requested: number }>(
+    request({ url: `${base}/mappings/bulk-delete/`, method: 'POST', data: { ids } }),
+  );
+}
+
 export function getOverview() {
   return dataOrThrow(request<TestHostOverview>({ url: `${base}/mappings/overview/`, method: 'GET' }));
 }

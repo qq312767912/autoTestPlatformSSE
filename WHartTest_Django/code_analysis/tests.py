@@ -1,6 +1,8 @@
 from unittest.mock import patch
 from types import SimpleNamespace
+import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -15,10 +17,37 @@ from langgraph_integration.models import LLMConfig
 from .models import AnalysisTask, AnalysisTaskExecutionLog, CodeAnalysisLLMConfig, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
 from .serializers import GitLabConnectionSerializer, ProjectRepositorySerializer
 from .review_mcp import CodeReviewMCP
-from .services import AI_REVIEW_LANGUAGE_RULE, AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _apply_verification_results, _attach_finding_diff_evidence, _classify_finding, _diff_line_stats, _effective_deep_coverage, _ensure_not_cancelled, _generate_fix_patches, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_fallback_diffs, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _prioritize_findings_for_report, _related_source_context, _reuse_cached_result, _review_payload_needs_chinese_retry, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, _verify_findings_against_target, remove_ocr_repositories_for_repository, remove_ocr_repository, retry_ocr_analysis, run_analysis
+from .services import AI_REVIEW_LANGUAGE_RULE, AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _apply_verification_results, _attach_finding_diff_evidence, _classify_finding, _deduplicate_iteration_test_points, _diff_line_stats, _effective_deep_coverage, _ensure_not_cancelled, _generate_fix_patches, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_fallback_diffs, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _prioritize_findings_for_report, _related_source_context, _reuse_cached_result, _review_payload_needs_chinese_retry, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, _verify_findings_against_target, remove_ocr_repositories_for_repository, remove_ocr_repository, retry_ocr_analysis, run_analysis
+from .services import CODE_REVIEW_REPORT_SCHEMA_VERSION, _is_pure_addition_hypothesis, _merge_related_findings, _related_document_context
 
 
 class CodeReviewPromptLanguageTests(SimpleTestCase):
+    def test_iteration_points_merge_same_goal_without_losing_priority(self):
+        points = [
+            {"title": "验证登录超时", "objective": "登录超时后重新提交", "expected_result": "提示重新登录", "priority": "medium", "change_group": "登录"},
+            {"title": "验证登录超时。", "objective": "登录超时后，重新提交", "expected_result": "提示重新登录。", "priority": "high"},
+            {"title": "登录超时校验", "objective": "登录超时后重新提交", "expected_result": "提示重新登录", "priority": "low"},
+        ]
+        result = _deduplicate_iteration_test_points(points)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["priority"], "high")
+        self.assertEqual(result[0]["change_group"], "登录")
+
+    def test_iteration_points_keep_distinct_scenarios_with_same_title(self):
+        points = [
+            {"title": "验证登录", "objective": "正确密码登录", "expected_result": "登录成功"},
+            {"title": "验证登录", "objective": "错误密码登录", "expected_result": "提示密码错误"},
+            {"title": "验证登录", "objective": "正确密码登录", "expected_result": "提示密码错误"},
+        ]
+        self.assertEqual(len(_deduplicate_iteration_test_points(points)), 3)
+
+    def test_iteration_points_do_not_merge_generic_goals_across_titles(self):
+        points = [
+            {"title": "订单保存", "objective": "验证功能", "expected_result": "正常"},
+            {"title": "用户保存", "objective": "验证功能", "expected_result": "正常"},
+        ]
+        self.assertEqual(len(_deduplicate_iteration_test_points(points)), 2)
+
     def test_ai_review_prompt_requires_chinese_for_report_fields(self):
         self.assertIn("所有面向用户展示的自然语言内容必须使用简体中文", AI_REVIEW_LANGUAGE_RULE)
         self.assertIn("即使 Diff、源码注释或业务上下文是英文，也不得输出英文审查结论", AI_REVIEW_LANGUAGE_RULE)
@@ -56,6 +85,109 @@ class CodeReviewPromptLanguageTests(SimpleTestCase):
 
 
 class ReviewPipelineToolTests(SimpleTestCase):
+    @patch("code_analysis.services._related_document_context", return_value=[])
+    @patch("code_analysis.services._get_code_analysis_llm_config", return_value=SimpleNamespace())
+    @patch("code_analysis.review_mcp.CodeReviewMCP.search_code", return_value=[])
+    @patch("code_analysis.review_mcp.CodeReviewMCP.read_file", return_value="class Demo {}")
+    @patch("langgraph_integration.views.create_llm_instance")
+    def test_partial_verifier_failure_preserves_successful_batches(self, create_llm, _read, _search, _config, _documents):
+        def invoke(prompt, **_kwargs):
+            keys = re.findall(r'"key": "(k\d+)"', prompt)
+            if "k10" in keys:
+                raise RuntimeError("Internal Server Error")
+            return SimpleNamespace(content=json.dumps({"items": [
+                {"key": key, "verdict": "rejected", "reason": "目标代码已有等价保护"} for key in keys
+            ]}))
+        create_llm.return_value.invoke.side_effect = invoke
+        task = SimpleNamespace(mode="standard", head_sha="head", repository=SimpleNamespace(source_type="local_git"))
+        findings = [{"key": f"k{index}", "file": "Demo.java", "source": "machine_rule",
+                     "severity": "high", "disposition": "needs_confirmation", "evidence": "@NotNull"}
+                    for index in range(11)]
+        active, rejected, _tokens, note = _verify_findings_against_target(task, findings)
+        self.assertEqual(len(rejected), 10)
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]["severity"], "medium")
+        self.assertEqual(active[0]["verification_status"], "verification_failed")
+        self.assertIn("Internal Server Error", active[0]["verification_reason"])
+        self.assertIn("批次2失败", note)
+
+    def test_ssewebvote_normal_change_candidates_do_not_remain_high_when_verification_fails(self):
+        machine = [
+            {"key": f"annotation:{subject}", "file": "Request.java", "source": "machine_rule",
+             "subject": subject, "severity": "high", "disposition": "needs_confirmation",
+             "change": "删除 @NotNull 注解", "evidence": "@NotNull"}
+            for subject in ("meetingID", "gdCode")
+        ]
+        ai = [
+            {"key": "ai:meeting", "file": "Request.java", "source": "ai_analysis", "severity": "high",
+             "disposition": "needs_confirmation", "change": "移除 meetingID 的 @NotNull 校验",
+             "evidence": "meetingID 删除 @NotNull", "impact": "若上下文为空可能出错"},
+            {"key": "ai:code", "file": "Request.java", "source": "ai_analysis", "severity": "high",
+             "disposition": "needs_confirmation", "change": "移除 gdCode 的 @NotNull 校验",
+             "evidence": "gdCode 删除 @NotNull", "impact": "若上下文为空可能出错"},
+            {"key": "ai:config", "file": ".env.production", "source": "ai_analysis", "severity": "high",
+             "disposition": "needs_confirmation", "change": "在 .env 配置文件中新增 VUE_APP_BASE_LTAPPKEY 变量",
+             "evidence": "新增配置键", "impact": "若配置错误可能失败"},
+        ]
+        merged = _merge_related_findings([*machine, *ai])
+        candidates = [item for item in merged if not _is_pure_addition_hypothesis(item)]
+        active, _ = _apply_verification_results(candidates, [])
+        self.assertEqual(len(active), 2)
+        self.assertTrue(all(item["severity"] != "high" for item in active))
+        self.assertTrue(all(item["verification_status"] == "verification_failed" for item in active))
+
+    def test_normal_added_configuration_with_only_conditional_impact_is_not_defect(self):
+        self.assertTrue(_is_pure_addition_hypothesis({
+            "source": "ai_analysis", "change": "在 .env 配置文件中新增 VUE_APP_BASE_LTAPPKEY 变量",
+            "impact": "若该配置错误，查询可能失败", "evidence": "Diff 显示新增配置键",
+        }))
+        self.assertFalse(_is_pure_addition_hypothesis({
+            "source": "ai_analysis", "change": "新增无需鉴权的转账接口",
+            "impact": "未授权访问可复现", "evidence": "匿名请求实际返回成功",
+        }))
+        self.assertFalse(_is_pure_addition_hypothesis({
+            "source": "ai_analysis", "change": "删除权限校验并在页面中新增入口",
+            "impact": "若匿名调用可能越权", "evidence": "移除 @PreAuthorize",
+        }))
+
+    def test_ai_and_rule_merge_only_same_field_and_annotation(self):
+        findings = [
+            {"key": "rule:meeting", "file": "Request.java", "source": "machine_rule", "subject": "meetingID", "evidence": "@NotNull"},
+            {"key": "ai:meeting", "file": "Request.java", "source": "ai_analysis", "change": "移除 meetingID 的 @NotNull 校验", "evidence": "meetingID 删除 @NotNull"},
+            {"key": "rule:code", "file": "Request.java", "source": "machine_rule", "subject": "gdCode", "evidence": "@NotNull"},
+        ]
+        merged = _merge_related_findings(findings)
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(merged[0]["source_keys"], ["ai:meeting", "rule:meeting"])
+        self.assertEqual(merged[1]["subject"], "gdCode")
+
+    def test_unverified_text_rule_loses_unsupported_high_severity(self):
+        active, _ = _apply_verification_results([{
+            "key": "annotation:meeting", "source": "machine_rule", "severity": "high",
+            "disposition": "needs_confirmation", "evidence": "@NotNull", "change": "删除 @NotNull 注解",
+        }], [])
+        self.assertEqual(active[0]["severity"], "medium")
+        self.assertEqual(active[0]["verification_status"], "verification_failed")
+        self.assertIn("原高风险初判", active[0]["severity_reason"])
+
+    def test_deferred_candidate_is_distinct_from_verifier_failure(self):
+        active, _ = _apply_verification_results([{
+            "key": "deferred", "source": "machine_rule", "severity": "high",
+            "disposition": "needs_confirmation", "verification_deferred": True,
+        }], [])
+        self.assertEqual(active[0]["verification_status"], "not_verified")
+        self.assertIn("未进入有界反证批次", active[0]["verification_reason"])
+        self.assertEqual(active[0]["severity"], "medium")
+
+    def test_verified_high_risk_requires_reachable_supporting_evidence(self):
+        finding = {"key": "permission", "source": "machine_rule", "severity": "high", "disposition": "needs_confirmation"}
+        active, _ = _apply_verification_results([finding], [{
+            "key": "permission", "verdict": "confirmed", "severity": "high", "reason": "匿名修改可复现",
+            "supporting_evidence": ["目标版本接口无鉴权，匿名调用返回 200"], "trigger_reachable": True,
+        }])
+        self.assertEqual(active[0]["disposition"], "confirmed")
+        self.assertEqual(active[0]["severity"], "high")
+
     def test_developer_report_keeps_all_three_dispositions(self):
         findings = [
             {"key": f"high-{index}", "severity": "high", "disposition": "needs_confirmation", "confidence": .8}
@@ -310,6 +442,69 @@ class ReviewPipelineToolTests(SimpleTestCase):
 
 
 class DiffRuleTests(TestCase):
+    def test_ssewebvote_request_validation_removal_remains_candidate_but_not_duplicate(self):
+        diff = '@@ -10,4 +10,3 @@\n public class WebSimpleVoteResultRequest {\n-    @NotNull(message = "会议ID不能为空")\n     private String meetingID;\n'
+        findings = _parse_diff(diff, "WebSimpleVoteResultRequest.java", DEFAULT_ANNOTATIONS)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["subject"], "meetingID")
+        self.assertEqual(findings[0]["change_kind"], "removed")
+
+    def test_removed_validated_field_with_new_field_is_marked_as_migration(self):
+        diff = '@@ -1,3 +1,2 @@\n-    @NotNull\n-    private String gdCode;\n+    private List<String> gdCodeShaList;'
+        findings = _parse_diff(diff, "Request.java", DEFAULT_ANNOTATIONS)
+        self.assertEqual(findings[0]["subject"], "gdCode")
+        self.assertEqual(findings[0]["change_kind"], "relocated_or_changed")
+        self.assertIn("gdCodeShaList", findings[0]["replacement_evidence"])
+
+    def test_same_annotation_on_same_field_is_not_removed(self):
+        diff = '@@ -1,4 +1,4 @@\n-    @NotNull(message = "旧提示")\n+    @NotNull(message = "新提示")\n     private String meetingID;'
+        findings = _parse_diff(diff, "Request.java", DEFAULT_ANNOTATIONS)
+        self.assertFalse(any(item["key"].startswith("annotation:") for item in findings))
+
+    def test_config_value_change_and_public_signature_change_are_not_deletions(self):
+        config = '-security.verify-ssl: true\n+security.verify-ssl: false'
+        config_findings = _parse_diff(config, "application.yml", DEFAULT_ANNOTATIONS)
+        self.assertEqual(len(config_findings), 1)
+        self.assertEqual(config_findings[0]["change"], "修改关键配置：security.verify-ssl")
+        self.assertEqual(config_findings[0]["severity"], "medium")
+        method = '-public Response query(Request request) {\n+public Response query() {'
+        self.assertFalse(any(item["key"].startswith("modifier:") for item in _parse_diff(method, "Service.java", DEFAULT_ANNOTATIONS)))
+
+    def test_config_environment_migration_requires_runtime_confirmation(self):
+        findings = _parse_diff('-security.verify-ssl: true\n+security.verify-ssl: ${VERIFY_SSL}', "application.yml", DEFAULT_ANNOTATIONS)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["change_kind"], "relocated_or_changed")
+        self.assertIn("VERIFY_SSL", findings[0]["replacement_evidence"])
+
+    def test_real_modifier_removal_is_kept(self):
+        findings = _parse_diff('-public Response query() {\n+Response query() {', "Service.java", DEFAULT_ANNOTATIONS)
+        self.assertTrue(any(item["key"].startswith("modifier:") for item in findings))
+
+    def test_only_current_project_document_excerpt_is_used_for_verification(self):
+        from requirements.models import RequirementDocument
+        user = User.objects.create_user("document-review-user")
+        project = Project.objects.create(name="文档核验项目", creator=user)
+        other_project = Project.objects.create(name="其他项目", creator=user)
+        relevant = RequirementDocument.objects.create(
+            project=project, title="投票接口调整", document_type="md", version="2.0",
+            content="meetingID 改由登录上下文读取。\n\n其余变更无关。",
+        )
+        unrelated = RequirementDocument.objects.create(
+            project=other_project, title="其他项目私有文档", document_type="md",
+            content="meetingID 属于私有项目。",
+        )
+        task = SimpleNamespace(project=project, requirement_document_ids=[str(relevant.id), str(unrelated.id)],
+                               api_document_ids=[], requirement_document_id=None, api_document_id=None,
+                               knowledge_document_ids=[])
+        references = _related_document_context(task, {"subject": "meetingID"})
+        self.assertEqual(len(references), 1)
+        self.assertEqual(references[0]["title"], "投票接口调整")
+        self.assertEqual(references[0]["version"], "2.0")
+        relevant.is_latest = False
+        relevant.save(update_fields=["is_latest"])
+        stale_references = _related_document_context(task, {"subject": "meetingID"})
+        self.assertIs(stale_references[0]["is_latest"], False)
+
     def test_gitlab_connections_always_disable_ssl_verification(self):
         serializer = GitLabConnectionSerializer(data={
             "name": "内网 GitLab", "base_url": "https://10.10.11.59", "verify_ssl": True,
@@ -427,7 +622,7 @@ class DiffRuleTests(TestCase):
         task = AnalysisTask.objects.create(
             project=project, repository=repository, creator=user, source_type="commits",
             base_sha="a" * 40, head_sha="b" * 40, mode="deep", status="fetching", raw_diff="diff -- app.py\n+ok",
-            change_report={"schema_version": 6, "summary": {"risk_count": 1}, "findings": [], "ocr_status": {"status": "completed", "coverage": 100}},
+            change_report={"schema_version": CODE_REVIEW_REPORT_SCHEMA_VERSION, "summary": {"risk_count": 1}, "findings": [], "ocr_status": {"status": "completed", "coverage": 100}},
             test_report={"summary": {"test_point_count": 1}, "iteration_summary": {"title": "登录变更", "change_groups": [{"name": "登录"}]}, "test_requirements": [point]},
             machine_coverage=100, ai_coverage=100,
         )
@@ -523,6 +718,11 @@ class DiffRuleTests(TestCase):
         from .services import _deduplicate_findings
         duplicated = [{"file": "a.java", "evidence": "@Excel", "source": "machine_rule"}, {"file": "a.java", "evidence": "@Excel", "source": "ai_analysis"}]
         self.assertEqual(len(_deduplicate_findings(duplicated)), 1)
+        distinct_fields = [
+            {"file": "a.java", "evidence": "@NotNull", "subject": "meetingID"},
+            {"file": "a.java", "evidence": "@NotNull", "subject": "gdCode"},
+        ]
+        self.assertEqual(len(_deduplicate_findings(distinct_fields)), 2)
 
     def test_unverified_ai_syntax_claim_is_filtered(self):
         from .services import _is_unverified_syntax_claim
@@ -644,7 +844,7 @@ class LocalGitMergeBaseTests(SimpleTestCase):
                 LocalGitClient.ROOT = original_root
             self.assertEqual(len(result["diffs"]), 1)
             self.assertIn("@Excel", result["diffs"][0]["diff"])
-            self.assertEqual(result["base_sha"], git("rev-parse", "base").strip())
+            self.assertEqual(result["base_sha"], git("rev-parse", "base").stdout.strip())
 
     def test_local_git_rejects_reversed_commit_range(self):
         """目标提交是基准提交的祖先时，说明选反了，必须拦下而不是反向报风险。"""
@@ -988,7 +1188,8 @@ class AnalysisLifecycleTests(TransactionTestCase):
         run_analysis(task)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
-        self.assertEqual(task.change_report["summary"]["high_risk_count"], 1)
+        self.assertEqual(task.change_report["summary"]["high_risk_count"], 0)
+        self.assertEqual(task.change_report["findings"][0]["verification_status"], "verification_failed")
         self.assertEqual(task.test_report["summary"]["test_point_count"], 1)
         self.assertEqual(task.ai_coverage, 0)
         self.assertEqual(task.change_report["files"][0]["review_status"], "machine_only")

@@ -1,0 +1,17 @@
+[
+  {
+    "relative": "skills/views.py",
+    "original_sha256": "4cab3c9581ea91b755c2b1a8ba151494f26c51af94a054e0afcf4b3856f3c9f6",
+    "candidate_sha256": "2dc920d2d57585c36c8314ba01f0523ff61729a71fd563a15154329464a206b9"
+  },
+  {
+    "relative": "skills/serializers.py",
+    "original_sha256": "056679f7947f26d34d17b9e66d19ae04dcb6ba79c7b7ff030cc377fde18467ef",
+    "candidate_sha256": "1c318e1a775e44a6a2991540587f7a3c38075dcad8bbb47bad74b9ed253f0235"
+  },
+  {
+    "relative": "skills/management/commands/init_skills.py",
+    "original_sha256": "f1df73c9e9aab0f0e52e7a46e2c9a7c16b4d647c87b0c6067056503602f356be",
+    "candidate_sha256": "51265659d858e8d999a8721137b24de789d2d4b83f44525e9c166a4fc11f0e73"
+  }
+]

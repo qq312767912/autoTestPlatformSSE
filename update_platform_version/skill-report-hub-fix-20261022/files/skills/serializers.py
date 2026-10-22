@@ -1,0 +1,608 @@
+# 导入路径工具用于路径归一化输出。
+from pathlib import Path
+
+# 导入 Django 配置读取工具。
+from django.conf import settings
+
+# 导入 DRF 序列化器基类。
+from rest_framework import serializers
+
+# 导入 Skill 模型。
+from .models import Skill, SkillVersion
+
+
+class SkillCategoryMixin(serializers.Serializer):
+    """导入类接口的展示分类（即「所属阶段」）。
+
+    这个值记在 Skill.declared_stage，不改写不可变版本包。
+
+    ⚠️ **必须继承 ``serializers.Serializer``，不能是普通的 ``object`` 混入类。**
+    DRF 的 ``SerializerMetaclass`` 收集字段时只认「自身带 ``_declared_fields``」的基类：
+    普通类用 ``type`` 建，没有这个属性，于是 ``category`` / ``description``
+    **一个都不会进字段表**——既不校验、也不进 ``validated_data``，视图里
+    ``validated_data['category']`` 直接 ``KeyError`` 变成 500。
+    这个坑曾经真实存在（三个导入接口全都拿不到分类），修复见本次提交。
+
+    取值分两种（真值见 ``knowledge_evolution.capability_registry``）：
+
+    * **规范阶段** —— ``SKILL_STAGE_OPTIONS`` 里的标识符，或它在 ``STAGE_LABELS``
+      里的中文名；两种写法都归一化成标识符，避免同一个阶段在库里存在两种拼法；
+    * **自定义阶段** —— 用户在导入表单里自己敲的名称（如「性能测试」），
+      归一化成 ``custom:<名称>``（见 ``CUSTOM_STAGE_PREFIX``）。
+
+    为什么要归一化、而不是原样存用户输入：导入分类字段是**同一套**服务端白名单，
+    直接放行裸字符串会让拼错的规范阶段（``test_executoin``）悄无声息地写进
+    ``declared_stage``——它不报错，也永远匹配不上阶段检索，在页面上和"没填"长得一样。
+    自定义档加了前缀，结构上就不可能冒充规范阶段。
+    """
+
+    category = serializers.CharField(max_length=64, required=True, allow_blank=False)
+    description = serializers.CharField(max_length=200, required=True, allow_blank=False)
+    # 展示名称：与 category / description 同属"平台生成、人工确认"的导入元数据。
+    # 允许留空 —— 留空就沿用包内 name，存量调用方不传这个字段行为完全不变。
+    # ⚠️ 它落到 ``Skill.display_name``，**不是** ``Skill.name``：后者是 Skill Hub
+    # 的跨项目归并键、也是版本包认逻辑身份的依据，被随手改掉会让同名正本裂开
+    # （详见 ``Skill.display_name`` 的模型注释）。
+    name = serializers.CharField(
+        max_length=128,
+        required=False,
+        allow_blank=True,
+        default='',
+        help_text='展示名称（平台生成、人工确认）；留空则沿用包内 name。不改变 Skill 的逻辑身份',
+    )
+
+    def validate_category(self, value):
+        from knowledge_evolution.capability_registry import normalize_stage_input
+
+        try:
+            # allow_custom=True：上传/导入阶段允许用户自建归属档。
+            return normalize_stage_input(value, allow_custom=True)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
+
+
+class SkillSerializer(serializers.ModelSerializer):
+    """Skill 序列化器"""
+    creator_name = serializers.CharField(source='creator.username', read_only=True, allow_null=True)
+    project_name = serializers.CharField(source='project.name', read_only=True)
+    script_path = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Skill
+        fields = [
+            'id', 'name', 'display_name', 'description', 'skill_content',
+            'skill_path', 'script_path', 'is_active',
+            'project', 'project_name',
+            'creator', 'creator_name',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'name', 'display_name', 'description', 'skill_content',
+            'skill_path', 'creator', 'creator_name',
+            'project_name', 'created_at', 'updated_at'
+        ]
+
+    def get_script_path(self, obj):
+        script_path = obj.get_script_path()
+        if not script_path:
+            return None
+        try:
+            # 条件：脚本路径位于 MEDIA_ROOT 下；动作：转为相对路径；结果：前端拿到可拼接的统一路径格式。
+            media_root = Path(settings.MEDIA_ROOT).resolve(strict=False)
+            candidate = Path(script_path).resolve(strict=False)
+            rel = candidate.relative_to(media_root)
+            return str(rel).replace('\\', '/')
+        except Exception:
+            # 非法路径或越界路径统一返回 None，避免泄露服务端绝对路径。
+            return None
+
+
+class SkillUploadSerializer(SkillCategoryMixin, serializers.Serializer):
+    """Skill 上传序列化器"""
+    version_overrides = serializers.JSONField(required=False, default=dict)
+
+    def validate_version_overrides(self, value):
+        from .import_preview import check_version
+        if not isinstance(value, dict) or len(value) > 50:
+            raise serializers.ValidationError("version_overrides 必须是名称到版本号的对象")
+        try:
+            return {str(name): check_version(version) for name, version in value.items()}
+        except Exception as exc:
+            raise serializers.ValidationError(str(exc))
+
+    file = serializers.FileField(
+        help_text='包含一个或多个 SKILL.md 的 zip 文件'
+    )
+    api_key = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=128,
+        write_only=True,
+        help_text='内部平台 Skill 安装时用户确认的 API Key',
+    )
+
+    def validate_file(self, value):
+        # 只允许 zip 包导入，避免上传任意文件类型触发后续解析异常。
+        if not value.name.endswith('.zip'):
+            raise serializers.ValidationError('只支持 .zip 文件')
+        # 条件：包体积超过 10MB；动作：拒绝；结果：限制单次上传资源消耗。
+        if value.size > 10 * 1024 * 1024:  # 10MB
+            raise serializers.ValidationError('文件大小不能超过 10MB')
+        return value
+
+
+class SkillGitImportSerializer(SkillCategoryMixin, serializers.Serializer):
+    """从 Git 仓库导入 Skill 的序列化器"""
+    git_url = serializers.URLField(
+        help_text='Git 仓库 HTTPS URL'
+    )
+    branch = serializers.CharField(
+        required=False,
+        default='main',
+        allow_blank=True,
+        max_length=256,
+        help_text='分支名（默认 main）'
+    )
+    api_key = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=128,
+        write_only=True,
+        help_text='内部平台 Skill 安装时用户确认的 API Key',
+    )
+
+    def validate_git_url(self, value):
+        from urllib.parse import urlparse
+        parsed = urlparse(value)
+        # 条件：非 HTTPS 协议；动作：拒绝；结果：降低中间人攻击与明文传输风险。
+        if parsed.scheme != 'https':
+            raise serializers.ValidationError('仅支持 HTTPS 协议')
+        if not parsed.hostname:
+            raise serializers.ValidationError('无效的仓库地址')
+        return value
+
+    def validate_branch(self, value):
+        import re
+        value = (value or '').strip()
+        # 空分支名回退 main，保证调用方可省略该字段。
+        if not value:
+            return 'main'
+        # 防止分支参数被解析为命令选项，减少注入面。
+        if value.startswith('-'):
+            raise serializers.ValidationError('分支名不能以 - 开头')
+        if not re.match(r'^[a-zA-Z0-9_./-]+$', value):
+            raise serializers.ValidationError('分支名包含非法字符')
+        return value
+
+
+class SkillZipUrlImportSerializer(SkillCategoryMixin, serializers.Serializer):
+    """从远程 zip URL 导入 Skill 的序列化器（用于 Skill 商店）"""
+    zip_url = serializers.URLField(
+        help_text='zip 包的 HTTPS URL'
+    )
+    sha256 = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=64,
+        help_text='可选：zip 包的 SHA256 校验和（64 位小写 16 进制）'
+    )
+    api_key = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=128,
+        write_only=True,
+        help_text='内部平台 Skill 安装时用户确认的 API Key',
+    )
+
+    def validate_zip_url(self, value):
+        from urllib.parse import urlparse
+        parsed = urlparse(value)
+        # 仅放行 HTTPS，更细粒度的私网/回环 IP 拦截在 model 层下载前做。
+        if parsed.scheme != 'https':
+            raise serializers.ValidationError('仅支持 HTTPS 协议')
+        if not parsed.hostname:
+            raise serializers.ValidationError('无效的 URL')
+        return value
+
+    def validate_sha256(self, value):
+        import re
+        value = (value or '').strip().lower()
+        if not value:
+            return ''
+        # 校验和必须是 64 位 16 进制字符，避免传入异常值后续比对永远失败。
+        if not re.match(r'^[0-9a-f]{64}$', value):
+            raise serializers.ValidationError('SHA256 必须是 64 位小写 16 进制字符')
+        return value
+
+
+class SkillListSerializer(serializers.ModelSerializer):
+    """Skill 列表序列化器（轻量）。
+
+    除基本信息外，额外给出**描述性元数据**字段，供 Skill Hub 的筛选器与卡片标签
+    使用：``source_type``(+label) / ``stage``(+label, +``stage_source``) / ``version``
+    / ``copies``。
+
+    ``stage`` 取「版本 manifest 声明优先，缺失回落管理员补填的 ``declared_stage``」，
+    ``stage_source`` 告诉前端这个阶段是包自己声明的还是管理员补的。
+
+    它们取自"展示版本"（``context["versions"]``：活跃版本优先，否则最新一版），
+    由视图**一次性批量取好**注入 context —— 列表页不许按 Skill 逐个查版本（N+1）。
+    取不到版本时统一返回空串，表示"这个 Skill 还没有版本"，不是错误。
+    """
+
+    creator_name = serializers.CharField(source='creator.username', read_only=True, allow_null=True)
+    description = serializers.SerializerMethodField()
+    source_type = serializers.SerializerMethodField()
+    source_type_label = serializers.SerializerMethodField()
+    stage = serializers.SerializerMethodField()
+    stage_label = serializers.SerializerMethodField()
+    stage_source = serializers.SerializerMethodField()
+    version = serializers.SerializerMethodField()
+    version_sha256 = serializers.SerializerMethodField()
+    version_created_by_name = serializers.SerializerMethodField()
+    version_updated_at = serializers.SerializerMethodField()
+    version_change_reason = serializers.SerializerMethodField()
+    copies = serializers.SerializerMethodField()
+    version_count = serializers.SerializerMethodField()
+    has_evolution = serializers.SerializerMethodField()
+    # T05：产出协议等级。``stage_result_level`` 是 Skill **声明**的等级（来自版本
+    # manifest），``stage_result_last_run`` 是**实测**结论（来自最近一次产出的
+    # 校验摘要）。两个都显示、不合成一个字段，因为"声称 L3"和"跑出来是 L3"
+    # 恰恰是最需要被分开看见的差距。
+    stage_result_level = serializers.SerializerMethodField()
+    stage_result_level_label = serializers.SerializerMethodField()
+    stage_result_capability = serializers.SerializerMethodField()
+    stage_result_last_run = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Skill
+        fields = [
+            'id', 'name', 'display_name', 'description', 'is_active',
+            'creator_name', 'created_at',
+            # 描述性元数据：筛选器与卡片标签用，不参与任何可用性判定。
+            'source_type', 'source_type_label',
+            'stage', 'stage_label', 'stage_source', 'version', 'version_sha256',
+            'version_created_by_name', 'version_updated_at', 'version_change_reason',
+            # 同名副本数（Skill Hub 是公共目录，同名归并成一条展示后，
+            # 要把"库里其实有几份"显式告诉使用者，而不是把多重性藏起来）。
+            'copies', 'version_count', 'has_evolution',
+            # 产出协议等级与最近一次校验结论（T05）。纯描述性元数据，
+            # 不参与可用性判定——可用性判据仍然只有 ``SkillRuntimeResolver`` 一处。
+            'stage_result_level', 'stage_result_level_label',
+            'stage_result_capability', 'stage_result_last_run',
+        ]
+
+    # -- 展示版本（元数据来源，不是可用性判据） ---------------------------
+
+    def _version(self, obj):
+        versions = self.context.get('versions') or {}
+        return versions.get(obj.pk)
+
+    def get_description(self, obj):
+        """平台自动生成用于商店卡片的短简介，不要求上传者额外填写。"""
+        import re
+
+        raw = re.sub(r'\s+', ' ', str(obj.description or '')).strip()
+        first = re.split(r'(?<=[。！？.!?])\s*', raw, maxsplit=1)[0] if raw else ''
+        summary = first or f'提供 {obj.name} 相关的自动化能力。'
+        return summary if len(summary) <= 64 else f'{summary[:61].rstrip()}…'
+
+    def get_source_type(self, obj):
+        version = self._version(obj)
+        if version is None:
+            return ''
+        # Hub 只展示三种用户可理解的来源；Git/商店都是人工导入通道。
+        return version.source_type if version.source_type in ('migration', 'evolution') else 'upload'
+
+    def get_source_type_label(self, obj):
+        version = self._version(obj)
+        if version is None:
+            return ''
+        return {
+            'migration': '存量迁移',
+            'evolution': '自进化生成',
+        }.get(version.source_type, '本地上传')
+
+    def get_stage(self, obj):
+        """展示阶段：版本 manifest 声明的优先，缺失时回落到管理员补填的声明。
+
+        存量迁移来的包 manifest 里没有 stage（`needs_manual_stage_binding`），
+        而版本包不可改写，所以只能在 Skill 上补一个声明位（`declared_stage`）。
+        """
+        stage, _ = self._stage_of(obj)
+        return stage
+
+    def _stage_of(self, obj):
+        """返回 ``(阶段标识符, 来源)``；来源取值 ``manifest`` / ``declared`` / ``''``。
+
+        ⚠️ **顺序不能反：版本包 manifest 声明的阶段优先。** 这是 ``get_stage``、
+        ``DeclaredStageTests`` 与本模块共同声明的口径（``manifest.stage`` >
+        ``declared_stage`` > 未声明）。原实现先判 ``declared``，会让管理员的一次补填
+        **静默盖掉包里自己的声明**，与文档和测试都相反 —— 同一个 Skill 上两个来源
+        打架时，包是更硬的事实（版本包不可变），补填只是存量包缺声明时的回落。
+        """
+        version = self._version(obj)
+        declared_in_manifest = str(
+            ((version.manifest if version is not None else None) or {}).get('stage') or ''
+        )
+        if declared_in_manifest:
+            return declared_in_manifest, 'manifest'
+        declared = str(getattr(obj, 'declared_stage', '') or '')
+        if declared:
+            return declared, 'declared'
+        return '', ''
+
+    def get_stage_source(self, obj):
+        """阶段是从哪来的，供前端区分「包自己声明的」和「管理员补的」。"""
+        return self._stage_of(obj)[1]
+
+    def get_stage_label(self, obj):
+        stage = self.get_stage(obj)
+        if not stage:
+            return ''
+        # 阶段中文名真值在 capability_registry。用户自定义阶段存的是 ``custom:<名称>``，
+        # 展示时要剥掉命名空间前缀、只给名称（``stage_display_label`` 负责这件事）；
+        # 仍未登记的裸标识符原样返回，不编造标签——"看到裸标识符"比"看到编出来的名字"
+        # 更好排查。
+        from knowledge_evolution.capability_registry import stage_display_label
+
+        return stage_display_label(stage)
+
+    def get_version(self, obj):
+        version = self._version(obj)
+        return version.version if version is not None else ''
+
+    def get_version_sha256(self, obj):
+        version = self._version(obj)
+        return version.package_sha256 if version is not None else ''
+
+    def get_version_created_by_name(self, obj):
+        version = self._version(obj)
+        return version.created_by.username if version is not None and version.created_by_id else ''
+
+    def get_version_updated_at(self, obj):
+        version = self._version(obj)
+        return version.updated_at.isoformat() if version is not None and version.updated_at else ''
+
+    def get_version_change_reason(self, obj):
+        version = self._version(obj)
+        return str((version.source_metadata or {}).get('change_reason') or '') if version is not None else ''
+
+    def get_copies(self, obj):
+        """该名字在库里的副本数（1 表示只有一条，>1 说明是归并展示）。"""
+        copies = self.context.get('copies') or {}
+        return int(copies.get(obj.name, 1))
+
+    def get_version_count(self, obj):
+        return int((self.context.get('version_counts') or {}).get(obj.pk, 0))
+
+    def get_has_evolution(self, obj):
+        return bool((self.context.get('evolved_skill_ids') or set()).__contains__(obj.pk))
+
+    # -- 产出协议等级（T05，描述性元数据，不是可用性判据） -----------------
+
+    def _declared_stage_result_level(self, obj):
+        """取 Skill **声明**的 ``stage_result`` 等级，未声明返回空串。
+
+        真值在 ``knowledge_evolution.stage_outputs``（等级集合与回落口径的唯一来源），
+        这里只是把它读出来展示，不另立一套判定。
+        """
+        from knowledge_evolution.stage_outputs import read_declared_level
+
+        version = self._version(obj)
+        if version is None:
+            return ''
+        return read_declared_level(version.manifest)
+
+    def get_stage_result_level(self, obj):
+        return self._declared_stage_result_level(obj)
+
+    def get_stage_result_level_label(self, obj):
+        from knowledge_evolution.stage_outputs import level_label
+
+        level = self._declared_stage_result_level(obj)
+        return level_label(level) if level else ''
+
+    def get_stage_result_capability(self, obj):
+        from knowledge_evolution.stage_outputs import COMPATIBILITY_CAPABILITIES
+
+        level = self._declared_stage_result_level(obj)
+        return COMPATIBILITY_CAPABILITIES.get(level, '') if level else ''
+
+    def get_stage_result_last_run(self, obj):
+        """最近一次运行的校验结论；从没跑过受控阶段时返回 ``None``。
+
+        返回 ``None`` 而不是一个"空结论"对象：页面要区分"没跑过"和"跑了但没提交
+        信封"，后者是 ``result_marker = structured_protocol_failure``。
+        """
+        runs = self.context.get('stage_result_runs') or {}
+        return runs.get(obj.pk) or None
+
+
+class SkillToggleSerializer(serializers.ModelSerializer):
+    """Skill 启用/禁用切换序列化器"""
+
+    class Meta:
+        model = Skill
+        fields = ['is_active']
+
+
+class SkillStageBindingSerializer(serializers.Serializer):
+    """给 Skill 补填 / 撤销能力阶段（Skill Hub「阶段未声明」的补救入口）。
+
+    为什么归一化服务端说了算：写进 ``declared_stage`` 的裸标识符会一路走进阶段匹配
+    逻辑（``task_binding`` 的 ``Q(declared_stage=stage)``）。拼错的阶段**不会报错**，
+    只会让这个 Skill 永远匹配不上任何阶段——那种问题在页面上看起来和"没填"一样，
+    极难排查。所以规范阶段只认登记过的那九项。
+
+    取值分两类（归一化真值 = ``capability_registry.normalize_stage_input``）：
+
+    * 规范阶段 —— ``SKILL_STAGE_OPTIONS``（8 类业务能力 + 平台基础能力）的标识符或
+      其中文名。**不含** ``knowledge_query``：它属 ``PLATFORM_UTILITY_STAGES``
+      （平台工具），不参与业务能力口径，也不该被绑成某个阶段的实现；
+    * 自定义阶段 —— 用户自己敲的名称，存 ``custom:<名称>``。它与
+      ``platform_base`` 同语义：只是归属标签，**永远匹配不上**
+      ``Q(declared_stage=stage)`` 的阶段检索。上传时允许自建，补填时也必须允许，
+      否则用户在导入环节填错的归属档事后改不回来。
+
+    空串表示撤销声明（允许，否则填错了退不回去）。
+    """
+    description = serializers.CharField(required=False, allow_blank=False, max_length=200)
+
+    stage = serializers.CharField(required=True, allow_blank=True, max_length=64)
+
+    def validate_stage(self, value):
+        from knowledge_evolution.capability_registry import normalize_stage_input
+
+        # 先判空：空串是"撤销声明"的语义，不能交给归一化器（它会当成缺失报错）。
+        value = (value or '').strip()
+        if not value:
+            return ''
+        try:
+            return normalize_stage_input(value, allow_custom=True)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Skill 版本（T02/T06/T07）
+# ---------------------------------------------------------------------------
+
+
+class SkillVersionSerializer(serializers.ModelSerializer):
+    """版本详情。``state`` 来自关联发布单元，不是本模型字段，因此显式声明只读。"""
+
+    state = serializers.CharField(read_only=True)
+    download_available = serializers.SerializerMethodField()
+    archived = serializers.SerializerMethodField()
+    can_archive = serializers.SerializerMethodField()
+
+    def get_download_available(self, obj):
+        root = obj.get_full_path()
+        return bool(root and (Path(root) / "SKILL.md").is_file())
+
+    def get_archived(self, obj):
+        return "hub_deleted_at" in (obj.source_metadata or {})
+
+    def get_can_archive(self, obj):
+        if self.get_archived(obj):
+            return False
+        from django.db.models import Q
+        return not SkillVersion.objects.filter(skill__name=obj.skill.name, version=obj.version, package_sha256=obj.package_sha256).filter(Q(active_for_skills__isnull=False) | Q(release__state='active')).exists()
+
+    # 发布单元主键。控制台要拿它去调 ``capability-releases/{id}/approval-view/``
+    # 与 ``bindings/``；没有这个字段，前端只能按 (name, version) 去猜关联关系，
+    # 而关联本来就在库里，不该由前端重建。
+    release_id = serializers.UUIDField(read_only=True, allow_null=True)
+    skill_name = serializers.CharField(source='skill.name', read_only=True)
+    created_by_name = serializers.CharField(
+        source='created_by.username', read_only=True, allow_null=True,
+    )
+    stage = serializers.SerializerMethodField()
+    entrypoint = serializers.SerializerMethodField()
+    change_reason = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SkillVersion
+        fields = [
+            'id', 'skill', 'skill_name', 'version', 'state', 'release_id',
+            'download_available', 'archived', 'can_archive',
+            'package_sha256', 'manifest', 'validation_report',
+            'source_type', 'source_metadata', 'previous_version',
+            'stage', 'entrypoint',
+            'change_reason',
+            'created_by', 'created_by_name', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'skill', 'skill_name', 'version', 'state', 'release_id',
+            'download_available', 'archived', 'can_archive',
+            'package_sha256', 'manifest', 'validation_report',
+            'source_type', 'source_metadata', 'previous_version',
+            'stage', 'entrypoint',
+            'created_by', 'created_by_name', 'created_at', 'updated_at',
+        ]
+
+    def get_stage(self, obj) -> str:
+        return obj.manifest_stage()
+
+    def get_entrypoint(self, obj) -> str:
+        return obj.manifest_entrypoint()
+
+    def get_change_reason(self, obj) -> str:
+        return str((obj.source_metadata or {}).get('change_reason') or '')
+
+
+class SkillVersionListSerializer(serializers.ModelSerializer):
+    """版本列表（轻量）：不含 manifest 与校验报告，避免列表接口体积膨胀。"""
+
+    state = serializers.CharField(read_only=True)
+    created_by_name = serializers.CharField(source='created_by.username', read_only=True, allow_null=True)
+    change_reason = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SkillVersion
+        fields = ['id', 'version', 'state', 'package_sha256', 'source_type', 'created_at', 'updated_at', 'created_by_name', 'change_reason']
+
+    def get_change_reason(self, obj):
+        return str((obj.source_metadata or {}).get('change_reason') or '')
+
+
+class SkillPreflightSerializer(serializers.Serializer):
+    """包预检请求：只上传文件，校验结果与短期令牌在响应里返回。"""
+
+    file = serializers.FileField(help_text='包含 SKILL.md 的技能包 zip')
+
+    def validate_file(self, value):
+        if not (value.name or '').lower().endswith('.zip'):
+            raise serializers.ValidationError('只支持 .zip 文件')
+        # 与 ``validation.MAX_TOTAL_UNCOMPRESSED``（50MB）配套：压缩包本身不该更大。
+        if value.size > 20 * 1024 * 1024:
+            raise serializers.ValidationError('文件大小不能超过 20MB')
+        return value
+
+
+class SkillCandidateCreateSerializer(serializers.Serializer):
+    version_override = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    """用预检令牌创建候选版本。"""
+
+    token = serializers.CharField(help_text='预检接口返回的短期令牌')
+    change_reason = serializers.CharField(
+        required=False, allow_blank=True, max_length=500,
+        help_text='变更原因，工作台会展示给审批人',
+    )
+    expected_benefit = serializers.CharField(
+        required=False, allow_blank=True, max_length=500, help_text='预期收益',
+    )
+    impact_scope = serializers.CharField(
+        required=False, allow_blank=True, max_length=500, help_text='影响范围',
+    )
+    api_key = serializers.CharField(
+        required=False, allow_blank=True, max_length=128, write_only=True,
+        help_text='内部平台 Skill 安装时用户确认的 API Key',
+    )
+
+
+class SkillVersionDiffQuerySerializer(serializers.Serializer):
+    """版本 diff 的查询参数；``base`` 缺省时与上一版本比较。"""
+
+    base = serializers.UUIDField(required=False, allow_null=True)
+
+
+class SkillQuarantineSerializer(serializers.Serializer):
+    """隔离请求：原因必填（R12 要求安全事件必须留痕）。"""
+
+    reason = serializers.CharField(max_length=500)
+
+
+class SkillVersionValidateSerializer(serializers.Serializer):
+    """提交静态校验请求。
+
+    ``reason`` 可选：校验本身会产出逐条报告，报告就是最好的说明，
+    不像隔离那种安全事件必须由人补上"为什么"。把它做成必填只会逼出
+    "校验""提交"这类无信息量的原因。
+    """
+
+    reason = serializers.CharField(
+        required=False, allow_blank=True, max_length=500,
+        help_text='可选：提交校验的说明',
+    )

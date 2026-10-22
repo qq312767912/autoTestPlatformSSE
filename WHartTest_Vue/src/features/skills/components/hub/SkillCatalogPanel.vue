@@ -83,6 +83,14 @@
                   {{ item.quarantinedCount }} 个隔离
                 </span>
               </div>
+              <div v-if="item.activeVersion" class="catalog__item-version">
+                v{{ item.activeVersion.version }} · sha {{ item.activeVersion.package_sha256?.slice(0, 10) }} · {{ item.activeVersion.created_by_name || item.creator_name || '未知用户' }}
+              </div>
+              <div v-if="item.id === selectedSkillId && item.versions.length > 1" class="catalog__versions-inline">
+                <div v-for="version in item.versions" :key="version.id" class="catalog__version-row">
+                  <span>v{{ version.version }}</span><span>sha {{ version.package_sha256.slice(0, 10) }}</span><span>{{ version.created_by_name || item.creator_name || '未知用户' }}</span>
+                </div>
+              </div>
               <div v-if="item.versionsError" class="catalog__item-error">
                 {{ item.versionsError }}
               </div>

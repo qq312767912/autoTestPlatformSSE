@@ -104,22 +104,14 @@
               <a-empty v-else description="请先选择已拆解的文档" />
             </a-form-item>
 
-            <a-grid :cols="2" :col-gap="16">
-              <a-grid-item>
-                <a-form-item label="提示词">
-                  <a-select v-model="form.promptId" allow-clear :loading="loadingPrompts" placeholder="可选，不选则使用系统默认">
-                    <a-option v-for="prompt in prompts" :key="prompt.id" :value="prompt.id">{{ prompt.name }}</a-option>
-                  </a-select>
-                </a-form-item>
-              </a-grid-item>
-              <a-grid-item>
-                <a-form-item label="知识库">
-                  <a-select v-model="form.knowledgeBaseIds" multiple allow-clear :loading="loadingKnowledge" placeholder="可选">
-                    <a-option v-for="kb in knowledgeBases" :key="kb.id" :value="kb.id">{{ kb.name }}</a-option>
-                  </a-select>
-                </a-form-item>
-              </a-grid-item>
-            </a-grid>
+            <a-form-item label="知识库">
+              <a-select v-model="form.knowledgeBaseIds" multiple allow-clear :loading="loadingKnowledge" placeholder="可选">
+                <a-option v-for="kb in knowledgeBases" :key="kb.id" :value="kb.id">{{ kb.name }}</a-option>
+              </a-select>
+              <template #extra>
+                方案生成使用平台固定质量要求；具体 Skill 由上方所选版本或质量飞轮锁定版本决定。
+              </template>
+            </a-form-item>
 
             <KnowledgeDocumentScopeSelector
               v-if="form.knowledgeBaseIds.length"
@@ -194,6 +186,29 @@
                   </div>
                 </div>
 
+                <a-collapse v-if="historicalArtifacts.length" class="other-collapse" :bordered="false">
+                  <a-collapse-item key="history" :header="`历史版本（${historicalArtifacts.length} 个）`">
+                    <div class="artifact-history-hint">历史产物按执行批次保留，重新生成不会覆盖原文件。</div>
+                    <div class="artifact-list">
+                      <div v-for="file in historicalArtifacts" :key="file.url" class="artifact-item artifact-item-quiet">
+                        <IconFile class="artifact-icon artifact-icon-quiet" />
+                        <div class="artifact-main">
+                          <div class="artifact-name" :title="file.name">{{ file.name }}</div>
+                          <div class="artifact-meta">
+                            <span>历史产物</span>
+                            <span v-if="fileExtLabel(file)">{{ fileExtLabel(file) }}</span>
+                            <span v-if="formatSize(file.size)">{{ formatSize(file.size) }}</span>
+                          </div>
+                        </div>
+                        <div class="artifact-actions">
+                          <a :href="file.url" target="_blank" rel="noopener noreferrer" class="artifact-action">打开</a>
+                          <a :href="file.url" :download="file.name" class="artifact-action">下载</a>
+                        </div>
+                      </div>
+                    </div>
+                  </a-collapse-item>
+                </a-collapse>
+
                 <a-collapse v-if="intermediateArtifacts.length" class="other-collapse" :bordered="false">
                   <a-collapse-item key="others" :header="`其他文件（${intermediateArtifacts.length} 个，含中间过程产物）`">
                     <div class="artifact-list">
@@ -229,6 +244,26 @@
               <a-empty v-else description="完成左侧配置后生成测试方案" />
             </template>
 
+            <a-collapse v-if="historicalOutputs.length" class="raw-collapse" :bordered="false">
+              <a-collapse-item key="historical" :header="`历史产出（${historicalOutputs.length} 个批次）`">
+                <div class="artifact-history-hint">历史批次只读保留，重新生成不会覆盖；展开可查看当时的产出正文和登记文件。</div>
+                <div v-for="item in historicalOutputs" :key="item.id" class="historical-output-item">
+                  <div class="historical-output-head">
+                    <span>{{ formatHistoryDate(item.created_at) }} · {{ item.prompt_version || '默认提示词' }}</span>
+                    <span>{{ historyFiles(item).length }} 个文件</span>
+                  </div>
+                  <div class="artifact-list">
+                    <div v-for="file in historyFiles(item)" :key="`${item.id}-${file.key || file.name}`" class="artifact-item artifact-item-quiet">
+                      <IconFile class="artifact-icon artifact-icon-quiet" />
+                      <div class="artifact-main"><div class="artifact-name">{{ file.name }}</div><div class="artifact-meta">历史批次 · {{ formatSize(file.size) }}</div></div>
+                      <a-button size="mini" type="text" @click="downloadHistoricalArtifact(item, file)">下载</a-button>
+                    </div>
+                  </div>
+                  <pre class="result-content historical-output-content">{{ item.content }}</pre>
+                </div>
+              </a-collapse-item>
+            </a-collapse>
+
             <a-collapse v-if="sessionId && streamContent && !isStreaming && !restoring" class="raw-collapse" :bordered="false">
               <a-collapse-item key="raw" header="查看 Skill 原始输出">
                 <pre class="result-content">{{ streamContent }}</pre>
@@ -249,13 +284,11 @@ import { IconFile } from '@arco-design/web-vue/es/icon';
 import { useProjectStore } from '@/store/projectStore';
 import { RequirementDocumentService } from '@/features/requirements/services/requirementService';
 import type { DocumentCategory, DocumentModule, RequirementDocument } from '@/features/requirements/types';
-import { getUserPrompts } from '@/features/prompts/services/promptService';
-import type { UserPrompt, UserPromptListResponseData } from '@/features/prompts/types/prompt';
 import { KnowledgeService } from '@/features/knowledge/services/knowledgeService';
 import type { KnowledgeBase } from '@/features/knowledge/types/knowledge';
 import KnowledgeDocumentScopeSelector from '@/features/knowledge/components/KnowledgeDocumentScopeSelector.vue';
-import { getExecutionContext, getWorkflowStageCatalog } from '@/features/knowledge-evolution/service';
-import type { ExecutionContextView, WorkflowCatalogSkill } from '@/features/knowledge-evolution/types';
+import { downloadGenerationOutputArtifact, getExecutionContext, getWorkflowStageCatalog, listGenerationOutputs } from '@/features/knowledge-evolution/service';
+import type { ExecutionContextView, WorkflowCatalogSkill, GenerationOutput } from '@/features/knowledge-evolution/types';
 import { activeStreams, getChatHistory, sendChatMessageStream } from '@/features/langgraph/services/chatService';
 import type { ChatHistoryMessage, ChatRequest } from '@/features/langgraph/types/chat';
 import { parseToolResultDisplayPayload } from '@/features/langgraph/utils/toolResultParser';
@@ -293,7 +326,6 @@ const parentOutputIds = computed(() => {
 const loadingSkills = ref(false);
 const loadingDocuments = ref(false);
 const loadingModules = ref(false);
-const loadingPrompts = ref(false);
 const loadingKnowledge = ref(false);
 const generating = ref(false);
 const sessionId = ref('');
@@ -302,9 +334,9 @@ const sessionId = ref('');
 const restoring = ref(false);
 const historyArtifacts = ref<ToolFileAttachment[]>([]);
 const historyContent = ref('');
+const historicalOutputs = ref<GenerationOutput[]>([]);
 const documents = ref<RequirementDocument[]>([]);
 const modules = ref<SelectedModule[]>([]);
-const prompts = ref<UserPrompt[]>([]);
 const knowledgeBases = ref<KnowledgeBase[]>([]);
 const planSkills = ref<WorkflowCatalogSkill[]>([]);
 
@@ -312,7 +344,6 @@ const form = reactive({
   skillVersionId: '',
   documentIds: [] as string[],
   moduleIds: [] as string[],
-  promptId: undefined as number | undefined,
   knowledgeBaseIds: [] as string[],
   knowledgeDocumentScope: 'all' as 'all' | 'selected',
   knowledgeDocumentIds: [] as string[],
@@ -328,6 +359,36 @@ const isStreaming = computed(() => {
   const state = streamState.value;
   return Boolean(state && !state.isComplete && !state.error);
 });
+
+function formatHistoryDate(value: string) {
+  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '未知时间';
+}
+
+function historyFiles(item: GenerationOutput): Array<{ name: string; key?: string; size?: number }> {
+  const raw = item.metadata?.artifacts;
+  return Array.isArray(raw) ? raw.filter((entry): entry is { name: string; key?: string; size?: number } => Boolean(entry && typeof entry === 'object' && typeof (entry as Record<string, unknown>).name === 'string')) : [];
+}
+
+async function downloadHistoricalArtifact(item: GenerationOutput, file: { name: string; key?: string }) {
+  try {
+    await downloadGenerationOutputArtifact(item.id, file.name, file.key || '');
+    Message.success(`已下载 ${file.name}`);
+  } catch {
+    Message.error('历史文件下载失败，文件可能已被清理');
+  }
+}
+
+async function loadHistoricalOutputs() {
+  const projectId = projectStore.currentProjectId;
+  if (!projectId) return;
+  try {
+    historicalOutputs.value = (await listGenerationOutputs(Number(projectId), 'test_plan_generation'))
+      .filter(item => item.id !== executionContext.value?.attempt_id)
+      .slice(0, 10);
+  } catch {
+    historicalOutputs.value = [];
+  }
+}
 
 const stepLabel = computed(() => {
   const state = streamState.value;
@@ -391,7 +452,10 @@ const INTERMEDIATE_PATTERNS: RegExp[] = [
   /(?:模板|样例|示例)(?:[_\-.]|$)/,
 ];
 
-const DELIVERABLE_HINT = /(测试方案|test[_\s-]?plan)/i;
+const PLAN_WORKBOOK_PATTERN = /(?:^|\/).+_测试方案_V[^/]+\.xlsx$/i;
+const PLAN_GUIDE_PATTERN = /(?:^|\/).+_测试方案说明_V[^/]+\.md$/i;
+const REQUIREMENTS_PATTERN = /(?:^|\/)requirements_parsed\.json$/i;
+const DELIVERABLE_HINT = /(测试方案|test[_\s-]?plan|requirements_parsed)/i;
 
 // 产物文件取工具结果里的 file 附件（后端 execute_skill_script 已把落盘文件转成可下载 URL）；
 // 来源有两处：本次页面内 streaming 的消息、以及从历史会话回填的消息。同名文件只保留最后一次生成的版本。
@@ -408,9 +472,7 @@ const allArtifacts = computed<ToolFileAttachment[]>(() => {
       if (file?.url) byUrl.set(file.url, file);
     }
   }
-  const byName = new Map<string, ToolFileAttachment>();
-  for (const file of byUrl.values()) byName.set(file.name, file);
-  return [...byName.values()].sort((a, b) => {
+  return [...byUrl.values()].sort((a, b) => {
     const rankA = EXT_PRIORITY[fileExt(a.name)] ?? 9;
     const rankB = EXT_PRIORITY[fileExt(b.name)] ?? 9;
     return rankA - rankB;
@@ -419,16 +481,38 @@ const allArtifacts = computed<ToolFileAttachment[]>(() => {
 
 const isIntermediate = (file: ToolFileAttachment) => INTERMEDIATE_PATTERNS.some(pattern => pattern.test(file.name));
 
-// 主产物优先按交付物关键词识别；识别不到时退回“非过程文件”，保证文件总能被看到。
+const isPlanDeliverable = (file: ToolFileAttachment) => (
+  PLAN_WORKBOOK_PATTERN.test(file.name)
+  || PLAN_GUIDE_PATTERN.test(file.name)
+  || REQUIREMENTS_PATTERN.test(file.name)
+);
+
+// 新协议严格展示三件人工交付物；存量批次仍用关键词兜底，避免历史文件失踪。
 const primaryArtifacts = computed(() => {
   const candidates = allArtifacts.value.filter(file => !isIntermediate(file));
+  const contracted = candidates.filter(isPlanDeliverable);
+  if (contracted.length) return latestByName(contracted);
   const hinted = candidates.filter(file => DELIVERABLE_HINT.test(file.name));
-  return hinted.length ? hinted : candidates;
+  return hinted.length ? latestByName(hinted) : latestByName(candidates);
+});
+
+const latestByName = (files: ToolFileAttachment[]) => {
+  const latest = new Map<string, ToolFileAttachment>();
+  for (const file of files) latest.set(file.name, file);
+  return [...latest.values()];
+};
+
+const historicalArtifacts = computed(() => {
+  const primaryUrls = new Set(primaryArtifacts.value.map(file => file.url));
+  return allArtifacts.value.filter(file => (
+    !primaryUrls.has(file.url) && !isIntermediate(file) && isPlanDeliverable(file)
+  ));
 });
 
 const intermediateArtifacts = computed(() => {
+  const hiddenHistoryUrls = new Set(historicalArtifacts.value.map(file => file.url));
   const primaryUrls = new Set(primaryArtifacts.value.map(file => file.url));
-  return allArtifacts.value.filter(file => !primaryUrls.has(file.url));
+  return allArtifacts.value.filter(file => !primaryUrls.has(file.url) && !hiddenHistoryUrls.has(file.url));
 });
 
 const categoryLabels: Record<DocumentCategory, string> = {
@@ -508,32 +592,26 @@ async function handleDocumentChange(value: unknown) {
 }
 
 async function loadAuxiliaryData() {
-  loadingPrompts.value = true;
   loadingKnowledge.value = true;
   try {
-    const [promptResponse, kbResponse] = await Promise.all([getUserPrompts({ prompt_type: 'general' }), KnowledgeService.getKnowledgeBases({})]);
-    prompts.value = promptResponse.status === 'success'
-      ? toArray<UserPrompt>((promptResponse.data as UserPromptListResponseData | null)?.results ?? promptResponse.data)
-      : [];
+    const kbResponse = await KnowledgeService.getKnowledgeBases({});
     knowledgeBases.value = toArray<KnowledgeBase>('results' in kbResponse ? kbResponse.results : kbResponse);
   } catch {
-    Message.warning('部分可选配置加载失败，不影响使用已加载的文档生成');
+    Message.warning('知识库配置加载失败，不影响使用已加载的文档生成');
   } finally {
-    loadingPrompts.value = false;
     loadingKnowledge.value = false;
   }
 }
 
 function buildMessage(selectedModules: SelectedModule[]) {
   const context = selectedModules.map((module, index) => `---\n[文档来源]\n${categoryLabels[module.documentCategory]}：《${module.documentTitle}》（ID: ${module.documentId}）\n\n[模块 ${index + 1}] ${module.title}\n${module.content}\n${module.confirmed_image_context ? `\n[人工确认的图片识别上下文]\n${module.confirmed_image_context}` : ''}\n---`).join('\n\n');
-  return `请严格使用本轮选定的 Skill 和以下已确认文档模块，生成一份可执行的测试方案。
+  return `请基于以下已确认文档模块生成可执行、可追溯的测试方案。平台会在运行时注入本轮锁定的 Skill，请遵循该 Skill 的具体操作要求。
 
-方案至少包含：测试目标、范围与非范围、风险分析、测试策略、环境与数据、关键场景、进入/退出准则、进度与交付物。对不确定内容明确标注，禁止臆造。
+除完整方案外，必须产出测试点清单。每条测试点至少包含：稳定 ID、所属模块、标题或测试目标、场景类型、优先级、关联需求 ID、预期结果；无法从材料确认的内容放入“不确定项”，禁止臆造。测试点不得只写在概述中，必须同时进入主产物和 stage_result.json 的 items。
 
-[交付物要求]
-- 主产物必须以文件形式落盘（优先 .xlsx 测试方案表，其次 Markdown 说明稿），结构化数据另附 .json。
-- 最终回复中不要粘贴方案正文，只用不超过 10 行列出产出文件名与一句话说明。
-- 文件命名保持稳定、可识别，便于后续流程按名称引用。
+人工交付物必须同时生成：{项目名}_测试方案_V{版本}.xlsx、{项目名}_测试方案说明_V{版本}.md、requirements_parsed.json。版本缺失时使用 1.0。Excel 固定包含测试点明细、目标与范围、策略、环境与数据、进入与退出准则、风险与待确认项、需求功能点与覆盖工作表。
+
+另外生成符合 stage-result/v1 的 stage_result.json，仅用于质量飞轮，不计入三件人工交付物。最终回复不要粘贴方案正文，只列出文件名与一句话说明。
 
 ${context}
 
@@ -625,9 +703,6 @@ async function refreshArtifacts() {
 function persistConversationContext(id: string) {
   localStorage.setItem(planSessionKey(), id);
   localStorage.setItem('langgraph_session_id', id);
-  if (form.promptId) {
-    localStorage.setItem('wharttest_selected_prompt_id', String(form.promptId));
-  }
   localStorage.setItem('langgraph_knowledge_settings', JSON.stringify({
     useKnowledgeBase: form.knowledgeBaseIds.length > 0,
     selectedKnowledgeBaseIds: form.knowledgeBaseIds,
@@ -742,7 +817,6 @@ async function generatePlan() {
     project_id: String(projectStore.currentProjectId),
     module_key: 'test_plan_generation',
     skill_version_id: form.skillVersionId,
-    prompt_id: form.promptId,
     use_knowledge_base: form.knowledgeBaseIds.length > 0,
     knowledge_base_ids: form.knowledgeBaseIds,
     knowledge_document_ids: form.knowledgeDocumentScope === 'selected' ? form.knowledgeDocumentIds : undefined,
@@ -775,6 +849,7 @@ function openConversation() {
 
 onMounted(async () => {
   await loadAuxiliaryData();
+  await loadHistoricalOutputs();
 });
 
 // projectStore 的当前项目在 onMounted 时可能尚未恢复，用 watch 保证恢复后自动加载，
@@ -790,7 +865,7 @@ watch(() => projectStore.currentProjectId, async (projectId) => {
   sessionId.value = '';
   historyArtifacts.value = [];
   historyContent.value = '';
-  await Promise.all([loadSkills(), loadDocuments(), loadSessionArtifacts()]);
+  await Promise.all([loadSkills(), loadDocuments(), loadSessionArtifacts(), loadHistoricalOutputs()]);
   // 上下文解析必须排在 Skill 加载**之后**：受控模式下它会用锁定版本覆盖选择器，
   // 顺序相反时 loadSkills 的"默认版本"会盖掉锁定版本，
   // 于是页面显示 A、流程记录的是 B —— 正是本设计要消灭的两套说法。
@@ -853,10 +928,14 @@ watch(() => projectStore.currentProjectId, async (projectId) => {
 .other-collapse :deep(.arco-collapse-item-header) { padding-right: 0; padding-left: 0; color: var(--color-text-3); font-size: 13px; }
 .artifact-item-quiet { padding: 8px 10px; background: transparent; border: 1px solid var(--color-border-2); }
 .artifact-icon-quiet { color: var(--color-text-3); }
+.artifact-history-hint { margin: 0 0 8px; color: var(--color-text-3); font-size: 12px; }
 
 .empty-hint { color: var(--color-text-3); font-size: 13px; line-height: 1.7; }
 .empty-hint p { margin: 0; }
 
 .raw-collapse { margin-top: auto; border-top: 1px solid var(--color-border-2); }
 .result-content { max-height: 320px; margin: 0; padding: 12px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--color-fill-2); border-radius: 6px; font: inherit; font-size: 12px; line-height: 1.7; }
+.historical-output-item { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.historical-output-head { display: flex; justify-content: space-between; color: var(--color-text-3); font-size: 12px; }
+.historical-output-content { max-height: 220px; }
 </style>

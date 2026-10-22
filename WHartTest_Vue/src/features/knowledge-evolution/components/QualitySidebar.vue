@@ -14,13 +14,17 @@
             :auto-upload="false"
             :limit="1"
             accept=".xlsx"
+            :disabled="submittingReport"
             :show-retry-button="false"
             :file-list="reportFileList"
             @change="onReportChange"
-          />
-          <a-button type="primary" long :disabled="!reportFile" :loading="submittingReport" @click="submitReport">
-            上传报告并记录采纳率
-          </a-button>
+          >
+            <template #upload-button>
+              <a-button type="primary" long :loading="submittingReport">
+                上传报告并记录采纳率
+              </a-button>
+            </template>
+          </a-upload>
           <div v-if="reportResult" class="report-result">
             <b>{{ reportResult.scan.acceptance_score }}%</b>
             <span>报告采纳率</span>
@@ -197,9 +201,10 @@ async function submit(output: GenerationOutput, signal: FeedbackEvent['signal'])
   }
 }
 
-function onReportChange(fileList: FileItem[]) {
+async function onReportChange(fileList: FileItem[]) {
   reportFileList.value = (fileList || []).slice(-1);
   reportResult.value = null;
+  if (reportFile.value) await submitReport();
 }
 
 async function submitReport() {
@@ -223,7 +228,14 @@ async function submitReport() {
 }
 
 function goToEvolution() {
-  router.push('/knowledge-evolution');
+  router.push({
+    path: '/knowledge-evolution',
+    query: {
+      view: 'data',
+      action: 'case-review-evolution',
+      review_id: String(props.taskId),
+    },
+  });
   close();
 }
 

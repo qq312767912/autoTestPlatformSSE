@@ -554,6 +554,15 @@ def validate_manifest(root: Path, manifest: dict) -> list:
                 message=f"manifest 未声明 {key}（允许，缺省时按指令型 Skill 处理）",
             ))
 
+    if 'report' in manifest:
+        try:
+            from testcases.skill_report import validate_sheets
+            report = manifest['report']
+            if not isinstance(report, dict):
+                raise ValidationError('report 必须是对象')
+            validate_sheets(report.get('sheets', []))
+        except ValidationError as exc:
+            issues.append(ValidationIssue(code='bad_report', path='SKILL.md', message='；'.join(exc.messages)))
     version = manifest.get("version")
     if isinstance(version, str) and version.strip():
         if not re.match(r"^[0-9]+(\.[0-9]+){1,3}([-+][A-Za-z0-9.\-]+)?$", version.strip()):

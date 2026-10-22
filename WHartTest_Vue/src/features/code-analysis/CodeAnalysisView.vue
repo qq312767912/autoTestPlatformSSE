@@ -116,6 +116,7 @@
           <div class="report-summary">
             <span>核心问题 <b>{{ selectedTask.change_report?.summary?.risk_count || 0 }}</b></span>
             <span class="risk-number">高风险 <b>{{ selectedTask.change_report?.summary?.high_risk_count || 0 }}</b></span>
+            <span>未完成反证 <b>{{ selectedTask.change_report?.summary?.unverified_risk_count || 0 }}</b></span>
           </div>
           <div v-if="selectedTask.change_report?.summary?.suppressed_risk_count" class="ocr-fallback-note">已全量扫描 {{ selectedTask.change_report.summary.candidate_risk_count }} 条候选，开发报告仅保留 {{ selectedTask.change_report.summary.risk_count }} 条核心问题；其中反证排除 {{ selectedTask.change_report.summary.rejected_risk_count || 0 }} 条，其余低优先级或低证据候选不占用开发阅读篇幅。</div>
           <div v-if="selectedTask.change_report?.summary?.source_counts" class="quality-breakdown"><b>风险来源</b><span v-for="(count, source) in selectedTask.change_report.summary.source_counts" :key="source">{{ sourceName(String(source)) }} {{ count }}</span></div>
@@ -128,13 +129,18 @@
             <div class="finding-head"><div><a-tag :color="severityColor(item.severity)">{{ severityLabel(item.severity) }}</a-tag><strong>{{ item.change }}</strong></div><span class="confidence">{{ sourceName(item.source) }} · {{ item.verified === false ? '待人工确认' : confidenceText(item.confidence) }}</span></div>
             <div class="verification-strip">
               <a-tag :color="verificationColor(item)">{{ verificationLabel(item) }}</a-tag>
-              <span>目标 Commit {{ item.target_commit_verified === false ? '未完成验证' : '已核验' }}</span>
+              <span>目标 Commit {{ item.target_commit_verified === true ? '已核验' : '未完成验证/历史未记录' }}</span>
               <span>触发路径 {{ item.trigger_reachable === false ? '未证明可达' : '已证明/待确认' }}</span>
             </div>
             <p>{{ item.file }} <a-tag class="risk-type" color="gray">{{ riskType(item) }}</a-tag></p>
             <div class="code-snippet"><div class="snippet-caption"><span>风险凭据</span><small>{{ item.line_start ? `旧版本第 ${item.line_start} 行` : '未定位源码行' }}</small></div><div v-for="(line, index) in evidenceLines(item)" :key="index" class="snippet-line"><span>{{ item.line_start ? item.line_start + index : '—' }}</span><code>{{ line || ' ' }}</code></div></div>
             <div class="finding-detail"><b>影响：</b><span>{{ item.impact || '需结合代码上下文和完整 Diff 确认实际影响范围' }}</span></div>
             <div v-if="item.verification_reason" class="finding-detail"><b>核验结论：</b><span>{{ item.verification_reason }}</span></div>
+            <div v-if="item.change_kind" class="finding-detail"><b>变更对齐：</b><span>{{ item.change_kind }}{{ item.subject ? ` · ${item.subject}` : '' }}</span></div>
+            <div v-if="item.replacement_evidence" class="finding-detail"><b>替代证据：</b><span>{{ item.replacement_evidence }}</span></div>
+            <div v-if="item.missing_evidence" class="finding-detail"><b>缺少的证据：</b><span>{{ item.missing_evidence }}</span></div>
+            <div v-if="item.severity_reason" class="finding-detail"><b>定级依据：</b><span>{{ item.severity_reason }}</span></div>
+            <div v-for="document in item.document_references || []" :key="document.document_id" class="finding-detail"><b>关联文档：</b><span>{{ document.title || '未命名' }}（版本 {{ document.version || '未记录' }}）：{{ document.excerpt || document.reason || '无可用片段' }}</span></div>
             <div v-if="evidenceList(item.supporting_evidence).length" class="verification-evidence supporting"><b>支持证据</b><ul><li v-for="evidence in evidenceList(item.supporting_evidence)" :key="evidence">{{ evidence }}</li></ul></div>
             <div v-if="evidenceList(item.counter_evidence).length" class="verification-evidence counter"><b>反证/保护逻辑</b><ul><li v-for="evidence in evidenceList(item.counter_evidence)" :key="evidence">{{ evidence }}</li></ul></div>
             <div class="finding-detail"><b>建议：</b><span>{{ item.recommendation || '覆盖相关正常流程、异常分支及调用链后再决定是否修复' }}</span></div>
@@ -446,7 +452,7 @@ const entityTitle = (entity:GraphEntity) => entity.name || entity.qualified_name
 const entityPath = (entity:GraphEntity) => entity.file_path || entity.file || (entity.source && entity.target ? `${entity.source} → ${entity.target}` : '');
 const durationText = (value?:number) => value ? (value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${value} ms`) : '—';
 const evidenceList = (value?:string|string[]) => Array.isArray(value) ? value.filter(Boolean) : (value ? [value] : []);
-const verificationLabel = (item:Finding) => ({supported:'反证通过',partially_supported:'部分支持',refuted:'已驳回',inconclusive:'证据不足',verification_failed:'核验失败'} as Record<string,string>)[item.verification_status || ''] || (item.disposition === 'confirmed' ? '反证通过' : (item.disposition === 'advisory' ? '改进建议' : '待确认'));
+const verificationLabel = (item:Finding) => ({supported:'反证通过',partially_supported:'部分支持',refuted:'已驳回',inconclusive:'证据不足',verification_failed:'核验失败',not_verified:'未进入反证',direct_evidence_fallback:'直接证据兜底'} as Record<string,string>)[item.verification_status || ''] || (item.disposition === 'confirmed' ? '反证通过' : (item.disposition === 'advisory' ? '改进建议' : '待确认'));
 const verificationColor = (item:Finding) => item.verification_status === 'refuted' ? 'gray' : (item.disposition === 'confirmed' ? 'green' : (item.verification_status === 'verification_failed' ? 'red' : 'orange'));
 const ocrStatusNotice = computed(() => {
   const status = selectedTask.value?.change_report?.ocr_status;

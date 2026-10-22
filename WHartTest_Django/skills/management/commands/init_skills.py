@@ -151,7 +151,9 @@ class Command(BaseCommand):
                         continue
 
                     # 条件：Skill 已存在；动作：更新内容和文件；结果：保留 is_active 等用户运行态配置。
-                    existing.description = parsed['description']
+                    # 卡片简介由平台维护；启动同步仅补空值，保留人工编辑。
+                    if not existing.description:
+                        existing.description = parsed['description']
                     existing.skill_content = skill_content
                     existing.save(update_fields=['description', 'skill_content', 'updated_at'])
 

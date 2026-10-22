@@ -82,6 +82,9 @@
                 </a-tag>
                 <span class="timeline__meta">{{ sourceTypeLabel(item.source_type) }}</span>
                 <span class="timeline__meta">{{ formatTime(item.created_at) }}</span>
+                <span class="timeline__meta">sha {{ item.package_sha256.slice(0, 10) }}</span>
+                <span class="timeline__meta">{{ item.created_by_name || '未知用户' }}</span>
+                <span v-if="item.change_reason" class="timeline__reason" :title="item.change_reason">{{ item.change_reason }}</span>
               </button>
               <a-tooltip content="设为对比基线">
                 <button

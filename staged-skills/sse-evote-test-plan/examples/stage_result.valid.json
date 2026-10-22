@@ -4,9 +4,19 @@
   "status": "completed",
   "primary_artifacts": [
     {
-      "name": "test_plan.xlsx",
+      "name": "上证e投票_测试方案_V1.0.xlsx",
       "kind": "xlsx",
       "sha256": "5f1e0f0c8b2a4d6e9c3b7a1d0e2f4c6b8a0d2e4f6c8b0a2d4e6f8c0b2a4d6e8f"
+    },
+    {
+      "name": "上证e投票_测试方案说明_V1.0.md",
+      "kind": "markdown",
+      "sha256": "6f1e0f0c8b2a4d6e9c3b7a1d0e2f4c6b8a0d2e4f6c8b0a2d4e6f8c0b2a4d6e8a"
+    },
+    {
+      "name": "requirements_parsed.json",
+      "kind": "json",
+      "sha256": "7f1e0f0c8b2a4d6e9c3b7a1d0e2f4c6b8a0d2e4f6c8b0a2d4e6f8c0b2a4d6e8b"
     }
   ],
   "requirements": [

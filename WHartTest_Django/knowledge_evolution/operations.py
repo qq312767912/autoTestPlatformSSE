@@ -186,7 +186,9 @@ class WorkflowGateService:
                 "version": str(version.version),
                 "release_state": release.state if release is not None else "",
                 "package_sha256": str(version.package_sha256),
-                "updated_at": skill.updated_at.isoformat() if skill.updated_at else "",
+                "updated_at": version.updated_at.isoformat() if version.updated_at else "",
+                "created_by_name": version.created_by.username if version.created_by_id else "",
+                "change_reason": str((version.source_metadata or {}).get("change_reason") or ""),
             })
 
         stages_payload = []
@@ -1680,15 +1682,16 @@ class StageExecutionContextService:
 
 
 class ProjectQualityCockpitService:
-    # 只保留「能力能被 Skill 直接迭代升级」的单次能力：代码审查与知识库问答
-    # 属平台基础能力，不进 Agent 台账，也不该在独立能力面板里占位。
-    # 口径见 ``capability_registry`` 与 ``specs/agent-ledger/requirements.md`` §3。
-    #
-    # ⚠️ 这是**面板展示范围**这一产品决策，不是口径推导，所以刻意留成字面量：
-    # 注册表里 ``MODE_SINGLE`` 的还有 ``risk_identification`` / ``issue_tracking``，
-    # 但这两者在平台里没有真实调用方，库里只有演练数据，展示出来只会让面板
-    # 看起来比实际热闹。它们哪天接了真实业务流，再加进这里。
-    SINGLE_STAGES = ["case_review"]
+    # 独立能力面板与 Agent 总览共用同一口径：只展示能通过 Skill
+    # 直接迭代升级的 5 个 Agent。代码审查、知识库问答、风险识别与
+    # 问题跟踪都不属于这个面板，不得从「全部业务能力」反向推导。
+    SINGLE_STAGES = [
+        "test_plan_generation",
+        "testcase_generation",
+        "case_review",
+        "test_execution",
+        "report_generation",
+    ]
 
     def summarize(self, project_id):
         # 质量驾驶舱只呈现测试业务角色，不把项目管理员混入质量团队。

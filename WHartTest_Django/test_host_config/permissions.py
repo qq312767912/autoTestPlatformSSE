@@ -9,6 +9,7 @@ ACTION_PERMISSIONS = {
     "publish": "test_host_config.publish_testhostconfig",
     "rollback": "test_host_config.rollback_testhostconfig",
     "diagnose": "test_host_config.diagnose_testhostmapping",
+    "bulk_delete": "test_host_config.delete_testhostmapping",
 }
 
 

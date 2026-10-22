@@ -91,7 +91,7 @@
 
 ## 输出格式
 
-产出 `analysis/requirements_parsed.json`：
+产出根目录 `requirements_parsed.json`：
 
 ```json
 {

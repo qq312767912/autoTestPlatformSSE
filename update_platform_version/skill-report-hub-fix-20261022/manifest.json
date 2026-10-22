@@ -1,0 +1,57 @@
+[
+  {
+    "relative": "skills/models.py",
+    "original_sha256": "1e1940ffba004d98aa0832b1bcbd97a6c333c83aedf3527bf1fc161896fac039",
+    "candidate_sha256": "250aa83f9f0ffd4cebc719b3e1872f3ab04783ba34827cd08b64c884f60b348f"
+  },
+  {
+    "relative": "skills/views.py",
+    "original_sha256": "c4c88fd08989b21777b061bfb81b6ce07822cf2fb69eeff0f509ed98877c84fc",
+    "candidate_sha256": "4cab3c9581ea91b755c2b1a8ba151494f26c51af94a054e0afcf4b3856f3c9f6"
+  },
+  {
+    "relative": "skills/serializers.py",
+    "original_sha256": "058c4e6d930e8d4f997290e32df1cc306eb7fd1689b26cda7d06c6d32b5baaab",
+    "candidate_sha256": "056679f7947f26d34d17b9e66d19ae04dcb6ba79c7b7ff030cc377fde18467ef"
+  },
+  {
+    "relative": "skills/versions.py",
+    "original_sha256": "f1e366a7e744090c2e7c695b28c4cd26cd1d389b0509e4234ae1a9bf927f97a4",
+    "candidate_sha256": "9b08c23b5876087f82843a8eda2bc2d8a0047e27e45adb4e9ae7a23c76faf901"
+  },
+  {
+    "relative": "skills/runtime.py",
+    "original_sha256": "326c73c1e82a4bb93b9217527fccd7356464b9b60de0a3a9950d0509b057ebce",
+    "candidate_sha256": "0a7fb2fc4b46e7bfb3dc7bbb5298f98cdc772cbdbff84b58e5815d3912809e7e"
+  },
+  {
+    "relative": "skills/validation.py",
+    "original_sha256": "747debc0f06e787634abae0ae66e449bbcefdc53a7e976dd35eda27ee5984a46",
+    "candidate_sha256": "386889ab5d56eb9510276a4dac6c8dbbf5662baf63741b3cdc4dc67310f063fd"
+  },
+  {
+    "relative": "skills/import_preview.py",
+    "original_sha256": null,
+    "candidate_sha256": "23a785486a3d512c69038b5a93ad664abfee17accfef62614d95a19d091d57a1"
+  },
+  {
+    "relative": "testcases/review_service.py",
+    "original_sha256": "272660b3496036b4460150b2a2abba3e5e487cc89702b96e5ac8d6a970af6bc8",
+    "candidate_sha256": "0af34eefc43d304997730b3304869266c81dbc14856b7d2848c82f1d51f0407e"
+  },
+  {
+    "relative": "testcases/serializers.py",
+    "original_sha256": "bb8548415f2b1cfa908485a8d28dbe7b601e85b7bd99616be0523bbffd9115db",
+    "candidate_sha256": "4fc7cea1fe87be7c84fd933ac55a005b91f4578490d826c64369acdcf8d2518c"
+  },
+  {
+    "relative": "testcases/skill_report.py",
+    "original_sha256": null,
+    "candidate_sha256": "76ce6a7448b2e66072cda3c052d576547f7b348b9b15fd474fbca6d20a4ef13c"
+  },
+  {
+    "relative": "knowledge_evolution/task_binding.py",
+    "original_sha256": "2e617cde1133f09ed991b44b2a9507fd716a0ea8543d4a66d5692b259e01a761",
+    "candidate_sha256": "aca4f862a8f9a67a3b9e0ebcc2dd771ef16786772f708a9aacea1ce4c4a49353"
+  }
+]

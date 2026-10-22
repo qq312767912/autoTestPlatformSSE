@@ -1,5 +1,6 @@
 import logging
 import uuid
+import zipfile
 from pathlib import Path
 
 from django.core.exceptions import ValidationError
@@ -27,7 +28,7 @@ from .serializers import (
     SkillVersionSerializer, SkillVersionListSerializer,
     SkillPreflightSerializer, SkillCandidateCreateSerializer,
     SkillVersionDiffQuerySerializer, SkillQuarantineSerializer,
-    SkillStageBindingSerializer,
+    SkillStageBindingSerializer, SkillDisplayMetadataSerializer,
     SkillVersionValidateSerializer,
 )
 from .validation import SkillPackageValidationService
@@ -50,7 +51,7 @@ def _get_version_or_404(skill, version_id):
         uuid.UUID(str(version_id))
     except (ValueError, TypeError, AttributeError):
         raise Http404('版本不存在')
-    return get_object_or_404(SkillVersion, id=version_id, skill=skill)
+    return get_object_or_404(SkillVersion, id=version_id, skill__name=skill.name)
 
 
 def _package_skill_names(skill_files) -> list[str]:
@@ -132,7 +133,7 @@ class SkillViewSet(BaseModelViewSet):
         'quarantine_version',
         # 2026-10-02 追加：启停与删除作用于**公共目录的条目**，一次动作会影响
         # 所有项目看到的目录，所以从"执行人员"提到"负责人"。
-        'partial_update', 'destroy',
+        'partial_update', 'destroy', 'archive_version', 'restore_version',
     })
     #: 仅做配置返回或远程代理拉取、不读写 Skill 数据的动作，只要求登录。
     PUBLIC_ACTIONS = frozenset({'store_config', 'store_manifest', 'store_readme'})
@@ -163,7 +164,7 @@ class SkillViewSet(BaseModelViewSet):
     #: 会改变目录状态的：补填阶段、启停、删除、隔离版本。权限收敛到负责人。
     GLOBAL_LEAD_ACTIONS = frozenset({
         'bind_stage', 'partial_update', 'destroy', 'quarantine_version',
-        'generate_metadata',
+        'generate_metadata', 'archive_version', 'restore_version', 'edit_metadata',
     })
 
     #: 需要跨项目取对象的动作：作用于**公共池里的一条 Skill**，而不是"URL 那个项目
@@ -288,12 +289,10 @@ class SkillViewSet(BaseModelViewSet):
         """
         skills, copies = canonical_skills(self.get_queryset())
         from django.db.models import Count, Q
-        version_stats = {
-            row['skill_id']: row
-            for row in SkillVersion.objects.filter(skill_id__in=[skill.pk for skill in skills])
-            .values('skill_id')
-            .annotate(total=Count('id'), evolved=Count('id', filter=Q(source_type='evolution')))
-        }
+        public_versions = list(SkillVersion.objects.filter(skill__name__in=[s.name for s in skills])
+            .exclude(source_metadata__has_key='hub_deleted_at').values('id', 'skill__name', 'source_type', 'version', 'package_sha256'))
+        version_stats = {skill.pk: {'total': len({(v['version'],v['package_sha256']) for v in public_versions if v['skill__name'] == skill.name}),
+            'evolved': any(v['skill__name'] == skill.name and v['source_type'] == 'evolution' for v in public_versions)} for skill in skills}
         serializer = self.get_serializer(
             skills, many=True, context={
                 'versions': self._display_versions(skills),
@@ -383,20 +382,10 @@ class SkillViewSet(BaseModelViewSet):
             return {}
 
         versions = {}
-        # 一次查询取回全部版本，按 (skill, -created_at) 排序后在 Python 里取每 Skill 首条。
-        # 只取展示要用的列：``validation_report`` 等大字段不读。
-        for version in (
-            SkillVersion.objects
-            .filter(skill_id__in=[skill.pk for skill in skills])
-            .only('id', 'skill_id', 'version', 'source_type', 'manifest', 'created_at')
-            .order_by('skill_id', '-created_at')
-        ):
-            versions.setdefault(version.skill_id, version)
-
-        # 活跃版本优先：它代表"这个 Skill 现在认定的生产版本"。
-        for skill in skills:
-            if skill.active_version is not None:
-                versions[skill.pk] = skill.active_version
+        ids = {skill.name: skill.pk for skill in skills}
+        for version in (SkillVersion.objects.filter(skill__name__in=ids)
+            .exclude(source_metadata__has_key='hub_deleted_at').select_related('skill', 'created_by').order_by('-created_at')):
+            versions.setdefault(ids[version.skill.name], version)
         return versions
 
     @staticmethod
@@ -457,6 +446,30 @@ class SkillViewSet(BaseModelViewSet):
             'message': '获取成功',
             'data': serializer.data
         })
+
+    @action(detail=True, methods=['patch'], url_path='metadata')
+    def edit_metadata(self, request, *args, **kwargs):
+        from django.db import transaction
+        from knowledge_evolution.knowledge_models import KnowledgeAuditLog
+        skill = self.get_object()
+        unknown = set(request.data) - {'display_name', 'description', 'stage'}
+        if unknown or not request.data:
+            return Response({'code': 400, 'message': '只能编辑展示名称、阶段和简介'}, status=400)
+        serializer = SkillDisplayMetadataSerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        fields = {('declared_stage' if key == 'stage' else key): value for key, value in serializer.validated_data.items()}
+        with transaction.atomic():
+            related = list(Skill.objects.select_for_update().filter(name=skill.name).order_by('pk'))
+            for item in related:
+                before = {key: getattr(item, key) for key in fields}
+                for key, value in fields.items():
+                    setattr(item, key, value)
+                item.save(update_fields=[*fields, 'updated_at'])
+                KnowledgeAuditLog.record(project_id=item.project_id, actor=request.user, action='update', entity=item,
+                    reason='编辑 Skill Hub 卡片展示信息', detail={'before': before, 'after': fields})
+        skill.refresh_from_db()
+        return Response({'code': 200, 'message': '展示信息已保存', 'data': SkillListSerializer(skill,
+            context={'versions': self._display_versions([skill])}).data})
 
     @action(detail=True, methods=['post'], url_path='stage')
     def bind_stage(self, request, *args, **kwargs):
@@ -628,6 +641,65 @@ class SkillViewSet(BaseModelViewSet):
             'message': f"Skill '{name}' 已删除"
         })
 
+    @action(detail=False, methods=['post'], url_path='upload-preview')
+    def upload_preview(self, request, *args, **kwargs):
+        import tempfile
+        from .validation import safe_extract_zip
+        from .import_preview import preview_directory
+        serializer = SkillPreflightSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                safe_extract_zip(serializer.validated_data['file'], directory)
+                items = preview_directory(directory)
+            return Response({'code': 200, 'data': items, 'message': '已读取包内版本'})
+        except (ValidationError, ValueError, zipfile.BadZipFile) as exc:
+            return Response({'code': 400, 'message': _validation_message(exc)}, status=400)
+
+    @action(detail=True, methods=['post'], url_path=r'versions/(?P<version_id>[^/.]+)/archive')
+    def archive_version(self, request, version_id=None, *args, **kwargs):
+        from django.db import transaction
+        from django.utils import timezone
+        from knowledge_evolution.knowledge_models import KnowledgeAuditLog
+        skill = self.get_object()
+        with transaction.atomic():
+            version = _get_version_or_404(skill, version_id)
+            list(Skill.objects.select_for_update().filter(name=skill.name).order_by("pk"))
+            equivalents = list(SkillVersion.objects.filter(skill__name=skill.name, version=version.version, package_sha256=version.package_sha256).select_related('release', 'skill'))
+            if any(item.active_for_skills.exists() or item.state == 'active' for item in equivalents):
+                return Response({'code': 409, 'message': '当前生效版本不能删除，请先切换运行版本'}, status=409)
+            if not SkillVersion.objects.filter(skill__name=skill.name).exclude(pk__in=[item.pk for item in equivalents]).exclude(source_metadata__has_key='hub_deleted_at').exists():
+                return Response({'code': 409, 'message': '至少保留一个未删除版本'}, status=409)
+            for item in equivalents:
+                metadata = dict(item.source_metadata or {})
+                if 'hub_deleted_at' in metadata:
+                    continue
+                metadata['hub_deleted_at'] = timezone.now().isoformat()
+                metadata['hub_deleted_by'] = request.user.pk
+                item.source_metadata = metadata
+                item.save(update_fields=['source_metadata', 'updated_at'])
+                KnowledgeAuditLog.record(project_id=item.skill.project_id, actor=request.user, action='archive', entity=item, reason='用户删除旧版本（可恢复，保留历史任务包）')
+            version.refresh_from_db()
+        return Response({'code': 200, 'message': '版本已删除，可在已删除版本中恢复', 'data': SkillVersionSerializer(version).data})
+
+    @action(detail=True, methods=['post'], url_path=r'versions/(?P<version_id>[^/.]+)/restore')
+    def restore_version(self, request, version_id=None, *args, **kwargs):
+        from django.db import transaction
+        from knowledge_evolution.knowledge_models import KnowledgeAuditLog
+        skill = self.get_object()
+        with transaction.atomic():
+            version = _get_version_or_404(skill, version_id)
+            list(Skill.objects.select_for_update().filter(name=skill.name).order_by("pk"))
+            for item in SkillVersion.objects.filter(skill__name=skill.name, version=version.version, package_sha256=version.package_sha256):
+                metadata = dict(item.source_metadata or {})
+                metadata.pop('hub_deleted_at', None)
+                metadata.pop('hub_deleted_by', None)
+                item.source_metadata = metadata
+                item.save(update_fields=['source_metadata', 'updated_at'])
+                KnowledgeAuditLog.record(project_id=item.skill.project_id, actor=request.user, action='restore', entity=item, reason='恢复已删除的 Skill 版本')
+            version.refresh_from_db()
+        return Response({'code': 200, 'message': '版本已恢复', 'data': SkillVersionSerializer(version).data})
+
     @action(detail=False, methods=['post'], url_path='upload')
     def upload(self, request, *args, **kwargs):
         """
@@ -651,6 +723,7 @@ class SkillViewSet(BaseModelViewSet):
                 project=project,
                 creator=request.user,
                 api_key=api_key,
+                version_overrides=serializer.validated_data.get("version_overrides", {}),
             )
             _apply_import_metadata(
                 skills, category=category, description=description,
@@ -660,7 +733,9 @@ class SkillViewSet(BaseModelViewSet):
             return Response({
                 'code': 201,
                 'message': f"成功上传 {len(skills)} 个 Skill: {names}",
-                'data': SkillSerializer(skills, many=True).data
+                 'data': [{**SkillSerializer(item).data,
+                    'uploaded_version': SkillVersionSerializer(item._imported_version).data,
+                    'duplicate': bool(getattr(item, '_imported_existing', False))} for item in skills]
             }, status=status.HTTP_201_CREATED)
         except ValidationError as e:
             # 参数/文件内容校验失败返回 400，便于前端直接提示用户修正输入。
@@ -966,6 +1041,7 @@ class SkillViewSet(BaseModelViewSet):
                 expected_benefit=data.get('expected_benefit', ''),
                 impact_scope=data.get('impact_scope', ''),
                 api_key=data.get('api_key') or None,
+                version_override=data.get('version_override') or None,
             )
         except ValidationError as e:
             return Response(
@@ -986,7 +1062,16 @@ class SkillViewSet(BaseModelViewSet):
     def list_versions(self, request, *args, **kwargs):
         """列出该 Skill 的全部版本（新→旧）。"""
         skill = self.get_object()
-        versions = skill.versions.select_related('release', 'created_by').order_by('-created_at')
+        versions = SkillVersion.objects.filter(skill__name=skill.name).select_related('release', 'created_by', 'skill').order_by('-created_at')
+        if request.query_params.get('include_archived') != 'true':
+            versions = versions.exclude(source_metadata__has_key='hub_deleted_at')
+        merged = {}
+        for version in versions:
+            key = (version.version, version.package_sha256)
+            previous = merged.get(key)
+            if previous is None or ('hub_deleted_at' in (previous.source_metadata or {}) and 'hub_deleted_at' not in (version.source_metadata or {})):
+                merged[key] = version
+        versions = list(merged.values())
         return Response({
             'code': 200,
             'message': '获取成功',

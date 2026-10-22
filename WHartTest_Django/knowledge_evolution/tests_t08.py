@@ -124,6 +124,51 @@ class TraceRecordingTests(SkillHubBaseTests):
         )
         self.assertNotEqual(AttemptTraceService.trace_for_attempt(other).pk, first.pk)
 
+    def test_running_span_can_be_finished_with_latency_and_redacted_error(self):
+        span = AttemptTraceService.record_span(
+            attempt=self.attempt, step_type="tool", status="running",
+            tool_name="execute_skill_script",
+        )
+        finished = AttemptTraceService.finish_span(
+            span.pk, status="failed", error_type="ToolError",
+            error_message="token=abcd1234efgh 执行失败",
+            output_hash="a" * 64,
+        )
+        self.assertEqual(finished.status, "failed")
+        self.assertIsNotNone(finished.finished_at)
+        self.assertGreaterEqual(finished.latency_ms, 0)
+        self.assertNotIn("abcd1234efgh", finished.error_message)
+        self.assertEqual(finished.output_hash, "a" * 64)
+
+    def test_finish_open_spans_closes_only_current_attempt(self):
+        open_span = AttemptTraceService.record_span(
+            attempt=self.attempt, step_type="tool", status="running",
+        )
+        completed = AttemptTraceService.record_span(
+            attempt=self.attempt, step_type="validation", status="completed",
+        )
+        AttemptTraceService.finish_open_spans(
+            self.attempt, error_type="Cancelled", error_message="客户端断开",
+        )
+        open_span.refresh_from_db()
+        completed.refresh_from_db()
+        self.assertEqual(open_span.status, "failed")
+        self.assertEqual(completed.status, "completed")
+
+    def test_completed_attempt_falls_back_to_output_trace_spans(self):
+        output = self.make_output(task_type=STAGE, workflow_id="wf-t08")
+        output_span = ExecutionSpan.objects.create(
+            trace=output.trace, workflow_id="wf-t08", stage=STAGE,
+            step_type="tool", status="completed", sequence=1,
+            tool_name="execute_skill_script",
+        )
+        StageExecutionAttemptService.mark_running(self.attempt)
+        StageExecutionAttemptService.complete(self.attempt, output=output)
+        self.attempt.refresh_from_db()
+
+        spans = AttemptTraceService.spans_for(self.attempt)
+        self.assertEqual([span.pk for span in spans], [output_span.pk])
+
 
 class TraceSummaryTests(SkillHubBaseTests):
     def setUp(self):
@@ -205,11 +250,46 @@ class TraceSummaryTests(SkillHubBaseTests):
         )
         span = AttemptTraceService.spans(self.attempt, user=self.lead)[0]
         self.assertEqual(
-            set(span) - {"error_summary", "metadata", "evidence", "group"},
+            set(span) - {
+                "error_summary", "metadata", "evidence", "group", "title",
+                "description", "input_summary", "output_summary", "artifacts",
+                "input_detail", "output_detail", "result_facts",
+                "detail_available", "detail_note", "timing_recorded",
+            },
             set(AttemptTraceService.SAFE_SPAN_FIELDS),
         )
         self.assertEqual(span["metadata"]["nested"]["secret_token"], REDACTED_PLACEHOLDER)
         self.assertEqual(span["tool_name"], "search_knowledge")
+
+    def test_span_payload_contains_human_readable_audit_detail(self):
+        self._record(
+            "tool", tool_name="execute_skill_script", status="completed",
+            metadata={
+                "step": 4,
+                "input_summary": {"script": "generate_plan.py", "token": "secret"},
+                "output_summary": "已生成测试方案文件",
+                "output_detail": {"ok": True, "password": "hidden"},
+            },
+        )
+        span = AttemptTraceService.spans(self.attempt, user=self.lead)[0]
+        self.assertEqual(span["title"], "调用工具：execute_skill_script")
+        self.assertIn("第 4 次工具调用", span["description"])
+        self.assertIn("generate_plan.py", span["input_summary"])
+        self.assertNotIn("secret", span["input_summary"])
+        self.assertEqual(span["output_summary"], "已生成测试方案文件")
+        self.assertEqual(span["input_detail"]["script"], "generate_plan.py")
+        self.assertEqual(span["input_detail"]["token"], REDACTED_PLACEHOLDER)
+        self.assertTrue(span["output_detail"]["ok"])
+        self.assertEqual(span["output_detail"]["password"], REDACTED_PLACEHOLDER)
+        self.assertTrue(span["detail_available"])
+        self.assertEqual(span["detail_note"], "")
+        self.assertFalse(span["timing_recorded"])
+
+    def test_historical_tool_span_explains_unavailable_detail(self):
+        self._record("tool", tool_name="execute_skill_script", status="completed")
+        span = AttemptTraceService.spans(self.attempt, user=self.lead)[0]
+        self.assertFalse(span["detail_available"])
+        self.assertIn("历史节点", span["detail_note"])
 
 
 class QuotePermissionTests(SkillHubBaseTests):

@@ -90,11 +90,12 @@ export class SkillService {
    * 逻辑名（`name` 是 Skill Hub 的归并键与版本包身份），只影响页面展示。
    * 包内多于一个 Skill 时后端会忽略它——一个名字对应不了多条。
    */
-  static async uploadSkill(projectId: number, file: File, category: string, description: string, apiKey?: string, name?: string): Promise<Skill[]> {
+  static async uploadSkill(projectId: number, file: File, category: string, description: string, apiKey?: string, name?: string, versionOverrides?: Record<string, string>): Promise<Skill[]> {
     const formData = new FormData()
     formData.append('file', file)
     formData.append('category', category)
     formData.append('description', description)
+    if (versionOverrides) formData.append('version_overrides', JSON.stringify(versionOverrides))
     if (apiKey) {
       formData.append('api_key', apiKey)
     }
@@ -185,6 +186,22 @@ export class SkillService {
       return Array.isArray(api.data) ? api.data : [api.data]
     }
     throw new Error(api?.message || response.error || '从 zip URL 导入 Skill 失败')
+  }
+
+  static async updateDisplayMetadata(projectId: number, skillId: number, data: {display_name: string; stage: string; description: string}) {
+    const response = await request<any>({url: `/projects/${projectId}/skills/${skillId}/metadata/`, method: 'PATCH', data})
+    const api = response.data as any
+    if (response.success && api?.data) return api.data
+    throw new Error(api?.message || response.error || '展示信息保存失败')
+  }
+
+  static async previewUpload(projectId: number, file: File): Promise<import('../types').SkillUploadPreview[]> {
+    const data = new FormData()
+    data.append('file', file)
+    const response = await request<any>({url: `/projects/${projectId}/skills/upload-preview/`, method: 'POST', data})
+    const api = response.data as any
+    if (response.success && Array.isArray(api?.data)) return api.data
+    throw new Error(api?.message || response.error || '无法读取包内版本')
   }
 
   static async suggestMetadata(

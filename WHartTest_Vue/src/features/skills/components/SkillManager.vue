@@ -97,6 +97,9 @@
     <p v-if="stageFilterHint" class="filter-hint">{{ text.stageUndeclaredHint }}</p>
 
     <!-- Skills 列表 -->
+    <a-alert v-if="uploadedResults.length" type="success" style="margin: 12px 0">
+      <div v-for="item in uploadedResults" :key="item.name">{{ item.name }} · v{{ item.version }}：{{ item.duplicate ? '该包已存在，已定位已有版本' : '上传成功，候选版本已保存' }}</div>
+    </a-alert>
     <a-spin :loading="loading">
       <div v-if="skills.length === 0" class="empty-state">
         <icon-apps style="font-size: 48px; color: #c0c4cc" />
@@ -114,6 +117,7 @@
           :key="skill.id"
           class="skill-card"
           :class="{ inactive: !skill.is_active }"
+          @click="handleSkillCard(skill)"
         >
           <div class="skill-header">
             <!-- 展示名优先：上传/导入时由平台生成、人工确认；没设过就回退逻辑名。
@@ -122,11 +126,12 @@
             <!-- 启停是治理动作（后端 = 超管或任一项目测试负责人）。没这个角色的人
                  不给可点的开关 —— 点了必然 403，比"看不到"更让人困惑。 -->
             <a-tooltip :content="text.manageOnly" :disabled="canManage">
-              <a-switch
+            <a-switch
                 v-model="skill.is_active"
                 size="small"
                 :disabled="!canManage"
                 @change="(val) => handleToggle(skill, val as boolean)"
+                @click.stop
               />
             </a-tooltip>
           </div>
@@ -187,7 +192,7 @@
           </div>
           <!-- 功能简介：卡片里最多两行，超出省略；悬浮看完整简介。 -->
           <div class="skill-summary">
-            <span class="skill-summary__label">平台自动简介</span>
+            <span class="skill-summary__label">功能简介</span>
             <a-tooltip :content="skill.description" position="top" :disabled="!isSummaryClipped(skill.description)">
               <div class="skill-description">{{ skill.description }}</div>
             </a-tooltip>
@@ -200,7 +205,10 @@
               <icon-calendar /> {{ formatDate(skill.created_at) }}
             </span>
             <div class="skill-actions">
-              <a-button type="text" size="mini" @click="handleViewContent(skill)">
+              <a-button v-if="canManage" type="text" size="mini" title="修改展示名称、阶段和简介" @click.stop="openMetadataEditor(skill)">编辑信息</a-button>
+              <a-button type="text" size="mini" title="下载卡片展示版本" @click.stop="downloadCardVersion(skill)">下载</a-button>
+              <a-button type="text" size="mini" title="管理旧版本" @click.stop="handleSkillCard(skill)">版本</a-button>
+              <a-button type="text" size="mini" @click.stop="handleViewContent(skill)">
                 <icon-eye />
               </a-button>
               <!-- 删除同样是治理动作：没权限的人不显示，而不是点了报错。 -->
@@ -209,7 +217,7 @@
                 :content="text.deleteConfirm"
                 @ok="handleDelete(skill)"
               >
-                <a-button type="text" size="mini" status="danger">
+                <a-button type="text" size="mini" status="danger" @click.stop>
                   <icon-delete />
                 </a-button>
               </a-popconfirm>
@@ -224,12 +232,22 @@
       v-model:visible="showUploadModal"
       :title="text.uploadSkill"
       :width="500"
-      @ok="handleUpload"
+      :on-before-ok="beforeUpload"
       :ok-text="text.confirm"
       :cancel-text="text.cancel"
       :confirm-loading="uploading"
     >
       <div class="upload-container">
+        <a-alert v-if="uploadPreviewError" type="error">{{ uploadPreviewError }}</a-alert>
+        <div v-for="item in uploadPreviews" :key="item.name" style="margin-bottom: 16px">
+          <strong>{{ item.name }}</strong>
+          <div>包内版本：{{ item.declared_version || '未声明，平台自动分配' }} · {{ item.target_skill_id ? '追加到已有 Skill' : '创建新 Skill' }}</div>
+          <a-form-item label="本次上传版本">
+            <a-input v-model="item.uploadVersion" placeholder="例如 1.2.0" />
+          </a-form-item>
+          <a-alert v-if="isVersionConflict(item)" type="warning">版本号已存在且内容不同，请改成 {{ item.suggested_version }} 或其他未占用版本。只改写本次上传包。</a-alert>
+          <a-alert v-else-if="item.duplicate_version === item.uploadVersion" type="info">相同包已存在，将定位到 v{{ item.duplicate_version }}。</a-alert>
+        </div>
         <a-form-item :label="text.category" required>
           <!-- allow-create：找不到合适的阶段时直接敲一个名称新建（后端归一化成 custom:<名称>） -->
           <a-select
@@ -285,6 +303,24 @@
       </div>
     </a-modal>
 
+    <a-modal v-model:visible="showMetadataModal" title="编辑 Skill 展示信息" :width="560" :on-before-ok="saveMetadata" :confirm-loading="savingMetadata">
+      <a-alert type="normal" style="margin-bottom: 16px">修改卡片展示信息。包内标识：{{ metadataTarget?.name }}；历史版本包内容保持不变。</a-alert>
+      <a-form :model="metadataForm" layout="vertical">
+        <a-form-item label="展示名称">
+          <a-input v-model="metadataForm.display_name" :max-length="128" show-word-limit placeholder="留空则显示包内名称" />
+        </a-form-item>
+        <a-form-item label="所属阶段">
+          <a-select v-model="metadataForm.stage" allow-clear allow-search allow-create placeholder="选择阶段，或输入新分类">
+            <a-option v-for="option in stageOptionList" :key="option.value" :value="option.value">{{ stageOptionText(option) }}</a-option>
+          </a-select>
+          <template #extra>平台展示阶段优先；清空后使用包内声明，包内也没有则显示未声明。</template>
+        </a-form-item>
+        <a-form-item label="功能简介">
+          <a-textarea v-model="metadataForm.description" :max-length="1000" :auto-size="{ minRows: 3, maxRows: 8 }" show-word-limit placeholder="说明此 Skill 的用途与适用范围" />
+        </a-form-item>
+      </a-form>
+    </a-modal>
+
     <!-- 内容查看弹窗 -->
     <a-modal
       v-model:visible="showContentModal"
@@ -297,6 +333,24 @@
         <a-divider />
         <pre class="content-body">{{ currentSkillContent.content }}</pre>
       </div>
+    </a-modal>
+    <a-modal v-model:visible="showVersionModal" :title="`${selectedVersionSkill?.display_name || selectedVersionSkill?.name || ''} · 版本历史`" :footer="false" width="720px">
+      <a-checkbox v-model="includeArchivedVersions" @change="reloadVersions">显示已删除版本（可恢复）</a-checkbox>
+      <a-empty v-if="!skillVersions.length" description="暂无版本" />
+      <a-list v-else>
+        <a-list-item v-for="version in skillVersions" :key="version.id">
+          <a-list-item-meta :title="`v${version.version}${version.archived ? '（已删除）' : ''}`" :description="version.change_reason || '暂无更新说明'" />
+          <template #actions>
+            <span>sha {{ version.package_sha256.slice(0, 12) }}</span>
+            <span>{{ formatDate(version.created_at) }}</span>
+            <a-button type="text" :disabled="version.download_available === false" @click="downloadVersion(version)">{{ version.download_available === false ? '包文件缺失' : '下载' }}</a-button>
+            <a-popconfirm v-if="canManage && !version.archived" content="删除这个旧版本？可在已删除列表中恢复，历史任务引用保留。" @ok="archiveVersion(version)">
+              <a-button type="text" status="danger" :disabled="!version.can_archive">删除</a-button>
+            </a-popconfirm>
+            <a-button v-if="canManage && version.archived" type="text" @click="archiveVersion(version, true)">恢复</a-button>
+          </template>
+        </a-list-item>
+      </a-list>
     </a-modal>
 
     <!-- Git 导入弹窗 -->
@@ -415,9 +469,12 @@
 import { ref, onMounted, computed } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { SkillService } from '../services/skillService'
+import { SkillHubService } from '../services/skillHubService'
+import type { SkillVersionDetail } from '../types/hub'
 import SkillStoreModal from './SkillStoreModal.vue'
 import SkillApiKeyConfirmModal from './SkillApiKeyConfirmModal.vue'
-import type { SkillListItem } from '../types'
+import type { SkillListItem, SkillUploadPreview } from '../types'
+import { toErrorMessage } from '../services/skillHubService'
 import { useAppI18n } from '@/composables/useAppI18n'
 import { zipNameSuggestsInternalSkill } from '../utils/internalSkills'
 import { stageOptionText } from '../utils/stages'
@@ -475,7 +532,7 @@ const text = computed(() => (
         bindStageSuccess: 'Capability stage declared',
         revokeStageSuccess: 'Stage declaration cleared',
         bindStageFailed: 'Failed to update the stage declaration',
-        stageFromManifest: 'Declared by the version package manifest. Version packages are immutable — change it by releasing a new version.',
+        stageFromManifest: 'Declared by the package. Click Edit information to set the displayed stage.',
         manageOnly: 'Only a platform admin or a project test lead can enable/disable or delete a Skill.',
         category: 'Category', categoryPlaceholder: 'Select a stage, or type a name to add your own',
         categoryRequired: 'Select a stage', customStageTip: 'No matching stage? Type a name and it becomes a reusable custom stage (e.g. "Performance").',
@@ -508,7 +565,7 @@ const text = computed(() => (
         bindStageSuccess: '已补填能力阶段',
         revokeStageSuccess: '已撤销阶段声明',
         bindStageFailed: '更新阶段声明失败',
-        stageFromManifest: '由版本包 manifest 声明。版本包是不可变产物，改它只能发新版本；这里不提供修改入口。',
+        stageFromManifest: '当前来自包内声明，可点击标签或“编辑信息”调整展示阶段。',
         stageResultLevelTip: (level: string, capability: string) =>
           `声明了 ${level} 产出协议。${capability ? `${capability}。` : ''}这只是声明——是否兑现看右侧的实测标签。`,
         stageResultRunOk: '协议通过',
@@ -562,7 +619,10 @@ const showUploadModal = ref(false)
 const showContentModal = ref(false)
 const selectedFile = ref<File | null>(null)
 const fileInputRef = ref<HTMLInputElement | null>(null)
-const currentSkillContent = ref<{ name: string; description: string; content: string } | null>(null)
+  const currentSkillContent = ref<{ name: string; description: string; content: string } | null>(null)
+  const showVersionModal = ref(false)
+  const selectedVersionSkill = ref<SkillListItem | null>(null)
+  const skillVersions = ref<SkillVersionDetail[]>([])
 const showGitImportModal = ref(false)
 const showStoreModal = ref(false)
 const gitUrl = ref('')
@@ -580,6 +640,12 @@ const uploadName = ref('')
 const gitName = ref('')
 /** 本次选择/导入识别出的包内 Skill 数量：>1 时名称输入置为只读。 */
 const uploadSkillCount = ref(0)
+const uploadPreviews = ref<Array<SkillUploadPreview & { uploadVersion: string }>>([])
+const uploadPreviewError = ref('')
+const uploadedResults = ref<Array<{ name: string; version: string; duplicate: boolean }>>([])
+const includeArchivedVersions = ref(false)
+const isVersionConflict = (item: SkillUploadPreview & { uploadVersion: string }) => item.existing_versions.includes(item.uploadVersion) && item.duplicate_version !== item.uploadVersion
+
 const gitSkillCount = ref(0)
 const uploadGenerating = ref(false)
 const gitSuggested = ref(false)
@@ -700,6 +766,32 @@ const canBindStage = ref(false)
 //: 分开存只是因为两处调用点读的是不同的业务动作。
 const canManage = ref(false)
 const stageOptionList = ref<Array<{ value: string; label: string; custom?: boolean }>>([])
+const showMetadataModal = ref(false)
+const savingMetadata = ref(false)
+const metadataTarget = ref<SkillListItem | null>(null)
+const metadataForm = ref<{display_name: string; stage: string | undefined; description: string}>({display_name: '', stage: undefined, description: ''})
+const openMetadataEditor = (skill: SkillListItem) => {
+  if (!canManage.value) return
+  metadataTarget.value = skill
+  metadataForm.value = {display_name: skill.display_name || '', stage: skill.stage || undefined, description: skill.description || ''}
+  showMetadataModal.value = true
+}
+const saveMetadata = async () => {
+  if (!metadataTarget.value) return false
+  savingMetadata.value = true
+  try {
+    await SkillService.updateDisplayMetadata(props.projectId, metadataTarget.value.id, {
+      display_name: metadataForm.value.display_name.trim(), stage: metadataForm.value.stage || '', description: metadataForm.value.description.trim(),
+    })
+    await fetchSkills()
+    stageFilter.value = undefined
+    if (searchKeyword.value) searchKeyword.value = metadataForm.value.display_name || metadataTarget.value.name
+    showMetadataModal.value = false
+    Message.success('展示信息已保存')
+  } catch (error: any) { Message.error(toErrorMessage(error, '保存失败')) }
+  finally { savingMetadata.value = false }
+  return false
+}
 const showStageModal = ref(false)
 const stageTarget = ref<SkillListItem | null>(null)
 const pendingStage = ref<string | undefined>(undefined)
@@ -748,19 +840,13 @@ const openStageBinding = (skill: SkillListItem) => {
   showStageModal.value = true
 }
 
-/**
- * 这个阶段标签能不能点开改。
- *
- * - 包在 manifest 里声明的：**不能**。版本包不可变，改它等于篡改包（`package_tampered`），
- *   想改只能发新版本 —— 给个点了没反应的入口比不给更糟。
- * - 管理员补填的 / 未声明的：能（前提是有管理权）。
- */
+/** 阶段标签编辑平台展示元数据，不修改包内 manifest。 */
 const canEditStage = (skill: SkillListItem) =>
-  canBindStage.value && skill.stage_source !== 'manifest'
+  canBindStage.value
 
 /** 标签点击统一走这里：没权限时点标签不该有任何反应。 */
 const handleStageTagClick = (skill: SkillListItem) => {
-  if (skill.stage_label ? canEditStage(skill) : canBindStage.value) openStageBinding(skill)
+  if (canManage.value) openMetadataEditor(skill)
 }
 
 /**
@@ -857,6 +943,18 @@ const handleFileChange = async (e: Event) => {
     uploadDescription.value = ''
     uploadName.value = ''
     uploadSkillCount.value = 0
+    uploadPreviews.value = []
+    uploadPreviewError.value = ''
+    const picked = selectedFile.value
+    try {
+      const preview = await SkillService.previewUpload(props.projectId, picked)
+      if (selectedFile.value !== picked) return
+      uploadPreviews.value = preview.map(item => ({ ...item, uploadVersion: item.duplicate_version || item.declared_version || item.suggested_version }))
+    } catch (error: any) {
+      uploadPreviewError.value = toErrorMessage(error, '包版本读取失败')
+      uploadGenerating.value = false
+      return
+    }
     try {
       const suggestion = await SkillService.suggestMetadata(props.projectId, { file: selectedFile.value })
       uploadCategory.value = suggestion.category
@@ -881,10 +979,15 @@ const doUpload = async (apiKey?: string) => {
   try {
     if (!uploadCategory.value) { Message.warning(text.value.categoryRequired); return }
     if (!uploadDescription.value.trim()) { Message.warning('请先生成并确认功能简介'); return }
+    if (uploadPreviewError.value || !uploadPreviews.value.length) { Message.warning('请先读取包内版本'); return }
+    if (uploadPreviews.value.some(isVersionConflict)) { Message.warning('请先修改冲突版本号'); return }
+    if (uploadPreviews.value.some(item => !/^\d+(\.\d+){1,3}([-+][A-Za-z0-9.\-]+)?$/.test(item.uploadVersion))) { Message.warning('请填写有效版本号，例如 1.2.0'); return }
+    const overrides = Object.fromEntries(uploadPreviews.value.filter(item => item.uploadVersion !== (item.declared_version || item.suggested_version)).map(item => [item.name, item.uploadVersion]))
     const skills = await SkillService.uploadSkill(
       props.projectId, selectedFile.value, uploadCategory.value,
-      uploadDescription.value.trim(), apiKey, uploadName.value.trim(),
+      uploadDescription.value.trim(), apiKey, uploadName.value.trim(), overrides,
     )
+    uploadedResults.value = skills.map(item => ({name: item.display_name || item.name, version: item.uploaded_version?.version || '未知', duplicate: Boolean(item.duplicate)}))
     const count = skills.length
     const names = skills.map(s => s.display_name || s.name).join(', ')
     Message.success(text.value.uploadSuccess(count, names))
@@ -895,11 +998,24 @@ const doUpload = async (apiKey?: string) => {
     uploadName.value = ''
     uploadSkillCount.value = 0
     await fetchSkills()
+    searchKeyword.value = skills.length === 1 ? (skills[0].display_name || skills[0].name) : ''
+    sourceFilter.value = undefined
+    stageFilter.value = undefined
+    const uploaded = skills[0]
+    const card = uploaded ? { ...uploaded } as unknown as SkillListItem : undefined
+    if (card) await handleSkillCard(card)
   } catch (e: any) {
-    Message.error(e.message || text.value.uploadFailed)
+    Message.error(toErrorMessage(e, text.value.uploadFailed))
   } finally {
     uploading.value = false
   }
+}
+
+const beforeUpload = async () => {
+  if (uploadGenerating.value) { Message.warning('正在读取包并生成元信息，请稍候'); return false }
+  await handleUpload()
+  // doUpload closes the dialog only after a successful upload. Keep conflicts editable.
+  return false
 }
 
 const handleUpload = async () => {
@@ -946,6 +1062,50 @@ const handleViewContent = async (skill: SkillListItem) => {
   } catch (e: any) {
     Message.error(e.message || text.value.fetchContentFailed)
   }
+}
+
+const handleSkillCard = async (skill: SkillListItem) => {
+  selectedVersionSkill.value = skill
+  includeArchivedVersions.value = false
+  showVersionModal.value = true
+  try {
+    skillVersions.value = await SkillHubService.listVersions(props.projectId, skill.id) as SkillVersionDetail[]
+  } catch (e: any) {
+    skillVersions.value = []
+    Message.error(e.message || '读取版本历史失败')
+  }
+}
+
+const reloadVersions = async () => {
+  if (!selectedVersionSkill.value) return
+  skillVersions.value = await SkillHubService.listVersions(props.projectId, selectedVersionSkill.value.id, includeArchivedVersions.value) as SkillVersionDetail[]
+}
+const downloadVersion = async (version: SkillVersionDetail) => {
+  if (!selectedVersionSkill.value) return
+  try {
+    const result = await SkillHubService.downloadVersion(props.projectId, selectedVersionSkill.value.id, version.id)
+    const url = URL.createObjectURL(result.blob)
+    const link = document.createElement('a'); link.href = url; link.download = result.filename; link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch (error: any) { Message.error(toErrorMessage(error, '版本下载失败')) }
+}
+const downloadCardVersion = async (skill: SkillListItem) => {
+  try {
+    const versions = await SkillHubService.listVersions(props.projectId, skill.id) as SkillVersionDetail[]
+    const version = versions.find(item => item.version === skill.version && item.package_sha256 === skill.version_sha256)
+    if (!version) { Message.warning('此版本包不存在，请查看版本历史'); return }
+    selectedVersionSkill.value = skill
+    await downloadVersion(version)
+  } catch (error: any) { Message.error(toErrorMessage(error, '下载失败')) }
+}
+const archiveVersion = async (version: SkillVersionDetail, restore = false) => {
+  if (!selectedVersionSkill.value) return
+  try {
+    await SkillHubService.archiveVersion(props.projectId, selectedVersionSkill.value.id, version.id, restore)
+    Message.success(restore ? '版本已恢复' : '旧版本已删除，可恢复')
+    await reloadVersions()
+    await fetchSkills()
+  } catch (error: any) { Message.error(toErrorMessage(error, '版本操作失败')) }
 }
 
 const formatDate = (dateStr: string) => {

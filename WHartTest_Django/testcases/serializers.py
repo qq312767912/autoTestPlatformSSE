@@ -754,6 +754,7 @@ class TestExecutionCreateSerializer(serializers.Serializer):
 
 
 class TestCaseReviewSerializer(serializers.ModelSerializer):
+    selected_skill_version = serializers.UUIDField(required=False, write_only=True)
     creator_name = serializers.CharField(source="creator.username", read_only=True)
     source_url = serializers.SerializerMethodField()
     report_url = serializers.SerializerMethodField()
@@ -764,7 +765,7 @@ class TestCaseReviewSerializer(serializers.ModelSerializer):
         model = TestCaseReview
         fields = [
             "id", "project", "creator", "creator_name", "source_file", "source_url",
-            "source_name", "business_context", "review_mode", "selected_skill", "skill_name", "custom_rules",
+            "source_name", "business_context", "review_mode", "selected_skill", "selected_skill_version", "skill_name", "custom_rules",
             "requirement_document_ids", "knowledge_base_ids", "knowledge_document_ids",
             "status", "current_step", "progress",
             "report_file", "report_url", "summary", "error_message", "celery_task_id",
@@ -813,6 +814,9 @@ class TestCaseReviewSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         from .review_service import build_skill_snapshot
+        version_id = validated_data.pop("selected_skill_version", None)
+        if version_id:
+            validated_data["summary"] = {"selected_skill_version": str(version_id)}
         source = validated_data["source_file"]
         validated_data["source_name"] = source.name
         mode = validated_data.get("review_mode", "general")
@@ -828,6 +832,15 @@ class TestCaseReviewSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         project_id = self.context["view"].kwargs.get("project_pk")
+        if attrs.get("selected_skill_version"):
+            if attrs.get("review_mode", "general") != "specified":
+                raise serializers.ValidationError({"selected_skill_version": "精确版本仅用于指定 Skill 审查"})
+            from skills.models import SkillVersion
+            version = SkillVersion.objects.filter(pk=attrs["selected_skill_version"]).select_related("skill", "release").first()
+            skill = attrs.get("selected_skill")
+            if not version or not skill or version.skill.name != skill.name or not version.is_runnable or "hub_deleted_at" in (version.source_metadata or {}):
+                raise serializers.ValidationError({"selected_skill_version": "所选版本不存在、已删除、不可运行或不属于该 Skill"})
+            attrs["selected_skill"] = version.skill
         from requirements.models import RequirementDocument
         from knowledge.models import Document, KnowledgeBase
         requirement_ids = list(dict.fromkeys(str(item) for item in (attrs.get("requirement_document_ids") or []) if item))

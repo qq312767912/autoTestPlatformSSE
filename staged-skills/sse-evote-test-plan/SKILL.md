@@ -1,7 +1,7 @@
 ---
 name: 上证e投票测试方案生成
 description: 面向上证e投票平台，将需求文档、原型和页面探索结果转化为矩阵式测试方案，明确覆盖范围、策略、资源、风险和待确认项。
-version: 1.1.0
+version: 1.2.1
 stage: test_plan_generation
 entrypoint: SKILL.md
 input_schema: schemas/input.json
@@ -29,11 +29,11 @@ permissions:
 **业务方案仍然保留可下载**，但不会进入进化链路。
 
 `stage_result.json` 的定位是**机器可读的索引**，不是方案的替代品：方案正文照旧写在
-`test_plan.xlsx` 里，信封只回答"这份方案包含哪些项、每项依据什么、为什么这么定"。
+`{项目名}_测试方案_V{版本}.xlsx` 里，信封只回答"这份方案包含哪些项、每项依据什么、为什么这么定"。
 
 必填与口径：
 
-- `primary_artifacts`：至少含 `test_plan.xlsx`，并给出其 `sha256`。
+- `primary_artifacts`：必须登记三件人工交付物及各自 `sha256`：`{项目名}_测试方案_V{版本}.xlsx`、`{项目名}_测试方案说明_V{版本}.md`、`requirements_parsed.json`。`stage_result.json` 不列入人工交付物。
 - `requirements`：本次方案依据的需求清单（`REQ-xxx`）。
 - `items`：**每个末级方案项一条**，`id` 形如 `TP-001`、同一次产出内唯一且稳定；
   每项必须带 `requirement_ids`、`evidence_ids`、`module`、`scenario_type`、
@@ -59,8 +59,17 @@ permissions:
    解析结果要为每条需求分配 `REQ-xxx` 标识，供 `stage_result.json` 引用。
 2. 如需求需要页面核验，按 `references/PageExplorer.md` 使用 `templates/page_explorer.py` 探索；先读 `websiteFeature/` 复用特征。小程序、现场工具、无界面服务不可用浏览器探索时，明确标注 UI 覆盖限制。
 3. 对照 `references/投票业务规则库.md`、`references/回归清单.md` 和历史测试资产，建立需求到测试范围的追溯。重点检查股权处理白名单反向验证、采编到下游数据链路、七大通道、开关/状态组合、多端差异。
-4. 按 `references/TestPlan.md` 使用 `templates/测试方案_template.xlsx` 填充矩阵式测试方案，保留模板表结构、字段、合并单元格与格式。
+4. 按 `references/TestPlan.md` 使用 `templates/测试方案_template.xlsx` 填充矩阵式测试方案，保留模板表结构、字段、合并单元格与格式；另按每个末级方案项填充 `方案人工评价` Sheet。
 5. 覆盖各功能点的正向与反向/边界场景；涉及数据、消息或文件时写明可观察表/字段/消息/文件名判据；末尾写按本次变更裁剪后的回归范围。
+
+## 产出脚本的字段契约
+
+`stage_result.json` 中方案项字段必须按**字段名**读取，禁止用固定下标猜列含义。
+尤其 `scenario_type` 的值只能是 `positive`、`negative`、`boundary`、`exception`、
+`concurrency`、`compatibility`；`priority` 的值是 `P0`–`P3`，两者绝不能互换。
+如果为了生成 Excel 使用元组，统一顺序为：
+`(id, title, requirement_ids, evidence_ids, module, scenario_type, priority, expected)`，
+并在映射前做枚举校验；遇到 `P0` 等优先级值时应读取优先级字段，而不是拿它查场景类型字典。
 6. 对执行资源与工时不确定项标记待确认；未覆盖的浏览器、设备、系统链路和外部依赖写入风险，不得写"无"掩盖缺口。
 7. **按 `references/TestPlan.md` 的「稳定 ID 与证据引用」一节生成 `stage_result.json`**：
    为每个末级方案项编号、挂需求与证据、写可判定预期，并记录决策摘要、假设、
@@ -74,21 +83,26 @@ permissions:
 
    `corpus.json` 是本次实际用到的知识文档索引（`document_id` / `document_version` /
    `chunk_id` / 片段正文）。退出码非 0 时逐条修掉报出的字段问题再重跑。
-9. 输出 `test_plan.xlsx`、`stage_result.json`、需求分析结构化结果、页面探索结构（若执行），以及供后续阶段消费的方案项列表和待确认问题。
+9. 生成三件人工交付物：`{项目名}_测试方案_V{版本}.xlsx`、`{项目名}_测试方案说明_V{版本}.md`、`requirements_parsed.json`。项目名清理文件名非法字符；版本优先用已确认值，缺失时使用 `1.0`。另生成飞轮内部文件 `stage_result.json`。
 
 ## 产出要求
 
-- 方案表包含测试里程碑、需求内容、测试策略、测试范围、测试资源、测试风险六大模块。
+- Excel 固定包含 `测试方案`、`方案评价统计`、`方案人工评价` 和 `填写说明（提交前可删除）` 工作表；按模板顺序保留主方案、统计、评价、说明四个 Sheet。
+- `方案人工评价` 每个末级方案项占一行，保留方案编号、模块、功能描述、测试要点/预期、场景类型与优先级；`评价结论`、`修改点`、`不采纳原因` 初始留空。
+- `评价结论` 仅允许 `采纳`、`不采纳`、`待修改`；待修改必须填写修改点，不采纳必须填写不采纳原因。用下拉选项和醒目缺项提示落实要求。
+- `方案评价统计` 自动统计方案项总数、采纳、不采纳、待修改、待评价、已评价和采纳率；采纳率=采纳数÷已评价数，已评价数=三种已选结论之和。
 - 测试范围按需求/模块/测试点分层，层级不超过四级；可直接映射到后续用例模块。
 - 每个末级方案项需有稳定 ID、需求来源、模块、场景类型、优先级和可判定说明。
 - 明确覆盖率、未覆盖项与阻塞条件；方案质量门禁未通过时不得假装已完成或驱动下一阶段。
 - 业务规则与素材冲突时保留证据并列出待确认问题。
+- 交付物必须使用模板中的统一清爽样式：深海军蓝标题、蓝灰表头、浅蓝分组、浅黄风险区、白底正文；隐藏网格线、冻结前两行、自动换行并避免文字裁切。不得用大面积高饱和色或无格式 Markdown 表格替代模板。
 
 ## 文件
 
-- `test_plan.xlsx`：团队矩阵式测试方案（业务主产物）。
+- `{项目名}_测试方案_V{版本}.xlsx`：团队矩阵式测试方案（人工交付物）。
+- `{项目名}_测试方案说明_V{版本}.md`：与 Excel 同源的可读说明稿（人工交付物）。
+- `requirements_parsed.json`：需求解析结果（人工交付物）。
 - `stage_result.json`：平台产出协议信封（L3）。
 - `corpus.json`：本次引用的知识文档索引，供 `scripts/validate_stage_result.py` 定位原句。
-- `analysis/requirements_parsed.json`：需求解析结果。
 - `analysis/page_structure.json`：页面探索结果（如适用）。
 - 结构化方案项、覆盖统计和待确认项。

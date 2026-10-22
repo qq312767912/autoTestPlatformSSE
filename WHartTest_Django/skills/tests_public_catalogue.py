@@ -316,7 +316,7 @@ class DeclaredStageTests(APITestCase):
         # 前端靠 source 区分"包自己声明的"和"管理员补的"。
         self.assertEqual(row["stage_source"], "declared")
 
-    def test_manifest_declaration_wins_over_the_manual_one(self):
+    def test_manual_card_stage_overrides_packaged_display_stage(self):
         skill = Skill.objects.create(
             project=self.project, name="declared-both", description="两边都有",
         )
@@ -329,8 +329,8 @@ class DeclaredStageTests(APITestCase):
             reverse("project-skills-list", kwargs={"project_pk": self.project.id}),
         )
         row = next(r for r in response.data["data"] if r["name"] == "declared-both")
-        self.assertEqual(row["stage"], "test_execution")
-        self.assertEqual(row["stage_source"], "manifest")
+        self.assertEqual(row["stage"], "testcase_generation")
+        self.assertEqual(row["stage_source"], "declared")
 
     def test_undeclared_skill_reports_no_stage_and_no_source(self):
         row = self._row()
