@@ -384,8 +384,8 @@ async function refreshAccessToken(): Promise<string | null> {
     if (response.ok) {
       const data = await response.json();
       if (data.access) {
-        // 更新token
-        localStorage.setItem('auth-accessToken', data.access);
+        // 同步 Pinia 与持久化令牌，并保存后端轮换后的 refresh token。
+        authStore.setTokens(data.access, data.refresh);
         return data.access;
       }
     }

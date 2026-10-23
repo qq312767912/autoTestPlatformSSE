@@ -105,10 +105,10 @@ async function refreshToken() {
     });
 
     if (response.data && response.data.access) {
-      // 更新token
       const newToken = response.data.access;
-      // 更新AuthStore中的token
-      localStorage.setItem('auth-accessToken', newToken);
+      // Pinia 是请求拦截器的令牌数据源，必须与持久化数据同步更新。
+      // 后端开启 refresh token 轮换时，也要保存新 refresh token。
+      authStore.setTokens(newToken, response.data.refresh);
       return newToken;
     } else {
       // 刷新失败，清除token并登出

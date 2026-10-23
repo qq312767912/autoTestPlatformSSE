@@ -88,6 +88,19 @@ export const useAuthStore = defineStore('auth', {
   
   actions: {
     /**
+     * 同步更新内存中的令牌和持久化令牌。
+     * refreshToken 未返回时保留当前值，兼容未开启刷新令牌轮换的后端。
+     */
+    setTokens(accessToken: string, refreshToken?: string) {
+      this.accessToken = accessToken;
+      localStorage.setItem('auth-accessToken', accessToken);
+
+      if (refreshToken) {
+        this.refreshToken = refreshToken;
+        localStorage.setItem('auth-refreshToken', refreshToken);
+      }
+    },
+    /**
      * 用户登录 Action
      * @param username 用户名
      * @param password 密码
@@ -102,14 +115,11 @@ export const useAuthStore = defineStore('auth', {
           this.isAuthenticated = true;
           // 存储API返回的用户信息
           this.user = response.data.user;
-          this.accessToken = response.data.access;
-          this.refreshToken = response.data.refresh;
+          this.setTokens(response.data.access, response.data.refresh);
 
           // 直接存储到 localStorage
           localStorage.setItem('auth-isAuthenticated', 'true');
           localStorage.setItem('auth-user', JSON.stringify(this.user));
-          localStorage.setItem('auth-accessToken', this.accessToken);
-          localStorage.setItem('auth-refreshToken', this.refreshToken);
 
           // 异步获取用户权限（不阻塞登录流程）
           this.loadUserPermissions().catch(error => {
