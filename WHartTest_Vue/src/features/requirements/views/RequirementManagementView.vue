@@ -193,7 +193,7 @@
             :auto-upload="false"
             :show-file-list="true"
             :limit="1"
-            accept=".pdf,.doc,.docx,.txt,.md"
+            accept=".pdf,.docx,.txt,.md"
             @change="handleFileChange"
           >
             <template #upload-button>
@@ -321,7 +321,7 @@ const pageText = computed(() => (
         directInput: 'Direct input',
         selectFile: 'Select file',
         clickToUploadFile: 'Click to upload a file',
-        uploadFileTip: 'Supports PDF, Word (.doc/.docx), TXT, and Markdown',
+        uploadFileTip: 'Supports PDF, Word (.docx), TXT, and Markdown',
         documentContent: 'Document content',
         enterOrPasteDocumentContent: 'Enter or paste the document content',
         restartReviewConfig: 'Restart review configuration',
@@ -386,7 +386,7 @@ const pageText = computed(() => (
         directInput: '直接输入',
         selectFile: '选择文件',
         clickToUploadFile: '点击上传文件',
-        uploadFileTip: '支持 PDF、Word(.doc/.docx)、TXT、Markdown',
+        uploadFileTip: '支持 PDF、Word(.docx)、TXT、Markdown',
         documentContent: '文档内容',
         enterOrPasteDocumentContent: '请输入或粘贴文档内容',
         restartReviewConfig: '重新评审配置',
@@ -772,7 +772,7 @@ const handleFileChange = (fileListParam: any[], file: any) => {
     // 自动设置文档类型
     const fileName = file.file.name;
     const extension = fileName.split('.').pop()?.toLowerCase();
-    if (extension && ['pdf', 'doc', 'docx', 'txt', 'md'].includes(extension)) {
+    if (extension && ['pdf', 'docx', 'txt', 'md'].includes(extension)) {
       uploadForm.document_type = extension as DocumentType;
     }
     // 如果没有标题，使用文件名
