@@ -16,7 +16,7 @@ from urllib.parse import quote
 
 import requests
 from django.utils import timezone
-from django.db import close_old_connections
+from django.db import close_old_connections, transaction
 
 from .models import AnalysisTask, AnalysisTaskExecutionLog, TestRequirementDraft, UserGitLabCredential
 
@@ -37,7 +37,7 @@ AI_REVIEW_LANGUAGE_RULE = (
     "还有 test_requirements 的全部描述字段。代码标识符、文件路径、接口名、字段名和必要的原始代码片段保持原文，"
     "但解释这些证据的句子必须使用中文；即使 Diff、源码注释或业务上下文是英文，也不得输出英文审查结论。"
 )
-CODE_REVIEW_REPORT_SCHEMA_VERSION = 7
+CODE_REVIEW_REPORT_SCHEMA_VERSION = 8
 DEVELOPER_REPORT_FINDING_LIMIT = 15
 
 # OpenCodeReview 参数统一维护。内网自建模型不限制 token；OCR 需要保留原生上下文，
@@ -1861,7 +1861,18 @@ def _apply_verification_results(findings, verdicts):
         item["supporting_evidence"] = [str(value)[:1000] for value in supporting[:10] if value]
         item["trigger_reachable"] = verdict.get("trigger_reachable") if isinstance(verdict.get("trigger_reachable"), bool) else None
         item["target_commit_verified"] = bool(verdict)
+        trace = dict(item.get("verification_trace") or {})
+        trace["evidence_status"] = (
+            "complete" if verdict and trace.get("source_status") == "read"
+            and not trace.get("missing_steps") and not item["missing_evidence"]
+            else "partial" if verdict or trace.get("files_read") or trace.get("queries")
+            else "unverified"
+        )
+        item["verification_trace"] = trace
         decision = verdict.get("verdict") or item.get("disposition") or "needs_confirmation"
+        if verdict and decision == "confirmed" and trace.get("source_status") == "unavailable":
+            decision = "needs_confirmation"
+            item["verification_reason"] = "目标 Commit 源码未能读取，无法确认可达错误"
         direct_evidence_fallback = not verdict and _has_direct_target_defect_evidence(item)
         if (
             not verdict and decision == "confirmed"
@@ -1911,6 +1922,47 @@ def _apply_verification_results(findings, verdicts):
         item["verified"] = decision == "confirmed"
         active.append(item)
     return active, rejected
+
+
+def _verification_queries(finding):
+    """Prefer code identities to words guessed from a model's description."""
+    subject = str(finding.get("subject") or "").strip()
+    replacement = str(finding.get("replacement_evidence") or "")
+    queries = [subject] if re.fullmatch(r"[A-Za-z_$][\w$]{2,100}", subject) else []
+    queries.extend(re.findall(r"@([A-Za-z_$][\w$]{2,100})", str(finding.get("rule_evidence") or finding.get("evidence") or ""))[:1])
+    if finding.get("change_kind") == "relocated_or_changed":
+        queries.extend(re.findall(r"\b[A-Za-z_$][\w$]{3,100}\b", replacement)[-2:])
+    if queries:
+        return list(dict.fromkeys(queries))[:4], "structured"
+    fallback = re.findall(r"[A-Za-z_$][\w$]{3,100}", " ".join(
+        str(finding.get(key) or "") for key in ("change", "evidence")
+    ))
+    return list(dict.fromkeys(fallback))[:4], "description_fallback"
+
+
+def _valid_verification_item(item, expected_keys):
+    if not isinstance(item, dict) or str(item.get("key")) not in expected_keys:
+        return False
+    if item.get("verdict") not in {"confirmed", "needs_confirmation", "rejected", "advisory"}:
+        return False
+    if item.get("severity") not in {"high", "medium", "low"}:
+        return False
+    if not isinstance(item.get("reason"), str) or not item["reason"].strip():
+        return False
+    if not isinstance(item.get("supporting_evidence"), list) or not all(
+        isinstance(value, str) for value in item["supporting_evidence"]
+    ):
+        return False
+    if not isinstance(item.get("trigger_reachable"), bool):
+        return False
+    if not isinstance(item.get("counter_evidence"), str) or not isinstance(item.get("missing_evidence"), str):
+        return False
+    if item["verdict"] == "confirmed" and (
+        not any(value.strip() for value in item["supporting_evidence"])
+        or item["trigger_reachable"] is not True
+    ):
+        return False
+    return True
 
 
 def _related_source_context(mcp, search_hits, current_path, source_cache, max_files=5):
@@ -1984,11 +2036,11 @@ def _related_document_context(task, finding, limit=3):
     return [item for _, item in matches[:limit]]
 
 
-def _verify_findings_against_target(task, findings, review_client=None):
+def _verify_findings_against_target(task, findings, review_client=None, force_model=False):
     """使用目标 Commit 源码和跨文件检索对 AI 候选做独立反证。"""
     if not findings:
         return [], [], 0, "没有需要执行反证审查的候选问题"
-    if task.mode == "quick":
+    if task.mode == "quick" and not force_model:
         active, rejected = _apply_verification_results(findings, [])
         return active, rejected, 0, "快速模式未执行 AI 反证审查，缺少直接源码证据的 AI 确定缺陷已降为待确认"
     from langgraph_integration.views import create_llm_instance
@@ -2004,11 +2056,23 @@ def _verify_findings_against_target(task, findings, review_client=None):
     candidates = []
     for finding in findings:
         path = str(finding.get("file") or "")
+        trace = {
+            "target_sha": task.head_sha, "source_status": "unavailable",
+            "files_read": [], "queries": [], "steps": [], "missing_steps": [],
+        }
         if path not in source_cache:
             try:
                 source_cache[path] = mcp.read_file(path)[:30000]
-            except Exception:
+            except Exception as exc:
                 source_cache[path] = ""
+                trace["missing_steps"].append(f"目标文件读取失败：{type(exc).__name__}")
+        if source_cache[path]:
+            trace["source_status"] = "read"
+            trace["files_read"].append(path)
+        elif not trace["missing_steps"]:
+            trace["missing_steps"].append("目标文件无可读源码")
+        trace["steps"].append({"name": "target_source", "target": path,
+                               "status": trace["source_status"]})
         source_lines = source_cache[path].splitlines()
         center = max(0, int(finding.get("line_start") or 1) - 1)
         excerpt_start = max(0, center - 55)
@@ -2017,18 +2081,26 @@ def _verify_findings_against_target(task, findings, review_client=None):
             f"{line_number + 1}: {source_lines[line_number]}"
             for line_number in range(excerpt_start, excerpt_end)
         )[:6000]
-        identifiers = re.findall(r"[A-Za-z_$][\w$]{3,}", " ".join([
-            str(finding.get("change") or ""), str(finding.get("evidence") or ""),
-        ]))
+        identifiers, query_source = _verification_queries(finding)
+        trace["query_source"] = query_source
         related = []
-        for identifier in list(dict.fromkeys(identifiers))[:4]:
+        for identifier in identifiers:
             if identifier not in search_cache:
                 try:
-                    search_cache[identifier] = mcp.search_code(identifier)
-                except Exception:
+                    search_cache[identifier] = mcp.search_code(identifier) or []
+                except Exception as exc:
                     search_cache[identifier] = []
+                    trace["missing_steps"].append(f"跨文件检索 {identifier} 失败：{type(exc).__name__}")
+            trace["queries"].append({"term": identifier, "hit_count": len(search_cache[identifier][:20])})
             related.extend(search_cache[identifier])
         related = list(dict.fromkeys(related))[:20]
+        trace["steps"].append({"name": "cross_file_search", "target": ", ".join(identifiers),
+                               "status": "partial" if trace["missing_steps"] else "completed"})
+        related_sources = _related_source_context(mcp, related, path, source_cache)
+        trace["files_read"].extend(item["file"] for item in related_sources)
+        trace["files_read"] = list(dict.fromkeys(trace["files_read"]))[:6]
+        if related and not related_sources:
+            trace["missing_steps"].append("相关源码未能读取")
         try:
             document_context = _related_document_context(task, finding)
         except Exception as exc:
@@ -2040,11 +2112,12 @@ def _verify_findings_against_target(task, findings, review_client=None):
             )},
             "target_source_excerpt": target_excerpt,
             "related_code_matches": related,
-            "related_source_context": _related_source_context(mcp, related, path, source_cache),
+            "related_source_context": related_sources,
             "change_kind": finding.get("change_kind"),
             "subject": finding.get("subject"),
             "replacement_evidence": finding.get("replacement_evidence"),
             "related_document_context": document_context,
+            "verification_trace": trace,
         })
 
     verdicts, tokens, errors, failed_reasons = [], 0, [], {}
@@ -2073,27 +2146,41 @@ def _verify_findings_against_target(task, findings, review_client=None):
         payload = _json_from_response(getattr(response, "content", response))
         usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
         used = int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0)
-        return index, payload.get("items") or [], used
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            raise ValueError("反证输出缺少 items 列表")
+        return index, items, used
 
     with ThreadPoolExecutor(max_workers=min(3, len(batches)), thread_name_prefix="finding-verification") as executor:
         futures = [executor.submit(verify_batch, index, batch) for index, batch in enumerate(batches)]
         for index, future in enumerate(futures):
+            expected = {str(candidate["key"]) for candidate in batches[index]}
+            valid = {}
+            failure_reason = "未返回有效裁决"
             try:
                 _, items, used = future.result()
-                verdicts.extend(items)
                 tokens += used
+                valid.update({str(item["key"]): item for item in items if _valid_verification_item(item, expected)})
             except Exception as exc:
+                errors.append(f"批次{index + 1}首轮失败：{type(exc).__name__}")
+                failure_reason = f"首轮失败：{type(exc).__name__}: {str(exc)[:200]}"
+            if len(valid) < len(expected):
                 try:
-                    _, items, used = verify_batch(index, batches[index])
-                    verdicts.extend(items)
-                    tokens += used
+                    retry_batch = [candidate for candidate in batches[index] if str(candidate["key"]) not in valid]
+                    _, retry_items, retry_used = verify_batch(index, retry_batch)
+                    tokens += retry_used
+                    valid.update({str(item["key"]): item for item in retry_items if _valid_verification_item(item, expected)})
                 except Exception as retry_exc:
                     errors.append(f"批次{index + 1}失败（重试后）：{retry_exc}")
-                    for candidate in batches[index]:
-                        failed_reasons[str(candidate.get("key"))] = f"反证批次{index + 1}重试失败：{retry_exc}"
+                    failure_reason = f"重试失败：{type(retry_exc).__name__}: {str(retry_exc)[:200]}"
+            verdicts.extend(valid.values())
+            for missing in expected - valid.keys():
+                failed_reasons[missing] = f"反证批次{index + 1}{failure_reason}"
     document_by_key = {str(item.get("key")): item.get("related_document_context") or [] for item in candidates}
+    trace_by_key = {str(item.get("key")): item.get("verification_trace") or {} for item in candidates}
     enriched_findings = [
         {**finding, "document_references": document_by_key.get(str(finding.get("key")), []),
+         "verification_trace": trace_by_key.get(str(finding.get("key")), {}),
          "verification_error": failed_reasons.get(str(finding.get("key")), "")}
         for finding in findings
     ]
@@ -2363,6 +2450,77 @@ def retry_ocr_analysis(task: AnalysisTask):
             task.save(update_fields=["change_report", "updated_at"])
     except Exception:
         logger.exception("OCR 重试结果未能记录到数据飞轮")
+
+
+def retry_verification_analysis(task: AnalysisTask):
+    """Recheck only unresolved findings, preserving all other report artifacts."""
+    _ensure_not_cancelled(task)
+    report = task.change_report or {}
+    snapshot = json.loads(json.dumps(report.get("findings") or [], ensure_ascii=False))
+    pending = [item for item in snapshot if item.get("verification_status") in {"verification_failed", "not_verified"}]
+    previous_status = (report.get("verification_retry") or {}).get("previous_status") or "partial"
+    if not pending:
+        raise ValueError("没有需要续审的候选")
+    AnalysisTaskExecutionLog.objects.create(task=task, event="started", message="未核验候选续审开始",
+                                            detail={"candidate_count": len(pending)})
+    task.status, task.progress, task.current_step = "ai_analyzing", 82, "仅核验未完成候选"
+    task.save(update_fields=["status", "progress", "current_step", "updated_at"])
+    started = time.monotonic()
+    client = None
+    if task.repository.source_type != "local_git":
+        credential = UserGitLabCredential.objects.get(
+            project=task.project, connection=task.repository.connection, user=task.executor,
+        )
+        client = GitLabClient(task.repository.connection, credential.get_token())
+    active, rejected, tokens, note = _verify_findings_against_target(task, pending, client, force_model=True)
+    active_by_key = {str(item["key"]): item for item in active}
+    rejected_keys = {str(item["key"]) for item in rejected}
+    resolved_keys = {key for key, item in active_by_key.items() if item.get("target_commit_verified") is True}
+    resolved_keys.update(rejected_keys)
+    with transaction.atomic():
+        locked = AnalysisTask.objects.select_for_update().get(pk=task.pk)
+        if locked.status == "cancelled":
+            raise AnalysisCancelled("续审已取消")
+        current = locked.change_report or {}
+        if locked.head_sha != task.head_sha or current.get("findings") != snapshot:
+            raise RuntimeError("续审期间报告或目标 Commit 已变化，已保留原报告")
+        merged = [active_by_key.get(str(item.get("key")), item) for item in snapshot
+                  if str(item.get("key")) not in rejected_keys]
+        current["findings"] = merged
+        summary = current.setdefault("summary", {})
+        summary.update({
+            "risk_count": len(merged),
+            "confirmed_count": sum(item.get("disposition") == "confirmed" for item in merged),
+            "needs_confirmation_count": sum(item.get("disposition") == "needs_confirmation" for item in merged),
+            "advisory_count": sum(item.get("disposition") == "advisory" for item in merged),
+            "high_risk_count": sum(item.get("severity") == "high" for item in merged),
+            "verified_risk_count": sum(item.get("target_commit_verified") is True for item in merged),
+            "unverified_risk_count": sum(item.get("target_commit_verified") is not True for item in merged),
+            "rejected_risk_count": int(summary.get("rejected_risk_count") or 0) + len(rejected),
+        })
+        summary["disposition_counts"] = {key: summary[f"{key}_count"] for key in
+                                          ("confirmed", "needs_confirmation", "advisory")}
+        summary["severity_counts"] = {level: sum(item.get("severity") == level for item in merged)
+                                      for level in ("high", "medium", "low")}
+        summary["source_counts"] = {source: sum(item.get("source") == source for item in merged)
+                                    for source in {item.get("source") for item in merged if item.get("source")}}
+        current["impact_summary"] = sorted({item.get("impact") for item in merged if item.get("impact")})
+        history = list(current.get("verification_retry_history") or [])
+        history.append({"at": timezone.now().isoformat(), "candidate_count": len(pending),
+                        "resolved_count": len(resolved_keys), "remaining_count": len(pending) - len(resolved_keys),
+                        "rejected_count": len(rejected), "tokens": tokens,
+                        "duration_ms": round((time.monotonic() - started) * 1000), "note": note[:500]})
+        current["verification_retry_history"] = history[-20:]
+        current.pop("verification_retry", None)
+        locked.change_report = _sanitize_json_value(current)
+        locked.status, locked.progress, locked.current_step = previous_status, 100, "未核验候选续审完成"
+        locked.token_usage += tokens
+        locked.completed_at = timezone.now()
+        locked.save(update_fields=["change_report", "status", "progress", "current_step",
+                                   "token_usage", "completed_at", "updated_at"])
+        AnalysisTaskExecutionLog.objects.create(task=locked, event="stage_finished", message="未核验候选续审完成",
+                                                detail=history[-1])
+    return locked
 
 
 def run_analysis(task: AnalysisTask, force_refresh=False):

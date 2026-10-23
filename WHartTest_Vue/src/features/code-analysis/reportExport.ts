@@ -184,6 +184,10 @@ function buildChangeReport(task: AnalysisTask): string {
       <div class="detail"><b>触发方式</b><span>${richText(item.trigger || '请开发结合调用链或运行场景确认触发条件')}</span></div>
       <div class="detail"><b>影响</b><span>${richText(item.impact || '需结合代码上下文确认')}</span></div>
       <div class="detail"><b>反证状态</b><span>${escapeHtml(item.verification_status || '历史报告未记录')}</span></div>
+      <div class="detail"><b>证据链</b><span>${escapeHtml(({complete:'完整',partial:'部分完成',unverified:'未核验'} as Record<string,string>)[item.verification_trace?.evidence_status || ''] || '历史报告未记录')}${item.verification_trace?.target_sha ? ` · 目标 Commit ${escapeHtml(item.verification_trace.target_sha)}` : ''}</span></div>
+      ${item.verification_trace?.files_read?.length ? `<div class="detail"><b>已查源码</b><span>${escapeHtml(item.verification_trace.files_read.join('、'))}</span></div>` : ''}
+      ${item.verification_trace?.queries?.length ? `<div class="detail"><b>检索词</b><span>${escapeHtml(item.verification_trace.queries.map(query => `${query.term}（${query.hit_count} 命中）`).join('、'))}</span></div>` : ''}
+      ${item.verification_trace?.missing_steps?.length ? `<div class="detail"><b>未完成步骤</b><span>${escapeHtml(item.verification_trace.missing_steps.join('；'))}</span></div>` : ''}
       ${item.verification_reason ? `<div class="detail"><b>核验结论</b><span>${richText(item.verification_reason)}</span></div>` : ''}
       ${item.source_keys?.length ? `<div class="detail"><b>合并来源</b><span>${escapeHtml(item.source_keys.join('、'))}</span></div>` : ''}
       ${item.change_kind ? `<div class="detail"><b>变更对齐</b><span>${escapeHtml(item.change_kind)}${item.subject ? ` · ${escapeHtml(item.subject)}` : ''}</span></div>` : ''}
@@ -214,6 +218,8 @@ function buildChangeReport(task: AnalysisTask): string {
   const optimization = diagnostics.optimization || {};
   const fallback = diagnostics.fallback || {};
   const deepStrategy = optimization.strategy === 'ocr_primary_ai_fallback' ? `深度模式由 OpenCodeReview 主审，已避免 ${numberValue(optimization.duplicate_ai_files_avoided)} 个文件的重复 AI 审查；${fallback.triggered ? `${numberValue(fallback.file_count)} 个失败文件由平台 AI 补审，补审覆盖 ${numberValue(fallback.coverage)}%` : '无需平台 AI 补审'}。` : '';
+  const retryHistory = report.verification_retry_history || [];
+  const latestRetry = retryHistory[retryHistory.length - 1];
   const body = `
     <section class="metrics">
       ${metric('变更文件', numberValue(summary.changed_files))}
@@ -228,6 +234,7 @@ function buildChangeReport(task: AnalysisTask): string {
       ${metric('AI 覆盖率', `${numberValue(task.ai_coverage)}%`)}
     </section>
     ${numberValue(summary.suppressed_risk_count) ? `<section class="section"><div class="summary"><h3>开发报告已聚焦</h3><p>平台已全量扫描 ${numberValue(summary.candidate_risk_count)} 条候选，本报告仅展示 ${numberValue(summary.risk_count)} 条核心问题；目标 Commit 反证核验排除 ${numberValue(summary.rejected_risk_count)} 条，其余低优先级或低证据候选不占用开发阅读篇幅。</p></div></section>` : ''}
+    ${latestRetry ? `<section class="section"><div class="summary"><h3>最近一次未核验候选续审</h3><p>${escapeHtml(latestRetry.at)}：处理 ${numberValue(latestRetry.candidate_count)} 项，完成 ${numberValue(latestRetry.resolved_count)} 项，仍未核验 ${numberValue(latestRetry.remaining_count)} 项；耗时 ${numberValue(latestRetry.duration_ms)} ms，使用 ${numberValue(latestRetry.tokens)} Token。</p></div></section>` : ''}
     <nav class="toc"><a href="#confirmed">必须处理</a><a href="#pending">待确认风险</a><a href="#advisory">改进建议</a><a href="#coverage">审查覆盖</a></nav>
     <section class="section confirmed" id="confirmed">
       <div class="section-head"><div><h2>必须处理的确定缺陷</h2><p>已有明确代码证据和可验证错误结果，建议开发优先修复</p></div><span class="count">${confirmed.length} 项</span></div>

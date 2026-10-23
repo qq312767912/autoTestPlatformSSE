@@ -17,7 +17,7 @@ from langgraph_integration.models import LLMConfig
 from .models import AnalysisTask, AnalysisTaskExecutionLog, CodeAnalysisLLMConfig, GitLabConnection, ProjectRepository, TestRequirementDraft, UserGitLabCredential
 from .serializers import GitLabConnectionSerializer, ProjectRepositorySerializer
 from .review_mcp import CodeReviewMCP
-from .services import AI_REVIEW_LANGUAGE_RULE, AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _apply_verification_results, _attach_finding_diff_evidence, _classify_finding, _deduplicate_iteration_test_points, _diff_line_stats, _effective_deep_coverage, _ensure_not_cancelled, _generate_fix_patches, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_fallback_diffs, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _prioritize_findings_for_report, _related_source_context, _reuse_cached_result, _review_payload_needs_chinese_retry, _risk_findings_for_tests, _sanitize_json_value, _validate_suggested_patch, _verify_findings_against_target, remove_ocr_repositories_for_repository, remove_ocr_repository, retry_ocr_analysis, run_analysis
+from .services import AI_REVIEW_LANGUAGE_RULE, AnalysisCancelled, DEFAULT_ANNOTATIONS, LOW_VALUE_FILE_PATTERNS, OCR_CONCURRENCY, OCR_RESUME_CONCURRENCY, GitLabClient, LocalGitClient, _apply_verification_results, _attach_finding_diff_evidence, _classify_finding, _deduplicate_iteration_test_points, _diff_line_stats, _effective_deep_coverage, _ensure_not_cancelled, _generate_fix_patches, _invalid_ocr_result_reason, _is_low_value_file, _load_ocr_payload, _managed_gitlab_repository, _ocr_diagnostics, _ocr_fallback_diffs, _ocr_needs_resume, _ocr_result_path, _ocr_timeout_budget, _parse_diff, _prioritize_findings_for_report, _related_source_context, _reuse_cached_result, _review_payload_needs_chinese_retry, _risk_findings_for_tests, _sanitize_json_value, _valid_verification_item, _verification_queries, _validate_suggested_patch, _verify_findings_against_target, remove_ocr_repositories_for_repository, remove_ocr_repository, retry_ocr_analysis, retry_verification_analysis, run_analysis
 from .services import CODE_REVIEW_REPORT_SCHEMA_VERSION, _is_pure_addition_hypothesis, _merge_related_findings, _related_document_context
 
 
@@ -96,7 +96,9 @@ class ReviewPipelineToolTests(SimpleTestCase):
             if "k10" in keys:
                 raise RuntimeError("Internal Server Error")
             return SimpleNamespace(content=json.dumps({"items": [
-                {"key": key, "verdict": "rejected", "reason": "目标代码已有等价保护"} for key in keys
+                {"key": key, "verdict": "rejected", "severity": "low", "reason": "目标代码已有等价保护",
+                 "supporting_evidence": [], "counter_evidence": "保护逻辑存在",
+                 "missing_evidence": "", "trigger_reachable": False} for key in keys
             ]}))
         create_llm.return_value.invoke.side_effect = invoke
         task = SimpleNamespace(mode="standard", head_sha="head", repository=SimpleNamespace(source_type="local_git"))
@@ -110,6 +112,59 @@ class ReviewPipelineToolTests(SimpleTestCase):
         self.assertEqual(active[0]["verification_status"], "verification_failed")
         self.assertIn("Internal Server Error", active[0]["verification_reason"])
         self.assertIn("批次2失败", note)
+
+    def test_verification_contract_rejects_incomplete_confirmed_and_invalid_types(self):
+        valid = {"key": "k1", "verdict": "confirmed", "severity": "high", "reason": "匿名访问可复现",
+                 "supporting_evidence": ["目标版请求返回 200"], "counter_evidence": "",
+                 "missing_evidence": "", "trigger_reachable": True}
+        self.assertTrue(_valid_verification_item(valid, {"k1"}))
+        self.assertFalse(_valid_verification_item({**valid, "supporting_evidence": []}, {"k1"}))
+        self.assertFalse(_valid_verification_item({**valid, "trigger_reachable": "true"}, {"k1"}))
+        self.assertFalse(_valid_verification_item({**valid, "key": "other"}, {"k1"}))
+
+    def test_unreadable_target_cannot_become_confirmed_from_model_claim(self):
+        finding = {"key": "k1", "source": "ai_analysis", "severity": "high",
+                   "disposition": "needs_confirmation", "verification_trace": {
+                       "source_status": "unavailable", "files_read": [], "queries": [],
+                       "missing_steps": ["目标文件读取失败"]}}
+        verdict = {"key": "k1", "verdict": "confirmed", "severity": "high",
+                   "reason": "声称存在问题", "supporting_evidence": ["声称有证据"],
+                   "counter_evidence": "", "missing_evidence": "", "trigger_reachable": True}
+        active, rejected = _apply_verification_results([finding], [verdict])
+        self.assertFalse(rejected)
+        self.assertEqual(active[0]["disposition"], "needs_confirmation")
+        self.assertEqual(active[0]["verification_trace"]["evidence_status"], "partial")
+
+    @patch("code_analysis.services._related_document_context", return_value=[])
+    @patch("code_analysis.services._get_code_analysis_llm_config", return_value=SimpleNamespace())
+    @patch("code_analysis.review_mcp.CodeReviewMCP.search_code", return_value=[])
+    @patch("code_analysis.review_mcp.CodeReviewMCP.read_file", return_value="class Demo {}")
+    @patch("langgraph_integration.views.create_llm_instance")
+    def test_invalid_verdict_retries_only_invalid_key(self, create_llm, _read, _search, _config, _documents):
+        seen = []
+        def invoke(prompt, **_kwargs):
+            keys = re.findall(r'"key": "(k\d+)"', prompt)
+            seen.append(keys)
+            items = [{"key": key, "verdict": "rejected", "severity": "low", "reason": "目标版存在替代实现",
+                      "supporting_evidence": [], "counter_evidence": "替代实现已查", "missing_evidence": "",
+                      "trigger_reachable": False} for key in keys]
+            if len(seen) == 1:
+                items[-1].pop("trigger_reachable")
+            return SimpleNamespace(content=json.dumps({"items": items}))
+        create_llm.return_value.invoke.side_effect = invoke
+        task = SimpleNamespace(mode="standard", head_sha="head", repository=SimpleNamespace(source_type="local_git"))
+        findings = [{"key": key, "file": "Demo.java", "source": "machine_rule", "severity": "medium"}
+                    for key in ("k1", "k2")]
+        active, rejected, _tokens, _note = _verify_findings_against_target(task, findings)
+        self.assertFalse(active)
+        self.assertEqual(len(rejected), 2)
+        self.assertEqual(seen, [["k1", "k2"], ["k2"]])
+
+    def test_structured_subject_precedes_description_guess(self):
+        queries, source = _verification_queries({"subject": "meetingID", "change": "删除 randomThing 注解",
+                                                 "rule_evidence": "@NotNull", "change_kind": "removed"})
+        self.assertEqual(source, "structured")
+        self.assertEqual(queries[:2], ["meetingID", "NotNull"])
 
     def test_ssewebvote_normal_change_candidates_do_not_remain_high_when_verification_fails(self):
         machine = [
@@ -1320,6 +1375,74 @@ class AnalysisLifecycleTests(TransactionTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIn("深度模式", response.data["detail"])
         delay.assert_not_called()
+
+    @patch("code_analysis.tasks.retry_code_analysis_verification.delay")
+    def test_retry_verification_endpoint_only_queues_unverified_candidates(self, delay):
+        delay.return_value = SimpleNamespace(id="verification-job")
+        task = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user,
+            source_type="commits", base_sha="a", head_sha="b", mode="standard", status="completed",
+            change_report={"findings": [
+                {"key": "pending", "verification_status": "not_verified"},
+                {"key": "done", "verification_status": "supported"},
+            ]},
+        )
+        client = APIClient(); client.force_authenticate(self.user)
+        response = client.post(f"/api/code-analysis/tasks/{task.id}/retry-verification/")
+        self.assertEqual(response.status_code, 202)
+        task.refresh_from_db()
+        self.assertEqual(task.status, "queued")
+        self.assertEqual(task.change_report["verification_retry"]["candidate_count"], 1)
+        self.assertEqual(task.celery_task_id, "verification-job")
+        delay.assert_called_once_with(str(task.id))
+        self.assertEqual(client.post(f"/api/code-analysis/tasks/{task.id}/retry-verification/").status_code, 409)
+
+    @patch("code_analysis.services._verify_findings_against_target")
+    def test_retry_verification_preserves_completed_and_test_report(self, verifier):
+        initial_findings = [
+            {"key": "pending", "verification_status": "not_verified", "disposition": "needs_confirmation",
+             "severity": "medium", "source": "machine_rule", "impact": "可能影响字段"},
+            {"key": "done", "verification_status": "supported", "disposition": "confirmed",
+             "severity": "high", "source": "static_scan", "impact": "真实权限缺陷"},
+        ]
+        task = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user, executor=self.user,
+            source_type="commits", base_sha="a", head_sha="b", mode="standard", status="queued",
+            change_report={"findings": initial_findings, "summary": {"rejected_risk_count": 0},
+                           "verification_retry": {"previous_status": "completed"}},
+            test_report={"test_requirements": [{"title": "原有测试点"}]},
+        )
+        verifier.return_value = ([{**initial_findings[0], "verification_status": "supported",
+                                  "target_commit_verified": True, "disposition": "confirmed"}], [], 12, "核验完成")
+        retry_verification_analysis(task)
+        task.refresh_from_db()
+        self.assertEqual([item["key"] for item in verifier.call_args.args[1]], ["pending"])
+        self.assertTrue(verifier.call_args.kwargs["force_model"])
+        self.assertEqual(task.change_report["findings"][1], initial_findings[1])
+        self.assertEqual(task.change_report["summary"]["confirmed_count"], 2)
+        self.assertEqual(task.test_report["test_requirements"][0]["title"], "原有测试点")
+        self.assertEqual(task.status, "completed")
+        self.assertEqual(task.token_usage, 12)
+
+    @patch("code_analysis.services._verify_findings_against_target")
+    def test_retry_verification_refuses_concurrent_report_change(self, verifier):
+        finding = {"key": "pending", "verification_status": "not_verified"}
+        task = AnalysisTask.objects.create(
+            project=self.project, repository=self.repository, creator=self.user, executor=self.user,
+            source_type="commits", base_sha="a", head_sha="b", mode="standard", status="queued",
+            change_report={"findings": [finding], "verification_retry": {"previous_status": "completed"}},
+        )
+        def change_report(*_args, **_kwargs):
+            AnalysisTask.objects.filter(pk=task.pk).update(change_report={
+                "findings": [{"key": "changed", "verification_status": "supported"}],
+                "verification_retry": {"previous_status": "completed"},
+            })
+            return ([], [], 0, "")
+        verifier.side_effect = change_report
+        with self.assertRaisesMessage(RuntimeError, "报告或目标 Commit 已变化"):
+            retry_verification_analysis(task)
+        task.refresh_from_db()
+        self.assertEqual(task.change_report["findings"][0]["key"], "changed")
 
     @patch("code_analysis.tasks.run_code_analysis.delay")
     def test_run_endpoint_queues_background_analysis(self, delay):

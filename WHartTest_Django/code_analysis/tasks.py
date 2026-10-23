@@ -6,7 +6,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from django.db import transaction
 
 from .models import AnalysisTask
-from .services import AnalysisCancelled, retry_ocr_analysis, run_analysis
+from .services import AnalysisCancelled, retry_ocr_analysis, retry_verification_analysis, run_analysis
 
 
 logger = logging.getLogger(__name__)
@@ -93,3 +93,34 @@ def retry_code_analysis_ocr(self, task_id):
             status="degraded", progress=100, current_step="OCR 重试失败，保留降级报告",
         )
         raise
+
+
+@shared_task(bind=True, max_retries=None, soft_time_limit=80 * 60, time_limit=90 * 60)
+def retry_code_analysis_verification(self, task_id):
+    claim = _claim_global_slot(task_id, "准备续审未核验候选")
+    if claim in {"missing", "cancelled"}:
+        return {"status": claim}
+    if claim == "queued":
+        raise self.retry(countdown=15)
+    try:
+        task = AnalysisTask.objects.select_related("project", "repository__connection", "executor").get(pk=task_id)
+        retry_verification_analysis(task)
+        return {"status": "completed"}
+    except AnalysisCancelled:
+        return {"status": "cancelled"}
+    except Exception as exc:
+        logger.exception("未核验候选续审失败: %s", task_id)
+        with transaction.atomic():
+            task = AnalysisTask.objects.select_for_update().get(pk=task_id)
+            if task.status != "cancelled":
+                report = task.change_report or {}
+                previous = (report.get("verification_retry") or {}).get("previous_status") or "partial"
+                report.pop("verification_retry", None)
+                task.change_report = report
+                task.status, task.progress, task.current_step = previous, 100, "续审失败，原报告已保留"
+                task.save(update_fields=["change_report", "status", "progress", "current_step", "updated_at"])
+                from .models import AnalysisTaskExecutionLog
+                AnalysisTaskExecutionLog.objects.create(task=task, event="stage_finished",
+                    message="未核验候选续审失败，原报告已保留",
+                    detail={"error_type": type(exc).__name__, "reason": str(exc)[:500]})
+        return {"status": "failed", "error": type(exc).__name__}

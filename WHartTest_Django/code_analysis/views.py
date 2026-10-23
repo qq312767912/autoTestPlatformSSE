@@ -10,6 +10,7 @@ from django.http import HttpResponse
 from celery import current_app
 from django.db import transaction
 from django.db.models import Count
+from django.utils import timezone
 from projects.models import ProjectMember
 from wharttest_django.permissions import HasModelPermission, permission_required
 from knowledge_evolution.graph_client import KnowledgeDocumentGraphClient, RequirementGraphClient, TestCaseGraphClient
@@ -650,6 +651,39 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
             AnalysisTaskExecutionLog.objects.create(task=task, event="queued", actor=request.user, message="OCR 重试已进入队列")
             from .tasks import retry_code_analysis_ocr
             result = retry_code_analysis_ocr.delay(str(task.id))
+            task.celery_task_id = result.id
+            task.save(update_fields=["celery_task_id", "updated_at"])
+        return Response(self.get_serializer(task).data, status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=["post"], url_path="retry-verification")
+    @permission_required("code_analysis.change_analysistask")
+    def retry_verification(self, request, pk=None):
+        if not CodeAnalysisLLMConfig.objects.filter(is_active=True).exclude(encrypted_api_key="").exists():
+            return Response({"detail": "请先由管理员配置并启用代码审查专用 LLM"}, status=status.HTTP_409_CONFLICT)
+        with transaction.atomic():
+            task = AnalysisTask.objects.select_for_update().get(pk=pk)
+            if not _can_access(request.user, task.project_id):
+                raise PermissionDenied("仅项目成员可续审")
+            if task.status not in {"completed", "degraded", "partial"}:
+                return Response({"detail": "当前任务尚未完成或正在执行"}, status=status.HTTP_409_CONFLICT)
+            report = task.change_report or {}
+            pending = [item for item in report.get("findings") or []
+                       if item.get("verification_status") in {"verification_failed", "not_verified"}]
+            if not pending:
+                return Response({"detail": "没有需要续审的候选"}, status=status.HTTP_409_CONFLICT)
+            if task.repository.source_type != "local_git" and not UserGitLabCredential.objects.filter(
+                project=task.project, connection=task.repository.connection, user=request.user,
+            ).exists():
+                return Response({"detail": "当前用户未配置该 GitLab 连接的访问凭据"}, status=status.HTTP_409_CONFLICT)
+            report["verification_retry"] = {"previous_status": task.status, "candidate_count": len(pending),
+                                            "requested_at": timezone.now().isoformat()}
+            task.change_report = report
+            task.status, task.progress, task.current_step, task.executor = "queued", 0, "未核验候选续审排队中", request.user
+            task.save(update_fields=["change_report", "status", "progress", "current_step", "executor", "updated_at"])
+            AnalysisTaskExecutionLog.objects.create(task=task, event="queued", actor=request.user,
+                message="未核验候选续审已进入队列", detail={"candidate_count": len(pending)})
+            from .tasks import retry_code_analysis_verification
+            result = retry_code_analysis_verification.delay(str(task.id))
             task.celery_task_id = result.id
             task.save(update_fields=["celery_task_id", "updated_at"])
         return Response(self.get_serializer(task).data, status=status.HTTP_202_ACCEPTED)

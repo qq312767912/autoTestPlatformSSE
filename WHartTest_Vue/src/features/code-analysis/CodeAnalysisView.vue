@@ -90,6 +90,7 @@
           <div class="report-toolbar"><div><h3>风险与影响</h3><p>确定性规则与 AI 风险提示的融合结果</p></div><a-dropdown trigger="click" @select="download(selectedTask, 'change', $event)"><a-button type="outline"><template #icon><icon-download /></template>下载报告<icon-down class="download-arrow" /></a-button><template #content><a-doption value="md">Markdown 文档（.md）</a-doption><a-doption value="html">前端样式网页（.html）</a-doption></template></a-dropdown></div>
           <a-alert v-if="ocrStatusNotice" :type="ocrStatusNotice.type" class="ocr-status-alert"><b>{{ ocrStatusNotice.title }}</b><span>{{ ocrStatusNotice.message }}</span></a-alert>
           <a-button v-if="canChangeTasks && canRetryOcr(selectedTask)" class="ocr-retry-button" type="outline" status="warning" @click="retryOcr(selectedTask)"><icon-refresh /> 单独重试 OCR</a-button>
+          <a-button v-if="canChangeTasks && canRetryVerification(selectedTask)" type="outline" status="warning" @click="retryVerification(selectedTask)"><icon-refresh /> 继续核验未完成项</a-button>
           <a-collapse v-if="ocrDiagnostics" :bordered="false" class="ocr-diagnostics">
             <a-collapse-item key="ocr-diagnostics" header="OCR 完整度与失败明细">
               <div class="ocr-diagnostic-summary">
@@ -118,6 +119,7 @@
             <span class="risk-number">高风险 <b>{{ selectedTask.change_report?.summary?.high_risk_count || 0 }}</b></span>
             <span>未完成反证 <b>{{ selectedTask.change_report?.summary?.unverified_risk_count || 0 }}</b></span>
           </div>
+          <div v-if="selectedTask.change_report?.verification_retry_history?.length" class="ocr-retry-note">最近一次候选续审：{{ selectedTask.change_report.verification_retry_history[selectedTask.change_report.verification_retry_history.length - 1]?.resolved_count || 0 }} 项完成，{{ selectedTask.change_report.verification_retry_history[selectedTask.change_report.verification_retry_history.length - 1]?.remaining_count || 0 }} 项仍未核验。</div>
           <div v-if="selectedTask.change_report?.summary?.suppressed_risk_count" class="ocr-fallback-note">已全量扫描 {{ selectedTask.change_report.summary.candidate_risk_count }} 条候选，开发报告仅保留 {{ selectedTask.change_report.summary.risk_count }} 条核心问题；其中反证排除 {{ selectedTask.change_report.summary.rejected_risk_count || 0 }} 条，其余低优先级或低证据候选不占用开发阅读篇幅。</div>
           <div v-if="selectedTask.change_report?.summary?.source_counts" class="quality-breakdown"><b>风险来源</b><span v-for="(count, source) in selectedTask.change_report.summary.source_counts" :key="source">{{ sourceName(String(source)) }} {{ count }}</span></div>
           <div v-if="selectedTask.change_report?.findings?.length" class="finding-filter">
@@ -136,6 +138,10 @@
             <div class="code-snippet"><div class="snippet-caption"><span>风险凭据</span><small>{{ item.line_start ? `旧版本第 ${item.line_start} 行` : '未定位源码行' }}</small></div><div v-for="(line, index) in evidenceLines(item)" :key="index" class="snippet-line"><span>{{ item.line_start ? item.line_start + index : '—' }}</span><code>{{ line || ' ' }}</code></div></div>
             <div class="finding-detail"><b>影响：</b><span>{{ item.impact || '需结合代码上下文和完整 Diff 确认实际影响范围' }}</span></div>
             <div v-if="item.verification_reason" class="finding-detail"><b>核验结论：</b><span>{{ item.verification_reason }}</span></div>
+            <div class="finding-detail"><b>证据链：</b><span>{{ evidenceStatusLabel(item.verification_trace?.evidence_status) }}<template v-if="item.verification_trace?.target_sha"> · 目标 {{ shortSha(item.verification_trace.target_sha) }}</template></span></div>
+            <div v-if="item.verification_trace?.files_read?.length" class="finding-detail"><b>已查源码：</b><span>{{ item.verification_trace.files_read.join('、') }}</span></div>
+            <div v-if="item.verification_trace?.queries?.length" class="finding-detail"><b>检索词：</b><span>{{ item.verification_trace.queries.map(query => `${query.term}（${query.hit_count} 命中）`).join('、') }}</span></div>
+            <div v-if="item.verification_trace?.missing_steps?.length" class="finding-detail"><b>未完成步骤：</b><span>{{ item.verification_trace.missing_steps.join('；') }}</span></div>
             <div v-if="item.change_kind" class="finding-detail"><b>变更对齐：</b><span>{{ item.change_kind }}{{ item.subject ? ` · ${item.subject}` : '' }}</span></div>
             <div v-if="item.replacement_evidence" class="finding-detail"><b>替代证据：</b><span>{{ item.replacement_evidence }}</span></div>
             <div v-if="item.missing_evidence" class="finding-detail"><b>缺少的证据：</b><span>{{ item.missing_evidence }}</span></div>
@@ -574,6 +580,8 @@ const terminalStatuses = new Set(['completed','degraded','partial','failed','can
 const isRunning = (task:AnalysisTask) => !terminalStatuses.has(task.status);
 const canRerun = (task:AnalysisTask) => ['completed','degraded','partial','failed','cancelled'].includes(task.status);
 const canRetryOcr = (task:AnalysisTask) => task.mode === 'deep' && ['completed','degraded','partial'].includes(task.status) && ['failed','partial'].includes(task.change_report?.ocr_status?.status || '');
+const canRetryVerification = (task:AnalysisTask) => ['completed','degraded','partial'].includes(task.status) && (task.change_report?.findings || []).some(item => ['verification_failed','not_verified'].includes(item.verification_status || ''));
+const evidenceStatusLabel = (status?:string) => ({complete:'完整',partial:'部分完成',unverified:'未核验'}[status || ''] || '历史报告未记录');
 const draftStatus = (item:any) => selectedTask.value?.test_requirement_drafts?.find(draft => draft.id === item.id)?.status || 'draft';
 const draftStatusLabel = (value:string) => ({draft:'待处理',accepted:'已采纳',ignored:'已忽略',converted:'已转正式用例'} as any)[value] || value;
 const draftStatusColor = (value:string) => ({draft:'arcoblue',accepted:'green',ignored:'gray',converted:'purple'} as any)[value] || 'gray';
@@ -734,6 +742,12 @@ async function saveToken(){const project=projectStore.currentProjectId;if(!proje
 async function cancelAnalysis(task:AnalysisTask){try{await api.cancelTask(task.id);Message.success('已取消分析任务');await loadTasks(true)}catch(e:any){Message.error(e.message||'取消失败')}}
 async function rerunAnalysis(task:AnalysisTask){try{await api.runTask(task.id);Message.success('已重新提交分析任务');await loadTasks(true)}catch(e:any){Message.error(e.message||'重跑失败')}}
 async function retryOcr(task:AnalysisTask){try{await api.retryTaskOcr(task.id);Message.success('OCR 重试已进入队列');await loadTasks(true)}catch(e:any){Message.error(e.message||'OCR 重试失败')}}
+function retryVerification(task:AnalysisTask){
+  const count=(task.change_report?.findings || []).filter(item=>['verification_failed','not_verified'].includes(item.verification_status || '')).length;
+  Modal.warning({title:'继续核验未完成项？',content:`仅核验 ${count} 条未完成候选，不重新抓取 Diff、重审已完成文件或覆盖已有成功结果。`,hideCancel:false,onOk:async()=>{
+    try{await api.retryTaskVerification(task.id);Message.success('未核验候选已进入续审队列');await loadTasks(true)}catch(e:unknown){Message.error(errorText(e,'续审提交失败'))}
+  }});
+}
 async function acceptDraft(item:any){try{await api.acceptTestRequirement(item.id);Message.success('测试需求已采纳');await loadTasks(true)}catch(e:any){Message.error(e.message||'采纳失败')}}
 async function ignoreDraft(item:any){try{await api.ignoreTestRequirement(item.id);Message.success('测试需求已忽略');await loadTasks(true)}catch(e:any){Message.error(e.message||'忽略失败')}}
 async function openConvert(item:any){const project=projectStore.currentProjectId;if(!project)return;try{testcaseModules.value=await api.getTestcaseModules(project);convertingDraft.value=item;convertModuleId.value=undefined;convertVisible.value=true}catch(e:any){Message.error(e.message||'读取用例模块失败')}}
