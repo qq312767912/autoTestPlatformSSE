@@ -32,7 +32,8 @@ class RequirementDocumentSerializer(serializers.ModelSerializer):
 class RequirementDocumentUploadSerializer(serializers.ModelSerializer):
     """需求文档上传序列化器"""
 
-    SUPPORTED_EXTENSIONS = {'txt', 'md', 'pdf', 'doc', 'docx'}
+    # 旧版 .doc（二进制 Word）解析不可靠，暂不支持；仅接受 .docx
+    SUPPORTED_EXTENSIONS = {'txt', 'md', 'pdf', 'docx'}
 
     class Meta:
         model = RequirementDocument
@@ -48,7 +49,7 @@ class RequirementDocumentUploadSerializer(serializers.ModelSerializer):
             ext = value.name.lower().split('.')[-1] if '.' in value.name else ''
             if ext not in self.SUPPORTED_EXTENSIONS:
                 raise serializers.ValidationError(
-                    f"不支持的文件格式: .{ext}。支持的格式: PDF、Word(.doc/.docx)、TXT、Markdown(.md)"
+                    f"不支持的文件格式: .{ext}。支持的格式: PDF、Word(.docx)、TXT、Markdown(.md)"
                 )
         return value
 

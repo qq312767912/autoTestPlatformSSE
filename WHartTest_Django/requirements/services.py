@@ -231,7 +231,8 @@ class DocumentProcessor:
             logger.error(f"提取文档内容失败: {e}")
             return ""
 
-    SUPPORTED_EXTENSIONS = {"txt", "md", "pdf", "doc", "docx"}
+    # 旧版 .doc（二进制 Word）解析不可靠，暂不支持；仅接受 .docx
+    SUPPORTED_EXTENSIONS = {"txt", "md", "pdf", "docx"}
 
     def _clear_document_images(self, document: Optional[RequirementDocument]) -> None:
         """清理文档旧图片，确保重新提取时按新文件全量覆盖。"""
@@ -281,7 +282,7 @@ class DocumentProcessor:
 
             if file_extension not in self.SUPPORTED_EXTENSIONS:
                 raise ValueError(
-                    f"不支持的文件格式: .{file_extension}。支持的格式: PDF、Word(.doc/.docx)、TXT、Markdown"
+                    f"不支持的文件格式: .{file_extension}。支持的格式: PDF、Word(.docx)、TXT、Markdown"
                 )
 
             if document and file_extension in {"doc", "docx"}:
