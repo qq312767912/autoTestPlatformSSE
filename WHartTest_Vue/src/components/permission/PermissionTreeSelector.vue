@@ -44,7 +44,6 @@
             show-line
             block-node
             :checked-keys="checkedKeys"
-            :half-checked-keys="halfCheckedKeys"
             :expanded-keys="expandedKeys"
             @check="onPermissionCheck"
             @expand="onNodeExpand"
@@ -78,6 +77,11 @@ import { ref, computed, onMounted, watch } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
 import { IconSave } from '@arco-design/web-vue/es/icon';
 import { useAppI18n } from '@/composables/useAppI18n';
+import {
+  deduplicateById,
+  mergeVisiblePermissionSelection,
+  permissionIdToKey,
+} from './permissionTreeState';
 import {
   getPermissionList,
   getUserPermissions,
@@ -164,18 +168,12 @@ const userPermissions = ref<Permission[]>([]);
 
 // 树形数据
 const permissionTreeData = computed(() => {
-  // 依赖 isEnglish.value 触发重新计算，确保语言切换时重新渲染权限树
-  isEnglish.value;
   return buildPermissionTree(allPermissions.value, userPermissions.value);
 });
-const checkedKeys = ref<(string | number)[]>([]);
-const halfCheckedKeys = ref<(string | number)[]>([]);
+const selectedPermissionIds = ref<number[]>([]);
+const checkedKeys = computed(() => selectedPermissionIds.value.map(permissionIdToKey));
 const expandedKeys = ref<(string | number)[]>([]); // 默认全部收起
-
-// 选中的权限ID
-const selectedPermissionIds = computed(() => {
-  return checkedKeys.value.filter(key => typeof key === 'number') as number[];
-});
+let permissionRequestVersion = 0;
 
 // 是否全部展开
 const isAllExpanded = computed(() => {
@@ -212,17 +210,12 @@ const filterTreeData = (treeData: PermissionTreeNode[], keyword: string): Permis
 // 构建权限树
 const buildPermissionTree = (permissions: Permission[], userPerms: Permission[]): PermissionTreeNode[] => {
   const userPermIds = new Set(userPerms.map(p => p.id));
-  const useEn = isEnglish.value;
 
   // 按第一层分类和第二层子分类进行分组
   const groupedByCategory = permissions.reduce((categories, permission) => {
-    const appLabelDisplay = useEn
-      ? (permission.content_type.app_label_en || permission.content_type.app_label_cn || permission.content_type.app_label)
-      : (permission.content_type.app_label_cn || permission.content_type.app_label);
+    const appLabelDisplay = permission.content_type.app_label_cn || permission.content_type.app_label;
     const appLabelSort = permission.content_type.app_label_sort || 999;
-    const appLabelSubcategory = useEn
-      ? (permission.content_type.app_label_subcategory_en || permission.content_type.app_label_subcategory)
-      : permission.content_type.app_label_subcategory;
+    const appLabelSubcategory = permission.content_type.app_label_subcategory;
     const appLabelSubcategorySort = permission.content_type.app_label_subcategory_sort || 999;
     const appLabel = permission.content_type.app_label;
     const model = permission.content_type.model;
@@ -243,17 +236,18 @@ const buildPermissionTree = (permissions: Permission[], userPerms: Permission[])
         models: {}
       };
     }
-    if (!categories[appLabelDisplay].subcategories[subcategoryKey].models[model]) {
-      categories[appLabelDisplay].subcategories[subcategoryKey].models[model] = {
-        model_cn: useEn
-          ? (permission.content_type.model_en || permission.content_type.model_cn || permission.content_type.model_verbose || model)
-          : (permission.content_type.model_cn || permission.content_type.model_verbose || model),
+    const modelKey = String(permission.content_type.id);
+    if (!categories[appLabelDisplay].subcategories[subcategoryKey].models[modelKey]) {
+      categories[appLabelDisplay].subcategories[subcategoryKey].models[modelKey] = {
+        content_type_id: permission.content_type.id,
+        model,
+        model_cn: permission.content_type.model_cn || permission.content_type.model_verbose || model,
         permissions: []
       };
     }
-    categories[appLabelDisplay].subcategories[subcategoryKey].models[model].permissions.push(permission);
+    categories[appLabelDisplay].subcategories[subcategoryKey].models[modelKey].permissions.push(permission);
     return categories;
-  }, {} as Record<string, { sortOrder: number; subcategories: Record<string, { app_label: string; app_label_subcategory: string; app_label_subcategory_sort: number; models: Record<string, { model_cn: string; permissions: Permission[] }> }> }>);
+  }, {} as Record<string, { sortOrder: number; subcategories: Record<string, { app_label: string; app_label_subcategory: string; app_label_subcategory_sort: number; models: Record<string, { content_type_id: number; model: string; model_cn: string; permissions: Permission[] }> }> }>);
 
   // 构建三层树形结构：第一层分类 -> 第二层子分类 -> 具体权限
   const sortedCategories = Object.entries(groupedByCategory).sort(([, categoryA], [, categoryB]) => {
@@ -269,21 +263,21 @@ const buildPermissionTree = (permissions: Permission[], userPerms: Permission[])
     const children: PermissionTreeNode[] = [];
 
     sortedSubcategories.forEach(([subcategoryKey, subcategoryData]) => {
-      const modelEntries = Object.entries(subcategoryData.models);
+      const modelEntries = Object.values(subcategoryData.models);
 
       // 如果有 app_label_subcategory，创建子分类层
       if (subcategoryData.app_label_subcategory) {
         children.push({
-          id: `subcategory_${subcategoryKey}`,
+          id: `subcategory:${categoryName}:${subcategoryKey}`,
           title: subcategoryData.app_label_subcategory,
           isGroup: true,
-          children: modelEntries.map(([model, modelData]) => ({
-            id: `model_${subcategoryKey}_${model}`,
-            title: modelData.model_cn || model,
+          children: modelEntries.map(modelData => ({
+            id: `model:${modelData.content_type_id}`,
+            title: modelData.model_cn || modelData.model,
             isGroup: true,
             children: modelData.permissions.map(permission => ({
-              id: permission.id,
-              title: useEn ? (permission.name_en || permission.name) : (permission.name_cn || permission.name),
+              id: permissionIdToKey(permission.id),
+              title: permission.name_cn || permission.name,
               isGroup: false,
               hasPermission: userPermIds.has(permission.id),
               permission,
@@ -292,14 +286,14 @@ const buildPermissionTree = (permissions: Permission[], userPerms: Permission[])
         });
       } else {
         // 没有 app_label_subcategory，model_cn 直接顶上去作为第二层
-        modelEntries.forEach(([model, modelData]) => {
+        modelEntries.forEach(modelData => {
           children.push({
-            id: `model_${subcategoryKey}_${model}`,
-            title: modelData.model_cn || model,
+            id: `model:${modelData.content_type_id}`,
+            title: modelData.model_cn || modelData.model,
             isGroup: true,
             children: modelData.permissions.map(permission => ({
-              id: permission.id,
-              title: useEn ? (permission.name_en || permission.name) : (permission.name_cn || permission.name),
+              id: permissionIdToKey(permission.id),
+              title: permission.name_cn || permission.name,
               isGroup: false,
               hasPermission: userPermIds.has(permission.id),
               permission,
@@ -310,7 +304,7 @@ const buildPermissionTree = (permissions: Permission[], userPerms: Permission[])
     });
 
     return {
-      id: `category_${categoryName}`,
+      id: `category:${categoryName}`,
       title: categoryName,
       isGroup: true,
       children,
@@ -324,7 +318,7 @@ const fetchAllPermissions = async () => {
   try {
     const response = await getPermissionList({ page: 1, pageSize: 1000 });
     if (response.success && response.data) {
-      allPermissions.value = response.data;
+      allPermissions.value = deduplicateById(response.data);
     } else {
       Message.error(response.error || text.value.fetchPermissionListFailed);
     }
@@ -339,14 +333,19 @@ const fetchAllPermissions = async () => {
 // 获取用户/组织权限
 const fetchUserPermissions = async () => {
   if (!props.id) return;
+  const requestVersion = ++permissionRequestVersion;
+  const entityType = props.type;
+  const entityId = props.id;
 
   try {
     let response;
-    if (props.type === 'user') {
-      response = await getUserPermissions(props.id);
+    if (entityType === 'user') {
+      response = await getUserPermissions(entityId);
     } else {
-      response = await getGroupPermissions(props.id);
+      response = await getGroupPermissions(entityId);
     }
+
+    if (requestVersion !== permissionRequestVersion || entityType !== props.type || entityId !== props.id) return;
 
     if (response.success && response.data) {
       userPermissions.value = response.data;
@@ -372,15 +371,24 @@ const loadPermissions = async () => {
 
 // 更新选中状态
 const updateCheckedKeys = () => {
-  const userPermIds = userPermissions.value.map(p => p.id);
-  checkedKeys.value = userPermIds;
+  selectedPermissionIds.value = [...new Set(userPermissions.value.map(permission => permission.id))];
 };
 
 // 权限选择处理
-const onPermissionCheck = (checkedKeysValue: (string | number)[], info: any) => {
-  checkedKeys.value = checkedKeysValue;
-  halfCheckedKeys.value = info.halfCheckedKeys || [];
+const onPermissionCheck = (checkedKeysValue: (string | number)[]) => {
+  selectedPermissionIds.value = mergeVisiblePermissionSelection(
+    selectedPermissionIds.value,
+    collectPermissionIds(filteredPermissionTreeData.value),
+    checkedKeysValue,
+  );
 };
+
+function collectPermissionIds(nodes: PermissionTreeNode[]): number[] {
+  return nodes.flatMap(node => {
+    if (node.permission) return [node.permission.id];
+    return node.children ? collectPermissionIds(node.children) : [];
+  });
+}
 
 // 节点展开处理
 const onNodeExpand = (expandedKeysValue: (string | number)[]) => {
@@ -498,7 +506,7 @@ const handleSavePermissions = () => {
 
 
 // 监听props变化
-watch(() => props.id, () => {
+watch(() => [props.type, props.id] as const, () => {
   if (props.id) {
     fetchUserPermissions();
   }
@@ -508,9 +516,6 @@ watch(() => props.id, () => {
 onMounted(async () => {
   if (!props.lazy) {
     await fetchAllPermissions();
-    if (props.id) {
-      await fetchUserPermissions();
-    }
   }
 });
 

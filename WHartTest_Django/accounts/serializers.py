@@ -250,6 +250,106 @@ PERMISSION_NAME_TRANSLATIONS = {
     "Can view Skill": "查看技能",
 }
 
+PERMISSION_NAME_TRANSLATIONS.update({
+    "Can publish a knowledge asset version": "发布知识资产版本",
+    "Can resolve a knowledge conflict": "解决知识冲突",
+    "Can review a knowledge candidate": "审核知识候选项",
+    "Can approve an L1 knowledge version": "审批一级知识版本",
+    "Can export retrieval traces": "导出检索轨迹",
+    "Can export knowledge source snapshots": "导出知识源快照",
+})
+
+# 权限树必须使用中文业务名称。模型本身的 verbose_name 可能是英文，
+# 因此按 app_label.model 精确映射，避免同名模型跨应用时被误翻译。
+PERMISSION_MODEL_NAME_CN = {
+    "api_database_configs.apidatabaseconfig": "接口数据库配置",
+    "api_environments.apienvironment": "接口环境",
+    "api_environments.apienvironmentvariable": "接口环境变量",
+    "api_environments.apiglobalrequestheader": "接口全局请求头",
+    "api_modules.apimodule": "接口模块",
+    "api_functions.apicustomfunction": "接口自定义函数",
+    "api_interfaces.apiinterfaceresult": "接口执行结果",
+    "api_interfaces.apiinterface": "接口",
+    "api_testcases.apitestcasegroup": "接口用例组",
+    "api_testcases.apitestcase": "接口测试用例",
+    "api_testcases.apitestcasestep": "接口测试步骤",
+    "api_testcases.apitestcasetag": "接口用例标签",
+    "api_testcases.apitestreport": "接口测试报告",
+    "api_testcases.apitestreportdetail": "接口测试报告明细",
+    "api_testtasks.apitesttaskexecution": "接口测试任务执行",
+    "api_testtasks.apitesttaskcaseresult": "接口任务用例结果",
+    "api_testtasks.apitesttasksuite": "接口测试任务套件",
+    "api_testtasks.apitesttaskcase": "接口测试任务用例",
+    "api_sync.apisynchistory": "接口同步历史",
+    "api_sync.apiglobalsyncconfig": "接口全局同步配置",
+    "api_sync.apisyncconfig": "接口同步配置",
+    "api_testcases.apiinterfacecase": "接口用例",
+    "api_testcases.apiinterfacecasereport": "接口用例报告",
+    "api_testcases.apiinterfacecasestep": "接口用例步骤",
+    "api_testcases.apiinterfacecasereportdetail": "接口用例报告明细",
+    "file_management.fileasset": "文件资产",
+    "file_management.filereference": "文件引用",
+    "test_host_config.testhostnodestatus": "测试域名节点状态",
+    "test_host_config.testhostconfigstate": "测试域名配置状态",
+    "test_host_config.testhostdiagnosis": "测试域名诊断",
+    "test_host_config.testhostconfigversion": "测试域名配置版本",
+    "langgraph_integration.llmauthstateusage": "大模型授权状态用量",
+    "knowledge_evolution.retrievaltrace": "检索轨迹",
+    "knowledge_evolution.generationoutput": "生成产出",
+    "knowledge_evolution.feedbackevent": "反馈事件",
+    "knowledge_evolution.knowledgeasset": "知识资产",
+    "knowledge_evolution.knowledgeversion": "知识版本",
+    "knowledge_evolution.indexprojection": "索引投影",
+    "knowledge_evolution.sourcesnapshot": "知识源快照",
+    "knowledge_evolution.knowledgeevidence": "知识证据",
+    "knowledge_evolution.knowledgecandidate": "知识候选项",
+    "knowledge_evolution.knowledgeauditlog": "知识审计日志",
+    "knowledge_evolution.knowledgeconflict": "知识冲突",
+    "knowledge_evolution.evaluationsuite": "评估套件",
+    "knowledge_evolution.evaluationcase": "评估用例",
+    "knowledge_evolution.indexprojectionoutbox": "索引投影发件箱",
+    "knowledge_evolution.graphnode": "知识图谱节点",
+    "knowledge_evolution.graphedge": "知识图谱边",
+    "knowledge_evolution.retrievalpolicy": "检索策略",
+    "knowledge_evolution.evaluationrun": "评估运行",
+    "knowledge_evolution.evaluationresult": "评估结果",
+    "knowledge_evolution.capabilityrelease": "能力发布",
+    "knowledge_evolution.promotiondecision": "晋级决策",
+    "knowledge_evolution.capabilitydefinition": "能力定义",
+    "knowledge_evolution.goldcase": "金标用例",
+    "knowledge_evolution.goldannotation": "金标标注",
+    "knowledge_evolution.annotationconflict": "标注冲突",
+    "knowledge_evolution.golddataset": "金标数据集",
+    "knowledge_evolution.golddatasetversion": "金标数据集版本",
+    "knowledge_evolution.evaluationrubric": "评估量表",
+    "knowledge_evolution.judgeresult": "评判结果",
+    "knowledge_evolution.executionspan": "执行跨度",
+    "knowledge_evolution.failureattribution": "失败归因",
+    "knowledge_evolution.optimizationproposal": "优化提案",
+    "knowledge_evolution.optimizationexperiment": "优化实验",
+    "knowledge_evolution.releaseobservation": "发布观测",
+    "knowledge_evolution.workflowstagegate": "工作流阶段门禁",
+    "knowledge_evolution.workflowskilllock": "工作流技能锁定",
+    "knowledge_evolution.evaluationgatesnapshot": "评估门禁快照",
+    "knowledge_evolution.flywheelrun": "飞轮运行",
+    "knowledge_evolution.testassettaxonomy": "测试资产分类体系",
+    "knowledge_evolution.assetcandidateevent": "资产候选事件",
+    "knowledge_evolution.historyimportbatch": "历史导入批次",
+    "knowledge_evolution.historyimportitem": "历史导入项",
+    "knowledge_evolution.historyreplay": "历史回放",
+    "knowledge_evolution.historyreplaydifference": "历史回放差异",
+    "knowledge_evolution.projectflywheelsetting": "项目飞轮设置",
+    "knowledge_evolution.stageexecutionattempt": "阶段执行尝试",
+    "knowledge_evolution.stageexecutioncontext": "阶段执行上下文",
+    "knowledge_evolution.stagederivedartifact": "阶段衍生产物",
+    "knowledge_evolution.stagefeedbackattachment": "阶段反馈附件",
+    "knowledge_evolution.workflowstagesubmission": "工作流阶段提交",
+    "knowledge_evolution.flywheelregistrationfailure": "飞轮注册失败记录",
+    "skills.skillworkshopexclusion": "技能工坊排除项",
+    "knowledge_evolution.evolutionexperiment": "进化实验",
+    "knowledge_evolution.evolutionvariant": "进化变体",
+}
+
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -459,6 +559,9 @@ class ContentTypeSerializer(serializers.ModelSerializer):
         if app_label == "prompts":
             return "LLM对话"
 
+        if app_label == "knowledge_evolution":
+            return "质量飞轮"
+
         app_labels = {
             # 前端一级菜单
             "projects": "项目管理",
@@ -479,6 +582,7 @@ class ContentTypeSerializer(serializers.ModelSerializer):
             "testcases": "测试管理",
             "testcase_templates": "测试管理",
             "knowledge": "知识库管理",
+            "file_management": "文件管理",
             # 系统管理
             "auth": "系统管理",
             "accounts": "系统管理",
@@ -516,6 +620,9 @@ class ContentTypeSerializer(serializers.ModelSerializer):
         if app_label == "prompts":
             return "LLM Chat"
 
+        if app_label == "knowledge_evolution":
+            return "Quality Flywheel"
+
         app_labels = {
             "projects": "Project Management",
             "requirements": "Requirements",
@@ -534,6 +641,7 @@ class ContentTypeSerializer(serializers.ModelSerializer):
             "testcases": "Test Management",
             "testcase_templates": "Test Management",
             "knowledge": "Knowledge Base",
+            "file_management": "File Management",
             "auth": "System Settings",
             "accounts": "System Settings",
             "api_keys": "System Settings",
@@ -588,6 +696,19 @@ class ContentTypeSerializer(serializers.ModelSerializer):
             if app_label in ["task_center", "django_celery_beat"]:
                 return "任务调度"
             return None
+
+        if menu_category == "质量飞轮":
+            if model_name in {"graphnode", "graphedge"}:
+                return "知识图谱"
+            if model_name in {
+                "testassettaxonomy", "golddataset", "golddatasetversion", "goldcase",
+                "goldannotation", "annotationconflict", "evaluationsuite", "evaluationcase",
+                "evaluationrun", "evaluationresult", "evaluationrubric", "judgeresult",
+                "evaluationgatesnapshot", "optimizationproposal", "optimizationexperiment",
+                "evolutionexperiment", "evolutionvariant",
+            }:
+                return "数据飞轮"
+            return "Agent总览"
 
         # 非系统管理菜单不需要二级分组，返回 None 让前端按一级菜单展示。
         if menu_category != "系统管理":
@@ -649,6 +770,19 @@ class ContentTypeSerializer(serializers.ModelSerializer):
             if app_label in ["task_center", "django_celery_beat"]:
                 return "Task Scheduling"
             return None
+
+        if menu_category == "Quality Flywheel":
+            if model_name in {"graphnode", "graphedge"}:
+                return "Knowledge Graph"
+            if model_name in {
+                "testassettaxonomy", "golddataset", "golddatasetversion", "goldcase",
+                "goldannotation", "annotationconflict", "evaluationsuite", "evaluationcase",
+                "evaluationrun", "evaluationresult", "evaluationrubric", "judgeresult",
+                "evaluationgatesnapshot", "optimizationproposal", "optimizationexperiment",
+                "evolutionexperiment", "evolutionvariant",
+            }:
+                return "Data Flywheel"
+            return "Agent Overview"
 
         if menu_category != "System Settings":
             return None
@@ -712,6 +846,9 @@ class ContentTypeSerializer(serializers.ModelSerializer):
         if menu_category == "任务中心" and subcategory == "任务调度":
             return 1
 
+        if menu_category == "质量飞轮":
+            return {"Agent总览": 1, "数据飞轮": 2, "知识图谱": 3}.get(subcategory, 99)
+
         subcategory_sort = {
             # 接口自动化
             "接口管理": 1,
@@ -753,7 +890,9 @@ class ContentTypeSerializer(serializers.ModelSerializer):
             "测试管理": 7,
             "LLM对话": 8,
             "知识库管理": 9,
-            "系统管理": 10,
+            "质量飞轮": 10,
+            "文件管理": 11,
+            "系统管理": 12,
         }
         return sort_order.get(app_label_cn, 99)
 
@@ -761,6 +900,10 @@ class ContentTypeSerializer(serializers.ModelSerializer):
         """
         返回模型的中文名称，根据应用名区分相同模型
         """
+        app_model_key = f"{obj.app_label}.{obj.model}"
+        if app_model_key in PERMISSION_MODEL_NAME_CN:
+            return PERMISSION_MODEL_NAME_CN[app_model_key]
+
         try:
             verbose_name = obj.model_class()._meta.verbose_name
             app_label = obj.app_label

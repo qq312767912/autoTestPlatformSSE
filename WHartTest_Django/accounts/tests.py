@@ -14,7 +14,7 @@ from rest_framework.test import APIRequestFactory
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
-from accounts.serializers import ContentTypeSerializer
+from accounts.serializers import ContentTypeSerializer, PermissionSerializer
 from accounts.views import MyTokenObtainPairView
 from accounts.login_crypto import _private_key, public_key_payload
 
@@ -144,17 +144,40 @@ class ContentTypeSerializerMenuGroupingTests(SimpleTestCase):
 
         self.assertEqual(self.serializer.get_app_label_cn(content_type), '接口自动化')
         self.assertEqual(self.serializer.get_app_label_subcategory(content_type), '接口管理')
-        self.assertEqual(self.serializer.get_app_label_sort(content_type), 3)
+        self.assertEqual(self.serializer.get_app_label_sort(content_type), 4)
 
     def test_task_center_is_grouped_as_top_level_task_center_menu(self):
         content_type = SimpleNamespace(app_label='task_center', model='scheduledtask')
 
         self.assertEqual(self.serializer.get_app_label_cn(content_type), '任务中心')
         self.assertEqual(self.serializer.get_app_label_subcategory(content_type), '任务调度')
-        self.assertEqual(self.serializer.get_app_label_sort(content_type), 5)
+        self.assertEqual(self.serializer.get_app_label_sort(content_type), 6)
 
     def test_django_celery_beat_is_grouped_under_task_center(self):
         content_type = SimpleNamespace(app_label='django_celery_beat', model='periodictask')
 
         self.assertEqual(self.serializer.get_app_label_cn(content_type), '任务中心')
         self.assertEqual(self.serializer.get_app_label_subcategory(content_type), '任务调度')
+
+    def test_flywheel_run_is_grouped_under_quality_flywheel(self):
+        content_type = SimpleNamespace(app_label='knowledge_evolution', model='flywheelrun')
+
+        self.assertEqual(self.serializer.get_app_label_cn(content_type), '质量飞轮')
+        self.assertEqual(self.serializer.get_app_label_subcategory(content_type), 'Agent总览')
+        self.assertEqual(self.serializer.get_model_cn(content_type), '飞轮运行')
+
+    def test_quality_graph_and_data_models_follow_sidebar_groups(self):
+        graph_type = SimpleNamespace(app_label='knowledge_evolution', model='graphnode')
+        data_type = SimpleNamespace(app_label='knowledge_evolution', model='golddataset')
+
+        self.assertEqual(self.serializer.get_app_label_subcategory(graph_type), '知识图谱')
+        self.assertEqual(self.serializer.get_app_label_subcategory(data_type), '数据飞轮')
+
+    def test_custom_quality_permissions_have_chinese_names(self):
+        permission = SimpleNamespace(
+            name='Can publish a knowledge asset version',
+            codename='publish_knowledge_asset_version',
+            content_type=SimpleNamespace(app_label='knowledge_evolution', model='knowledgeasset'),
+        )
+
+        self.assertEqual(PermissionSerializer().get_name_cn(permission), '发布知识资产版本')
