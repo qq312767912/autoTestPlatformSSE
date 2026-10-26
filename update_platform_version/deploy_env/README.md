@@ -28,6 +28,15 @@ bash 04-deploy.sh
 bash 05-verify.sh
 ```
 
+内网不使用微信插件宿主。`04-deploy.sh` 会自动调用
+`09-disable-weixin-plugin-host.sh`，把 `wharttest-weixin-plugin-host` 的 Docker
+自动重启策略改为 `no` 后停止容器，避免 Docker daemon 或宿主机重启时再次拉起。
+如需单独执行停用操作：
+
+```bash
+bash 09-disable-weixin-plugin-host.sh
+```
+
 `04-deploy.sh` 不依赖可能因覆盖解压而丢失的 `.latest-backup` 标记，而是自动查找
 `backups/` 下当天最近一次带 `BACKUP_COMPLETE` 的完整备份。当天只需成功执行过一次
 `02-backup.sh` 即可重复部署；当天没有完整备份时才会阻断。

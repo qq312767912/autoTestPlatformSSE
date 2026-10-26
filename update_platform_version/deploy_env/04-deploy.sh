@@ -77,6 +77,15 @@ chmod 600 "$host_sync_token"
 
 "${compose[@]}" config >/dev/null
 
+# 内网不使用微信插件宿主。基础 Compose 中该服务仍是 restart: unless-stopped，
+# 因此每次部署都显式关闭其自动重启策略并停止容器，避免宿主机重启后恢复旧 Node.js 进程。
+WEIXIN_DISABLE_SCRIPT="$UPDATE_DIR/09-disable-weixin-plugin-host.sh"
+if [ ! -f "$WEIXIN_DISABLE_SCRIPT" ]; then
+  echo "缺少微信插件宿主停用脚本：$WEIXIN_DISABLE_SCRIPT" >&2
+  exit 1
+fi
+bash "$WEIXIN_DISABLE_SCRIPT"
+
 wait_healthy() {
   local container="$1"
   local limit="${2:-180}"
@@ -159,5 +168,5 @@ else
   echo "[警告] 当前用户非 root 且系统无 sudo，请稍后以 root 执行 30-install-host-sync.sh" >&2
 fi
 
-echo "Backend、Frontend、Semgrep Scanner、CRG 升级完成，三个执行器已恢复；域名同步服务已安装。"
+echo "Backend、Frontend、Semgrep Scanner、CRG 升级完成，三个执行器已恢复；微信插件宿主已停用；域名同步服务已安装。"
 echo "请执行 05-verify.sh，并进行登录、代码审查、用例审查等人工验收。"
