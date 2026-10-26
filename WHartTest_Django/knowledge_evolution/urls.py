@@ -2,6 +2,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    BenchmarkCatalogViewSet,
     EvaluationResultViewSet,
     EvaluationRunViewSet,
     EvaluationSuiteViewSet,
@@ -45,6 +46,8 @@ router.register("retrieval-traces", RetrievalTraceViewSet, basename="retrieval-t
 router.register("generation-outputs", GenerationOutputViewSet, basename="generation-output")
 router.register("feedback", FeedbackEventViewSet, basename="knowledge-feedback")
 router.register("evaluation-suites", EvaluationSuiteViewSet, basename="evaluation-suite")
+# 内置公开测评集：全局只读目录，路径以 benchmark_id 作主键
+router.register("evaluation-benchmarks", BenchmarkCatalogViewSet, basename="evaluation-benchmark")
 router.register("evaluation-runs", EvaluationRunViewSet, basename="evaluation-run")
 router.register("evaluation-results", EvaluationResultViewSet, basename="evaluation-result")
 router.register("knowledge-candidates", KnowledgeCandidateViewSet, basename="knowledge-candidate")

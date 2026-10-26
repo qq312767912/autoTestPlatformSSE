@@ -26,6 +26,29 @@ def _can_access(user, project_id):
     return user.is_superuser or ProjectMember.objects.filter(project_id=project_id, user=user).exists()
 
 
+def _task_source(task):
+    """任务的代码来源：用户仓库或公开样本只读快照。"""
+    from .services import _task_repo
+
+    return _task_repo(task)
+
+
+def _task_is_local(task):
+    """本地仓库与公开快照都不需要 GitLab 凭据。"""
+    try:
+        return _task_source(task).source_type in {"local_git", "benchmark_snapshot"}
+    except ValueError:
+        return False
+
+
+def _task_repo_label(task):
+    try:
+        source = _task_source(task)
+    except ValueError:
+        return "公开测评快照（不可用）"
+    return getattr(source, "path_with_namespace", "") or getattr(source, "name", "") or "未知仓库"
+
+
 def _graph_task_queryset(user):
     queryset = AnalysisTask.objects.select_related("project", "repository", "creator").filter(
         status__in={"completed", "degraded", "partial"},
@@ -359,10 +382,11 @@ class KnowledgeGraphSourceViewSet(viewsets.ViewSet):
         graph = (task.change_report or {}).get("graph_context") or {}
         diagnostics = graph.get("diagnostics") or {}
         counts = graph.get("counts") or {}
+        source_name = task.repository.name if task.repository_id else f"公开测评 · {task.benchmark_case.repo if task.benchmark_case_id else ''}"
         return {
             "id": f"code:{task.pk}",
             "type": "code_repository",
-            "name": task.repository.name,
+            "name": source_name,
             "description": task.title or f"{task.base_sha[:8]} → {task.head_sha[:8]}",
             "project": {"id": task.project_id, "name": task.project.name},
             "snapshot": {
@@ -383,7 +407,7 @@ class KnowledgeGraphSourceViewSet(viewsets.ViewSet):
             "capabilities": ["overview", "search", "filter", "neighborhood", "provenance"],
             "provenance": {
                 "source_type": "code_repository",
-                "source_id": str(task.repository_id),
+                "source_id": str(task.repository_id or f"benchmark:{task.benchmark_case_id}"),
                 "snapshot_id": str(task.pk),
                 "analysis_task_id": str(task.pk),
             },
@@ -671,8 +695,8 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
                        if item.get("verification_status") in {"verification_failed", "not_verified"}]
             if not pending:
                 return Response({"detail": "没有需要续审的候选"}, status=status.HTTP_409_CONFLICT)
-            if task.repository.source_type != "local_git" and not UserGitLabCredential.objects.filter(
-                project=task.project, connection=task.repository.connection, user=request.user,
+            if not _task_is_local(task) and not UserGitLabCredential.objects.filter(
+                project=task.project, connection=_task_source(task).connection, user=request.user,
             ).exists():
                 return Response({"detail": "当前用户未配置该 GitLab 连接的访问凭据"}, status=status.HTTP_409_CONFLICT)
             report["verification_retry"] = {"previous_status": task.status, "candidate_count": len(pending),
@@ -736,14 +760,14 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
             return Response(finding)
 
         review_client = None
-        if task.repository.source_type != "local_git":
+        if not _task_is_local(task):
             try:
                 credential = UserGitLabCredential.objects.get(
-                    project=task.project, connection=task.repository.connection, user=request.user,
+                    project=task.project, connection=_task_source(task).connection, user=request.user,
                 )
             except UserGitLabCredential.DoesNotExist:
                 return Response({"detail": "请先配置当前用户的 GitLab Token"}, status=status.HTTP_400_BAD_REQUEST)
-            review_client = GitLabClient(task.repository.connection, credential.get_token())
+            review_client = GitLabClient(_task_source(task).connection, credential.get_token())
         generated, tokens, note = generate_suggested_patch(task, finding, review_client)
 
         with transaction.atomic():
@@ -769,10 +793,10 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
             ai_review = coverage.get("ai_review") or {}
             ocr_status = report.get("ocr_status") or {}
             lines = [
-                f"# {task.title or task.repository.name} - 代码审查报告", "",
+                f"# {task.title or _task_repo_label(task)} - 代码审查报告", "",
                 "## 分析输入", "",
                 f"- 平台项目：{task.project.name}",
-                f"- 代码仓库：{task.repository.path_with_namespace}",
+                f"- 代码仓库：{_task_repo_label(task)}",
                 f"- 分析范围：{task.base_sha} → {task.head_sha}",
                 f"- 分析模式：{task.get_mode_display()}",
                 f"- 完成时间：{task.completed_at or '-'}", "",
@@ -858,8 +882,8 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
             iteration_test_requirements = [item for item in test_requirements if item not in risk_test_requirements]
             iteration_test_requirements.sort(key=lambda item: priority_order.get(item.get("priority"), 9))
             lines = [
-                f"# {task.title or task.repository.name} - 测试分析报告", "",
-                f"- 代码仓库：{task.repository.path_with_namespace}",
+                f"# {task.title or _task_repo_label(task)} - 测试分析报告", "",
+                f"- 代码仓库：{_task_repo_label(task)}",
                 f"- 分析范围：{task.base_sha} → {task.head_sha}",
                 f"- 迭代验证：{len(iteration_test_requirements)}",
                 f"- 风险排查：{len(risk_test_requirements)}",

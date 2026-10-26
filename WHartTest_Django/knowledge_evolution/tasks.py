@@ -5,6 +5,8 @@ import logging
 from celery import shared_task
 
 from .projection import ProjectionService
+from .code_review_benchmark import finalize_code_review_benchmark  # noqa: F401 - register Celery task
+from .benchmark_runs import execute_benchmark_run  # noqa: F401 - register Celery task
 
 logger = logging.getLogger(__name__)
 

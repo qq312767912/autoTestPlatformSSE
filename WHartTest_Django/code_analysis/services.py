@@ -1,5 +1,6 @@
 import fnmatch
 import json
+import logging
 import os
 import re
 import signal
@@ -19,6 +20,119 @@ from django.utils import timezone
 from django.db import close_old_connections, transaction
 
 from .models import AnalysisTask, AnalysisTaskExecutionLog, TestRequirementDraft, UserGitLabCredential
+
+logger = logging.getLogger(__name__)
+
+
+class SnapshotRepositoryRef:
+    """公开样本快照的仓库引用。
+
+    `AnalysisTask.repository` 指向用户登记的仓库；公开样本没有用户仓库，
+    由本类提供与 `ProjectRepository` 相同的只读字段，避免伪造一条仓库记录。
+    """
+
+    source_type = "benchmark_snapshot"
+
+    def __init__(self, case, snapshot):
+        self.case = case
+        self.snapshot = snapshot
+        self.name = f"{case.repo} {case.base_sha[:8]}..{case.head_sha[:8]}"
+        self.local_path = snapshot.path
+        self.gitlab_project_id = None
+        self.connection = None
+        self.excluded_patterns = []
+        self.critical_annotations = []
+        self.source_id = f"benchmark:{case.pk}"
+
+
+def _task_repo(task):
+    """统一取任务代码来源：用户仓库或公开样本快照。"""
+    if task.repository_id:
+        return task.repository
+    case = getattr(task, "benchmark_case", None)
+    if case is None:
+        raise ValueError("审查任务既没有仓库，也没有公开样本")
+    from knowledge_evolution.benchmark_models import BenchmarkRepositorySnapshot
+
+    snapshot = BenchmarkRepositorySnapshot.objects.filter(
+        repo=case.repo, base_sha=case.base_sha, head_sha=case.head_sha, status="ready",
+    ).first()
+    if snapshot is None or not snapshot.path or not os.path.isdir(snapshot.path):
+        raise ValueError("公开样本快照尚未准备完成，请先完成预检")
+    return SnapshotRepositoryRef(case, snapshot)
+
+
+def _task_source_id(task):
+    if task.repository_id:
+        return task.repository_id
+    return f"benchmark:{getattr(task, 'benchmark_case_id', '')}"
+
+
+def _is_local_source(task):
+    """公开快照与本地 Git 都是本地只读仓库，走同一套读取与物化路径。"""
+    try:
+        return _task_repo(task).source_type in {"local_git", "benchmark_snapshot"}
+    except ValueError:
+        return False
+
+
+class SnapshotGitClient:
+    """只读快照的 Git 读取器：接口与 LocalGitClient 一致，但按绝对路径访问专用目录。"""
+
+    def __init__(self, path):
+        from knowledge_evolution.benchmark_snapshots import snapshot_root
+
+        resolved = Path(path or "").resolve()
+        root = snapshot_root()
+        if root not in resolved.parents:
+            raise ValueError("快照路径不在允许范围内")
+        if not (resolved / ".git").exists():
+            raise ValueError("公开样本快照不存在")
+        self.path = resolved
+
+    def _git(self, *args):
+        result = subprocess.run(
+            ["git", "-C", str(self.path), "--no-pager", *args],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+        )
+        if result.returncode:
+            raise ValueError(result.stderr.strip() or "快照 Git 命令执行失败")
+        return result.stdout
+
+    def resolve(self, ref):
+        return self._git("rev-parse", "--verify", f"{ref}^{{commit}}").strip()
+
+    def merge_base(self, base_ref, head_ref):
+        try:
+            return self._git("merge-base", base_ref, head_ref).strip()
+        except ValueError:
+            return ""
+
+    def compare(self, base_ref, head_ref):
+        base_sha, head_sha = self.resolve(base_ref), self.resolve(head_ref)
+        if base_sha == head_sha:
+            raise ValueError("基准与目标指向同一个 Commit，没有可审查的差异")
+        merge_base = self.merge_base(base_sha, head_sha)
+        if merge_base == head_sha:
+            raise ValueError("目标 Commit 是基准 Commit 的祖先，基准与目标疑似颠倒")
+        compare_base = merge_base or base_sha
+        name_status = self._git("diff", "--name-status", "--find-renames", compare_base, head_sha)
+        diffs = []
+        for row in name_status.splitlines():
+            parts = row.split("\t")
+            if len(parts) < 2:
+                continue
+            status = parts[0]
+            old_path = parts[-2] if len(parts) > 2 else parts[1]
+            new_path = parts[-1]
+            target = new_path if not status.startswith("D") else old_path
+            diff = self._git("diff", "--no-ext-diff", "--find-renames", compare_base, head_sha, "--", target)
+            diffs.append({
+                "old_path": old_path, "new_path": new_path,
+                "new_file": status.startswith("A"), "deleted_file": status.startswith("D"),
+                "diff": diff,
+            })
+        return {"base_sha": compare_base, "head_sha": head_sha, "diffs": diffs}
 
 
 DEFAULT_ANNOTATIONS = {
@@ -351,14 +465,14 @@ def _managed_gitlab_repository(task):
     """使用执行人的 Token创建或更新任务独占浅仓库，任务删除前持续保留。"""
     credential = UserGitLabCredential.objects.get(
         project=task.project,
-        connection=task.repository.connection,
+        connection=_task_repo(task).connection,
         user=task.executor or task.creator,
     )
     token = credential.get_token()
     OCR_WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     root = OCR_WORKSPACE_ROOT / str(task.pk)
     root.mkdir(mode=0o700, exist_ok=True)
-    (root / ".repository-id").write_text(str(task.repository_id), encoding="utf-8")
+    (root / ".repository-id").write_text(str(_task_source_id(task)), encoding="utf-8")
     askpass = root / "git-askpass.sh"
     askpass.write_text(
         "#!/bin/sh\ncase \"$1\" in *Username*) printf '%s\\n' oauth2 ;; *) printf '%s\\n' \"$OCR_GITLAB_TOKEN\" ;; esac\n",
@@ -415,12 +529,19 @@ def _managed_local_repository(task):
 
     CRG 容器只能看到受限的任务仓库挂载，不挂载平台整个
     /workspace。这也让本地 Git 与 GitLab 审查共用相同的仓库身份约束。
+    公开样本快照同样走这里：快照本身就是本地只读 Git 仓库。
     """
-    source = LocalGitClient(task.repository.local_path).path
+    source_ref = _task_repo(task)
+    if source_ref.source_type == "benchmark_snapshot":
+        source = Path(source_ref.local_path).resolve()
+        if not (source / ".git").exists():
+            raise ValueError("公开样本快照不可用，请先完成预检")
+    else:
+        source = LocalGitClient(source_ref.local_path).path
     OCR_WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     root = OCR_WORKSPACE_ROOT / str(task.pk)
     root.mkdir(mode=0o700, exist_ok=True)
-    (root / ".repository-id").write_text(str(task.repository_id), encoding="utf-8")
+    (root / ".repository-id").write_text(str(_task_source_id(task)), encoding="utf-8")
     env = os.environ.copy()
     if not (root / ".git").exists():
         _run_git(["git", "init", "--quiet"], cwd=root, env=env)
@@ -441,7 +562,8 @@ def _managed_local_repository(task):
 
 @contextmanager
 def _ocr_repository(task):
-    if task.repository.source_type == "local_git":
+    source_type = _task_repo(task).source_type
+    if source_type in {"local_git", "benchmark_snapshot"}:
         with _managed_local_repository(task) as prepared:
             yield prepared
         return
@@ -1256,11 +1378,11 @@ def _normalize_ocr_findings(task, findings):
 
 def _target_file_content(task, path, review_client=None):
     """读取目标提交文件的完整内容，用于在隔离目录校验建议补丁。"""
-    if task.repository.source_type == "local_git":
-        return LocalGitClient(task.repository.local_path)._git("show", f"{task.head_sha}:{path}")
+    if _task_repo(task).source_type == "local_git":
+        return LocalGitClient(_task_repo(task).local_path)._git("show", f"{task.head_sha}:{path}")
     if not review_client:
         return ""
-    return review_client.raw_file(task.repository.gitlab_project_id, path, task.head_sha)
+    return review_client.raw_file(_task_repo(task).gitlab_project_id, path, task.head_sha)
 
 
 def _validate_suggested_patch(task, patch_text, review_client=None):
@@ -2467,11 +2589,11 @@ def retry_verification_analysis(task: AnalysisTask):
     task.save(update_fields=["status", "progress", "current_step", "updated_at"])
     started = time.monotonic()
     client = None
-    if task.repository.source_type != "local_git":
+    if _task_repo(task).source_type != "local_git":
         credential = UserGitLabCredential.objects.get(
-            project=task.project, connection=task.repository.connection, user=task.executor,
+            project=task.project, connection=_task_repo(task).connection, user=task.executor,
         )
-        client = GitLabClient(task.repository.connection, credential.get_token())
+        client = GitLabClient(_task_repo(task).connection, credential.get_token())
     active, rejected, tokens, note = _verify_findings_against_target(task, pending, client, force_model=True)
     active_by_key = {str(item["key"]): item for item in active}
     rejected_keys = {str(item["key"]) for item in rejected}
@@ -2530,18 +2652,26 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
     task.status, task.progress, task.current_step = "fetching", 10, "读取代码变更"
     task.save(update_fields=["status", "progress", "current_step", "updated_at"])
     try:
-        if task.repository.source_type == "local_git":
+        repo_ref = _task_repo(task)
+        client = None
+        if repo_ref.source_type == "benchmark_snapshot":
+            # 公开样本：只读快照 + 精确 Commit，不使用任何用户仓库或 GitLab 凭据。
+            payload = SnapshotGitClient(repo_ref.local_path).compare(task.base_sha, task.head_sha)
+            task.base_sha, task.head_sha = payload["base_sha"], payload["head_sha"]
+            task.title = task.title or f"公开测评：{repo_ref.case.repo}"
+            diffs = payload["diffs"]
+        elif repo_ref.source_type == "local_git":
             if task.source_type != "commits":
                 raise ValueError("本地 Git 审查仅支持两个分支或 Commit 对比")
-            payload = LocalGitClient(task.repository.local_path).compare(task.base_sha, task.head_sha)
+            payload = LocalGitClient(_task_repo(task).local_path).compare(task.base_sha, task.head_sha)
             task.base_sha, task.head_sha = payload["base_sha"], payload["head_sha"]
-            task.title = task.title or f"本地 Git：{task.repository.name}"
+            task.title = task.title or f"本地 Git：{_task_repo(task).name}"
             diffs = payload["diffs"]
         else:
-            credential = UserGitLabCredential.objects.get(project=task.project, connection=task.repository.connection, user=task.executor or task.creator)
-            client = GitLabClient(task.repository.connection, credential.get_token())
+            credential = UserGitLabCredential.objects.get(project=task.project, connection=_task_repo(task).connection, user=task.executor or task.creator)
+            client = GitLabClient(_task_repo(task).connection, credential.get_token())
             if task.source_type == "merge_request":
-                payload = client.merge_request_changes(task.repository.gitlab_project_id, task.merge_request_iid)
+                payload = client.merge_request_changes(_task_repo(task).gitlab_project_id, task.merge_request_iid)
                 task.base_sha = payload.get("diff_refs", {}).get("base_sha", task.base_sha)
                 task.head_sha = payload.get("diff_refs", {}).get("head_sha", task.head_sha)
                 task.title = task.title or payload.get("title", "")
@@ -2550,14 +2680,14 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
                 # 先取共同祖先：既拦下基准/目标颠倒，也让任务记录的“提交范围”与实际
                 # 比较范围一致（与 MR 模式写入 diff_refs.base_sha 的做法对齐）。
                 try:
-                    compare_base = client.merge_base(task.repository.gitlab_project_id, task.base_sha, task.head_sha)
+                    compare_base = client.merge_base(_task_repo(task).gitlab_project_id, task.base_sha, task.head_sha)
                     if not isinstance(compare_base, str) or not re.fullmatch(r"[0-9a-f]{40,64}", compare_base):
                         compare_base = ""
                 except Exception:
                     compare_base = ""
                 if compare_base and compare_base == task.head_sha:
                     raise ValueError("目标 Commit 是基准 Commit 的祖先，基准与目标疑似颠倒，请交换后重试")
-                payload = client.compare(task.repository.gitlab_project_id, task.base_sha, task.head_sha)
+                payload = client.compare(_task_repo(task).gitlab_project_id, task.base_sha, task.head_sha)
                 diffs = payload.get("diffs", [])
                 if compare_base:
                     task.base_sha = compare_base
@@ -2568,8 +2698,8 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         _ensure_not_cancelled(task)
         task.status, task.progress, task.current_step = "machine_analyzing", 40, "检测关键代码变化"
         task.save(update_fields=["status", "progress", "current_step", "base_sha", "head_sha", "title", "updated_at"])
-        patterns = task.repository.excluded_patterns or []
-        annotations = DEFAULT_ANNOTATIONS | set(task.repository.critical_annotations or [])
+        patterns = _task_repo(task).excluded_patterns or []
+        annotations = DEFAULT_ANNOTATIONS | set(_task_repo(task).critical_annotations or [])
         files, findings, raw_parts, analyzable_diffs = [], [], [], []
         total_additions, total_deletions = 0, 0
         for item in diffs:
@@ -2602,7 +2732,7 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         # 确定性工具优先：只有实际运行的静态检查结果才能标记为 static_scan 风险。
         try:
             from .review_mcp import CodeReviewMCP
-            static_findings, static_notes = CodeReviewMCP(task, client if task.repository.source_type != "local_git" else None).run_static_checks(analyzable_diffs)
+            static_findings, static_notes = CodeReviewMCP(task, client if _task_repo(task).source_type != "local_git" else None).run_static_checks(analyzable_diffs)
             findings.extend(static_findings)
         except Exception as exc:
             static_notes = [f"静态检查不可用：{exc}"]
@@ -2638,7 +2768,7 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
                     ai_findings, _unused_points, impact_modules, ai_tokens, ai_coverage, ai_note = _analysis_stage(
                         task.pk, "AI分析", _run_ai_batches,
                         task, analyzable_diffs, findings,
-                        client if task.repository.source_type != "local_git" else None,
+                        client if _task_repo(task).source_type != "local_git" else None,
                     )
                     findings.extend(ai_findings)
                     token_usage += ai_tokens
@@ -2658,7 +2788,7 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
                         fallback_findings, _unused_points, impact_modules, fallback_tokens, fallback_coverage, fallback_note = _analysis_stage(
                             task.pk, "OCR失败文件补审", _run_ai_batches,
                             task, fallback_diffs, findings,
-                            client if task.repository.source_type != "local_git" else None,
+                            client if _task_repo(task).source_type != "local_git" else None,
                         )
                         findings.extend(fallback_findings)
                         token_usage += fallback_tokens
@@ -2720,7 +2850,7 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         verification_candidates, _ = _prioritize_findings_for_report(classified_findings, limit=30)
         verified_findings, rejected_findings, verification_tokens, verification_note = _verify_findings_against_target(
             task, verification_candidates,
-            client if task.repository.source_type != "local_git" else None,
+            client if _task_repo(task).source_type != "local_git" else None,
         )
         verification_keys = {str(item.get("key")) for item in verification_candidates}
         deferred_candidates = [
@@ -2747,7 +2877,7 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         if task.mode == "standard":
             fix_tokens, fix_note = _generate_fix_patches(
                 task, findings, analyzable_diffs,
-                client if task.repository.source_type != "local_git" else None,
+                client if _task_repo(task).source_type != "local_git" else None,
             )
             token_usage += fix_tokens
         else:

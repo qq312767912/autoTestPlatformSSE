@@ -127,7 +127,7 @@
         </section>
 
         <section v-else-if="workspace === 'single'" class="panel content-panel">
-          <div class="section-head toolbar"><div><span>独立能力流程</span><h2>Agent 独立测评</h2><p>五个 Agent 分别从自己的业务页发起，单独执行、单独留痕，不会跳转到自动评测或并入全链路流程。</p></div></div>
+          <div class="section-head toolbar"><div><span>独立能力流程</span><h2>Agent 独立测评</h2><p>各能力独立发起、独立留痕；代码审查可在下方运行专用测评集。</p></div></div>
           <div class="single-grid">
             <article v-for="item in cockpit.single_capabilities" :key="item.stage">
               <header>
@@ -147,6 +147,8 @@
               </footer>
             </article>
           </div>
+
+          <CodeReviewBenchmark v-if="projectStore.currentProjectId" :project-id="projectStore.currentProjectId" />
 
           <div v-if="reviewEvolutionExperiment" class="start-result evolution-experiment">
             <div class="start-result-head">
@@ -1087,6 +1089,7 @@ import { useProjectStore } from '@/store/projectStore';
 import { SkillHubConsole, SkillManager } from '@/features/skills';
 import KnowledgeGraphView from '@/features/knowledge-graph/KnowledgeGraphView.vue';
 import WorkflowEvolutionWorkbench from './WorkflowEvolutionWorkbench.vue';
+import CodeReviewBenchmark from './CodeReviewBenchmark.vue';
 import { WORKFLOW_STAGES as DEFAULT_WORKFLOW_STAGES } from '@/features/skills/utils/stages';
 import { annotateGoldCase, confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, createTestAssetTaxonomy, confirmHistoryImport, downloadSkillPackage, downloadStageArtifact, downloadStageReviewReport, evaluateWorkflowStage, evolveCaseReview, executeWorkflowStage, freezeGoldDatasetVersion, generateCandidatesFromRun, getAssetCandidateStats, getCaseReviewAttributionTaxonomy, getFlywheelSwitch, getGenerationOutputLineage, getGoldCase, getProjectQualityCockpit, getStageAttachmentCatalog, getStageAttemptTrace, getStageDiff, getStageOutput, getStageReviewStatus, getWorkflowStageCatalog, getWorkflowStatus, listAnnotationConflicts, listAssetCandidateEvents, listCapabilityReleases, listCaseReviewEvolutionCandidates, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listGoldDatasetVersions, listHistoryImports, listHistoryReplays, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, listStageAttachments, listStageAttempts, listTestAssetTaxonomies, openFlywheelRun, overrideWorkflowStage, preflightCaseReviewEvolution, preflightHistoryImport, proposeCaseReviewOptimizations, publishTestAssetTaxonomy, confirmCaseReviewOptimizations, resolveAnnotationConflict, retryAssetCandidate, retryFailedAssetCandidates, runStageAttribution, scoreWorkflowStage, setFlywheelSwitch, startHistoryReplay, startWorkflow, submitTestAssetTaxonomy, updateCandidateState, uploadStageAttachment, uploadStageFeedback, uploadStageReview } from './service';
 import { chooseCaseReviewEvolutionWinner, createCaseReviewEvolutionExperiment, rerunCaseReviewEvolutionExperiment, submitCaseReviewEvolutionWinner } from './service';

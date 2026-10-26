@@ -2,7 +2,7 @@ import os
 
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
-from projects.models import ProjectMember
+from projects.models import Project, ProjectMember
 from projects.roles import ensure_test_lead, is_test_lead
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
@@ -68,6 +68,9 @@ from .serializers import (
     OptimizationExperimentSerializer,
     OptimizationProposalSerializer,
 )
+
+# 内置公开测评集目录与准备接口（独立模块，避免继续膨胀本文件）
+from .benchmark_views import BenchmarkCatalogViewSet  # noqa: E402,F401
 from .capability_models import CapabilityDefinition, CapabilityRelease
 from .evaluation_v2_models import EvaluationRubric, JudgeResult
 from .trace_models import ExecutionSpan, FailureAttribution
@@ -1436,6 +1439,68 @@ class EvaluationSuiteViewSet(ProjectScopedReadOnlyViewSet):
             EvaluationSuite.objects.select_related("project", "created_by")
         )
 
+    @action(detail=False, methods=["post"], url_path="import-code-review")
+    def import_code_review(self, request):
+        """导入公开或内部代码审查金标；仓库必须先登记到当前项目。"""
+        import re
+        from django.db import transaction
+        from rest_framework.exceptions import ValidationError
+        from code_analysis.models import ProjectRepository
+        from .models import EvaluationCase
+
+        project_id = request.data.get("project")
+        if not str(project_id or "").isdigit():
+            raise ValidationError({"project": "请选择项目"})
+        _ensure_project_member(request.user, project_id)
+        project = get_object_or_404(Project, pk=int(project_id))
+        cases = request.data.get("cases")
+        if not isinstance(cases, list) or not 1 <= len(cases) <= 1000:
+            raise ValidationError({"cases": "每次须导入 1 至 1000 条样本"})
+        source = request.data.get("source")
+        if source == "public":
+            # 内置公开集改由服务端目录准备，停止接受手工"伪官方"导入；
+            # 历史 source=public 记录仍按「历史自定义集」可读，不做数据改写。
+            raise ValidationError({
+                "source": "公开测评集已改为平台内置目录（SWE-CARE / SWR-Bench / AACR-Bench），"
+                          "不再接受手工上传；内部测评集请使用 source=internal",
+            })
+        if source not in {"internal"}:
+            raise ValidationError({"source": "来源须为 internal；公开集请使用内置目录"})
+        repo_ids = {str(item.get("repository_id")) for item in cases if isinstance(item, dict)}
+        repositories = {str(repo.id): repo for repo in ProjectRepository.objects.filter(project_id=project_id, id__in=repo_ids, is_active=True)}
+        normalized = []
+        for index, item in enumerate(cases, 1):
+            if not isinstance(item, dict) or str(item.get("repository_id")) not in repositories:
+                raise ValidationError({"cases": f"第 {index} 条仓库未登记在当前项目"})
+            base, head = str(item.get("base_sha") or ""), str(item.get("head_sha") or "")
+            if not re.fullmatch(r"[0-9a-fA-F]{7,40}", base) or not re.fullmatch(r"[0-9a-fA-F]{7,40}", head) or base == head:
+                raise ValidationError({"cases": f"第 {index} 条须提供不同的有效 Commit SHA"})
+            issues = item.get("issues")
+            if not isinstance(issues, list) or any(not isinstance(issue, dict) or not issue.get("description") for issue in issues):
+                raise ValidationError({"cases": f"第 {index} 条金标问题格式错误"})
+            if str(item.get("language") or "").lower() not in {"python", "java", "c++", "cpp"}:
+                raise ValidationError({"cases": f"第 {index} 条须指定 Python、Java 或 C++ 语言"})
+            source_url = str(item.get("source_url") or "")
+            if source_url and not source_url.startswith(("https://", "http://")):
+                raise ValidationError({"cases": f"第 {index} 条来源链接须为 HTTP(S) 地址"})
+            normalized.append((item, base, head, issues))
+        with transaction.atomic():
+            suite = EvaluationSuite.objects.create(
+                project_id=project_id, name=str(request.data.get("name") or "代码审查测评集")[:255],
+                suite_type="gold", task_type="code_review", created_by=request.user,
+                description=str(request.data.get("description") or "")[:2000],
+            )
+            EvaluationCase.objects.bulk_create([
+                EvaluationCase(
+                    suite=suite, case_number=index, task_type="code_review",
+                    input_payload={"repository_id": str(item[0]["repository_id"]), "base_sha": item[1], "head_sha": item[2]},
+                    expected_payload={"issues": item[3]}, golden_labels={"issues": item[3]},
+                    split="gold", annotator=str(request.user),
+                    metadata={"source": source, "source_url": str(item[0].get("source_url") or ""), "language": "c++" if str(item[0].get("language")).lower() == "cpp" else str(item[0].get("language")).lower(), "dataset": str(request.data.get("dataset") or "")[:120], "dataset_version": str(request.data.get("dataset_version") or "")[:80]},
+                ) for index, item in enumerate(normalized, 1)
+            ])
+        return Response(self.get_serializer(suite).data, status=201)
+
 
 class EvaluationRunViewSet(
     mixins.CreateModelMixin,
@@ -1464,6 +1529,146 @@ class EvaluationRunViewSet(
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("无权在该评测集下创建运行")
         serializer.save(triggered_by=self.request.user, status="pending")
+
+    @action(detail=False, methods=["post"], url_path="run-code-review")
+    def run_code_review(self, request):
+        from django.utils import timezone
+        from rest_framework.exceptions import ValidationError
+        from code_analysis.models import AnalysisTask, CodeAnalysisLLMConfig, ProjectRepository
+        from code_analysis.tasks import run_code_analysis
+        from .models import EvaluationCase
+
+        suite = get_object_or_404(EvaluationSuite, pk=request.data.get("suite"), task_type="code_review")
+        _ensure_project_member(request.user, suite.project_id)
+        model_config = CodeAnalysisLLMConfig.objects.filter(is_active=True).exclude(encrypted_api_key="").first()
+        if not model_config:
+            raise ValidationError({"detail": "请先配置代码审查专用模型"})
+        cases = list(EvaluationCase.objects.filter(suite=suite).order_by("case_number"))
+        if not cases:
+            raise ValidationError({"detail": "评测集没有样本"})
+        repo_ids = {case.input_payload.get("repository_id") for case in cases}
+        repos = {str(repo.id): repo for repo in ProjectRepository.objects.filter(project=suite.project, id__in=repo_ids, is_active=True)}
+        if len(repos) != len(repo_ids):
+            raise ValidationError({"detail": "部分仓库已停用或不属于当前项目"})
+        from code_analysis.models import UserGitLabCredential
+        if any(repo.source_type == "gitlab" and not UserGitLabCredential.objects.filter(project=suite.project, connection=repo.connection, user=request.user).exists() for repo in repos.values()):
+            raise ValidationError({"detail": "请先配置相关 GitLab 仓库的个人凭据"})
+        run = EvaluationRun.objects.create(suite=suite, name=str(request.data.get("name") or "代码审查测评")[:255], triggered_by=request.user, config={"benchmark": "code_review", "mode": "standard", "judge": "manual", "dataset": cases[0].metadata.get("dataset", ""), "dataset_version": cases[0].metadata.get("dataset_version", ""), "model_config_id": model_config.pk, "model_name": model_config.name}, status="running", started_at=timezone.now())
+        from .evaluation_models import EvaluationResult
+        for case in cases:
+            payload = case.input_payload
+            task = AnalysisTask.objects.create(
+                project=suite.project, repository=repos[str(payload["repository_id"])], creator=request.user,
+                executor=request.user, source_type="commits", base_sha=payload["base_sha"], head_sha=payload["head_sha"],
+                title=f"测评 {suite.name} #{case.case_number}", mode="standard", status="queued",
+            )
+            EvaluationResult.objects.create(run=run, case=case, status="pending", predicted_payload={"analysis_task_id": str(task.id)})
+            run_code_analysis.delay(str(task.id), force_refresh=True)
+        from .code_review_benchmark import finalize_code_review_benchmark
+        finalize_code_review_benchmark.apply_async(args=[str(run.id)], countdown=20)
+        return Response(self.get_serializer(run).data, status=202)
+
+    @action(detail=False, methods=["post"], url_path="run-code-review-public")
+    def run_code_review_public(self, request):
+        """内置公开集运行：先预检，再锁定样本与版本，异步准备快照并建标准审查任务。"""
+        from rest_framework.exceptions import ValidationError
+        from code_analysis.models import CodeAnalysisLLMConfig
+        from .benchmark_catalog import CATALOG
+        from .benchmark_models import BenchmarkDatasetVersion
+        from .benchmark_runs import create_public_run, execute_benchmark_run
+
+        project_id = request.data.get("project")
+        if not str(project_id or "").isdigit():
+            raise ValidationError({"project": "请选择项目"})
+        _ensure_project_member(request.user, project_id)
+        project = get_object_or_404(Project, pk=int(project_id))
+        benchmark_id = str(request.data.get("benchmark_id") or "")
+        if benchmark_id not in CATALOG:
+            raise ValidationError({"benchmark_id": "未知公开测评集"})
+        version_code = str(request.data.get("version") or "").strip()
+        versions = BenchmarkDatasetVersion.objects.filter(benchmark_id=benchmark_id)
+        version = versions.filter(version=version_code).first() if version_code else versions.filter(status="ready").order_by("-created_at").first()
+        if version is None:
+            raise ValidationError({"version": "该测评集尚未准备可运行的数据版本"})
+        if version.status != "ready":
+            raise ValidationError({"version": f"数据版本不可运行：{version.status}"})
+        model_config = CodeAnalysisLLMConfig.objects.filter(is_active=True).exclude(encrypted_api_key="").first()
+        if model_config is None:
+            raise ValidationError({"detail": "请先配置代码审查专用模型"})
+        case_keys = request.data.get("case_keys")
+        if case_keys is not None and not isinstance(case_keys, list):
+            raise ValidationError({"case_keys": "须为样本标识数组"})
+        languages = request.data.get("languages")
+        if languages is not None and not isinstance(languages, list):
+            raise ValidationError({"languages": "须为语言数组"})
+        include_clean = request.data.get("include_clean")
+        run = create_public_run(
+            project=project,
+            version=version,
+            actor=request.user,
+            case_keys=case_keys,
+            languages=languages,
+            include_clean=include_clean,
+            mode=str(request.data.get("mode") or "pilot"),
+            allow_partial=bool(request.data.get("allow_partial")),
+            name=str(request.data.get("name") or ""),
+            model_config=model_config,
+        )
+        execute_benchmark_run.delay(str(run.id))
+        payload = self.get_serializer(run).data
+        payload["benchmark_binding"] = {
+            "benchmark_id": run.benchmark_binding.benchmark_id,
+            "version": version.version,
+            "mode": run.benchmark_binding.mode,
+            "selected_cases": len(run.benchmark_binding.selected_case_keys),
+            "excluded_cases": len(run.benchmark_binding.excluded_cases),
+        }
+        return Response(payload, status=202)
+
+    @action(detail=True, methods=["get"], url_path="benchmark-binding")
+    def benchmark_binding(self, request, pk=None):
+        run = self.get_object()
+        binding = getattr(run, "benchmark_binding", None)
+        if binding is None:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": "该运行不是内置公开集运行"})
+        return Response({
+            "benchmark_id": binding.benchmark_id,
+            "version": binding.version.version,
+            "version_status": binding.version.status,
+            "manifest_digest": binding.version.manifest_digest,
+            "mode": binding.mode,
+            "status": binding.status,
+            "selected_case_keys": binding.selected_case_keys,
+            "excluded_cases": binding.excluded_cases,
+            "preflight": binding.preflight,
+            "snapshot_manifest": binding.snapshot_manifest,
+            "model_snapshot": binding.model_snapshot,
+            "code_version": binding.code_version,
+            "license": binding.version.manifest.get("license", {}),
+        })
+
+    @action(detail=True, methods=["get"], url_path="code-review-report")
+    def code_review_report(self, request, pk=None):
+        from .benchmark_report import build_benchmark_report
+        run = self.get_object()
+        if run.suite.task_type != "code_review" or (run.config or {}).get("benchmark") != "code_review":
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": "该运行不是代码审查测评"})
+        return Response(build_benchmark_report(run))
+
+    @action(detail=True, methods=["post"], url_path="adjudicate-code-review")
+    def adjudicate_code_review(self, request, pk=None):
+        """人工核验一条样本；未匹配金标视为漏报，未匹配发现必须逐条判定。"""
+        from rest_framework.exceptions import ValidationError
+        from .benchmark_report import build_benchmark_report
+        from .code_review_benchmark import adjudicate_case
+        run = self.get_object()
+        if run.suite.task_type != "code_review" or (run.config or {}).get("benchmark") != "code_review":
+            raise ValidationError({"detail": "该运行不是代码审查测评"})
+        _ensure_project_member(request.user, run.suite.project_id)
+        adjudicate_case(run, request.data, request.user)
+        return Response(build_benchmark_report(run))
 
     @action(detail=True, methods=["post"], url_path="generate-review-candidates")
     def generate_review_candidates(self, request, pk=None):

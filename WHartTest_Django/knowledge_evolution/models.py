@@ -447,3 +447,9 @@ from .optimization_models import (  # noqa: E402,F401
 from .capability_models import (  # noqa: E402,F401
     CapabilityDefinition, CapabilityRelease, PromotionDecision, ReleaseObservation,
 )
+
+# 代码审查内置公开测评集：全局目录版本、样本、准备作业与仓库快照
+from .benchmark_models import (  # noqa: E402,F401
+    BenchmarkCase, BenchmarkDatasetVersion, BenchmarkPrepareJob,
+    BenchmarkRepositorySnapshot, BenchmarkRunBinding, ImmutableVersionError,
+)

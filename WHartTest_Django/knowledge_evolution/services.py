@@ -324,6 +324,22 @@ def record_task_output(*, project, user, task_type: str, task_id: str,
         return None
 
 
+def _review_source_label(task) -> str:
+    """审查来源的可读标识。
+
+    用户仓库任务取 `ProjectRepository.name`；公开测评集任务没有仓库记录
+    （`AnalysisTask.repository` 为 NULL，由 `benchmark_case` 提供快照来源），
+    此时退化为「仓库全名 + 提交区间」，而不是让 `None.name` 抛异常。
+    """
+    repo = getattr(task, "repository", None)
+    if repo is not None:
+        return repo.name
+    case = getattr(task, "benchmark_case", None)
+    if case is not None:
+        return f"[公开集] {case.repo}"
+    return f"[公开集] task:{task.pk}"
+
+
 def record_code_review_task(task, rejected_findings=None, capability=None) -> tuple[str, str] | None:
     """Persist code-review classifications and counter-evidence without raw diff text."""
     if capability is None:
@@ -398,7 +414,7 @@ def record_code_review_task(task, rejected_findings=None, capability=None) -> tu
         user=task.executor or task.creator,
         task_type="code_review",
         task_id=str(task.pk),
-        query=f"{task.repository.name}: {task.base_sha}..{task.head_sha}",
+        query=f"{_review_source_label(task)}: {task.base_sha}..{task.head_sha}",
         content=content,
         channels={
             "machine": {"enabled": True, "coverage": task.machine_coverage},

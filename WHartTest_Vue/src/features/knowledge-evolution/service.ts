@@ -95,6 +95,9 @@ async function post<T>(path: string, data?: unknown): Promise<T> {
   return request<T>('post', path, data);
 }
 
+export const benchmarkGet = get;
+export const benchmarkPost = post;
+
 async function patch<T>(path: string, data?: unknown): Promise<T> {
   return request<T>('patch', path, data);
 }

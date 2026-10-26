@@ -136,7 +136,16 @@ class AnalysisTask(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="code_analysis_tasks")
-    repository = models.ForeignKey(ProjectRepository, on_delete=models.CASCADE, related_name="analysis_tasks")
+    # 公开测评样本没有用户登记的仓库，因此仓库可空；二者必居其一由 clean 约束校验。
+    repository = models.ForeignKey(
+        ProjectRepository, on_delete=models.CASCADE, null=True, blank=True,
+        related_name="analysis_tasks",
+    )
+    benchmark_case = models.ForeignKey(
+        "knowledge_evolution.BenchmarkCase", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="analysis_tasks",
+        help_text="公开测评样本；与 repository 互斥，用于受控只读快照审查",
+    )
     creator = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="code_analysis_tasks")
     # 创建人与最近一次执行人分离：成员协作重跑时，只能使用自己的 GitLab Token。
     executor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="executed_code_analysis_tasks")
@@ -172,6 +181,15 @@ class AnalysisTask(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    models.Q(repository__isnull=False, benchmark_case__isnull=True)
+                    | models.Q(repository__isnull=True, benchmark_case__isnull=False)
+                ),
+                name="analysis_task_single_source",
+            ),
+        ]
 
 
 class AnalysisTaskExecutionLog(models.Model):

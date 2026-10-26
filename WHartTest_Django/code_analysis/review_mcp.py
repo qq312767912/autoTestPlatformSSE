@@ -10,6 +10,27 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 
+LOCAL_SOURCES = {"local_git", "benchmark_snapshot"}
+
+
+def _source(task):
+    from .services import _task_repo
+
+    return _task_repo(task)
+
+
+def _source_type(task):
+    return _source(task).source_type
+
+
+def _git_client(task):
+    from .services import LocalGitClient, SnapshotGitClient, _task_repo
+
+    ref = _task_repo(task)
+    if ref.source_type == "benchmark_snapshot":
+        return SnapshotGitClient(ref.local_path)
+    return LocalGitClient(ref.local_path)
+
 
 class CodeReviewMCP:
     MAX_FILE_CHARS = 20000
@@ -22,23 +43,23 @@ class CodeReviewMCP:
     def read_file(self, path, ref=None):
         """读取目标版本文件，最大 4k 字符。"""
         ref = ref or self.task.head_sha
-        if self.task.repository.source_type == "local_git":
+        if _source_type(self.task) in LOCAL_SOURCES:
             from .services import LocalGitClient
-            git = LocalGitClient(self.task.repository.local_path)
+            git = _git_client(self.task)
             return git._git("show", f"{ref}:{path}")[:self.MAX_FILE_CHARS]
         if not self.client:
             return ""
-        return self.client.raw_file(self.task.repository.gitlab_project_id, path, ref)[:self.MAX_FILE_CHARS]
+        return self.client.raw_file(_source(self.task).gitlab_project_id, path, ref)[:self.MAX_FILE_CHARS]
 
     def search_code(self, query, ref=None):
         """在目标提交中检索字面量；统一返回 path:line:content。"""
         if not query or len(query) > 120:
             return []
         ref = ref or self.task.head_sha
-        if self.task.repository.source_type != "local_git":
+        if _source_type(self.task) not in LOCAL_SOURCES:
             if not self.client:
                 return []
-            project_id = self.task.repository.gitlab_project_id
+            project_id = _source(self.task).gitlab_project_id
             payload = self.client.get(
                 f"/projects/{project_id}/search",
                 {"scope": "blobs", "search": query, "ref": ref, "per_page": self.MAX_RESULTS},
@@ -49,15 +70,15 @@ class CodeReviewMCP:
                 if item.get("path") or item.get("filename")
             ]
         from .services import LocalGitClient
-        git = LocalGitClient(self.task.repository.local_path)
+        git = _git_client(self.task)
         output = git._git("grep", "-n", "-I", "-e", query, ref)
         return output.splitlines()[:self.MAX_RESULTS]
 
     def git_history(self, path):
-        if self.task.repository.source_type != "local_git":
+        if _source_type(self.task) not in LOCAL_SOURCES:
             return []
         from .services import LocalGitClient
-        git = LocalGitClient(self.task.repository.local_path)
+        git = _git_client(self.task)
         return git._git("log", "--oneline", "-5", self.task.head_sha, "--", path).splitlines()
 
     @staticmethod
@@ -174,7 +195,7 @@ class CodeReviewMCP:
 
     @contextmanager
     def _repository_root(self):
-        if self.task.repository.source_type == "local_git":
+        if _source_type(self.task) in LOCAL_SOURCES:
             from .services import _managed_local_repository
             with _managed_local_repository(self.task) as prepared:
                 yield prepared[0]
