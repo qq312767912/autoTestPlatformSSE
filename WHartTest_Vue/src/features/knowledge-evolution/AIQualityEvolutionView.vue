@@ -150,14 +150,24 @@
 
           <CodeReviewBenchmark v-if="projectStore.currentProjectId" :project-id="projectStore.currentProjectId" />
 
+          <div class="winner-bar">
+            <a-select placeholder="查看最近 20 次进化实验" style="max-width:520px" :model-value="reviewEvolutionExperiment?.experiment_id" :disabled="reviewEvolutionExperimentBusy" @change="openReviewExperimentHistory">
+              <a-option v-for="item in reviewEvolutionHistory" :key="item.experiment_id" :value="item.experiment_id">第 {{ item.round_number }} 轮 · {{ item.baseline_version }} · {{ item.state }} · {{ item.experiment_id.slice(0,8) }}</a-option>
+            </a-select>
+            <a-button size="mini" @click="loadReviewEvolutionHistory">刷新实验历史</a-button>
+          </div>
           <div v-if="reviewEvolutionExperiment" class="start-result evolution-experiment">
             <div class="start-result-head">
-              <div><b>隔离 A/B 进化实验</b><small>基线 {{ reviewEvolutionExperiment.baseline_version }} · {{ reviewEvolutionExperiment.state }}</small></div>
+              <div><b>隔离 A/B 进化实验</b><small>第 {{ reviewEvolutionExperiment.round_number }} / {{ reviewEvolutionExperiment.policy.max_rounds }} 轮 · 基线 {{ reviewEvolutionExperiment.baseline_version }} · {{ reviewEvolutionExperiment.state }}</small></div>
               <div class="actions">
                 <a-button size="mini" type="primary" :loading="reviewEvolutionExperimentBusy" :disabled="reviewEvolutionExperiment.state!=='ready'" @click="rerunReviewExperiment">同输入重跑 Baseline/A/B</a-button>
                 <a-button size="mini" @click="reviewEvolutionExperiment=null">收起</a-button>
               </div>
             </div>
+            <p class="muted-line">评委使用同一模型配置的三个隔离上下文，分别核对事实、覆盖和可执行性。</p>
+            <p class="muted-line">本轮评测预算：最多 {{ reviewEvolutionExperiment.policy.max_calls }} 次调用、{{ reviewEvolutionExperiment.policy.max_estimated_tokens }} 估算 Token、{{ reviewEvolutionExperiment.policy.max_seconds }} 秒（调用间检查）。</p>
+            <p v-if="reviewEvolutionExperiment.evaluation_report.budget" class="muted-line">已预留 {{ reviewEvolutionExperiment.evaluation_report.budget.calls }} 次调用 · {{ reviewEvolutionExperiment.evaluation_report.budget.estimated_tokens }} 估算 Token · 耗时 {{ reviewEvolutionExperiment.evaluation_report.budget.elapsed_seconds }} 秒</p>
+            <a-alert v-if="reviewEvolutionExperiment.evaluation_report.stop_reason" type="warning">{{ reviewEvolutionExperiment.evaluation_report.stop_reason }}</a-alert>
             <div class="variant-grid">
               <article v-for="variant in reviewEvolutionExperiment.variants" :key="variant.id" :class="{winner:reviewEvolutionExperiment.winner_label===variant.label}">
                 <header><b>{{ variant.label==='baseline'?'Baseline':`Candidate ${variant.label}` }}</b><a-tag>{{ variant.status }}</a-tag></header>
@@ -166,18 +176,25 @@
                   <span><b>{{ variant.run_result.issue_count ?? '—' }}</b><small>问题</small></span>
                   <span><b>{{ variant.run_result.latency_ms ?? '—' }}</b><small>ms</small></span>
                   <span><b>{{ variant.run_result.estimated_output_tokens ?? '—' }}</b><small>输出 Token</small></span>
-                  <span><b>{{ variant.run_result.fixed_hits?.resolved_issue_types?.length ?? '—' }}</b><small>修复命中</small></span>
+                  <span><b>{{ variant.run_result.pending_count ?? '—' }}</b><small>待确认</small></span>
                 </div>
                 <p v-if="variant.run_result.error" class="warn-line">{{ variant.run_result.error }}</p>
-                <a-button v-if="variant.label!=='baseline'&&reviewEvolutionExperiment.state==='awaiting_choice'" size="mini" @click="reviewEvolutionWinnerLabel=variant.label">选择 {{ variant.label }}</a-button>
+                <template v-if="variant.label!=='baseline' && reviewEvolutionExperiment.evaluation_report.comparisons?.[variant.label]">
+                  <p>{{ reviewEvolutionExperiment.evaluation_report.comparisons[variant.label]?.reason }}</p>
+                  <small>改善 {{ reviewEvolutionExperiment.evaluation_report.comparisons[variant.label]?.better ?? 0 }} · 退步 {{ reviewEvolutionExperiment.evaluation_report.comparisons[variant.label]?.worse ?? 0 }} · 平票 {{ reviewEvolutionExperiment.evaluation_report.comparisons[variant.label]?.ties ?? 0 }}</small>
+                  <details><summary>查看独立评委证据</summary><p v-for="vote in reviewEvolutionExperiment.evaluation_report.comparisons[variant.label]?.votes" :key="vote.judge">评委 {{ vote.judge }}：{{ vote.reason || vote.error }}<br/>{{ vote.evidence?.join('；') }}</p></details>
+                </template>
+                <details><summary>查看补丁与实际产出</summary><pre style="max-height:260px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere">{{ JSON.stringify({patch:variant.patch,output:variant.run_result.output},null,2) }}</pre></details>
+                <a-button :disabled="!reviewEvolutionExperiment.evaluation_report.comparisons?.[variant.label]?.eligible" v-if="variant.label!=='baseline'&&reviewEvolutionExperiment.state==='awaiting_choice'" size="mini" @click="reviewEvolutionWinnerLabel=variant.label">选择 {{ variant.label }}</a-button>
               </article>
             </div>
             <div v-if="reviewEvolutionExperiment.state==='awaiting_choice'" class="winner-bar">
-              <a-radio-group v-model="reviewEvolutionWinnerLabel"><a-radio value="A">Candidate A</a-radio><a-radio value="B">Candidate B</a-radio></a-radio-group>
+              <a-radio-group v-model="reviewEvolutionWinnerLabel"><a-radio value="A" :disabled="!reviewEvolutionExperiment.evaluation_report.comparisons?.A?.eligible">Candidate A</a-radio><a-radio value="B" :disabled="!reviewEvolutionExperiment.evaluation_report.comparisons?.B?.eligible">Candidate B</a-radio></a-radio-group>
               <a-input v-model="reviewEvolutionWinnerReason" placeholder="填写人工对比理由"/>
               <a-button type="primary" :loading="reviewEvolutionExperimentBusy" :disabled="!reviewEvolutionWinnerLabel||!reviewEvolutionWinnerReason.trim()" @click="chooseReviewExperimentWinner">确认 winner</a-button>
             </div>
             <div v-if="reviewEvolutionExperiment.state==='winner_selected'" class="winner-bar">
+              <a-button v-if="reviewEvolutionExperiment.evaluation_report.can_iterate" :loading="reviewEvolutionExperimentBusy" @click="nextReviewExperiment">以胜出版本继续下一轮</a-button>
               <span>已选择 Candidate {{ reviewEvolutionExperiment.winner_label }}：{{ reviewEvolutionExperiment.winner_reason }}</span>
               <a-button type="primary" :loading="reviewEvolutionExperimentBusy" @click="submitReviewExperimentWinner">提交 Skill Hub 验证与发布审批</a-button>
             </div>
@@ -794,6 +811,12 @@
             <small>{{ reviewEvolutionPreflight?.scan.acceptance_score ?? 0 }}%</small>
           </article>
         </div>
+        <a-form layout="vertical" style="margin-top:12px">
+          <a-form-item label="最多迭代轮数"><a-input-number v-model="reviewEvolutionPolicy.max_rounds" :min="1" :max="3" :precision="0"/></a-form-item>
+          <a-form-item label="每轮最大模型调用次数（含候选生成和评委）"><a-input-number v-model="reviewEvolutionPolicy.max_calls" :min="10" :max="120" :precision="0"/></a-form-item>
+          <a-form-item label="每轮估算 Token 预算（保守预留，非计费数）"><a-input-number v-model="reviewEvolutionPolicy.max_estimated_tokens" :min="20000" :max="400000" :step="10000" :precision="0"/></a-form-item>
+          <a-form-item label="每轮评测时间预算（秒，调用间检查）"><a-input-number v-model="reviewEvolutionPolicy.max_seconds" :min="30" :max="900" :precision="0"/></a-form-item>
+        </a-form>
         <!-- 派生的依据必须在这里说清楚：降级路径用的是"人工在报告里写的结论"，
              主路径用的是"人工确认过的 AI 候选"。两者产出的包不一样，混着说没人能复核。 -->
         <p class="detail-note" style="margin-top:12px">
@@ -806,8 +829,8 @@
           不会自动顶掉正在使用的版本。
         </a-alert>
         <p class="detail-note">
-          若这次审查用的版本已经不是当前生效的活跃版本，派生目标就是错的，
-          平台会直接拒绝而不是照旧派生。
+          始终继承本次审查实际执行的精确版本。后续轮次从人工胜出副本派生，原版本保留。
+          每轮以真实产出进行三次独立成对评测；平票不算提升。
         </p>
       </template>
     </a-modal>
@@ -1092,7 +1115,7 @@ import WorkflowEvolutionWorkbench from './WorkflowEvolutionWorkbench.vue';
 import CodeReviewBenchmark from './CodeReviewBenchmark.vue';
 import { WORKFLOW_STAGES as DEFAULT_WORKFLOW_STAGES } from '@/features/skills/utils/stages';
 import { annotateGoldCase, confirmWorkflowStage, createEvaluationRun, createEvaluationSuite, createTestAssetTaxonomy, confirmHistoryImport, downloadSkillPackage, downloadStageArtifact, downloadStageReviewReport, evaluateWorkflowStage, evolveCaseReview, executeWorkflowStage, freezeGoldDatasetVersion, generateCandidatesFromRun, getAssetCandidateStats, getCaseReviewAttributionTaxonomy, getFlywheelSwitch, getGenerationOutputLineage, getGoldCase, getProjectQualityCockpit, getStageAttachmentCatalog, getStageAttemptTrace, getStageDiff, getStageOutput, getStageReviewStatus, getWorkflowStageCatalog, getWorkflowStatus, listAnnotationConflicts, listAssetCandidateEvents, listCapabilityReleases, listCaseReviewEvolutionCandidates, listEvaluationResults, listEvaluationRuns, listEvaluationSuites, listExecutionSpans, listFailureAttributions, listFeedbackEvents, listGoldDatasets, listGoldDatasetVersions, listHistoryImports, listHistoryReplays, listKnowledgeCandidates, listOptimizationProposals, listRetrievalTraces, listStageAttachments, listStageAttempts, listTestAssetTaxonomies, openFlywheelRun, overrideWorkflowStage, preflightCaseReviewEvolution, preflightHistoryImport, proposeCaseReviewOptimizations, publishTestAssetTaxonomy, confirmCaseReviewOptimizations, resolveAnnotationConflict, retryAssetCandidate, retryFailedAssetCandidates, runStageAttribution, scoreWorkflowStage, setFlywheelSwitch, startHistoryReplay, startWorkflow, submitTestAssetTaxonomy, updateCandidateState, uploadStageAttachment, uploadStageFeedback, uploadStageReview } from './service';
-import { chooseCaseReviewEvolutionWinner, createCaseReviewEvolutionExperiment, rerunCaseReviewEvolutionExperiment, submitCaseReviewEvolutionWinner } from './service';
+import { getCaseReviewEvolutionExperiment, listCaseReviewEvolutionExperiments, nextCaseReviewEvolutionIteration, chooseCaseReviewEvolutionWinner, createCaseReviewEvolutionExperiment, rerunCaseReviewEvolutionExperiment, submitCaseReviewEvolutionWinner } from './service';
 import type { AnnotationConflict, AssetCandidateEvent, AssetCandidateStats, AttributionTaxonomyV2, CapabilityRelease, CaseReviewEvolutionCandidate, CaseReviewEvolutionPreflight, CaseReviewEvolutionResult, EvaluationResult, EvaluationRun, EvaluationSuite, EvolutionExperimentView, ExecutionSpan, FailureAttribution, FeedbackEvent, FlywheelSwitchState, GoldCase, GoldDataset, GoldDatasetVersion, HistoryImportBatch, HistoryReplay, KnowledgeCandidate, OptimizationCandidate, OptimizationProposal, OptimizationProposalResult, OutputLineageView, ProjectQualityCockpit, ProjectQualityPerson, ProjectWorkflowView, RetrievalTrace, StageAttachmentCatalog, StageAttachmentView, StageAttemptTraceView, StageDiffView, StageExecutionAttemptView, StageExecutionPlan, StageFeedbackResult, StageOutputView, StageReviewStatusView, StartWorkflowResult, TestAssetTaxonomy, WorkflowCatalogSkill, WorkflowStageCatalog, WorkflowStageGateView } from './types';
 
 type Workspace='overview'|'single'|'workflow'|'gold'|'evaluation'|'attribution'|'optimization';
@@ -1616,6 +1639,8 @@ const reviewEvolutionThreshold=ref(70),reviewEvolutionSelected=ref('');
 const reviewEvolutionFileList=ref<FileItem[]>([]);
 const reviewEvolutionPreflight=ref<CaseReviewEvolutionPreflight|null>(null);
 const reviewEvolutionResult=ref<CaseReviewEvolutionResult|null>(null);
+const reviewEvolutionPolicy=ref({max_rounds:3,max_calls:120,max_estimated_tokens:400000,max_seconds:900});
+const reviewEvolutionHistory=ref<Array<Pick<EvolutionExperimentView,'experiment_id'|'state'|'round_number'|'baseline_version'>>>([]);
 const reviewEvolutionExperiment=ref<EvolutionExperimentView|null>(null);
 const reviewEvolutionExperimentBusy=ref(false);
 const reviewEvolutionWinnerLabel=ref<''|'A'|'B'>('');
@@ -1915,7 +1940,7 @@ async function submitReviewEvolution():Promise<boolean>{
       return false;
     }
     reviewEvolutionExperiment.value=await createCaseReviewEvolutionExperiment(
-      projectStore.currentProjectId,reviewEvolutionSelected.value,reviewEvolutionConfirmedIds.value,
+      projectStore.currentProjectId,reviewEvolutionSelected.value,reviewEvolutionConfirmedIds.value,reviewEvolutionPolicy.value,
     );
     showReviewEvolutionModal.value=false;
     reviewEvolutionStep.value=1;
@@ -1927,13 +1952,41 @@ async function submitReviewEvolution():Promise<boolean>{
     return false;
   }finally{reviewEvolutionSubmitting.value=false}
 }
+async function loadReviewEvolutionHistory(){
+  const projectId=projectStore.currentProjectId;if(!projectId)return;
+  try{
+    const result=await listCaseReviewEvolutionExperiments(projectId);
+    if(projectStore.currentProjectId===projectId)reviewEvolutionHistory.value=result.experiments;
+  }catch(error:any){Message.error(errorText(error,'读取进化实验历史失败'))}
+}
+async function openReviewExperimentHistory(value:unknown){
+  const projectId=projectStore.currentProjectId;if(!projectId||typeof value!=='string')return;
+  reviewEvolutionExperimentBusy.value=true;
+  try{
+    const result=await getCaseReviewEvolutionExperiment(projectId,value);
+    if(projectStore.currentProjectId===projectId){
+      reviewEvolutionExperiment.value=result;reviewEvolutionWinnerLabel.value='';reviewEvolutionWinnerReason.value='';
+    }
+  }catch(error:any){Message.error(errorText(error,'读取实验详情失败'))}
+  finally{reviewEvolutionExperimentBusy.value=false}
+}
 async function rerunReviewExperiment(){
   if(!projectStore.currentProjectId||!reviewEvolutionExperiment.value)return;
   reviewEvolutionExperimentBusy.value=true;
   try{
     reviewEvolutionExperiment.value=await rerunCaseReviewEvolutionExperiment(projectStore.currentProjectId,reviewEvolutionExperiment.value.experiment_id);
-    Message.success('Baseline/A/B 同输入重跑完成，请人工选择 winner');
+    Message.info(reviewEvolutionExperiment.value.evaluation_report.stop_reason || '实际重跑与独立盲评完成，请查看证据后人工选优');
   }catch(error:any){Message.error(errorText(error,'A/B 重跑失败'))}
+  finally{reviewEvolutionExperimentBusy.value=false}
+}
+async function nextReviewExperiment(){
+  if(!projectStore.currentProjectId||!reviewEvolutionExperiment.value)return;
+  reviewEvolutionExperimentBusy.value=true;
+  try{
+    reviewEvolutionExperiment.value=await nextCaseReviewEvolutionIteration(projectStore.currentProjectId,reviewEvolutionExperiment.value.experiment_id);
+    reviewEvolutionWinnerLabel.value='';reviewEvolutionWinnerReason.value='';
+    Message.success('已从胜出版本派生下一轮，上一轮结果已保留');
+  }catch(error:any){Message.error(errorText(error,'派生下一轮失败'))}
   finally{reviewEvolutionExperimentBusy.value=false}
 }
 async function chooseReviewExperimentWinner(){
@@ -2120,7 +2173,7 @@ async function loadCockpit(){if(!projectStore.currentProjectId)return;try{cockpi
 async function selectTrace(v:RetrievalTrace){selectedTraceId.value=v.id;try{selectedSpans.value=await listExecutionSpans(v.id)}catch{selectedSpans.value=[];Message.error('加载节点轨迹失败')}}
 async function selectSuite(v:EvaluationSuite){selectedSuiteId.value=v.id;await loadRuns();if(runs.value[0])await selectRun(runs.value[0]);else{selectedRunId.value='';results.value=[]}}
 async function selectRun(v:EvaluationRun){selectedRunId.value=v.id;await loadResults()}
-async function bootstrap(){await loadSuites();if(suites.value[0])await selectSuite(suites.value.find(v=>v.suite_type==='seed')||suites.value[0]);else{selectedSuiteId.value=undefined;selectedRunId.value='';runs.value=[];results.value=[]}await Promise.all([loadFeedback(),loadCandidates(),loadTraces(),loadGovernance(),loadCockpit(),loadFlywheelSwitch()]);if(allTraces.value[0])await selectTrace(allTraces.value[0]);else{selectedTraceId.value='';selectedSpans.value=[]}}
+async function bootstrap(){await loadSuites();if(suites.value[0])await selectSuite(suites.value.find(v=>v.suite_type==='seed')||suites.value[0]);else{selectedSuiteId.value=undefined;selectedRunId.value='';runs.value=[];results.value=[]}await Promise.all([loadFeedback(),loadCandidates(),loadTraces(),loadGovernance(),loadCockpit(),loadFlywheelSwitch(),loadReviewEvolutionHistory()]);if(allTraces.value[0])await selectTrace(allTraces.value[0]);else{selectedTraceId.value='';selectedSpans.value=[]}}
 async function refreshAll(){await bootstrap();Message.success('数据已刷新')}
 async function createRun(){if(!selectedSuiteId.value)return;try{await createEvaluationRun({suite:selectedSuiteId.value,name:`评测运行 · ${new Date().toLocaleString('zh-CN')}`,policy_version:'default-policy@v3',model_name:'qwen3-coder-plus'});await loadRuns();Message.success('评测运行已启动')}catch{Message.error('启动评测失败')}}
 const independentCapabilityRoutes:Record<string,string>={
@@ -2188,6 +2241,7 @@ function releaseStateColor(v:string){if(v==='active')return'green';if(['rejected
 function gateSummary(v:CapabilityRelease){const report=v.gate_report||{};if(report.passed===true)return'已通过影子硬门禁';if(report.passed===false)return'未通过影子硬门禁';return'待执行影子对比'}
 const levels=['l0','l1','l2','l3'] as const;function scores(v:EvaluationResult){return levels.map(k=>[k,v[`${k}_score`]] as const).filter((p):p is readonly[typeof levels[number],number]=>typeof p[1]==='number')}function isFailure(v:EvaluationResult){return v.status==='failed'||scores(v).some(([,n])=>n<.5)}function failureSummary(v:EvaluationResult){if(v.error_message)return v.error_message;const s=scores(v);if(!s.length)return'执行失败，暂无评分';const [l,n]=s.reduce((a,b)=>b[1]<a[1]?b:a);return`${l.toUpperCase()} 得分 ${n.toFixed(2)} 低于门槛 0.50`}
 watch(()=>projectStore.currentProjectId,async id=>{
+  reviewEvolutionHistory.value=[];reviewEvolutionExperiment.value=null;reviewEvolutionWinnerLabel.value='';reviewEvolutionWinnerReason.value='';
   assetCandidateEvents.value=[];assetCandidateStats.value=emptyAssetCandidateStats();activeGoldCase.value=null;
   goldVersions.value=[];taxonomies.value=[];annotationConflicts.value=[];historyImports.value=[];historyReplays.value=[];historyPreflight.value=null;
   selectedSuiteId.value=undefined;selectedRunId.value='';selectedTraceId.value='';

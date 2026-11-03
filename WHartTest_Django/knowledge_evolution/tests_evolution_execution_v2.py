@@ -81,7 +81,6 @@ class ExecutablePatchV2Tests(SkillHubBaseTests):
         with self.assertRaisesMessage(ValidationError, "对比理由"):
             EvolutionExecutionService.choose_winner(experiment=experiment, label="A", reason="")
 
-        EvolutionExecutionService.choose_winner(experiment=experiment, label="B", reason="结构更完整")
-        experiment.refresh_from_db()
-        self.assertEqual(experiment.winner_label, "B")
-        self.assertEqual(experiment.state, "winner_selected")
+        # 旧的“只要标成 completed 就能选优”不能绕过独立评测。
+        with self.assertRaisesMessage(ValidationError, "独立对比评测"):
+            EvolutionExecutionService.choose_winner(experiment=experiment, label="B", reason="结构更完整")

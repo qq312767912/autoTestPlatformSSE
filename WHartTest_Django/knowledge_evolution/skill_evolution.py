@@ -338,6 +338,7 @@ class SkillEvolutionService:
         cls, *, skill_version, attributions, actor, patch: dict | None = None,
         change_reason: str = "", expected_benefit: str = "", impact_scope: str = "",
         api_key: str | None = None, variant_label: str = "", allow_v2_routes: bool = False,
+        locked_experiment_baseline: bool = False,
     ) -> dict:
         """派生候选包并落成新的 draft 版本，返回诊断信息。
 
@@ -368,7 +369,8 @@ class SkillEvolutionService:
 
         # 硬校验 3：基线必须仍是当前活跃版本，否则派生目标就是错的。
         skill = skill_version.skill
-        if skill.active_version_id and str(skill.active_version_id) != str(skill_version.id):
+        if (skill.active_version_id and str(skill.active_version_id) != str(skill_version.id)
+                and not (allow_v2_routes and locked_experiment_baseline)):
             raise ValidationError(
                 f"派生基线必须是当前活跃版本；{skill_version.version} 已不是活跃版本，"
                 f"请基于 {skill.active_version.version} 重新派生"

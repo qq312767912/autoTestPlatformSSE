@@ -128,6 +128,13 @@ class EvolutionExperiment(models.Model):
     winner_label = models.CharField(max_length=1, choices=WINNER_CHOICES, blank=True)
     winner_reason = models.TextField(blank=True)
     baseline_sha256 = models.CharField(max_length=64)
+    policy = models.JSONField(default=dict, blank=True)
+    evaluation_report = models.JSONField(default=dict, blank=True)
+    round_number = models.PositiveSmallIntegerField(default=1)
+    parent = models.OneToOneField(
+        "self", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="next_round",
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
         related_name="created_evolution_experiments",

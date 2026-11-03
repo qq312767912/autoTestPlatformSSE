@@ -12,6 +12,9 @@ from django.db import transaction
 
 from .llm_judges import _json_object
 from .optimization_models import EvolutionExperiment, EvolutionVariant
+from .paired_evaluation import (
+    BudgetExceeded, EvaluationBudget, PairedOutputEvaluator, bounded_llm, normalize_policy,
+)
 from .skill_evolution import (
     SkillCandidateDeriver, SkillEvolutionService, assert_patch_within_whitelist,
     patch_fingerprint,
@@ -158,8 +161,7 @@ class SkillCreatorAdapter:
 
     @staticmethod
     def _default_factory(config):
-        from langgraph_integration.views import create_llm_instance
-        return create_llm_instance(config, temperature=0)
+        return bounded_llm(config, max_tokens=8192)
 
     @staticmethod
     def instruction() -> str:
@@ -168,7 +170,7 @@ class SkillCreatorAdapter:
             raise ValidationError("预置 skill-creator 不存在，无法生成结构优化变体")
         return path.read_text(encoding="utf-8")
 
-    def build(self, *, skill_version, attributions) -> dict:
+    def build(self, *, skill_version, attributions, budget=None, minimal=False, feedback=None) -> dict:
         from langgraph_integration.models import LLMConfig
         from .report_optimization import SkillPackageReader
 
@@ -185,18 +187,27 @@ class SkillCreatorAdapter:
             "evidence": [entry.get("summary", "") for entry in (item.evidence or [])[:3]],
         } for item in items]
         prompt = (
-            self.instruction() + "\n\n"
-            "请生成 Candidate B 结构化重构补丁。必须补齐适用的前置检查、分步拆解、分支 SOP、失败兜底。\n"
+            self.instruction() + "\n\n" +
+            ("MUST 生成 Candidate A 最小改动补丁，只修改一个已确认问题相关步骤。\n" if minimal else
+             "MUST 生成 Candidate B 结构化重构补丁，补齐适用的前置检查、分步拆解、分支 SOP、失败兜底。\n")
+            + "MUST 只修复已确认诊断；NEVER 引入个人文风、无关检查点或通用黑名单。"
+            "MUST 保留业务职责和报告约定；MUST 返回 JSON 对象："
+            '{"edits":[{"path":"SKILL.md","content":"完整文件内容"}],"rationale":"修改依据"}。\n'
             f"当前包：{json.dumps(package, ensure_ascii=False)}\n"
             f"已确认诊断：{json.dumps(payload, ensure_ascii=False)}"
+            f"\n上一轮评测观察（只作改进线索，不是新归因）：{json.dumps(feedback or {}, ensure_ascii=False)}"
         )
+        if budget:
+            budget.reserve(prompt, output_tokens=8192)
         try:
             result = _json_object(self.llm_factory(config).invoke(prompt))
+            if budget:
+                budget.check_time()
         except Exception as exc:
             raise ValidationError(f"skill-creator 调用失败：{exc}") from exc
         patch = {
             "schema": "skill_patch/v2",
-            "strategy": "skill_creator_structural",
+            "strategy": "minimal_targeted_mutation" if minimal else "skill_creator_structural",
             "edits": list(result.get("edits") or []),
             "attribution_ids": sorted(str(item.id) for item in items),
             "categories": sorted({item.category for item in items}),
@@ -216,29 +227,55 @@ class EvolutionExecutionService:
     @classmethod
     @transaction.atomic
     def create_experiment(
-        cls, *, output, skill_version, attributions, actor, skill_creator=None,
+        cls, *, output, skill_version, attributions, actor, skill_creator=None, policy=None, parent=None,
     ) -> EvolutionExperiment:
         items = _verified_attributions(attributions)
-        if output.skill_version_id != skill_version.id:
+        if parent is None and output.skill_version_id != skill_version.id:
             raise ValidationError("实验基线必须是当次审查实际运行的精确 Skill 版本")
+        if any(item.output_id != output.id or item.project_id != output.project_id for item in items):
+            raise ValidationError("归因必须来自同一原始任务与项目")
+        resolved_policy = normalize_policy(parent.policy if parent else policy)
+        if parent:
+            parent = EvolutionExperiment.objects.select_for_update().get(pk=parent.pk)
+            if parent.state != "winner_selected" or parent.output_id != output.id:
+                raise ValidationError("下一轮必须继承同一任务的人工胜出版本")
+            winner = parent.variants.get(label=parent.winner_label)
+            cls._assert_eligible(parent, winner)
+            if winner.skill_version_id != skill_version.id or not parent.evaluation_report.get("can_iterate"):
+                raise ValidationError("收益不足或已达到迭代预算，停止继续优化")
+            if (parent.round_number >= resolved_policy["max_rounds"]
+                    or not parent.evaluation_report["comparisons"][winner.label].get("clear_gain")):
+                raise ValidationError("胜出候选收益不足或已达到最大轮数")
+            if EvolutionExperiment.objects.filter(parent=parent).exists():
+                raise ValidationError("本轮已派生下一轮，不能重复创建")
+        from skills.versions import SkillVersionService
+        if not SkillVersionService.verify_package_integrity(skill_version)["ok"]:
+            raise ValidationError("实验基线包指纹不一致")
         baseline_sha = skill_version.package_sha256
         experiment = EvolutionExperiment.objects.create(
             project=output.project, output=output, baseline_skill_version=skill_version,
-            baseline_sha256=baseline_sha, created_by=actor,
+            baseline_sha256=baseline_sha, created_by=actor, policy=resolved_policy,
+            parent=parent, round_number=parent.round_number + 1 if parent else 1,
         )
         experiment.attributions.set(items)
         cls._baseline(experiment, skill_version)
-        patch_a = ExecutablePatchBuilder.build(skill_version=skill_version, attributions=items)
-        patch_b = (skill_creator or SkillCreatorAdapter()).build(
-            skill_version=skill_version, attributions=items,
-        )
+        generation_budget = EvaluationBudget(resolved_policy)
+        creator = skill_creator or SkillCreatorAdapter()
+        kwargs = {"budget": generation_budget, "feedback": (
+            parent.evaluation_report.get("comparisons") if parent else None
+        )} if isinstance(creator, SkillCreatorAdapter) else {}
+        patch_a = (creator.build(skill_version=skill_version, attributions=items, minimal=True, **kwargs)
+                   if parent and isinstance(creator, SkillCreatorAdapter) else
+                   ExecutablePatchBuilder.build(skill_version=skill_version, attributions=items))
+        patch_b = creator.build(skill_version=skill_version, attributions=items, **kwargs)
         cls._candidate(experiment, "A", "minimal_targeted_mutation", patch_a, items, actor)
         cls._candidate(experiment, "B", "skill_creator_structural", patch_b, items, actor)
         skill_version.refresh_from_db()
         if skill_version.package_sha256 != baseline_sha:
             raise ValidationError("实验派生触碰了基线包，事务已中止")
         experiment.state = "ready"
-        experiment.save(update_fields=["state", "updated_at"])
+        experiment.evaluation_report = {"generation_budget": generation_budget.snapshot()}
+        experiment.save(update_fields=["state", "evaluation_report", "updated_at"])
         return experiment
 
     @staticmethod
@@ -253,10 +290,24 @@ class EvolutionExecutionService:
 
     @staticmethod
     def _candidate(experiment, label, strategy, patch, items, actor):
+        root = Path(experiment.baseline_skill_version.get_full_path())
+        changed = bool(patch.get("remove"))
+        for edit in patch.get("edits", []):
+            path = root / edit["path"]
+            if path.is_file():
+                current = path.read_text(encoding="utf-8")
+                changed = changed or edit.get("content") != current
+                old_size = len(current)
+                if len(edit.get("content", "")) > max(old_size, 1024) * experiment.policy["max_growth_ratio"]:
+                    raise ValidationError("候选文件增长超过实验体积预算")
+            else:
+                changed = True
+        if not changed:
+            raise ValidationError("候选没有实质修改，停止无收益派生")
         derived = SkillEvolutionService.derive_candidate(
             skill_version=experiment.baseline_skill_version, attributions=items, actor=actor,
-            patch=patch, variant_label=label,
-            allow_v2_routes=True,
+            patch=patch, variant_label=f"{label}.r{experiment.round_number}.{str(experiment.id)[:8]}",
+            allow_v2_routes=True, locked_experiment_baseline=True,
             change_reason=f"实验 {experiment.id} Candidate {label}：{strategy}",
             expected_benefit="修复已确认归因，同时保留 Baseline 作为对照",
             impact_scope=json.dumps(patch.get("impact") or {}, ensure_ascii=False),
@@ -266,7 +317,7 @@ class EvolutionExecutionService:
             skill_version=derived["candidate"], sandbox_key=f"evo:{experiment.id}:{label}",
             patch=patch, asset_snapshots={"skill_package_sha256": derived["candidate"].package_sha256},
             impact_scope=patch.get("impact") or {}, rollback_target=str(experiment.baseline_skill_version_id),
-            fingerprint=patch_fingerprint(patch),
+            fingerprint=_stable_hash({"experiment": str(experiment.id), "patch": patch_fingerprint(patch)}),
         )
 
     @classmethod
@@ -283,76 +334,211 @@ class EvolutionExecutionService:
         return variant
 
     @classmethod
-    def rerun_same_input(cls, *, experiment) -> EvolutionExperiment:
+    def rerun_same_input(cls, *, experiment, evaluator=None) -> EvolutionExperiment:
         """在三个独立上下文中以同一源文件重跑本阶段，保留原始对比数据。"""
-        from langgraph_integration.views import create_llm_instance
         from testcases.models import TestCaseReview
         from testcases.review_service import (
             TESTCASE_REVIEW_CHUNK_SIZE, _get_testcase_review_llm_config,
             _read_rows, _review_chunk,
         )
 
-        review = TestCaseReview.objects.filter(
-            project=experiment.project,
-            summary__output_id=str(experiment.output_id),
-        ).first()
-        if review is None:
-            raise ValidationError("找不到原审查任务，无法以相同输入重跑")
-        rows = _read_rows(review.source_file.path)
-        if not rows:
-            raise ValidationError("原审查输入为空，无法重跑")
-        config = _get_testcase_review_llm_config()
-        chunks = [rows[index:index + TESTCASE_REVIEW_CHUNK_SIZE] for index in range(0, len(rows), TESTCASE_REVIEW_CHUNK_SIZE)]
-        experiment.state = "running"
-        experiment.save(update_fields=["state", "updated_at"])
-        for variant in experiment.variants.select_related("skill_version").order_by("label"):
-            started = time.perf_counter()
-            variant.status = "running"
-            variant.save(update_fields=["status", "updated_at"])
-            try:
-                skill_path = Path(variant.skill_version.get_full_path() or "") / "SKILL.md"
-                skill_prompt = skill_path.read_text(encoding="utf-8")
-                results = []
-                for chunk in chunks:
-                    llm = create_llm_instance(config, temperature=0.1, max_retries=0)
-                    results.append(_review_chunk(llm, skill_prompt, chunk, review.business_context))
-                issues = [item for result in results for item in (result.get("issues") or [])]
-                pending = [item for result in results for item in (result.get("pending_confirmations") or [])]
-                output_payload = {"issues": issues, "pending_confirmations": pending}
-                elapsed_ms = round((time.perf_counter() - started) * 1000)
-                cls.record_run(experiment=experiment, label=variant.label, result={
-                    "input_hash": _stable_hash(rows),
-                    "output": output_payload,
-                    "output_hash": _stable_hash(output_payload),
-                    "issue_count": len(issues),
-                    "pending_count": len(pending),
-                    "latency_ms": elapsed_ms,
-                    "estimated_input_tokens": round((len(skill_prompt) + len(json.dumps(rows, ensure_ascii=False))) / 4),
-                    "estimated_output_tokens": round(len(json.dumps(output_payload, ensure_ascii=False)) / 4),
-                    "fixed_hits": cls._fixed_hits(experiment, issues),
-                })
-            except Exception as exc:
-                cls.record_run(experiment=experiment, label=variant.label, result={
-                    "input_hash": _stable_hash(rows), "error": f"{type(exc).__name__}: {exc}",
-                    "latency_ms": round((time.perf_counter() - started) * 1000),
-                })
+        # 先在短事务中领取任务，网络调用不持有数据库事务。
+        with transaction.atomic():
+            locked = EvolutionExperiment.objects.select_for_update().get(pk=experiment.pk)
+            if locked.state != "ready":
+                raise ValidationError("仅待重跑实验可以执行，禁止重复评测或覆盖已选优结果")
+            review = TestCaseReview.objects.filter(
+                project=experiment.project, summary__output_id=str(experiment.output_id),
+            ).first()
+            if review is None:
+                raise ValidationError("找不到原审查任务，无法以相同输入重跑")
+            source = (experiment.parent.evaluation_report.get("source_snapshot")
+                      if experiment.parent_id else None)
+            if source is None:
+                rows = _read_rows(review.source_file.path)
+                context_parts = []
+                if review.requirement_document_ids:
+                    from requirements.models import RequirementDocument
+                    docs = RequirementDocument.objects.filter(
+                        project=review.project, id__in=review.requirement_document_ids,
+                    ).order_by("id").values_list("title", "content")
+                    context_parts.extend(f"【需求文档：{title}】\n{(content or '')[:8000]}" for title, content in docs)
+                if review.knowledge_document_ids:
+                    from knowledge.models import Document
+                    docs = Document.objects.filter(
+                        knowledge_base__project=review.project, status="completed",
+                        id__in=review.knowledge_document_ids,
+                    ).order_by("id").values_list("title", "content")
+                    context_parts.extend(f"【知识库文档：{title}】\n{(content or '')[:8000]}" for title, content in docs)
+                source = {"rows": rows, "business_context": review.business_context,
+                          "custom_rules": review.custom_rules,
+                          "document_context": "\n\n".join(context_parts)[:20000]}
+            rows = source.get("rows")
+            if not rows:
+                raise ValidationError("原审查输入为空，无法重跑")
+            config = _get_testcase_review_llm_config()
+            locked.state = "running"
+            locked.evaluation_report = {
+                **locked.evaluation_report, "source_snapshot": source, "input_hash": _stable_hash(source),
+            }
+            locked.save(update_fields=["state", "evaluation_report", "updated_at"])
         experiment.refresh_from_db()
+        budget = EvaluationBudget(experiment.policy)
+        generation_usage = experiment.evaluation_report.get("generation_budget") or {}
+        budget.calls = generation_usage.get("calls", 0)
+        budget.estimated_tokens = generation_usage.get("estimated_tokens", 0)
+        budget.started -= generation_usage.get("elapsed_seconds", 0)
+        chunks = [rows[index:index + TESTCASE_REVIEW_CHUNK_SIZE]
+                  for index in range(0, len(rows), TESTCASE_REVIEW_CHUNK_SIZE)]
+        report = dict(experiment.evaluation_report)
+        report.update({"schema": "paired_output/v1", "comparisons": {}, "can_iterate": False,
+                       "evaluation_mode": "full_test", "stop_reason": "",
+                       "model": {"config_id": str(getattr(config, "pk", "")),
+                                 "name": str(getattr(config, "name", "")),
+                                 "judge_contexts": 3, "distinct_models": False}})
+        try:
+            for variant in experiment.variants.select_related("skill_version").order_by("label"):
+                started = time.perf_counter()
+                variant.status = "running"
+                variant.save(update_fields=["status", "updated_at"])
+                try:
+                    cls._verify_variant(variant)
+                    skill_path = Path(variant.skill_version.get_full_path() or "") / "SKILL.md"
+                    skill_prompt = skill_path.read_text(encoding="utf-8")
+                    for path in sorted((skill_path.parent / "references").rglob("*.md")):
+                        skill_prompt += f"\n\n# 参考规则：{path.name}\n" + path.read_text(encoding="utf-8")
+                    if source.get("document_context"):
+                        skill_prompt += "\n\n# 本次审查参考文档（只能据此判断，不得臆造）\n" + source["document_context"]
+                    if source.get("custom_rules"):
+                        skill_prompt += "\n\n# 本次用户指定的审查规则（在不违反质量边界的前提下优先执行）\n" + source["custom_rules"]
+                    results = []
+                    for chunk in chunks:
+                        # safe_llm_invoke(max_retries=1) 只尝试一次；SDK 重试也禁用。
+                        budget.reserve(skill_prompt + json.dumps(chunk, ensure_ascii=False)
+                                       + str(source.get("business_context") or "") + " " * 8000,
+                                       output_tokens=8192)
+                        llm = bounded_llm(config, temperature=0.1, max_tokens=8192)
+                        result = _review_chunk(llm, skill_prompt, chunk, source.get("business_context"))
+                        if (not isinstance(result, dict) or not isinstance(result.get("issues"), list)
+                                or not all(isinstance(item, dict) for item in result["issues"])):
+                            raise ValidationError("真实重跑未返回有效问题列表")
+                        results.append(result)
+                    issues = [item for result in results for item in (result.get("issues") or [])]
+                    pending = [item for result in results for item in (result.get("pending_confirmations") or [])]
+                    output_payload = {"issues": issues, "pending_confirmations": pending,
+                                      "chunks": results}
+                    cls.record_run(experiment=experiment, label=variant.label, result={
+                        "input_hash": _stable_hash(source), "output": output_payload,
+                        "output_hash": _stable_hash(output_payload),
+                        "package_sha256": variant.skill_version.package_sha256,
+                        "issue_count": len(issues), "pending_count": len(pending),
+                        "latency_ms": round((time.perf_counter() - started) * 1000),
+                        "estimated_input_tokens": len(skill_prompt) * len(chunks) + len(json.dumps(source, ensure_ascii=False)),
+                        "estimated_output_tokens": len(json.dumps(output_payload, ensure_ascii=False)),
+                        "fixed_hits": cls._fixed_hits(experiment, issues),
+                    })
+                except BudgetExceeded:
+                    raise
+                except Exception as exc:
+                    cls.record_run(experiment=experiment, label=variant.label, result={
+                        "input_hash": _stable_hash(source), "error": f"{type(exc).__name__}: {exc}",
+                        "latency_ms": round((time.perf_counter() - started) * 1000),
+                    })
+            variants = {v.label: v for v in experiment.variants.select_related("skill_version")}
+            baseline = variants["baseline"]
+            for label in ("A", "B"):
+                candidate = variants[label]
+                if baseline.status != "completed" or candidate.status != "completed":
+                    report["comparisons"][label] = {"eligible": False, "reason": "真实运行失败"}
+                    continue
+                comparison = (evaluator or PairedOutputEvaluator()).compare(
+                    baseline=baseline.run_result["output"], candidate=candidate.run_result["output"],
+                    source=source, config=config, budget=budget,
+                )
+                comparison["binding"] = cls._run_binding(baseline, candidate)
+                report["comparisons"][label] = comparison
+            eligible = [c for c in report["comparisons"].values() if c.get("eligible")]
+            budget.check_time()
+            report["can_iterate"] = bool(eligible) and any(c.get("clear_gain") for c in eligible)
+            if not eligible:
+                report["stop_reason"] = "没有通过独立对比评测的改进候选"
+            elif not report["can_iterate"]:
+                report["stop_reason"] = "收益有限，停止迭代；可人工审核本轮候选"
+            if experiment.round_number >= normalize_policy(experiment.policy)["max_rounds"]:
+                report["can_iterate"] = False
+                report["stop_reason"] = "达到最大迭代轮数"
+            experiment.state = "awaiting_choice"
+        except Exception as exc:
+            report["stop_reason"] = str(exc)
+            report["can_iterate"] = False
+            # 预算中断后保留已完成产出，但本轮不得发布。
+            experiment.state = "failed"
+            experiment.variants.filter(status__in=["ready", "running"]).update(
+                status="failed", run_result={"error": str(exc)},
+            )
+        report["budget"] = budget.snapshot()
+        experiment.evaluation_report = report
+        experiment.save(update_fields=["state", "evaluation_report", "updated_at"])
         return experiment
+
+    @staticmethod
+    def _verify_variant(variant):
+        from skills.versions import SkillVersionService
+        if not variant.skill_version or not SkillVersionService.verify_package_integrity(variant.skill_version)["ok"]:
+            raise ValidationError("实验版本包已改变，必须重新创建实验")
+
+    @staticmethod
+    def _run_binding(baseline, candidate):
+        return _stable_hash([{
+            "version": str(v.skill_version_id), "sha": v.skill_version.package_sha256,
+            "input": v.run_result.get("input_hash"), "output": v.run_result.get("output_hash"),
+        } for v in (baseline, candidate)])
+
+    @classmethod
+    def _assert_eligible(cls, experiment, winner):
+        report = experiment.evaluation_report or {}
+        comparison = report.get("comparisons", {}).get(winner.label, {})
+        if not comparison.get("eligible") or report.get("evaluation_mode") != "full_test":
+            raise ValidationError("候选未通过真实运行与独立对比评测")
+        if _stable_hash(report.get("source_snapshot")) != report.get("input_hash"):
+            raise ValidationError("冻结输入快照与评测记录不一致")
+        baseline = experiment.variants.select_related("skill_version").get(label="baseline")
+        for variant in (baseline, winner):
+            cls._verify_variant(variant)
+            result = variant.run_result
+            if (variant.status != "completed" or not result.get("output_hash")
+                    or _stable_hash(result.get("output")) != result.get("output_hash")
+                    or result.get("input_hash") != report.get("input_hash")
+                    or result.get("package_sha256") != variant.skill_version.package_sha256):
+                raise ValidationError("输入、输出或版本与评测记录不一致")
+        if comparison.get("binding") != cls._run_binding(baseline, winner):
+            raise ValidationError("评测记录已过期，禁止复用旧结论")
+
+    @classmethod
+    def next_iteration(cls, *, experiment, actor, skill_creator=None):
+        if experiment.state != "winner_selected":
+            raise ValidationError("请先人工确认本轮胜出候选")
+        winner = experiment.variants.select_related("skill_version").get(label=experiment.winner_label)
+        return cls.create_experiment(
+            output=experiment.output, skill_version=winner.skill_version,
+            attributions=experiment.attributions.all(), actor=actor, parent=experiment,
+            skill_creator=skill_creator,
+        )
 
     @staticmethod
     def _fixed_hits(experiment, issues: list) -> dict:
         issue_types = {str(item.get("issue_type") or "") for item in issues}
-        expected = set(experiment.attributions.values_list("issue_type", flat=True))
-        remaining = sorted(expected & issue_types)
         return {
-            "expected_issue_types": sorted(expected),
-            "remaining_issue_types": remaining,
-            "resolved_issue_types": sorted(expected - issue_types),
+            "verified": False,
+            "note": "仅观察问题类型变化，不能作为修复或质量提升证据",
+            "observed_issue_types": sorted(issue_types),
+            "confirmed_fine_causes": sorted(set(experiment.attributions.values_list("fine_cause", flat=True))),
         }
 
     @classmethod
     @transaction.atomic
     def choose_winner(cls, *, experiment, label: str, reason: str) -> EvolutionExperiment:
+        experiment = EvolutionExperiment.objects.select_for_update().get(pk=experiment.pk)
         if experiment.state != "awaiting_choice":
             raise ValidationError("Baseline/A/B 尚未全部重跑完成，不能选优")
         if label not in {"A", "B"}:
@@ -362,10 +548,16 @@ class EvolutionExecutionService:
         winner = experiment.variants.get(label=label)
         if winner.status != "completed":
             raise ValidationError("不能选择运行失败的变体")
+        cls._assert_eligible(experiment, winner)
+        report = dict(experiment.evaluation_report)
+        report["can_iterate"] = bool(report.get("can_iterate")) and bool(
+            report["comparisons"][label].get("clear_gain")
+        )
+        experiment.evaluation_report = report
         experiment.winner_label = label
         experiment.winner_reason = reason.strip()
         experiment.state = "winner_selected"
-        experiment.save(update_fields=["winner_label", "winner_reason", "state", "updated_at"])
+        experiment.save(update_fields=["winner_label", "winner_reason", "state", "evaluation_report", "updated_at"])
         return experiment
 
     @classmethod
@@ -374,9 +566,11 @@ class EvolutionExecutionService:
         """仅把人工 winner 送入既有发布审批，绝不自动激活。"""
         from skills.versions import SkillVersionService
 
+        experiment = EvolutionExperiment.objects.select_for_update().get(pk=experiment.pk)
         if experiment.state != "winner_selected" or experiment.winner_label not in {"A", "B"}:
             raise ValidationError("必须先完成人工 A/B 选优，才能提交发布审批")
         winner = experiment.variants.select_related("skill_version").get(label=experiment.winner_label)
+        cls._assert_eligible(experiment, winner)
         SkillVersionService.submit_for_validation(
             winner.skill_version, actor=actor,
             reason=f"实验 {experiment.id} 人工选优：{experiment.winner_reason}",
@@ -403,5 +597,9 @@ def experiment_view(experiment) -> dict:
         "baseline_version": experiment.baseline_skill_version.version,
         "baseline_sha256": experiment.baseline_sha256,
         "winner_label": experiment.winner_label, "winner_reason": experiment.winner_reason,
+        "policy": normalize_policy(experiment.policy), "round_number": experiment.round_number,
+        "parent_id": str(experiment.parent_id or ""),
+        "evaluation_report": {key: value for key, value in (experiment.evaluation_report or {}).items()
+                              if key != "source_snapshot"},
         "variants": variants,
     }

@@ -930,10 +930,10 @@ export async function confirmCaseReviewOptimizations(
 }
 
 export async function createCaseReviewEvolutionExperiment(
-  projectId:number, reviewId:string, attributionIds:string[],
+  projectId:number, reviewId:string, attributionIds:string[], policy?:Record<string,number>,
 ):Promise<EvolutionExperimentView>{
   return post<EvolutionExperimentView>('/case-review-evolution/experiments/',{
-    project:projectId,review_id:reviewId,attribution_ids:attributionIds,
+    project:projectId,review_id:reviewId,attribution_ids:attributionIds,policy,
   });
 }
 export async function rerunCaseReviewEvolutionExperiment(projectId:number,experimentId:string):Promise<EvolutionExperimentView>{
@@ -951,4 +951,16 @@ export async function submitCaseReviewEvolutionWinner(projectId:number,experimen
 /** 「这条产出是怎么来的」：闭环七段（`stages`）+ 内容来源（`sources`）。 */
 export async function getGenerationOutputLineage(outputId: string): Promise<OutputLineageView> {
   return get<OutputLineageView>(`/generation-outputs/${outputId}/lineage/`);
+}
+
+/** 人工确认本轮胜出版本后，保留历史并派生下一轮。 */
+export async function nextCaseReviewEvolutionIteration(projectId:number,experimentId:string):Promise<EvolutionExperimentView>{
+  return post<EvolutionExperimentView>('/case-review-evolution/experiments/next-iteration/',{project:projectId,experiment_id:experimentId});
+}
+
+export async function listCaseReviewEvolutionExperiments(projectId:number):Promise<{experiments:Array<Pick<EvolutionExperimentView,'experiment_id'|'state'|'round_number'|'baseline_version'>>}>{
+  return get('/case-review-evolution/experiments/',{project:projectId});
+}
+export async function getCaseReviewEvolutionExperiment(projectId:number,experimentId:string):Promise<EvolutionExperimentView>{
+  return get('/case-review-evolution/experiments/',{project:projectId,experiment_id:experimentId});
 }

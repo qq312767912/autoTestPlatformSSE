@@ -2496,15 +2496,27 @@ class CaseReviewEvolutionViewSet(viewsets.ViewSet):
             "confirmed_ids": [item["attribution_id"] for item in confirmed],
         })
 
-    @action(detail=False, methods=["post"], url_path="experiments")
+    @action(detail=False, methods=["get", "post"], url_path="experiments")
     def experiments(self, request):
         """从同一精确基线生成 Baseline/A/B 三个隔离实验分支。"""
         from django.core.exceptions import ValidationError as DjangoValidationError
         from .case_review_evolution import CaseReviewEvolutionService
         from .evolution_execution import EvolutionExecutionService, experiment_view
+        from .optimization_models import EvolutionExperiment
         from .trace_models import FailureAttribution
 
         project = self._project(request)
+        if request.method == "GET":
+            experiments = EvolutionExperiment.objects.filter(project=project).select_related("baseline_skill_version")
+            if request.query_params.get("experiment_id"):
+                return Response(experiment_view(get_object_or_404(
+                    experiments, pk=request.query_params["experiment_id"],
+                )))
+            return Response({"experiments": [{
+                "experiment_id": str(item.id), "state": item.state,
+                "round_number": item.round_number, "baseline_version": item.baseline_skill_version.version,
+                "created_at": item.created_at.isoformat(),
+            } for item in experiments[:20]]})
         review = self._review(request, project)
         output = CaseReviewEvolutionService._output_of(review)
         skill_version = CaseReviewEvolutionService._skill_version_of(review, output, persist=True)
@@ -2516,6 +2528,7 @@ class CaseReviewEvolutionViewSet(viewsets.ViewSet):
             experiment = EvolutionExecutionService.create_experiment(
                 output=output, skill_version=skill_version,
                 attributions=attributions, actor=request.user,
+                policy=request.data.get("policy"),
             )
         except DjangoValidationError as exc:
             return Response({"detail": _validation_text(exc)}, status=400)
@@ -2538,6 +2551,23 @@ class CaseReviewEvolutionViewSet(viewsets.ViewSet):
             return Response({"detail": _validation_text(exc)}, status=400)
         experiment.refresh_from_db()
         return Response(experiment_view(experiment))
+
+    @action(detail=False, methods=["post"], url_path="experiments/next-iteration")
+    def experiment_next_iteration(self, request):
+        """人工触发下一轮，继承胜出版本和冻结输入。"""
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from .evolution_execution import EvolutionExecutionService, experiment_view
+        from .optimization_models import EvolutionExperiment
+
+        project = self._project(request)
+        experiment = get_object_or_404(
+            EvolutionExperiment, pk=request.data.get("experiment_id"), project=project,
+        )
+        try:
+            child = EvolutionExecutionService.next_iteration(experiment=experiment, actor=request.user)
+        except DjangoValidationError as exc:
+            return Response({"detail": _validation_text(exc)}, status=400)
+        return Response(experiment_view(child), status=201)
 
     @action(detail=False, methods=["post"], url_path="experiments/choose-winner")
     def experiment_choose_winner(self, request):

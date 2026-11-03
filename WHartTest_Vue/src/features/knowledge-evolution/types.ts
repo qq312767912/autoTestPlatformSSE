@@ -1089,8 +1089,22 @@ export interface OptimizationDecisionResult {
   confirmed_ids: string[];
 }
 
+export interface PairedEvolutionComparison {
+  eligible: boolean; reason: string; better?: number; worse?: number; ties?: number;
+  clear_gain?: boolean; regression?: boolean;
+  votes?: Array<{ judge: number; status: string; preference?: string; reason?: string; error?: string; evidence?: string[] }>;
+}
+
 export interface EvolutionExperimentView {
   experiment_id: string;
+  round_number: number;
+  parent_id: string;
+  policy: { max_rounds: number; max_calls: number; max_estimated_tokens: number; max_seconds: number };
+  evaluation_report: {
+    can_iterate?: boolean; stop_reason?: string;
+    budget?: { calls: number; estimated_tokens: number; elapsed_seconds: number };
+    comparisons?: Partial<Record<'A'|'B', PairedEvolutionComparison>>;
+  };
   state: 'draft'|'ready'|'running'|'awaiting_choice'|'winner_selected'|'submitted'|'failed'|string;
   baseline_version: string;
   baseline_sha256: string;
