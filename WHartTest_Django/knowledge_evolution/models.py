@@ -440,7 +440,7 @@ from .gate_models import EvaluationGateSnapshot  # noqa: E402,F401
 
 # 受控优化候选与实验
 from .optimization_models import (  # noqa: E402,F401
-    EvolutionExperiment, EvolutionVariant, OptimizationExperiment, OptimizationProposal,
+    EvolutionExperiment, EvolutionVariant, OptimizationExperiment, OptimizationProposal, SkillEvaluationProfile,
 )
 
 # 任务 14–16：能力候选、影子门禁、发布与回滚

@@ -252,17 +252,24 @@ class EvolutionExecutionService:
         if not SkillVersionService.verify_package_integrity(skill_version)["ok"]:
             raise ValidationError("实验基线包指纹不一致")
         baseline_sha = skill_version.package_sha256
+        from .dual_evaluation import frozen_config
+        assessment_config = (parent.assessment_config if parent else
+                             frozen_config(project=output.project, skill_version=skill_version))
         experiment = EvolutionExperiment.objects.create(
             project=output.project, output=output, baseline_skill_version=skill_version,
             baseline_sha256=baseline_sha, created_by=actor, policy=resolved_policy,
             parent=parent, round_number=parent.round_number + 1 if parent else 1,
+            assessment_config=assessment_config,
         )
         experiment.attributions.set(items)
         cls._baseline(experiment, skill_version)
         generation_budget = EvaluationBudget(resolved_policy)
         creator = skill_creator or SkillCreatorAdapter()
         kwargs = {"budget": generation_budget, "feedback": (
-            parent.evaluation_report.get("comparisons") if parent else None
+            {"comparisons": parent.evaluation_report.get("comparisons"),
+             "general_shortfalls": parent.evaluation_report.get("general", {}).get("results", {}).get(parent.winner_label, {}).get("shortfalls", []),
+             "business_metrics": parent.evaluation_report.get("business", {}).get("metrics", [])}
+            if parent else None
         )} if isinstance(creator, SkillCreatorAdapter) else {}
         patch_a = (creator.build(skill_version=skill_version, attributions=items, minimal=True, **kwargs)
                    if parent and isinstance(creator, SkillCreatorAdapter) else
@@ -334,7 +341,7 @@ class EvolutionExecutionService:
         return variant
 
     @classmethod
-    def rerun_same_input(cls, *, experiment, evaluator=None) -> EvolutionExperiment:
+    def rerun_same_input(cls, *, experiment, evaluator=None, general_evaluator=None, business_evaluator=None) -> EvolutionExperiment:
         """在三个独立上下文中以同一源文件重跑本阶段，保留原始对比数据。"""
         from testcases.models import TestCaseReview
         from testcases.review_service import (
@@ -427,6 +434,11 @@ class EvolutionExecutionService:
                     pending = [item for result in results for item in (result.get("pending_confirmations") or [])]
                     output_payload = {"issues": issues, "pending_confirmations": pending,
                                       "chunks": results}
+                    if experiment.assessment_config.get("schema"):
+                        from .skill_assessment import render_review_sheets
+                        output_payload["artifact_sheets"] = render_review_sheets(
+                            source=source, output=output_payload, skill_prompt=skill_prompt, review=review,
+                        )
                     cls.record_run(experiment=experiment, label=variant.label, result={
                         "input_hash": _stable_hash(source), "output": output_payload,
                         "output_hash": _stable_hash(output_payload),
@@ -467,6 +479,13 @@ class EvolutionExecutionService:
             if experiment.round_number >= normalize_policy(experiment.policy)["max_rounds"]:
                 report["can_iterate"] = False
                 report["stop_reason"] = "达到最大迭代轮数"
+            if experiment.assessment_config.get("schema"):
+                from .dual_evaluation import evaluate_dual
+                evaluate_dual(
+                    experiment=experiment, report=report, variants=variants,
+                    source=source, config=config, budget=budget,
+                    general_evaluator=general_evaluator, business_evaluator=business_evaluator,
+                )
             experiment.state = "awaiting_choice"
         except Exception as exc:
             report["stop_reason"] = str(exc)
@@ -503,6 +522,11 @@ class EvolutionExecutionService:
         if _stable_hash(report.get("source_snapshot")) != report.get("input_hash"):
             raise ValidationError("冻结输入快照与评测记录不一致")
         baseline = experiment.variants.select_related("skill_version").get(label="baseline")
+        from .dual_evaluation import assert_dual_current
+        assert_dual_current(
+            experiment, report,
+            {item.label: item for item in experiment.variants.select_related("skill_version")}, winner.label,
+        )
         for variant in (baseline, winner):
             cls._verify_variant(variant)
             result = variant.run_result
@@ -598,6 +622,7 @@ def experiment_view(experiment) -> dict:
         "baseline_sha256": experiment.baseline_sha256,
         "winner_label": experiment.winner_label, "winner_reason": experiment.winner_reason,
         "policy": normalize_policy(experiment.policy), "round_number": experiment.round_number,
+        "assessment_config": experiment.assessment_config,
         "parent_id": str(experiment.parent_id or ""),
         "evaluation_report": {key: value for key, value in (experiment.evaluation_report or {}).items()
                               if key != "source_snapshot"},

@@ -14,6 +14,7 @@ DEFAULT_POLICY = {
     "max_rounds": 3, "max_calls": 120, "max_estimated_tokens": 400000,
     "max_seconds": 900, "max_growth_ratio": 1.5,
 }
+POLICY_LIMITS = {**DEFAULT_POLICY, "max_estimated_tokens": 2000000}
 
 
 def bounded_llm(config, *, temperature=0, max_tokens=4096):
@@ -44,8 +45,8 @@ def normalize_policy(value=None):
     for key, number in (value or {}).items():
         if key not in result or isinstance(number, bool) or not isinstance(number, (int, float)):
             raise ValidationError("实验预算包含未知字段或非数字值")
-        if number != number or not 0 < number <= DEFAULT_POLICY[key]:
-            raise ValidationError(f"{key} 必须大于零且不超过 {DEFAULT_POLICY[key]}")
+        if number != number or not 0 < number <= POLICY_LIMITS[key]:
+            raise ValidationError(f"{key} 必须大于零且不超过 {POLICY_LIMITS[key]}")
         if key != "max_growth_ratio" and int(number) != number:
             raise ValidationError(f"{key} 必须是整数")
         if key == "max_growth_ratio" and number < 1:

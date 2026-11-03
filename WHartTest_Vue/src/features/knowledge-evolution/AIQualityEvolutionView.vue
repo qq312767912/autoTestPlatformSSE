@@ -168,6 +168,7 @@
             <p class="muted-line">本轮评测预算：最多 {{ reviewEvolutionExperiment.policy.max_calls }} 次调用、{{ reviewEvolutionExperiment.policy.max_estimated_tokens }} 估算 Token、{{ reviewEvolutionExperiment.policy.max_seconds }} 秒（调用间检查）。</p>
             <p v-if="reviewEvolutionExperiment.evaluation_report.budget" class="muted-line">已预留 {{ reviewEvolutionExperiment.evaluation_report.budget.calls }} 次调用 · {{ reviewEvolutionExperiment.evaluation_report.budget.estimated_tokens }} 估算 Token · 耗时 {{ reviewEvolutionExperiment.evaluation_report.budget.elapsed_seconds }} 秒</p>
             <a-alert v-if="reviewEvolutionExperiment.evaluation_report.stop_reason" type="warning">{{ reviewEvolutionExperiment.evaluation_report.stop_reason }}</a-alert>
+            <SkillAssessmentResults v-if="projectStore.currentProjectId" :project-id="projectStore.currentProjectId" :experiment="reviewEvolutionExperiment" @updated="reviewEvolutionExperiment=$event" />
             <div class="variant-grid">
               <article v-for="variant in reviewEvolutionExperiment.variants" :key="variant.id" :class="{winner:reviewEvolutionExperiment.winner_label===variant.label}">
                 <header><b>{{ variant.label==='baseline'?'Baseline':`Candidate ${variant.label}` }}</b><a-tag>{{ variant.status }}</a-tag></header>
@@ -663,6 +664,7 @@
           <span>{{ selectedReview?.skill_name }} · {{ selectedReview?.skill_version }}</span>
           <span v-if="selectedReview?.package_sha256" class="sha">sha {{ selectedReview.package_sha256.slice(0,12) }}</span>
         </div>
+        <SkillEvaluationConfig v-if="projectStore.currentProjectId && reviewEvolutionSelected" ref="evaluationConfigRef" :project-id="projectStore.currentProjectId" :review-id="reviewEvolutionSelected" />
         <a-form layout="vertical" style="margin-top:12px">
           <a-form-item
             label="已确认的审查报告（平台导出的 xlsx）"
@@ -814,7 +816,7 @@
         <a-form layout="vertical" style="margin-top:12px">
           <a-form-item label="最多迭代轮数"><a-input-number v-model="reviewEvolutionPolicy.max_rounds" :min="1" :max="3" :precision="0"/></a-form-item>
           <a-form-item label="每轮最大模型调用次数（含候选生成和评委）"><a-input-number v-model="reviewEvolutionPolicy.max_calls" :min="10" :max="120" :precision="0"/></a-form-item>
-          <a-form-item label="每轮估算 Token 预算（保守预留，非计费数）"><a-input-number v-model="reviewEvolutionPolicy.max_estimated_tokens" :min="20000" :max="400000" :step="10000" :precision="0"/></a-form-item>
+          <a-form-item label="每轮估算 Token 预算（保守预留，非计费数）"><a-input-number v-model="reviewEvolutionPolicy.max_estimated_tokens" :min="20000" :max="2000000" :step="10000" :precision="0"/></a-form-item>
           <a-form-item label="每轮评测时间预算（秒，调用间检查）"><a-input-number v-model="reviewEvolutionPolicy.max_seconds" :min="30" :max="900" :precision="0"/></a-form-item>
         </a-form>
         <!-- 派生的依据必须在这里说清楚：降级路径用的是"人工在报告里写的结论"，
@@ -1103,6 +1105,8 @@
 </template>
 
 <script setup lang="ts">
+import SkillEvaluationConfig from './SkillEvaluationConfig.vue';
+import SkillAssessmentResults from './SkillAssessmentResults.vue';
 import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
@@ -1639,6 +1643,7 @@ const reviewEvolutionThreshold=ref(70),reviewEvolutionSelected=ref('');
 const reviewEvolutionFileList=ref<FileItem[]>([]);
 const reviewEvolutionPreflight=ref<CaseReviewEvolutionPreflight|null>(null);
 const reviewEvolutionResult=ref<CaseReviewEvolutionResult|null>(null);
+const evaluationConfigRef=ref<InstanceType<typeof SkillEvaluationConfig>|null>(null);
 const reviewEvolutionPolicy=ref({max_rounds:3,max_calls:120,max_estimated_tokens:400000,max_seconds:900});
 const reviewEvolutionHistory=ref<Array<Pick<EvolutionExperimentView,'experiment_id'|'state'|'round_number'|'baseline_version'>>>([]);
 const reviewEvolutionExperiment=ref<EvolutionExperimentView|null>(null);
@@ -1939,6 +1944,7 @@ async function submitReviewEvolution():Promise<boolean>{
       Message.error('完整 A/B 进化需要先生成并人工确认结构化归因；当前 LLM 降级路径不能跳过 Critic 与证据闸口');
       return false;
     }
+    if(!evaluationConfigRef.value || !await evaluationConfigRef.value.save())return false;
     reviewEvolutionExperiment.value=await createCaseReviewEvolutionExperiment(
       projectStore.currentProjectId,reviewEvolutionSelected.value,reviewEvolutionConfirmedIds.value,reviewEvolutionPolicy.value,
     );

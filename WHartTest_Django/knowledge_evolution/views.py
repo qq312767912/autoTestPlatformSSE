@@ -2496,6 +2496,50 @@ class CaseReviewEvolutionViewSet(viewsets.ViewSet):
             "confirmed_ids": [item["attribution_id"] for item in confirmed],
         })
 
+    @action(detail=False, methods=["get", "post"], url_path="evaluation-profile")
+    def evaluation_profile(self, request):
+        """业务指标按当前任务实际使用的 Skill 隔离保存。"""
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from .case_review_evolution import CaseReviewEvolutionService
+        from .dual_evaluation import profile_view
+        from .optimization_models import SkillEvaluationProfile
+        from .skill_assessment import normalize_metrics
+
+        project = self._project(request)
+        review = self._review(request, project)
+        output = CaseReviewEvolutionService._output_of(review)
+        version = CaseReviewEvolutionService._skill_version_of(review, output, persist=True)
+        if not version:
+            return Response({"detail": "原任务没有可定位的 Skill 版本"}, status=400)
+        if request.method == "POST":
+            try:
+                metrics = normalize_metrics(request.data.get("metrics"))
+            except DjangoValidationError as exc:
+                return Response({"detail": _validation_text(exc)}, status=400)
+            SkillEvaluationProfile.objects.update_or_create(
+                project=project, skill=version.skill,
+                defaults={"metrics": metrics, "updated_by": request.user},
+            )
+        return Response(profile_view(project=project, review=review, skill_version=version))
+
+    @action(detail=False, methods=["post"], url_path="experiments/business-review")
+    def experiment_business_review(self, request):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from .dual_evaluation import record_human_metrics
+        from .evolution_execution import experiment_view
+        from .optimization_models import EvolutionExperiment
+
+        experiment = get_object_or_404(
+            EvolutionExperiment, pk=request.data.get("experiment_id"), project=self._project(request),
+        )
+        try:
+            experiment = record_human_metrics(
+                experiment=experiment, values=request.data.get("values"), actor=request.user,
+            )
+        except DjangoValidationError as exc:
+            return Response({"detail": _validation_text(exc)}, status=400)
+        return Response(experiment_view(experiment))
+
     @action(detail=False, methods=["get", "post"], url_path="experiments")
     def experiments(self, request):
         """从同一精确基线生成 Baseline/A/B 三个隔离实验分支。"""

@@ -33,6 +33,7 @@ import type {
   OptimizationProposalResult,
   AttributionTaxonomyV2,
   EvolutionExperimentView,
+  SkillEvaluationProfileView, SkillBusinessMetric,
   OutputLineageView,
   StageFeedbackResult,
   StageExecutionAttemptView,
@@ -963,4 +964,14 @@ export async function listCaseReviewEvolutionExperiments(projectId:number):Promi
 }
 export async function getCaseReviewEvolutionExperiment(projectId:number,experimentId:string):Promise<EvolutionExperimentView>{
   return get('/case-review-evolution/experiments/',{project:projectId,experiment_id:experimentId});
+}
+
+export async function getSkillEvaluationProfile(projectId:number,reviewId:string):Promise<SkillEvaluationProfileView>{
+  return get('/case-review-evolution/evaluation-profile/',{project:projectId,review_id:reviewId});
+}
+export async function saveSkillEvaluationProfile(projectId:number,reviewId:string,metrics:SkillBusinessMetric[]):Promise<SkillEvaluationProfileView>{
+  return post('/case-review-evolution/evaluation-profile/',{project:projectId,review_id:reviewId,metrics});
+}
+export async function recordEvolutionBusinessScores(projectId:number,experimentId:string,values:Record<string,Record<string,{value:number;evidence:string}>>):Promise<EvolutionExperimentView>{
+  return post('/case-review-evolution/experiments/business-review/',{project:projectId,experiment_id:experimentId,values});
 }

@@ -129,6 +129,7 @@ class EvolutionExperiment(models.Model):
     winner_reason = models.TextField(blank=True)
     baseline_sha256 = models.CharField(max_length=64)
     policy = models.JSONField(default=dict, blank=True)
+    assessment_config = models.JSONField(default=dict, blank=True)
     evaluation_report = models.JSONField(default=dict, blank=True)
     round_number = models.PositiveSmallIntegerField(default=1)
     parent = models.OneToOneField(
@@ -147,6 +148,19 @@ class EvolutionExperiment(models.Model):
         indexes = [
             models.Index(fields=["project", "state"], name="ke_evoexp_project_state_idx"),
         ]
+
+
+class SkillEvaluationProfile(models.Model):
+    """项目内每个 Skill 独立的业务指标；实验使用冻结副本。"""
+
+    project = models.ForeignKey("projects.Project", on_delete=models.CASCADE)
+    skill = models.ForeignKey("skills.Skill", on_delete=models.CASCADE)
+    metrics = models.JSONField(default=list, blank=True)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "skill"], name="uniq_skill_evaluation_profile")]
 
 
 class EvolutionVariant(models.Model):

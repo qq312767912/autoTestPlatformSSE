@@ -258,6 +258,11 @@ class PairedPublicationTests(SkillHubBaseTests):
         skill.save(update_fields=["active_version"])
         output = self.make_output(skill_version=version)
         attribution = ExecutablePatchV2Tests.attribution(self, output, suffix="derive-lineage")
+        from knowledge_evolution.optimization_models import SkillEvaluationProfile
+        SkillEvaluationProfile.objects.create(project=self.project, skill=skill, metrics=[{
+            "id": "business", "name": "业务量表", "source": "judge", "direction": "higher",
+            "criterion": "0–10 按实际产出可执行性评分", "required": True,
+        }])
         experiment = EvolutionExecutionService.create_experiment(
             output=output, skill_version=version, attributions=[attribution], actor=self.lead, skill_creator=Creator(),
         )
@@ -275,6 +280,12 @@ class PairedPublicationTests(SkillHubBaseTests):
             "evaluation_mode": "full_test", "can_iterate": True,
             "comparisons": {"A": {"eligible": True, "clear_gain": True,
                                    "binding": EvolutionExecutionService._run_binding(baseline, winner)}}}
+        from knowledge_evolution.dual_evaluation import evaluate_dual
+        evaluate_dual(experiment=experiment, report=experiment.evaluation_report,
+                      variants={v.label: v for v in experiment.variants.select_related("skill_version")},
+                      source=source, config=SimpleNamespace(name="test"), budget=EvaluationBudget(None),
+                      general_evaluator=SimpleNamespace(evaluate=Mock(return_value={"status": "completed"})),
+                      business_evaluator=SimpleNamespace(evaluate=Mock(return_value={"business": {"status": "completed", "value": 8}})))
         experiment.save()
         EvolutionExecutionService.choose_winner(experiment=experiment, label="A", reason="人工核查")
         experiment.refresh_from_db()

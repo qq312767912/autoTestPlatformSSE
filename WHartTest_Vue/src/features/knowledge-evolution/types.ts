@@ -1100,7 +1100,11 @@ export interface EvolutionExperimentView {
   round_number: number;
   parent_id: string;
   policy: { max_rounds: number; max_calls: number; max_estimated_tokens: number; max_seconds: number };
+  assessment_config?: {schema?:string;general_rubric?:GeneralSkillDimension[];business_metrics?:SkillBusinessMetric[]};
   evaluation_report: {
+    general?:{rubric:GeneralSkillDimension[];results:Partial<Record<'baseline'|'A'|'B',GeneralSkillAssessmentResult>>};
+    business?:{metrics:SkillBusinessMetric[];results:Partial<Record<'baseline'|'A'|'B',Record<string,BusinessMetricResult>>>};
+    manual_values?:Partial<Record<'baseline'|'A'|'B',Record<string,{value:number;evidence:string}>>>;
     can_iterate?: boolean; stop_reason?: string;
     budget?: { calls: number; estimated_tokens: number; elapsed_seconds: number };
     comparisons?: Partial<Record<'A'|'B', PairedEvolutionComparison>>;
@@ -1203,4 +1207,27 @@ export interface FlywheelSwitchState {
   /** 本期灰度目标阶段（后端真值），用于说明"灰度到哪一步"而不是"全部禁用"。 */
   pilot_stage: string;
   can_manage: boolean;
+}
+
+export interface SkillBusinessMetric {
+  id:string; name:string; source:'sheet'|'judge'|'human'; direction:'higher'|'lower'|'';
+  required:boolean; tolerance:number; target:number|null; criterion:string;
+  selector?:{sheet:string;column:string;cell:string;aggregate:'cell'|'sum'|'mean'|'count';start_row?:number;match_column?:string;match_value?:string};
+}
+export interface GeneralSkillDimension {
+  id:string;name:string;weight:number;group:string;criterion:string;
+  score?:number;reason?:string;evidence?:string[];weighted_gap?:number;
+}
+export interface SkillEvaluationProfileView {
+  skill_id:string;skill_version_id:string;general_rubric:GeneralSkillDimension[];
+  metrics:SkillBusinessMetric[];warnings:string[];
+  sheet_catalog:Array<{name:string;columns:string[];catalog_truncated:boolean;unresolved_formulas:string[];
+    numeric_cells:Array<{address:string;label:string;value:number;selector:NonNullable<SkillBusinessMetric['selector']>}>}>;
+}
+export interface GeneralSkillAssessmentResult {
+  status:string;reason?:string;total?:number;dimensions?:GeneralSkillDimension[];shortfalls?:GeneralSkillDimension[];
+}
+export interface BusinessMetricResult {
+  status:string;value?:number;reason?:string;evidence?:string[];provenance?:string;
+  actor_id?:string;recorded_at?:string;
 }
