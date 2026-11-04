@@ -345,3 +345,9 @@ export class SkillHubService {
     return Array.isArray(data) ? data : (data?.results ?? [])
   }
 }
+
+/** Hub 独立测评使用项目作用域，返回知识飞轮域的裸业务对象。 */
+export async function hubAssessmentCall<T>(projectId:number,path:string,method:'GET'|'POST',data:Record<string,unknown>={}):Promise<T>{
+  return callEvo<T>({url:`/knowledge-evolution/skill-assessments/${path}`,method,
+    ...(method==='GET'?{params:{project:projectId,...data}}:{data:{project:projectId,...data}}),timeout:600000})
+}

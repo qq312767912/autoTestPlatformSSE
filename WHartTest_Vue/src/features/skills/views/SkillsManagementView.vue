@@ -4,7 +4,7 @@
       <!--
         Skill Hub（本页）负责"上传和发现公开 Skill"：上传、Git 导入、从 Skill 商店安装、
         按来源与能力阶段筛选，以及启停与删除。Skill 的进化（候选版本、评测门禁、发布治理）
-        不在这一页——它在数据飞轮的「Skill 进化工坊」页签里，避免同一套版本治理两处并存。
+        复用数据飞轮的版本治理。Hub 同时提供独立通用测评和项目内私有候选加工，确认后才提交回 Hub。
         数据飞轮下也挂了同名页签，与本页是同一份实现（`SkillManager`）。
       -->
       <SkillManager :project-id="currentProjectId" :key="`skills-${currentProjectId}`" />

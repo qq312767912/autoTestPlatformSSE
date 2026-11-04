@@ -1216,7 +1216,7 @@ export interface SkillBusinessMetric {
 }
 export interface GeneralSkillDimension {
   id:string;name:string;weight:number;group:string;criterion:string;
-  score?:number;reason?:string;evidence?:string[];weighted_gap?:number;
+  score?:number|null;reason?:string;evidence?:string[];weighted_gap?:number;
 }
 export interface SkillEvaluationProfileView {
   skill_id:string;skill_version_id:string;general_rubric:GeneralSkillDimension[];
@@ -1225,7 +1225,7 @@ export interface SkillEvaluationProfileView {
     numeric_cells:Array<{address:string;label:string;value:number;selector:NonNullable<SkillBusinessMetric['selector']>}>}>;
 }
 export interface GeneralSkillAssessmentResult {
-  status:string;reason?:string;total?:number;dimensions?:GeneralSkillDimension[];shortfalls?:GeneralSkillDimension[];
+  status:string;reason?:string;total?:number|null;assessed_score?:number;score_basis?:number;dimensions?:GeneralSkillDimension[];shortfalls?:GeneralSkillDimension[];
 }
 export interface BusinessMetricResult {
   status:string;value?:number;reason?:string;evidence?:string[];provenance?:string;

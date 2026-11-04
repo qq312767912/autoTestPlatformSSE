@@ -206,6 +206,7 @@
             </span>
             <div class="skill-actions">
               <a-button v-if="canManage" type="text" size="mini" title="修改展示名称、阶段和简介" @click.stop="openMetadataEditor(skill)">编辑信息</a-button>
+              <a-button type="text" size="mini" @click.stop="openAssessment(skill)">通用测评</a-button>
               <a-button type="text" size="mini" title="下载卡片展示版本" @click.stop="downloadCardVersion(skill)">下载</a-button>
               <a-button type="text" size="mini" title="管理旧版本" @click.stop="handleSkillCard(skill)">版本</a-button>
               <a-button type="text" size="mini" @click.stop="handleViewContent(skill)">
@@ -321,6 +322,7 @@
       </a-form>
     </a-modal>
 
+    <HubSkillAssessment v-if="assessmentTarget" :project-id="projectId" :skill="assessmentTarget" :initial-version-id="assessmentVersionId" @close="assessmentTarget=null" @submitted="fetchSkills" />
     <!-- 内容查看弹窗 -->
     <a-modal
       v-model:visible="showContentModal"
@@ -343,6 +345,7 @@
           <template #actions>
             <span>sha {{ version.package_sha256.slice(0, 12) }}</span>
             <span>{{ formatDate(version.created_at) }}</span>
+            <a-button v-if="!version.archived" type="text" :disabled="version.download_available === false" @click="openAssessment(selectedVersionSkill,version.id)">通用测评</a-button>
             <a-button type="text" :disabled="version.download_available === false" @click="downloadVersion(version)">{{ version.download_available === false ? '包文件缺失' : '下载' }}</a-button>
             <a-popconfirm v-if="canManage && !version.archived" content="删除这个旧版本？可在已删除列表中恢复，历史任务引用保留。" @ok="archiveVersion(version)">
               <a-button type="text" status="danger" :disabled="!version.can_archive">删除</a-button>
@@ -472,6 +475,7 @@ import { SkillService } from '../services/skillService'
 import { SkillHubService } from '../services/skillHubService'
 import type { SkillVersionDetail } from '../types/hub'
 import SkillStoreModal from './SkillStoreModal.vue'
+import HubSkillAssessment from './HubSkillAssessment.vue'
 import SkillApiKeyConfirmModal from './SkillApiKeyConfirmModal.vue'
 import type { SkillListItem, SkillUploadPreview } from '../types'
 import { toErrorMessage } from '../services/skillHubService'
@@ -484,6 +488,9 @@ const props = defineProps<{
   /** 嵌入到数据飞轮页签时为 true：隐去本组件自带的抬头，避免与页签/hero 重复。 */
   embedded?: boolean
 }>()
+const assessmentTarget=ref<SkillListItem|null>(null)
+const assessmentVersionId=ref('')
+function openAssessment(skill:SkillListItem|null,versionId=''){if(!skill)return;assessmentVersionId.value=versionId;assessmentTarget.value=skill}
 const { isEnglish } = useAppI18n()
 const text = computed(() => (
   isEnglish.value

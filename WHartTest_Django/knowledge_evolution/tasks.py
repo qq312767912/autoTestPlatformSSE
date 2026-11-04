@@ -73,3 +73,26 @@ def process_asset_candidate_event(self, event_id: str):
 
     event = AssetCandidateService.process_by_id(event_id)
     return {"event_id": str(event_id), "status": getattr(event, "status", "missing")}
+
+
+@shared_task(name="knowledge_evolution.hub_assessment_job", soft_time_limit=960, time_limit=1020)
+def hub_assessment_job(session_id, action, payload, actor_id, job_id):
+    from django.contrib.auth import get_user_model
+    from . import hub_assessment
+    try:
+        from .views import _ensure_project_member
+        from .hub_assessment_models import SkillAssessmentSession
+        actor = get_user_model().objects.get(pk=actor_id)
+        session = SkillAssessmentSession.objects.get(pk=session_id)
+        _ensure_project_member(actor, session.project_id)
+        if action == 'assess':
+            hub_assessment.assess(session_id, actor=actor, job_id=job_id, **payload)
+        elif action == 'generate':
+            hub_assessment.generate(session_id, job_id=job_id)
+        else:
+            raise ValueError('未知测评动作')
+    except Exception:
+        from .hub_assessment_models import SkillAssessmentSession
+        SkillAssessmentSession.objects.filter(pk=session_id, job_id=job_id, state='queued').update(state='failed', error='任务无法启动，请检查模型、版本或项目权限', job_id='')
+        logger.exception('Hub 测评后台任务失败：%s', session_id)
+        raise

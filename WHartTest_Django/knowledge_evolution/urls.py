@@ -41,7 +41,10 @@ from .views import (
     ProjectFlywheelSettingViewSet,
 )
 
+from .hub_assessment_views import SkillAssessmentViewSet
+
 router = DefaultRouter()
+router.register("skill-assessments", SkillAssessmentViewSet, basename="skill-assessment")
 router.register("retrieval-traces", RetrievalTraceViewSet, basename="retrieval-trace")
 router.register("generation-outputs", GenerationOutputViewSet, basename="generation-output")
 router.register("feedback", FeedbackEventViewSet, basename="knowledge-feedback")
