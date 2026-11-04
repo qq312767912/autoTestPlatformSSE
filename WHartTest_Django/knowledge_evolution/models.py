@@ -454,4 +454,4 @@ from .benchmark_models import (  # noqa: E402,F401
     BenchmarkRepositorySnapshot, BenchmarkRunBinding, ImmutableVersionError,
 )
 
-from .hub_assessment_models import SkillAssessmentSession  # noqa: E402,F401
+from .hub_assessment_models import SkillAssessmentSession, SkillAgentTaskBinding  # noqa: E402,F401

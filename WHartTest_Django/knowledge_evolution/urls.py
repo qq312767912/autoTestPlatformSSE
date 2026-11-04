@@ -42,8 +42,10 @@ from .views import (
 )
 
 from .hub_assessment_views import SkillAssessmentViewSet
+from .skill_agent_tasks import SkillAgentTaskViewSet
 
 router = DefaultRouter()
+router.register("skill-agent-tasks", SkillAgentTaskViewSet, basename="skill-agent-task")
 router.register("skill-assessments", SkillAssessmentViewSet, basename="skill-assessment")
 router.register("retrieval-traces", RetrievalTraceViewSet, basename="retrieval-trace")
 router.register("generation-outputs", GenerationOutputViewSet, basename="generation-output")

@@ -41,6 +41,10 @@
         @update:selected-prompt-id="selectedPromptId = $event"
       />
 
+      <a-alert v-if="skillTaskBinding" type="info">
+        当前 Agent 任务绑定：{{ skillTaskBinding.skill_name }} @ {{ skillTaskBinding.version }} · SHA {{ skillTaskBinding.package_sha256.slice(0,16) }}。请在本任务中执行并复核产出。
+      </a-alert>
+      <a-alert v-if="skillTaskError" type="error">{{ skillTaskError }}</a-alert>
       <div class="exploration-auth-bar">
         <span class="exploration-auth-label">探索登录态</span>
         <a-select
@@ -195,6 +199,8 @@
 </template>
 
 <script setup lang="ts">
+import { useRoute } from 'vue-router';
+import { getSkillAgentTask, toErrorMessage, type SkillAgentTaskBinding } from '@/features/skills/services/skillHubService';
 import { ref, onMounted, onActivated, watch, onUnmounted, computed, nextTick } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
 import {
@@ -1832,6 +1838,40 @@ const switchSession = async (id: string) => {
   }
 };
 
+const route = useRoute();
+const skillTaskBinding = ref<SkillAgentTaskBinding|null>(null);
+const skillTaskError = ref('');
+const skillTaskLoading = ref(false);
+let lastHubTask = '';
+async function openHubAgentTask() {
+  const target = typeof route.query.skill_task === 'string' ? route.query.skill_task : '';
+  if (!target || lastHubTask === target) return;
+  if (String(projectStore.currentProjectId) !== String(route.query.project)) {
+    skillTaskError.value = '请切换到发起 Skill 任务的项目后继续';
+    return;
+  }
+  skillTaskLoading.value = true;
+  try {
+    const binding = await getSkillAgentTask(Number(projectStore.currentProjectId),target);
+    if (!binding) throw new Error('绑定任务不存在或无权访问');
+    await switchSession(target);
+    skillTaskBinding.value = binding;
+    skillTaskError.value = '';
+    lastHubTask = target;
+  } catch(error) {skillTaskError.value = toErrorMessage(error,'读取 Skill 任务失败');}
+  finally {skillTaskLoading.value=false;}
+}
+watch(()=>[sessionId.value,projectStore.currentProjectId],async()=>{
+  const id=sessionId.value,project=projectStore.currentProjectId;
+  skillTaskBinding.value=null;
+  if(!id||!project){skillTaskError.value='';return;}
+  skillTaskLoading.value=true;
+  try {const binding=await getSkillAgentTask(Number(project),id);if(sessionId.value===id&&projectStore.currentProjectId===project){skillTaskBinding.value=binding;skillTaskError.value='';}}
+  catch(error){if(sessionId.value===id)skillTaskError.value=toErrorMessage(error,'读取任务版本绑定失败，请重试');}
+  finally {if(sessionId.value===id)skillTaskLoading.value=false;}
+});
+watch(()=>[route.query.skill_task,projectStore.currentProjectId],()=>{if(isMountedLoadComplete)void openHubAgentTask();});
+
 // 创建新对话
 const createNewChat = () => {
   // 终止正在进行的流式请求
@@ -2052,6 +2092,8 @@ const handleSendMessage = async (data: {
     return;
   }
 
+  if(skillTaskLoading.value||skillTaskError.value){Message.warning(skillTaskError.value||'正在读取任务版本绑定，请稍后');return;}
+
   // 🔧 发送新消息前，先固化上一轮的流式内容（避免内容丢失）
   solidifyStreamContent();
 
@@ -2090,6 +2132,7 @@ const handleSendMessage = async (data: {
   };
 
   applyResolvedLlmConfigToRequest(requestData);
+  if(skillTaskBinding.value)requestData.skill_version_id=skillTaskBinding.value.skill_version_id;
 
   // 如果有图片，添加到请求中
   if (imageBase64List.length > 0) {
@@ -2126,7 +2169,7 @@ const handleSendMessage = async (data: {
     return;
   }
 
-  if (isStreamMode.value) {
+  if (skillTaskBinding.value || isStreamMode.value) {
     // 流式模式（传递用户消息用于立即创建会话标题）
     await handleStreamMessage(requestData, message);
   } else {
@@ -2720,6 +2763,7 @@ onMounted(async () => {
 
   // 标记onMounted完成
   isMountedLoadComplete = true;
+  await openHubAgentTask();
 });
 
 // 监听 LLM 配置变化
@@ -2729,6 +2773,7 @@ watch(getRefreshTrigger(), async () => {
 }, { immediate: false });
 
 onActivated(async () => {
+  if(isMountedLoadComplete && route.query.skill_task && lastHubTask!==route.query.skill_task){await openHubAgentTask();return;}
   // 每次组件被激活时（从其他页面切回来）
   console.log('✅ Chat component activated.');
 

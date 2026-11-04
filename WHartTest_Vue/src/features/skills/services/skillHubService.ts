@@ -351,3 +351,20 @@ export async function hubAssessmentCall<T>(projectId:number,path:string,method:'
   return callEvo<T>({url:`/knowledge-evolution/skill-assessments/${path}`,method,
     ...(method==='GET'?{params:{project:projectId,...data}}:{data:{project:projectId,...data}}),timeout:600000})
 }
+
+export interface SkillAgentTaskBinding {
+  session_id: string
+  project_id: number
+  skill_version_id: string
+  skill_name: string
+  version: string
+  package_sha256: string
+}
+
+export async function createSkillAgentTask(project:number, source_version_id:string):Promise<SkillAgentTaskBinding>{
+  return callEvo({url:'/knowledge-evolution/skill-agent-tasks/',method:'POST',data:{project,source_version_id}})
+}
+export async function getSkillAgentTask(project:number,session_id:string):Promise<SkillAgentTaskBinding|null>{
+  const data=await callEvo<{binding:SkillAgentTaskBinding|null}>({url:'/knowledge-evolution/skill-agent-tasks/',method:'GET',params:{project,session_id}})
+  return data.binding
+}

@@ -2395,6 +2395,14 @@ class AgentLoopStreamAPIView(View):
         # The task stage and the concrete Skill version are separate choices.
         # Existing callers may omit the version and retain the old resolver.
         selected_skill_version_id = str(body_data.get("skill_version_id") or "")
+        from knowledge_evolution.skill_agent_tasks import resolve_agent_task_version
+        try:
+            selected_skill_version_id = await sync_to_async(resolve_agent_task_version)(
+                session_id=session_id, project_id=project_id, actor=request.user,
+                requested_version_id=selected_skill_version_id,
+            )
+        except DjangoValidationError as exc:
+            return api_error_response("；".join(exc.messages), 409)
         if request._flywheel_attempt is not None:
             # 受控模式下版本由 attempt（= 流程锁）决定。请求体里显式传了别的版本
             # 说明这一轮不是从受控页面发起的（或有人改了请求），必须拒绝而不是静默忽略

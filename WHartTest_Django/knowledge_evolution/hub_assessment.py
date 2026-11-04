@@ -175,7 +175,7 @@ def task_outputs(session, item, *, config, budget, evidence=None, confirmed=Fals
         raise ValidationError('该 Skill 当前不可运行，可使用结构体检')
     manifest = scan_package_dir(Path(package(session, item).get_full_path())).manifest or {}
     if manifest.get('entrypoint') or manifest.get('permissions') or manifest.get('allowed-tools'):
-        raise ValidationError('此 Skill 声明脚本或工具依赖；请使用结构体检或真实产出复核，文本模式不模拟工具执行')
+        raise ValidationError('此 Skill 声明脚本或工具依赖；请使用结构体检或前往 Agent 任务执行与复核，文本模式不模拟工具执行')
     data = full_package(package(session, item))
     outputs = []
     for case in session.cases:

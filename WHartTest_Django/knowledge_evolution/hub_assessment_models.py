@@ -26,3 +26,10 @@ class SkillAssessmentSession(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+
+
+class SkillAgentTaskBinding(models.Model):
+    session = models.OneToOneField('langgraph_integration.ChatSession', on_delete=models.CASCADE)
+    source_version = models.ForeignKey('skills.SkillVersion', on_delete=models.PROTECT)
+    source_sha256 = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)

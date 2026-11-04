@@ -221,3 +221,55 @@ class HubAssessmentTests(SkillHubBaseTests):
         request = APIRequestFactory().post('/submit/', {'project': self.project.pk, 'confirmed': True}, format='json')
         force_authenticate(request, self.executor)
         self.assertEqual(SkillAssessmentViewSet.as_view({'post': 'submit'})(request, pk=session.pk).status_code, 403)
+
+
+class HubAgentHandoffTests(SkillHubBaseTests):
+    def request(self, view, action, data, actor=None, pk=None):
+        factory = APIRequestFactory()
+        request = (factory.get if action == 'list' else factory.post)('/', data, format='json')
+        force_authenticate(request, actor or self.lead)
+        return view.as_view({'get' if action == 'list' else 'post': action})(request, **({'pk': pk} if pk else {}))
+
+    def test_external_evidence_cannot_enter_hub_api_or_mutate_legacy_sessions(self):
+        _, version = self.make_skill_version()
+        response = self.request(SkillAssessmentViewSet, 'create', {'project': self.project.pk, 'source_version_id': str(version.pk), 'mode': 'external'})
+        self.assertEqual(response.status_code,400)
+        self.assertEqual(SkillAssessmentSession.objects.count(),0)
+        legacy=service.create_session(project=self.project,version=version,actor=self.lead,mode='external',confirmed=True,
+            cases=[{'prompt':'input','expected':'expected','output':'unbound output','evidence_ref':'untrusted file'}])
+        for action in ['assess','generate','select','submit']:
+            response=self.request(SkillAssessmentViewSet,action,{'project':self.project.pk,'confirmed':True},pk=str(legacy.pk))
+            self.assertEqual(response.status_code,400)
+        from knowledge_evolution.tasks import hub_assessment_job
+        legacy.state,legacy.job_id='queued','old-job';legacy.save()
+        with patch.object(service,'assess') as execute:
+            with self.assertRaises(ValueError):hub_assessment_job.run(str(legacy.pk),'assess',{},self.lead.pk,'old-job')
+            execute.assert_not_called()
+
+    def test_agent_handoff_creates_fresh_owned_session_and_immutable_version_binding(self):
+        from .skill_agent_tasks import SkillAgentTaskViewSet, resolve_agent_task_version
+        _,version=self.make_skill_version()
+        payload={'project':self.project.pk,'source_version_id':str(version.pk)}
+        first=self.request(SkillAgentTaskViewSet,'create',payload)
+        second=self.request(SkillAgentTaskViewSet,'create',payload)
+        self.assertEqual(first.status_code,201)
+        self.assertNotEqual(first.data['session_id'],second.data['session_id'])
+        self.assertEqual(first.data['package_sha256'],version.package_sha256)
+        args=dict(session_id=first.data['session_id'],project_id=self.project.pk,actor=self.lead)
+        self.assertEqual(resolve_agent_task_version(**args),str(version.pk))
+        for overrides in [dict(requested_version_id='wrong'),dict(actor=self.executor),dict(project_id=self.other_project.pk)]:
+            with self.assertRaises(ValidationError):resolve_agent_task_version(**(args|overrides))
+        lookup=self.request(SkillAgentTaskViewSet,'list',{'project':self.project.pk,'session_id':first.data['session_id']},actor=self.executor)
+        self.assertIsNone(lookup.data['binding'])
+        version.package_sha256='0'*64;version.save(update_fields=['package_sha256'])
+        with self.assertRaises(ValidationError):resolve_agent_task_version(**args)
+
+    def test_bound_task_cannot_use_legacy_chat_that_ignores_skill_version(self):
+        from .skill_agent_tasks import SkillAgentTaskViewSet
+        from langgraph_integration.views import ChatAPIView
+        from asgiref.sync import async_to_sync
+        _,version=self.make_skill_version()
+        launched=self.request(SkillAgentTaskViewSet,'create',{'project':self.project.pk,'source_version_id':str(version.pk)})
+        request=SimpleNamespace(user=self.lead,data={'session_id':launched.data['session_id'],'message':'execute','project_id':self.project.pk})
+        response=async_to_sync(ChatAPIView().post)(request)
+        self.assertEqual(response.status_code,409)

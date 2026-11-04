@@ -85,6 +85,8 @@ def hub_assessment_job(session_id, action, payload, actor_id, job_id):
         actor = get_user_model().objects.get(pk=actor_id)
         session = SkillAssessmentSession.objects.get(pk=session_id)
         _ensure_project_member(actor, session.project_id)
+        if session.mode == 'external':
+            raise ValueError('真实产出复核已移至 Agent 任务，停止历史手工证据测评')
         if action == 'assess':
             hub_assessment.assess(session_id, actor=actor, job_id=job_id, **payload)
         elif action == 'generate':

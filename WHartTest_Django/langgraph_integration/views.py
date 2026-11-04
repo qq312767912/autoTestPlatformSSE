@@ -989,6 +989,12 @@ class ChatAPIView(APIView):
         logger.info(f"ChatAPIView: Received POST request from user {request.user.id}")
         user_message_content = request.data.get("message")
         session_id = request.data.get("session_id")
+        # Hub 绑定任务必须使用会锁定 Skill 工具集的 Agent 执行入口。
+        from knowledge_evolution.hub_assessment_models import SkillAgentTaskBinding
+        if session_id and await sync_to_async(
+            SkillAgentTaskBinding.objects.filter(session__session_id=session_id).exists
+        )():
+            return Response({"status": "error", "code": 409, "message": "此任务已绑定 Skill 版本，请使用 Agent 任务执行入口"}, status=409)
         project_id = request.data.get("project_id")
         image_base64 = request.data.get("image")  # 图片base64编码（不含前缀）
         include_requirement_images = str(
