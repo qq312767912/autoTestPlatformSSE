@@ -70,6 +70,15 @@
       </div>
     </section>
 
+    <a-alert v-if="isMember" type="info">从 Hub 精确版本建立项目副本，开展通用测评与候选改进；业务产出从原任务接入并沿用实际执行版本。独立能力测评同时评估模型、Prompt 和工具链。</a-alert>
+    <a-space v-if="isMember" wrap style="padding:12px">
+      <a-button type="primary" :disabled="!!focusError||!selectedVersion||selectedVersion.archived||selectedVersion.download_available===false" @click="openGeneralAssessment">通用测评与候选进化</a-button>
+      <a-button @click="emit('review-task')">从用例审查产出开始</a-button>
+      <a-button @click="emit('capability-evaluation')">前往独立能力测评</a-button>
+      <span v-if="selectedSkill && selectedVersion">{{ selectedSkill.name }} @ {{ selectedVersion.version }} · {{ selectedVersion.package_sha256.slice(0,12) }}</span>
+    </a-space>
+    <a-alert v-if="focusError" type="warning">{{ focusError }} <a-button size="mini" @click="emit('clear-source')">返回当前项目工坊</a-button></a-alert>
+
     <!-- 角色加载 / 越权 / 读取失败：三种情况分别说清楚，不用同一个灰底盖住 -->
     <div v-if="accessLoading && !isMember" class="console__blocked">
       <a-spin dot /> 正在确认你在本项目的角色…
@@ -203,14 +212,25 @@
     />
 
     <a-modal v-model:visible="materialPickerVisible" title="从 Skill Hub 选择原材料" :footer="false">
-      <a-empty v-if="!excludedMaterials.length" description="没有已移出的业务 Skill" />
-      <a-list v-else>
-        <a-list-item v-for="item in excludedMaterials" :key="item.id">
-          <a-list-item-meta :title="item.name" :description="item.description" />
-          <template #actions><a-button size="mini" type="primary" @click="restoreMaterial(item)">加入工坊</a-button></template>
-        </a-list-item>
-      </a-list>
+      <p>列出 Hub 中可用于业务进化的 Skill。已在工坊的可直接定位，移出的可重新加入；平台基础工具不列入业务材料。</p>
+      <a-input-search v-model="materialKeyword" placeholder="搜索 Skill 名称或描述" allow-clear />
+      <a-alert v-if="catalogError" type="error">{{ catalogError }}</a-alert>
+      <a-spin :loading="catalogLoading" style="width:100%">
+        <a-empty v-if="!catalogLoading && !catalogError && !pickerMaterials.length" :description="materialKeyword?'没有匹配的 Skill':'Hub 暂无可加入的业务 Skill，可先在 Skill Hub 导入'" />
+        <a-list v-else>
+          <a-list-item v-for="item in pickerMaterials" :key="item.id">
+            <a-list-item-meta :title="item.display_name || item.name" :description="item.description" />
+            <template #actions>
+              <a-tag v-if="!excludedSkillIds.includes(item.id)">已在工坊</a-tag>
+              <a-button v-if="excludedSkillIds.includes(item.id)" size="mini" type="primary" :disabled="materialBusy" @click="restoreMaterial(item)">加入工坊</a-button>
+              <a-button v-else size="mini" :disabled="materialBusy" @click="locateMaterial(item)">定位此 Skill</a-button>
+            </template>
+          </a-list-item>
+        </a-list>
+      </a-spin>
     </a-modal>
+
+    <HubSkillAssessment v-if="assessmentSkill" :project-id="projectId" :skill="assessmentSkill" :initial-version-id="assessmentVersionId" :initial-assessment-id="assessmentSessionId" context="workshop" @close="closeAssessment" @submitted="loadCatalog" />
 
     <!-- 治理动作的原因弹窗：驳回/隔离/回滚必须留下原因，否则审计只有"有人点了按钮" -->
     <a-modal
@@ -256,6 +276,7 @@ import SkillGovernancePanel from '../components/hub/SkillGovernancePanel.vue'
 import SkillImportDrawer from '../components/hub/SkillImportDrawer.vue'
 import SkillUploadPreflightDrawer from '../components/hub/SkillUploadPreflightDrawer.vue'
 import SkillVersionWorkbench from '../components/hub/SkillVersionWorkbench.vue'
+import HubSkillAssessment from '../components/HubSkillAssessment.vue'
 import type { SkillListItem } from '../types'
 import type {
   AuditLogEntry,
@@ -271,7 +292,29 @@ import type {
 import { RELEASE_STATE_LABEL, canReachReleaseState, type ReleaseState } from '../types/hub'
 import { PLATFORM_BASE_STAGE } from '../utils/stages'
 
-const props = defineProps<{ projectId: number; embedded?: boolean }>()
+const props = defineProps<{ projectId: number; embedded?: boolean; focusSkillId?:number; focusVersionId?:string; focusAssessmentId?:string; focusProjectId?:number }>()
+const emit = defineEmits<{ 'review-task':[]; 'capability-evaluation':[]; 'assessment-close':[]; 'clear-source':[] }>()
+const materialKeyword=ref(''),materialBusy=ref(false),focusError=ref('')
+const assessmentSkill=ref<SkillListItem|null>(null),assessmentVersionId=ref(''),assessmentSessionId=ref('')
+const pickerMaterials=computed(()=>{const keyword=materialKeyword.value.trim().toLowerCase();return sourceSkills.value.filter(item=>!keyword||`${item.display_name} ${item.name} ${item.description}`.toLowerCase().includes(keyword))})
+let appliedFocus=''
+function closeAssessment(){assessmentSkill.value=null;emit('assessment-close')}
+function openGeneralAssessment(){const skill=sourceSkills.value.find(item=>item.id===selectedSkillId.value);if(!skill||!selectedVersion.value)return;assessmentSkill.value=skill;assessmentVersionId.value=selectedVersion.value.id;assessmentSessionId.value=''}
+async function locateMaterial(item:SkillListItem){keyword.value='';stageFilter.value='';await selectSkill(item.id);materialPickerVisible.value=false}
+async function applyFocus(){
+  if(!props.focusVersionId||catalogLoading.value||catalogError.value)return
+  const key=`${props.projectId}:${props.focusProjectId}:${props.focusVersionId}:${props.focusAssessmentId||''}`
+  if(appliedFocus===key)return
+  focusError.value=''
+  if(props.focusProjectId && props.focusProjectId!==props.projectId){focusError.value='请切换到来源项目后继续，避免将任务证据关联到其他项目';return}
+  const skill=sourceSkills.value.find(item=>versionsBySkill.value[item.id]?.versions.some(version=>version.id===props.focusVersionId))
+  if(!skill){focusError.value='来源版本不在当前可见的业务 Skill 目录中，请检查版本是否已归档或属于平台基础工具';return}
+  if(excludedSkillIds.value.includes(skill.id)){focusError.value='此 Skill 已移出当前工坊，请在“选择原材料”中加入后继续';materialPickerVisible.value=true;return}
+  appliedFocus=key
+  await locateMaterial(skill)
+  await selectVersion(props.focusVersionId)
+  if(props.focusAssessmentId){assessmentSkill.value=skill;assessmentVersionId.value=props.focusVersionId;assessmentSessionId.value=props.focusAssessmentId}
+}
 
 // --------------------------------------------------------------------- 角色
 
@@ -407,7 +450,6 @@ const catalogStats = computed(() => ({
   risks: entries.value.reduce((sum, item) => sum + item.quarantinedCount, 0),
 }))
 
-const excludedMaterials = computed(() => sourceSkills.value.filter((item) => excludedSkillIds.value.includes(item.id)))
 
 const selectedSkill = computed(
   () => entries.value.find((entry) => entry.id === selectedSkillId.value) ?? null,
@@ -492,10 +534,13 @@ async function loadCatalog() {
     catalogError.value = toErrorMessage(err, '能力目录读取失败')
     skills.value = []
     versionsBySkill.value = {}
+    sourceSkills.value = []
     catalogLoading.value = false
     return
   }
   catalogLoading.value = false
+  await applyFocus()
+  if(props.focusVersionId && focusError.value){selectedSkillId.value=null;selectedVersionId.value='';clearVersionContext();return}
 
   // 首次进入或刷新后，把选中项对齐到仍然存在的版本上。
   if (selectedSkillId.value == null) {
@@ -545,14 +590,15 @@ async function deleteSkill(item: SkillCatalogEntry) {
 }
 
 async function restoreMaterial(item: SkillListItem) {
+  materialBusy.value=true
   try {
     await SkillService.restoreToWorkshop(props.projectId, item.id)
     Message.success(`“${item.name}”已加入进化工坊`)
     await loadCatalog()
-    if (!excludedMaterials.value.length) materialPickerVisible.value = false
+    await locateMaterial(item)
   } catch (err) {
     Message.error(toErrorMessage(err, '加入工坊失败'))
-  }
+  } finally {materialBusy.value=false}
 }
 
 async function selectSkill(skillId: number) {
@@ -1058,7 +1104,8 @@ async function onCandidateCreated(payload: { skillId: number; versionId: string;
   }
 }
 
-watch(projectIdRef, loadCatalog, { immediate: true })
+watch(()=>[props.focusVersionId,props.focusAssessmentId,props.focusProjectId],()=>{focusError.value='';if(props.focusVersionId)void applyFocus();else{appliedFocus='';void loadCatalog()}})
+watch(projectIdRef,()=>{appliedFocus='';assessmentSkill.value=null;focusError.value='';return loadCatalog()}, { immediate: true })
 </script>
 
 <style scoped>

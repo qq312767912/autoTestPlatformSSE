@@ -6,9 +6,9 @@
         <a-form-item label="待测精确版本"><a-select v-model="versionId" placeholder="请选择版本" :disabled="busy" @change="current=null"><a-option v-for="version in versions" :key="version.id" :value="version.id" :disabled="version.archived||version.download_available===false">{{ skill.name }} · v{{ version.version }} · {{ version.package_sha256.slice(0,12) }}</a-option></a-select></a-form-item>
         <a-form-item label="测评方式"><a-radio-group v-model="mode" :disabled="busy"><a-radio value="structure">结构体检</a-radio><a-radio value="text">文本任务实测</a-radio></a-radio-group></a-form-item>
         <a-alert v-if="mode==='structure'">无需测试输入。评估八项可评维度，共 77 分；实测表现未执行，不显示完整百分制总分。仍可生成私有候选继续加工。</a-alert>
-        <a-alert v-else-if="mode==='text'" type="warning">使用真实模型执行文本任务，不运行脚本、浏览器或外部工具。声明这些依赖的 Skill 会拒绝文本实测，请通过下方入口前往 Agent 任务执行。</a-alert>
-        <p>真实产出复核请在 Agent 任务中进行，由任务绑定 Skill 版本和产出文件。</p>
-        <a-button :disabled="!versionId||busy" :loading="launching" @click="goToAgentTask">前往 Agent 任务执行与复核</a-button>
+        <a-alert v-else-if="mode==='text'" type="warning">使用真实模型执行文本任务，不运行脚本、浏览器或外部工具。声明这些依赖的 Skill 会拒绝文本实测，请进入进化工坊关联业务任务。</a-alert>
+        <p>真实业务产出的测评与 Skill 改进入口在数据飞轮的进化工坊，沿用业务任务绑定的版本和产出。</p>
+        <a-button v-if="context!=='workshop'" :disabled="!versionId||busy" :loading="launching" @click="goToWorkshop">进入 Skill 进化工坊</a-button>
         <template v-if="mode==='text'">
           <article v-for="(item,index) in cases" :key="index" class="case">
             <b>测试输入 {{ index+1 }}</b><a-button v-if="cases.length>1" size="mini" @click="cases.splice(index,1)">移除</a-button>
@@ -27,7 +27,7 @@
       <p>本会话方式：{{ modeName(current.mode) }} · 已使用 {{ current.budget.calls||0 }} 次调用 / {{ current.budget.estimated_tokens||0 }} 估算 Token。测试输入与量表已冻结。</p>
       <a-alert v-if="current.error" type="error">{{ current.error }}</a-alert>
       <a-alert v-if="isRunning" type="info">后台执行中，可关闭窗口，稍后从测评历史继续查看。<a-button size="mini" @click="refresh">刷新状态</a-button></a-alert>
-      <a-alert v-if="current.mode==='external'" type="warning">此历史手工复核仅供查看。请前往 Agent 任务执行与复核，历史粘贴的产出不再用于进化或提交。</a-alert>
+      <a-alert v-if="current.mode==='external'" type="warning">此历史手工复核仅供查看。请在进化工坊关联原业务任务，历史粘贴的产出不再用于进化或提交。</a-alert>
       <div class="items">
         <article v-for="item in items" :key="item.id" class="result-card" :class="{selected:current.winner_id===item.id}">
           <header><b>{{ item.label }}</b><a-tag v-if="current.winner_id===item.id" color="green">下一轮基线</a-tag></header>
@@ -57,10 +57,11 @@
 import { useRouter } from 'vue-router'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
-import { SkillHubService, createSkillAgentTask, hubAssessmentCall, toErrorMessage } from '../services/skillHubService'
+import { SkillHubService, hubAssessmentCall, toErrorMessage } from '../services/skillHubService'
+import { skillWorkshopLocation } from '../utils/workshopNavigation'
 import type { SkillVersionSummary } from '../types/hub'
 import type { AssessmentCase, AssessmentHistory, AssessmentItem, HubAssessment } from '../types/assessment'
-const props=defineProps<{projectId:number;skill:{id:number;name:string;version?:string;version_sha256?:string};initialVersionId?:string}>()
+const props=defineProps<{projectId:number;skill:{id:number;name:string;version?:string;version_sha256?:string};initialVersionId?:string;initialAssessmentId?:string;context?:'hub'|'workshop'}>()
 const emit=defineEmits<{close:[];submitted:[]}>()
 const versions=ref<SkillVersionSummary[]>([]),versionId=ref(''),loading=ref(false),pending=ref(false)
 const router=useRouter(),launching=ref(false)
@@ -90,11 +91,11 @@ async function openHistory(value:unknown){if(typeof value!=='string')return;pend
 async function action(path:string,data:Record<string,unknown>={}){if(!current.value)return;pending.value=true;try{current.value=await hubAssessmentCall<HubAssessment>(props.projectId,`${current.value.id}/${path}/`,'POST',data);if(current.value.state==='submitted')emit('submitted');void loadHistory()}catch(error){Message.error(toErrorMessage(error,'操作失败'));await refresh()}finally{pending.value=false}}
 async function start(){pending.value=true;try{current.value=await hubAssessmentCall<HubAssessment>(props.projectId,'','POST',{source_version_id:versionId.value,mode:mode.value,cases:cases.value,policy:policy.value,confirmed:false});await action('assess');void loadHistory()}catch(error){Message.error(toErrorMessage(error,'新建测评失败'))}finally{pending.value=false}}
 async function measure(item:AssessmentItem){await action('assess',{candidate_id:item.id})}
-async function goToAgentTask(){if(!versionId.value||busy.value)return;launching.value=true;try{const task=await createSkillAgentTask(props.projectId,versionId.value);await router.push({name:'LangGraphChat',query:{skill_task:task.session_id,project:String(task.project_id)}});emit('close')}catch(error){Message.error(toErrorMessage(error,'创建 Agent 任务失败'))}finally{launching.value=false}}
+async function goToWorkshop(){if(!versionId.value||busy.value)return;launching.value=true;try{await router.push(skillWorkshopLocation(props.projectId,props.skill.id,versionId.value,current.value?.id||''));emit('close')}catch(error){Message.error(toErrorMessage(error,'进入工坊失败'))}finally{launching.value=false}}
 async function generate(){await action('generate')}
 function pick(item:AssessmentItem){const reason=selectionReasons.value[item.id]?.trim();if(!reason){Message.warning('请填写选择理由');return}Modal.confirm({title:'选择项目内候选基线',content:'确认已查看测评结果与 diff？选择后下轮从此私有副本继续，Hub 原件保持不变。',onOk:()=>action('select',{candidate_id:item.id,reason})})}
 function submit(){Modal.confirm({title:'提交候选回 Hub',content:'确认已查看完整测评、产出与 diff？将新增候选版本并提交验证审批，不自动激活。仅项目负责人可提交。',onOk:()=>action('submit',{confirmed:true})})}
-watch(()=>[props.projectId,props.skill.id,props.initialVersionId],async()=>{loading.value=true;current.value=null;stopPolling();try{versions.value=await SkillHubService.listVersions(props.projectId,props.skill.id);versionId.value=props.initialVersionId||versions.value.find(item=>item.version===props.skill.version&&item.package_sha256===props.skill.version_sha256)?.id||'';await loadHistory()}catch(error){Message.error(toErrorMessage(error,'读取 Skill 版本失败'))}finally{loading.value=false}},{immediate:true})
+watch(()=>[props.projectId,props.skill.id,props.initialVersionId,props.initialAssessmentId],async()=>{loading.value=true;current.value=null;stopPolling();try{versions.value=await SkillHubService.listVersions(props.projectId,props.skill.id);versionId.value=props.initialVersionId||versions.value.find(item=>item.version===props.skill.version&&item.package_sha256===props.skill.version_sha256)?.id||'';await loadHistory();if(props.initialAssessmentId){await openHistory(props.initialAssessmentId);if(current.value&&props.initialVersionId&&current.value.source_version_id!==props.initialVersionId){current.value=null;throw new Error('测评会话与所选精确版本不一致')}}}catch(error){Message.error(toErrorMessage(error,'读取 Skill 版本失败'))}finally{loading.value=false}},{immediate:true})
 </script>
 <style scoped>
 .case{padding:12px;margin:12px 0;border:1px solid var(--color-border-2);border-radius:6px;display:grid;gap:8px}.budget{margin:12px 0}.budget label{display:inline-flex;flex-direction:column;gap:5px;margin:10px}.history,.actions,header{display:flex;align-items:center;gap:12px;margin:14px 0}.history>:first-child{flex:1}.results{margin-top:24px}.items{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.result-card{border:1px solid var(--color-border-2);padding:12px;border-radius:8px;min-width:0}.result-card.selected{border-color:rgb(var(--green-6))}.result-card table{width:100%;border-collapse:collapse;margin:12px 0}.result-card th,.result-card td{padding:7px;text-align:left;border-bottom:1px solid var(--color-border-2);vertical-align:top}.result-card pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto;padding:10px;background:var(--color-fill-1)}summary{cursor:pointer;color:rgb(var(--arcoblue-6))}code{font-size:11px;color:var(--color-text-3)}.result-card :deep(.arco-btn){margin-top:8px;margin-right:6px}header{flex-wrap:wrap}.actions{flex-wrap:wrap}

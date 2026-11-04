@@ -48,7 +48,7 @@ class SkillAssessmentViewSet(viewsets.ViewSet):
 
     def create(self, request):
         if request.data.get('mode') == 'external':
-            return Response({'detail': '真实产出复核请前往 Agent 任务；此处不接收手工产出证据'}, status=400)
+            return Response({'detail': '真实产出复核请进入数据飞轮的 Skill 进化工坊；此处不接收手工产出证据'}, status=400)
         project = self.project(request)
         version = get_object_or_404(SkillVersion.objects.select_related('skill', 'release'), pk=request.data.get('source_version_id'))
         return self.perform(lambda: service.create_session(
@@ -65,7 +65,7 @@ class SkillAssessmentViewSet(viewsets.ViewSet):
         with transaction.atomic():
             session = get_object_or_404(SkillAssessmentSession.objects.select_for_update(), pk=pk, project=project)
             if session.mode == 'external':
-                return Response({'detail': '此历史测评仅可查看，真实产出复核请前往 Agent 任务'}, status=400)
+                return Response({'detail': '此历史测评仅可查看，真实产出复核请进入数据飞轮的 Skill 进化工坊'}, status=400)
             if session.state in {'queued', 'running', 'submitted'}:
                 return Response({'detail': '会话正在执行或已提交'}, status=400)
             session.job_id = str(uuid.uuid4())
@@ -95,7 +95,7 @@ class SkillAssessmentViewSet(viewsets.ViewSet):
     def select(self, request, pk=None):
         session = get_object_or_404(self.scoped(request), pk=pk)
         if session.mode == 'external':
-            return Response({'detail': '真实产出复核已移至 Agent 任务'}, status=400)
+            return Response({'detail': '真实产出复核已移至数据飞轮的 Skill 进化工坊'}, status=400)
         return self.perform(lambda: service.select_candidate(
             session.pk, candidate_id=request.data.get('candidate_id', ''), reason=str(request.data.get('reason') or ''),
         ))
@@ -106,5 +106,5 @@ class SkillAssessmentViewSet(viewsets.ViewSet):
         session = get_object_or_404(self.scoped(request), pk=pk)
         _ensure_test_lead(request.user, session.project_id)
         if session.mode == 'external':
-            return Response({'detail': '真实产出复核已移至 Agent 任务，历史手工证据不能提交'}, status=400)
+            return Response({'detail': '真实产出复核已移至数据飞轮的 Skill 进化工坊，历史手工证据不能提交'}, status=400)
         return self.perform(lambda: service.submit_candidate(session.pk, actor=request.user, confirmed=request.data.get('confirmed', False)))

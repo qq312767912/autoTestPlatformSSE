@@ -15,9 +15,9 @@
       </header>
 
       <nav v-if="primaryView==='data'" class="quick-tabs" aria-label="数据飞轮功能">
-        <button type="button" :class="{active:quickMode==='console'}" @click="quickMode='console'">控制台</button>
-        <button type="button" :class="{active:quickMode==='skills'}" @click="quickMode='skills'">Skill 进化工坊</button>
-        <button type="button" :class="{active:quickMode==='hub'}" @click="quickMode='hub'">Skill Hub</button>
+        <button type="button" :class="{active:quickMode==='console'}" @click="switchDataTab('console')">控制台</button>
+        <button type="button" :class="{active:quickMode==='skills'}" @click="switchDataTab('skills')">Skill 进化工坊</button>
+        <button type="button" :class="{active:quickMode==='hub'}" @click="switchDataTab('hub')">Skill Hub</button>
       </nav>
 
       <div class="workspace-shell" :class="{'graph-layout':primaryView==='graph','workflow-layout':workspace==='workflow'}">
@@ -102,54 +102,11 @@
         </section>
 
         <section v-else-if="quickMode === 'skills'" class="skill-hub-embed">
-          <SkillHubConsole embedded :project-id="projectStore.currentProjectId!" :key="`quality-skill-hub-${projectStore.currentProjectId}`" />
-        </section>
-
-        <!-- Skill Hub：与左侧菜单的 Skill Hub 页是同一份实现（SkillManager）。
-             两处入口都指向同一个组件，避免"同一套列表两处各写一遍"随后漂移。 -->
-        <section v-else-if="quickMode === 'hub'" class="skill-hub-embed">
-          <SkillManager embedded :project-id="projectStore.currentProjectId!" :key="`quality-skill-list-${projectStore.currentProjectId}`" />
-        </section>
-
-        <section v-else-if="workspace === 'overview'" class="panel launch-console">
-          <div class="launch-heading">
-            <div><span>QUICK START</span><h2>选择一项工作</h2><p>进入对应的数据、评测或治理流程。</p></div>
-            <a-tag color="arcoblue">{{ projectName }}</a-tag>
-          </div>
-          <div class="launch-grid">
-            <button type="button" @click="workspace='single'"><i><icon-experiment/></i><div><b>独立能力评测</b><small>从各 Agent 自己的业务入口独立发起</small></div><em>{{ cockpit.single_capabilities.length }} 个 Agent</em><icon-right/></button>
-            <button type="button" @click="workspace='workflow'"><i><icon-branch/></i><div><b>全链路测试</b><small>{{ workflowChainText }}</small></div><em>{{ cockpit.workflows.length }} 条流程</em><icon-right/></button>
-            <button type="button" @click="workspace='gold'"><i><icon-message/></i><div><b>建设评测数据</b><small>整理反馈、Badcase 与金标数据</small></div><em>{{ pendingFeedback }} 条待复核</em><icon-right/></button>
-            <button type="button" @click="workspace='evaluation'"><i><icon-dashboard/></i><div><b>运行自动评测</b><small>选择数据集，执行分层质量扫描</small></div><em>{{ runs.length }} 次运行</em><icon-right/></button>
-            <button type="button" @click="workspace='attribution'"><i><icon-branch/></i><div><b>分析失败轨迹</b><small>识别意图、规划、检索、模型或工具调用问题</small></div><em>{{ failedTraces.length }} 条待分析</em><icon-right/></button>
-            <button type="button" @click="workspace='optimization'"><i><icon-safe/></i><div><b>优化与发布</b><small>影子验证、人工审批、灰度发布与安全回滚</small></div><em>{{ pendingOptimizationCount }} 项待处理</em><icon-right/></button>
-          </div>
-        </section>
-
-        <section v-else-if="workspace === 'single'" class="panel content-panel">
-          <div class="section-head toolbar"><div><span>独立能力流程</span><h2>Agent 独立测评</h2><p>各能力独立发起、独立留痕；代码审查可在下方运行专用测评集。</p></div></div>
-          <div class="single-grid">
-            <article v-for="item in cockpit.single_capabilities" :key="item.stage">
-              <header>
-                <div><span>{{ capabilityCode(item.stage) }}</span><h3>{{ taskTypeLabels[item.stage] || item.stage }}</h3></div>
-                <a-tag :color="item.failed ? 'red' : item.outputs ? 'green' : 'gray'">{{ item.failed ? '存在失败' : item.outputs ? '正常' : '暂无产出' }}</a-tag>
-              </header>
-              <div class="single-stats">
-                <span><b>{{ item.outputs }}</b><small>产出</small></span>
-                <span><b>{{ item.feedback }}</b><small>反馈</small></span>
-                <span><b>{{ item.failed }}</b><small>失败</small></span>
-              </div>
-              <footer>
-                <span>最近产出 {{ formatDate(item.latest_at || undefined) }}</span>
-                <a-button size="small" type="primary" @click="startIndependentCapability(item.stage)">
-                  <template #icon><icon-plus/></template>发起流程
-                </a-button>
-              </footer>
-            </article>
-          </div>
-
-          <CodeReviewBenchmark v-if="projectStore.currentProjectId" :project-id="projectStore.currentProjectId" />
-
+          <SkillHubConsole embedded :project-id="projectStore.currentProjectId!" :key="`quality-skill-hub-${projectStore.currentProjectId}`"
+            :focus-skill-id="workshopTarget.skillId" :focus-version-id="workshopTarget.versionId" :focus-assessment-id="workshopTarget.assessmentId" :focus-project-id="workshopTarget.projectId"
+            @review-task="openReviewEvolution()" @capability-evaluation="openData('single')" @assessment-close="closeWorkshopAssessment" @clear-source="clearWorkshopSource" />
+          <section v-if="reviewEvolutionHistory.length || reviewEvolutionExperiment || reviewEvolutionResult" class="panel content-panel">
+            <div class="section-head"><div><span>从业务任务接入</span><h2>用例审查进化实验</h2><p>实验沿用原任务的输入、产出和精确 Skill 版本；保留完整测评与人工选择记录。</p></div></div>
           <div class="winner-bar">
             <a-select placeholder="查看最近 20 次进化实验" style="max-width:520px" :model-value="reviewEvolutionExperiment?.experiment_id" :disabled="reviewEvolutionExperimentBusy" @change="openReviewExperimentHistory">
               <a-option v-for="item in reviewEvolutionHistory" :key="item.experiment_id" :value="item.experiment_id">第 {{ item.round_number }} 轮 · {{ item.baseline_version }} · {{ item.state }} · {{ item.experiment_id.slice(0,8) }}</a-option>
@@ -265,6 +222,61 @@
               回滚目标 {{ reviewEvolutionResult.rollback_target }}。
             </p>
           </div>
+          </section>
+        </section>
+
+        <!-- Skill Hub：与左侧菜单的 Skill Hub 页是同一份实现（SkillManager）。
+             两处入口都指向同一个组件，避免"同一套列表两处各写一遍"随后漂移。 -->
+        <section v-else-if="quickMode === 'hub'" class="skill-hub-embed">
+          <SkillManager embedded :project-id="projectStore.currentProjectId!" :key="`quality-skill-list-${projectStore.currentProjectId}`" />
+        </section>
+
+        <section v-else-if="workspace === 'overview'" class="panel launch-console">
+          <div class="launch-heading">
+            <div><span>QUICK START</span><h2>选择一项工作</h2><p>进入对应的数据、评测或治理流程。</p></div>
+            <a-tag color="arcoblue">{{ projectName }}</a-tag>
+          </div>
+          <div class="launch-grid">
+            <button type="button" @click="workspace='single'"><i><icon-experiment/></i><div><b>独立能力评测</b><small>从各 Agent 自己的业务入口独立发起</small></div><em>{{ cockpit.single_capabilities.length }} 个 Agent</em><icon-right/></button>
+            <button type="button" @click="workspace='workflow'"><i><icon-branch/></i><div><b>全链路测试</b><small>{{ workflowChainText }}</small></div><em>{{ cockpit.workflows.length }} 条流程</em><icon-right/></button>
+            <button type="button" @click="workspace='gold'"><i><icon-message/></i><div><b>建设评测数据</b><small>整理反馈、Badcase 与金标数据</small></div><em>{{ pendingFeedback }} 条待复核</em><icon-right/></button>
+            <button type="button" @click="workspace='evaluation'"><i><icon-dashboard/></i><div><b>运行自动评测</b><small>选择数据集，执行分层质量扫描</small></div><em>{{ runs.length }} 次运行</em><icon-right/></button>
+            <button type="button" @click="workspace='attribution'"><i><icon-branch/></i><div><b>分析失败轨迹</b><small>识别意图、规划、检索、模型或工具调用问题</small></div><em>{{ failedTraces.length }} 条待分析</em><icon-right/></button>
+            <button type="button" @click="workspace='optimization'"><i><icon-safe/></i><div><b>优化与发布</b><small>影子验证、人工审批、灰度发布与安全回滚</small></div><em>{{ pendingOptimizationCount }} 项待处理</em><icon-right/></button>
+          </div>
+        </section>
+
+        <section v-else-if="workspace === 'single'" class="panel content-panel">
+          <div class="section-head toolbar"><div><span>独立能力流程</span><h2>Agent 独立测评</h2><p>评估完整能力的产出及模型、Prompt、Skill、工具链配合效果。选择卡片进入对应流程，确认 Skill 问题后接入进化工坊。</p></div></div>
+          <div v-if="!showCodeReviewBenchmark" class="single-grid">
+            <article v-for="item in cockpit.single_capabilities" :key="item.stage">
+              <header>
+                <div><span>{{ capabilityCode(item.stage) }}</span><h3>{{ taskTypeLabels[item.stage] || item.stage }}</h3></div>
+                <a-tag :color="item.failed ? 'red' : item.outputs ? 'green' : 'gray'">{{ item.failed ? '存在失败' : item.outputs ? '正常' : '暂无产出' }}</a-tag>
+              </header>
+              <div class="single-stats">
+                <span><b>{{ item.outputs }}</b><small>产出</small></span>
+                <span><b>{{ item.feedback }}</b><small>反馈</small></span>
+                <span><b>{{ item.failed }}</b><small>失败</small></span>
+              </div>
+              <footer>
+                <span>最近产出 {{ formatDate(item.latest_at || undefined) }}</span>
+                <a-button size="small" type="primary" @click="startIndependentCapability(item.stage)">
+                  <template #icon><icon-plus/></template>发起流程
+                </a-button>
+              </footer>
+            </article>
+            <article class="code-review-entry" tabindex="0" role="button" aria-label="进入代码审查测评" @click="openCodeReviewEvaluation" @keydown.enter="openCodeReviewEvaluation" @keydown.space.prevent="openCodeReviewEvaluation">
+              <header><div><span>CR</span><h3>代码审查测评</h3></div><a-tag color="gray">评测集</a-tag></header>
+              <div class="single-stats"><span><b>模型</b><small>审查能力</small></span><span><b>Prompt</b><small>规则与判断</small></span><span><b>工具链</b><small>执行与证据</small></span></div>
+              <footer><span>内置公开集 / 内部集</span><a-button size="small" type="primary" @click.stop="openCodeReviewEvaluation">进入测评</a-button></footer>
+            </article>
+          </div>
+          <template v-else>
+            <a-button size="small" @click="closeCodeReviewEvaluation">返回独立能力卡片</a-button>
+            <CodeReviewBenchmark v-if="projectStore.currentProjectId" :project-id="projectStore.currentProjectId" />
+          </template>
+
         </section>
 
         <section v-else-if="workspace === 'workflow'" class="panel content-panel workflow-panel">
@@ -1128,7 +1140,19 @@ type QuickMode='console'|'skills'|'hub';
 const projectStore=useProjectStore(); const projectName=computed(()=>projectStore.currentProject?.name||'当前项目'); const workspace=ref<Workspace>('overview');
 const route=useRoute(),router=useRouter();
 const routeView=():PrimaryView=>['agents','data','graph'].includes(String(route.query.view))?String(route.query.view) as PrimaryView:'agents';
-const primaryView=ref<PrimaryView>(routeView()),quickMode=ref<QuickMode>('console');
+const routeTab=():QuickMode=>['skills','hub'].includes(String(route.query.tab))?String(route.query.tab) as QuickMode:'console';
+const primaryView=ref<PrimaryView>(routeView()),quickMode=ref<QuickMode>(routeTab());
+const showCodeReviewBenchmark=ref(route.query.capability==='code_review');
+const taskWorkshopTarget=ref<{skillId?:number;versionId?:string;projectId?:number;assessmentId?:string}>({});
+const workshopTarget=computed(()=>route.query.skill_version_id?{
+  skillId:Number(route.query.skill_id)||undefined,versionId:String(route.query.skill_version_id),assessmentId:String(route.query.assessment_id||''),projectId:Number(route.query.project)||undefined,
+}:taskWorkshopTarget.value);
+if(route.query.section==='single')workspace.value='single';
+async function switchDataTab(tab:QuickMode){quickMode.value=tab;await router.replace({path:'/knowledge-evolution',query:{view:'data',tab}})}
+async function clearWorkshopSource(){taskWorkshopTarget.value={};await switchDataTab('skills')}
+async function closeWorkshopAssessment(){const query={...route.query};delete query.assessment_id;await router.replace({path:'/knowledge-evolution',query})}
+async function openCodeReviewEvaluation(){showCodeReviewBenchmark.value=true;await router.replace({path:'/knowledge-evolution',query:{view:'data',tab:'console',section:'single',capability:'code_review'}})}
+async function closeCodeReviewEvaluation(){showCodeReviewBenchmark.value=false;await openData('single')}
 /** 横幅抬头（h1 + 描述）。
  *  ⚠️ 数据飞轮下**按页签分别展示**，不是三个页签共用一句「数据飞轮」——
  *     用户 2026-10-03 明确：共用的横幅看不出当前切到了哪个页签。
@@ -1143,8 +1167,8 @@ const pageHeader=computed(()=>{
   }
   return {title:'Agent总览',description:'查看运行、评测、失败样本与待处理改进。'};
 });
-watch(()=>route.query.view,()=>{primaryView.value=routeView();workspace.value='overview'});
-async function openData(target:Workspace){primaryView.value='data';quickMode.value='console';await router.replace({path:'/knowledge-evolution',query:{view:'data'}});workspace.value=target}
+watch(()=>[route.query.view,route.query.tab,route.query.section,route.query.capability],()=>{primaryView.value=routeView();quickMode.value=routeTab();workspace.value=route.query.section==='single'?'single':'overview';showCodeReviewBenchmark.value=route.query.capability==='code_review'});
+async function openData(target:Workspace){primaryView.value='data';quickMode.value='console';await router.replace({path:'/knowledge-evolution',query:{view:'data',tab:'console',...(target==='single'?{section:'single'}:{})}});workspace.value=target}
 const suites=ref<EvaluationSuite[]>([]),runs=ref<EvaluationRun[]>([]),results=ref<EvaluationResult[]>([]),feedbackEvents=ref<FeedbackEvent[]>([]),candidates=ref<KnowledgeCandidate[]>([]),allTraces=ref<RetrievalTrace[]>([]);
 const goldDatasets=ref<GoldDataset[]>([]),selectedSpans=ref<ExecutionSpan[]>([]),attributions=ref<FailureAttribution[]>([]),proposals=ref<OptimizationProposal[]>([]),releases=ref<CapabilityRelease[]>([]);
 const goldMode=ref<'review'|'datasets'|'history'|'feedback'>('review'),assetCandidateEvents=ref<AssetCandidateEvent[]>([]),assetCandidateStatus=ref(''),assetRetryId=ref(''),assetRetryBusy=ref(false);
@@ -1651,6 +1675,7 @@ const reviewEvolutionExperimentBusy=ref(false);
 const reviewEvolutionWinnerLabel=ref<''|'A'|'B'>('');
 const reviewEvolutionWinnerReason=ref('');
 const selectedReview=computed(()=>reviewEvolutionItems.value.find(v=>v.review_id===reviewEvolutionSelected.value));
+watch(selectedReview,item=>{if(item)taskWorkshopTarget.value={skillId:Number(item.skill_id),versionId:item.skill_version_id,projectId:Number(projectStore.currentProjectId)}});
 const reviewEvolutionFile=computed<File|null>(()=>reviewEvolutionFileList.value[0]?.file||null);
 const preflightBlockers=computed(()=>reviewEvolutionPreflight.value?.blockers||[]);
 const preflightReady=computed(()=>reviewEvolutionPreflight.value?.ready===true);
@@ -1713,6 +1738,7 @@ function errorText(error:any,fallback:string):string{
   return error?.message||fallback;
 }
 async function openReviewEvolution(preferredReviewId=''){
+  await switchDataTab('skills');
   reviewEvolutionStep.value=1;
   reviewEvolutionSelected.value='';
   reviewEvolutionFileList.value=[];
@@ -1749,6 +1775,7 @@ async function loadReviewEvolutionItems(preferredReviewId=''){
     const preferred=preferredReviewId
       ? reviewEvolutionItems.value.find(v=>v.review_id===preferredReviewId&&v.evolvable)
       : undefined;
+    if(preferredReviewId&&!preferred){Message.warning('来源任务不可进化或已不可访问，不会改用其他任务的版本和产出');return;}
     const first=preferred||reviewEvolutionItems.value.find(v=>v.evolvable);
     if(first)reviewEvolutionSelected.value=first.review_id;
   }catch(error:any){Message.error(errorText(error,'加载用例审查项目失败'))}
@@ -1759,8 +1786,7 @@ async function loadReviewEvolutionItems(preferredReviewId=''){
 async function openReviewEvolutionFromRoute(){
   if(route.query.action!=='case-review-evolution'||!projectStore.currentProjectId)return;
   primaryView.value='data';
-  quickMode.value='console';
-  workspace.value='single';
+  quickMode.value='skills';
   const reviewId=String(route.query.review_id||'');
   await openReviewEvolution(reviewId);
   const query={...route.query};
@@ -2190,10 +2216,6 @@ const independentCapabilityRoutes:Record<string,string>={
   report_generation:'/langgraph-chat?module_key=report_generation',
 };
 async function startIndependentCapability(stage:string){
-  if(stage==='case_review'){
-    await openReviewEvolution();
-    return;
-  }
   const target=independentCapabilityRoutes[stage];
   if(!target){Message.error('该能力暂无可发起的独立流程');return}
   await router.push(target);
@@ -2247,6 +2269,7 @@ function releaseStateColor(v:string){if(v==='active')return'green';if(['rejected
 function gateSummary(v:CapabilityRelease){const report=v.gate_report||{};if(report.passed===true)return'已通过影子硬门禁';if(report.passed===false)return'未通过影子硬门禁';return'待执行影子对比'}
 const levels=['l0','l1','l2','l3'] as const;function scores(v:EvaluationResult){return levels.map(k=>[k,v[`${k}_score`]] as const).filter((p):p is readonly[typeof levels[number],number]=>typeof p[1]==='number')}function isFailure(v:EvaluationResult){return v.status==='failed'||scores(v).some(([,n])=>n<.5)}function failureSummary(v:EvaluationResult){if(v.error_message)return v.error_message;const s=scores(v);if(!s.length)return'执行失败，暂无评分';const [l,n]=s.reduce((a,b)=>b[1]<a[1]?b:a);return`${l.toUpperCase()} 得分 ${n.toFixed(2)} 低于门槛 0.50`}
 watch(()=>projectStore.currentProjectId,async id=>{
+  taskWorkshopTarget.value={};
   reviewEvolutionHistory.value=[];reviewEvolutionExperiment.value=null;reviewEvolutionWinnerLabel.value='';reviewEvolutionWinnerReason.value='';
   assetCandidateEvents.value=[];assetCandidateStats.value=emptyAssetCandidateStats();activeGoldCase.value=null;
   goldVersions.value=[];taxonomies.value=[];annotationConflicts.value=[];historyImports.value=[];historyReplays.value=[];historyPreflight.value=null;
@@ -2529,4 +2552,5 @@ watch(()=>projectStore.currentProjectId,async id=>{
 @media(max-width:900px){.variant-grid{grid-template-columns:1fr}.winner-bar{grid-template-columns:1fr}}
 @media(max-width:900px){.evidence-workbench{grid-template-columns:1fr;height:min(72vh,760px)}.evidence-index{max-height:230px;border-right:0;border-bottom:1px solid var(--color-border-2)}.evidence-detail{padding:16px}.evidence-detail dl div{grid-template-columns:88px minmax(0,1fr)}}
 .linkage-bar{display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:11px 14px;border:1px solid var(--color-border-2);border-radius:9px;background:var(--color-fill-1)}.linkage-bar.is-off{border-color:rgb(var(--orange-3));background:rgb(var(--orange-1))}.linkage-bar.is-on{border-color:rgb(var(--green-3));background:rgb(var(--green-1))}.linkage-bar>svg{flex:none;font-size:19px}.linkage-bar.is-off>svg{color:var(--orange)}.linkage-bar.is-on>svg{color:#00b42a}.linkage-copy{display:flex;min-width:0;flex:1;flex-direction:column;gap:2px}.linkage-copy b{font-size:13px}.linkage-copy small{color:var(--color-text-3);font-size:11px;line-height:1.55}.linkage-hint{flex:none;color:var(--color-text-3);font-size:11px}.linkage-modal-actions{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.code-review-entry{cursor:pointer}.code-review-entry:hover,.code-review-entry:focus-visible{border-color:rgb(var(--arcoblue-6));outline:2px solid rgba(var(--arcoblue-6),.15);outline-offset:2px}
 </style>
