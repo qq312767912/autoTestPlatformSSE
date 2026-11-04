@@ -1,4 +1,5 @@
 import os
+import json
 import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -63,6 +64,36 @@ class ReviewRetryPolicyTests(SimpleTestCase):
                          [2, 4, 8, 16, 30, 30])
 
 
+class ReviewInputBudgetTests(SimpleTestCase):
+    def test_original_values_only_sent_once_and_column_alignment_preserved(self):
+        rows = review_service._case_rows("用例", [
+            (1, ["编号", "", "步骤", "预期", "预期"]),
+            (2, ["TC-1", "未命名列原文", "完整步骤", "第一项预期", "第二项预期"]),
+        ])
+        payload = review_service._serialize_review_rows(rows)
+        sent = json.loads(payload)[0]
+        self.assertNotIn("columns", sent)
+        self.assertEqual(sent["headers"], ["编号", "", "步骤", "预期", "预期"])
+        self.assertEqual(sent["cells"], rows[0]["cells"])
+        self.assertEqual(payload.count("完整步骤"), 1)
+
+    def test_dynamic_chunks_cover_all_rows_without_truncating_oversized_case(self):
+        rows = [{"sheet": "用例", "row": i + 2, "headers": ["步骤"],
+                 "cells": ["长步骤" * length]}
+                for i, length in enumerate([10, 10, 500, 10, 10])]
+        with patch.object(review_service, "TESTCASE_REVIEW_CHUNK_MAX_CHARS", 300):
+            chunks = review_service._build_review_chunks(rows)
+            self.assertEqual([r for chunk in chunks for r in chunk], rows)
+            self.assertIn([rows[2]], chunks)
+            for chunk in chunks:
+                self.assertTrue(len(chunk) == 1 or
+                                len(review_service._serialize_review_rows(chunk)) <= 300)
+
+    def test_small_cases_still_obey_row_limit(self):
+        rows = [{"sheet": "用例", "row": i, "cells": ["步骤"]} for i in range(45)]
+        self.assertEqual([len(c) for c in review_service._build_review_chunks(rows)], [20, 20, 5])
+
+
 class TestCaseReviewLLMConfigResolutionTests(SimpleTestCase):
     """审查只认专用配置：缺失或没密钥必须失败，不得回退平台通用 LLM。"""
 
@@ -96,7 +127,7 @@ class ReviewChunkFallbackTests(SimpleTestCase):
 
     TOTAL_ROWS = 40
 
-    def _run(self, *, failing_rows=(), max_retries=3, budget=None, total_rows=None):
+    def _run(self, *, failing_rows=(), max_retries=3, budget=None, total_rows=None, summary=None):
         rows = [
             {"sheet": "登录", "row": index + 2, "cells": ["TC", "步骤", "预期"],
              "columns": {"编号": "TC", "步骤": "步骤", "预期": "预期"}}
@@ -105,7 +136,8 @@ class ReviewChunkFallbackTests(SimpleTestCase):
         calls, sleeps = [], []
         review = SimpleNamespace(
             id=1, status="pending", progress=0, current_step="", business_context="",
-            custom_rules="", skill_snapshot="SKILL", selected_skill=None, summary={},
+            custom_rules="", skill_snapshot="SKILL", selected_skill=None, summary=summary or {},
+            requirement_document_ids=[], knowledge_document_ids=[],
             error_message="", source_name="cases.xlsx", skill_name="test-case-clarity-review",
             source_file=SimpleNamespace(path="/tmp/cases.xlsx"),
             report_file=SimpleNamespace(save=lambda *args, **kwargs: None),
@@ -121,9 +153,12 @@ class ReviewChunkFallbackTests(SimpleTestCase):
             return {"issues": [], "pending_confirmations": [], "governance_suggestions": []}
 
         patches = [
+            patch.object(review_service, "_lock_review_skill", return_value={}),
+            patch.object(review_service, "_publish_to_evolution"),
             patch.object(review_service, "_read_rows", return_value=rows),
             patch.object(review_service, "TestCaseReview", SimpleNamespace(
-                objects=SimpleNamespace(get=lambda **kwargs: review))),
+                objects=SimpleNamespace(get=lambda **kwargs: review,
+                                        filter=lambda **kwargs: SimpleNamespace(exists=lambda: False)))),
             patch.object(review_service, "TestCaseReviewLLMConfig", SimpleNamespace(
                 objects=SimpleNamespace(filter=lambda **kwargs: SimpleNamespace(first=lambda: config)))),
             patch.object(review_service, "create_llm_instance", return_value=object()),
@@ -185,3 +220,18 @@ class ReviewChunkFallbackTests(SimpleTestCase):
         self.assertIsNotNone(result.error)
         uncovered = result.review.summary["_checkpoint"]["uncovered"]
         self.assertEqual(len(uncovered), result.total_chunks)
+
+    def test_partial_report_retry_reuses_successful_chunks(self):
+        first = self._run(failing_rows={2})
+        self.assertIsNone(first.error)
+        self.assertIn("_checkpoint", first.summary)
+        second = self._run(summary=first.summary)
+        self.assertIsNone(second.error)
+        self.assertEqual(second.calls, [2])
+        self.assertEqual(second.summary["uncovered_chunks"], 0)
+
+    def test_changed_input_signature_does_not_reuse_old_results(self):
+        first = self._run(failing_rows={2})
+        second = self._run(summary=first.summary, total_rows=41)
+        self.assertIsNone(second.error)
+        self.assertEqual(set(second.calls), {2, 22, 42})

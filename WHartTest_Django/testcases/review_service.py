@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 FALLBACK_SKILL = """审查测试用例的可执行性与验收清晰度。不要凭空补造业务规则；未知标准标记为待业务确认。按风险检查前置条件、测试数据、步骤、预期、业务结果、边界异常、数据一致性、证据与可维护性。"""
 TESTCASE_REVIEW_CHUNK_SIZE = 20
+TESTCASE_REVIEW_CHUNK_MAX_CHARS = 12000
 TESTCASE_REVIEW_CHUNK_ATTEMPTS = 3
 TESTCASE_REVIEW_MAX_ATTEMPTS = 5
 TESTCASE_REVIEW_MAX_WORKERS = 2
@@ -142,7 +143,7 @@ def _case_rows(sheet_name, source_rows):
             "row": row_number,
             "cells": cells,
             "columns": columns,
-            "headers": [header for header in padded_headers if header],
+            "headers": padded_headers,
         })
     return rows
 
@@ -285,6 +286,35 @@ def _extract_json(text):
         return json.loads(match.group(0))
 
 
+def _review_input_rows(rows):
+    """只发送一份原文；按原列顺序保留空值、重复表头及未命名列。"""
+    return [
+        {key: row[key] for key in ("sheet", "row", "headers", "cells") if key in row}
+        for row in rows
+    ]
+
+
+def _serialize_review_rows(rows):
+    return json.dumps(_review_input_rows(rows), ensure_ascii=False, separators=(",", ":"))
+
+
+def _build_review_chunks(rows):
+    """同时约束行数和用例数据字符量；超长单行独立送审，绝不截断。"""
+    chunks, chunk = [], []
+    for row in rows:
+        candidate = [*chunk, row]
+        if chunk and (
+            len(candidate) > TESTCASE_REVIEW_CHUNK_SIZE
+            or len(_serialize_review_rows(candidate)) > TESTCASE_REVIEW_CHUNK_MAX_CHARS
+        ):
+            chunks.append(chunk)
+            chunk = []
+        chunk.append(row)
+    if chunk:
+        chunks.append(chunk)
+    return chunks
+
+
 def _review_chunk(llm, skill_prompt, rows, business_context):
     from .skill_report import declared_sheets
     report_definitions = declared_sheets(skill_prompt)
@@ -302,7 +332,7 @@ def _review_chunk(llm, skill_prompt, rows, business_context):
         "请严格按下方 Skill 审查这些测试用例行。只输出一个 JSON 对象，不要 Markdown。"
         "同一根因在同一用例内合并；高风险必须语义复核；识别并跳过表头，不要把表头当作测试用例。"
         "每条问题都应生成 rewrite，写成可供测试人员直接参考的用例改写示例，不要仅复述 suggestion。必须严格分成‘前置：’、‘步骤：’、‘预期：’三段，段落之间空一行；步骤和预期使用逐行编号。基于原文有变化或新增的最小连续文本片段，必须用【改】…【/改】包住，未变化的原文不要标记；标记不得嵌套，且必须成对。导出报告时标记会移除并将标记内文本着色。不得补造未知业务规则，缺少依据时用【待业务确认：具体缺失信息】占位；仅当确实无需修改时允许为空。"
-        "每行 columns 已按识别到的原表头映射，cells 保留原列顺序。\n"
+        "每行 headers 为原表头，cells 为同列顺序的完整原文；MUST按列对应审查所有用例。\n"
         "扩展报告：MUST遵循本次Skill要求的额外工作表，返回report_sheets数组。Skill无额外表要求时返回空数组。"
         "Skill声明report.sheets时MUST沿用其name、columns.key和highlight，逐表填写rows对象数组。"
         "Skill只用文字要求新增sheet时MUST自行定义name、columns(key/title)、rows、tab_color及highlight；"
@@ -310,7 +340,7 @@ def _review_chunk(llm, skill_prompt, rows, business_context):
         "不同批次同表MUST使用相同列key。只填写输入支持的分析，未知项明确写待确认，NEVER编造覆盖证据。\n"
         f"业务背景：{business_context or '未提供；未知业务规则必须标为待业务确认'}\n"
         f"输出结构示例：{json.dumps(schema, ensure_ascii=False)}\n"
-        f"待审查数据：{json.dumps(rows, ensure_ascii=False)}"
+        f"待审查数据：{_serialize_review_rows(rows)}"
     )
     # 此处只调用一次：重试次数与指数退避统一由 run_testcase_review 的外层循环管理。
     # 若两层同时重试，单批最坏耗时会放大成 (1 + max_retries) 倍超时时间，
@@ -684,12 +714,10 @@ def run_testcase_review(review_id):
     if review.custom_rules.strip():
         skill_prompt += "\n\n# 本次用户指定的审查规则（在不违反质量边界的前提下优先执行）\n" + review.custom_rules.strip()
     issues, pending, governance, extra_reports = [], [], [], []
-    # 分片大小与并发度是一对取舍：分片小则单批 JSON 输出短、不易触发网关
-    # 120 秒上游超时，但分片小会成倍增加批次数。历史实现一度改成「10 行 +
-    # 串行」，480 条用例产生 48 批串行调用，总耗时逼近 Celery 软时限。
-    # 这里取 20 行 + 2 路并发，在两者之间取得平衡。
+    # 用例正文只发送一次，按数据字符量动态分片，同时保留20行上限和2路并发。
+    # 字符预算不含Skill及参考文档，不是模型token或完整上下文上限。
     chunk_size = TESTCASE_REVIEW_CHUNK_SIZE
-    chunks = [rows[i:i + chunk_size] for i in range(0, len(rows), chunk_size)]
+    chunks = _build_review_chunks(rows)
     review_timeout = max(30, min(int(config.request_timeout or 120), 600))
     attempts = _chunk_attempt_limit(config)
     workers = max(1, min(TESTCASE_REVIEW_MAX_WORKERS, len(chunks)))
@@ -736,6 +764,8 @@ def run_testcase_review(review_id):
         "business_context": review.business_context,
         "custom_rules": review.custom_rules,
         "chunk_size": chunk_size,
+        "chunk_max_chars": TESTCASE_REVIEW_CHUNK_MAX_CHARS,
+        "input_contract": "single-source-rows/v1",
         "report_contract": "skill-sheets/v1",
     }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     checkpoint = (review.summary or {}).get("_checkpoint") or {}
@@ -837,7 +867,11 @@ def run_testcase_review(review_id):
         extra_reports.append(result.get("report_sheets", []))
     review.current_step = "生成 Excel 报告"
     review.progress = 90
+    saved_checkpoint = review.summary.get("_checkpoint")
     review.summary = _write_report(review, rows, issues, pending, governance, uncovered, chunks, extra_reports)
+    if uncovered:
+        # 部分完成的报告仍须保留成功批次，重试时按相同签名只补审缺失批次。
+        review.summary["_checkpoint"] = saved_checkpoint
     review.status = "completed"
     review.progress = 100
     review.current_step = (
@@ -893,8 +927,7 @@ def build_review_findings(review, issues):
 def _recover_issues_from_checkpoint(review):
     """历史记录补录用：从断点里恢复问题明细。
 
-    `_write_report` 会用报告摘要整体覆盖 summary，因此正常流程结束后
-    checkpoint 已经不存在，只能作为兜底。
+    部分完成的报告保留 checkpoint，可用于补审及历史结果恢复。
     """
     checkpoint = (review.summary or {}).get("_checkpoint") or {}
     issues, pending, governance, extra_reports = [], [], [], []
