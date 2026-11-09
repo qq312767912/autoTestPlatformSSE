@@ -178,6 +178,8 @@ assert_backend() {
     cd /app
     python manage.py check
     [ -f /app/bundled_skills/test-case-clarity-review/references/review-rules.md ]
+    [ -f /app/platform_skills/excel-to-ui-case/SKILL.md ]
+    [ -f /app/platform_skills/excel-to-ui-case/references/platform-contract.md ]
     python -c "import celery,kombu,redis; assert (celery.__version__,kombu.__version__,redis.__version__) == (\"5.4.0\",\"5.6.2\",\"5.2.0\")"
     echo "Alpine/musl + OpenCodeReview(ocr CLI) + UI 录制器 Chromium/Playwright + 用例审查 Skill 就绪"
   '

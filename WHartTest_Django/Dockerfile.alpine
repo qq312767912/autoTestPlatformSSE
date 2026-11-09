@@ -219,6 +219,8 @@ RUN npm config set registry "${NPM_REGISTRY}" 2>/dev/null && \
     esac
 
 COPY bundled_skills/ /app/bundled_skills/
+# Platform conversion rules must remain available even when bundled_skills is bind-mounted.
+COPY bundled_skills/excel-to-ui-case/ /app/platform_skills/excel-to-ui-case/
 
 # 清理
 RUN find /app -type f \( -name "*.sqlite*" -o -name "*.db" -o -name "*.sql" \) -delete 2>/dev/null; \

@@ -286,6 +286,8 @@ COPY test_host_config/ /app/test_host_config/
 COPY utils/ /app/utils/
 COPY wharttest_django/ /app/wharttest_django/
 COPY bundled_skills/ /app/bundled_skills/
+# Platform conversion rules must remain available even when bundled_skills is bind-mounted.
+COPY bundled_skills/excel-to-ui-case/ /app/platform_skills/excel-to-ui-case/
 
 # 清理不必要的文件
 RUN find /app -type f \( -name "*.sqlite*" -o -name "*.db" -o -name "*.sql" \) -delete && \

@@ -37,7 +37,13 @@ def permitted_project(user, value):
 
 
 def local_skill():
-    root = Path(getattr(settings, 'BUNDLED_SKILLS_DIR', None) or os.environ.get('BUNDLED_SKILLS_DIR', '/app/bundled_skills')).resolve()
+    configured = getattr(settings, 'BUNDLED_SKILLS_DIR', None) or os.environ.get('BUNDLED_SKILLS_DIR')
+    # A separate image path survives deployments mounting /app/bundled_skills.
+    # Source checkouts use the same versioned package under BASE_DIR.
+    builtin = Path('/app/platform_skills')
+    if not (builtin / DEFAULT_SKILL / 'SKILL.md').is_file():
+        builtin = Path(settings.BASE_DIR) / 'bundled_skills'
+    root = Path(configured or builtin).resolve()
     directory = (root / DEFAULT_SKILL).resolve()
     directory.relative_to(root)
     main = directory / 'SKILL.md'
