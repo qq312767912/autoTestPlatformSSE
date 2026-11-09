@@ -160,7 +160,8 @@ class KnowledgeBase(models.Model):
 
 def document_upload_path(instance, filename):
     """生成文档上传路径"""
-    return f'knowledge_bases/{instance.knowledge_base.id}/documents/{filename}'
+    extension = os.path.splitext(filename)[1].lower()
+    return f'knowledge_bases/{instance.knowledge_base.id}/documents/{uuid.uuid4().hex[:20]}{extension}'
 
 
 def document_image_upload_path(instance, filename):
@@ -208,6 +209,7 @@ class Document(models.Model):
     file = models.FileField(
         _('文件'),
         upload_to=document_upload_path,
+        max_length=500,
         blank=True,
         null=True
     )

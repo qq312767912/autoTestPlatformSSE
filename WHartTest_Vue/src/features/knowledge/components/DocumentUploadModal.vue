@@ -36,6 +36,7 @@
             <input
               ref="fileInputRef"
               type="file"
+              multiple
               accept=".pdf,.docx,.doc,.xlsx,.xls,.pptx,.txt,.md,.html,.htm"
               style="display: none"
               @change="handleFileInputChange"
@@ -49,12 +50,12 @@
                 </div>
               </div>
             </div>
-            <div v-if="formData.file" class="selected-file">
+            <div v-for="file in selectedFiles" :key="file.name" class="selected-file">
               <div class="file-info">
                 <icon-file />
-                <span class="file-name">{{ formData.file.name }}</span>
-                <span class="file-size">({{ formatFileSize(formData.file.size) }})</span>
-                <a-button type="text" size="mini" @click="removeFile">
+                <span class="file-name">{{ file.name }}</span>
+                <span class="file-size">({{ formatFileSize(file.size) }})</span>
+                <a-button type="text" size="mini" @click="removeFile(file)">
                   <icon-close />
                 </a-button>
               </div>
@@ -175,6 +176,7 @@ const text = computed(() => (
 const formRef = ref();
 const fileInputRef = ref<HTMLInputElement>();
 const loading = ref(false);
+const selectedFiles = ref<File[]>([]);
 const uploadProgress = ref(0);
 
 // 表单数据
@@ -245,6 +247,7 @@ watch(() => props.visible, (visible) => {
 
 // 方法
 const resetForm = () => {
+  selectedFiles.value = [];
   Object.assign(formData, {
     uploadType: 'file',
     title: '',
@@ -261,6 +264,7 @@ const resetForm = () => {
 
 const handleUploadTypeChange = () => {
   // 切换上传方式时清空相关字段
+  selectedFiles.value = [];
   formData.file = null;
   formData.content = '';
   formData.url = '';
@@ -284,7 +288,14 @@ const triggerFileInput = () => {
 
 const handleFileInputChange = (event: Event) => {
   const target = event.target as HTMLInputElement;
-  const file = target.files?.[0];
+  const files = Array.from(target.files || []);
+  if (files.some(file => !validateFileExtension(file))) {
+    Message.error(text.value.unsupportedFileType(ALLOWED_EXTENSIONS));
+    target.value = "";
+    return;
+  }
+  selectedFiles.value = files;
+  const file = files[0];
 
   if (file) {
     // 验证文件扩展名
@@ -305,11 +316,10 @@ const handleFileInputChange = (event: Event) => {
   }
 };
 
-const removeFile = () => {
-  formData.file = null;
-  if (fileInputRef.value) {
-    fileInputRef.value.value = '';
-  }
+const removeFile = (file: File) => {
+  selectedFiles.value = selectedFiles.value.filter(item => item !== file);
+  formData.file = selectedFiles.value[0] || null;
+  if (fileInputRef.value) fileInputRef.value.value = '';
 };
 
 const formatFileSize = (bytes: number): string => {
@@ -347,7 +357,8 @@ const getDocumentType = (uploadType: string, file?: File): DocumentType => {
 const handleSubmit = async () => {
   try {
     // Arco Design 的 validate 方法：成功时返回 undefined，失败时抛出错误
-    await formRef.value?.validate();
+    if (loading.value) return;
+    if (await formRef.value?.validate()) return;
 
     // 验证文件上传模式下是否选择了文件
     if (formData.uploadType === 'file' && !formData.file) {
@@ -372,21 +383,32 @@ const handleSubmit = async () => {
       uploadData.url = formData.url;
     }
 
-    // 模拟上传进度
-    const progressInterval = setInterval(() => {
-      if (uploadProgress.value < 90) {
-        uploadProgress.value += Math.random() * 20;
+    if (formData.uploadType === 'file') {
+      const failed: File[] = [];
+      const files = [...selectedFiles.value];
+      for (const [index, file] of files.entries()) {
+        try {
+          await KnowledgeService.uploadDocument({
+            knowledge_base: props.knowledgeBaseId,
+            title: files.length === 1 ? formData.title : file.name.replace(/\.[^.]+$/, '').slice(0, 200),
+            document_type: getDocumentType('file', file),
+            file,
+          });
+        } catch {
+          failed.push(file);
+        }
+        uploadProgress.value = Math.round((index + 1) / files.length * 100);
       }
-    }, 200);
-
-    await KnowledgeService.uploadDocument(uploadData);
-
-    clearInterval(progressInterval);
-    uploadProgress.value = 100;
-
-    setTimeout(() => {
-      emit('submit');
-    }, 500);
+      selectedFiles.value = failed;
+      formData.file = failed[0] || null;
+      if (failed.length) {
+        Message.error(`上传完成：成功 ${files.length - failed.length}，失败 ${failed.length}，可重试失败文件`);
+        return;
+      }
+    } else {
+      await KnowledgeService.uploadDocument(uploadData);
+    }
+    emit('submit');
 
   } catch (error: any) {
     console.error('上传文档失败:', error);

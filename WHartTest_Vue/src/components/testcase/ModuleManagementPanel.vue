@@ -38,6 +38,7 @@
             :field-names="{ key: 'id', title: 'name' }"
             show-line
             block-node
+            :allow-deselect="false"
             draggable
             @drop="onDrop"
             @select="onModuleSelect"
@@ -208,16 +209,15 @@ const onModuleSearch = () => {
 
 // 模块树节点选择
 const onModuleSelect = (
-  _newSelectedKeys: (string | number)[],
+  newSelectedKeys: (string | number)[],
   data: { selected?: boolean; selectedNodes: TreeNodeData[]; node?: TreeNodeData; e?: Event }
 ) => {
-  if (data.selected && data.node) {
-    selectedModuleKey.value = data.node.key as number;
-    emit('moduleSelected', selectedModuleKey.value);
-  } else {
-    selectedModuleKey.value = null;
-    emit('moduleSelected', null);
-  }
+  // 使用树返回的选中键，不依赖不同版本事件数据中的 node.key / selected。
+  const nodeId = data.node?.id ?? data.node?.key ?? newSelectedKeys[0];
+  const moduleId = nodeId == null ? null : Number(nodeId);
+  selectedModuleKey.value = moduleId !== null && Number.isFinite(moduleId) ? moduleId : null;
+  selectedModuleKeys.value = selectedModuleKey.value === null ? [] : [selectedModuleKey.value];
+  emit('moduleSelected', selectedModuleKey.value);
 };
 
 // 树节点展开/收起处理
@@ -318,20 +318,9 @@ const handleModuleAction = async (action: string | number | Record<string, any> 
       if (selectedModuleKey.value) {
         const moduleToDelete = testCaseModules.value.find(m => m.id === selectedModuleKey.value);
         if (moduleToDelete) {
-          const children = testCaseModules.value.filter(m => m.parent === selectedModuleKey.value || m.parent_id === selectedModuleKey.value);
-          if (children.length > 0) {
-            Message.error('该模块下有子模块，请先删除子模块');
-            return;
-          }
-          // 检查模块下是否有用例
-          if (moduleToDelete.test_case_count && moduleToDelete.test_case_count > 0) {
-            Message.error(`模块 "${moduleToDelete.name}" 下包含 ${moduleToDelete.test_case_count} 个测试用例，请先处理用例。`);
-            return;
-          }
-
           Modal.warning({
             title: '确认删除',
-            content: `确定要删除模块 "${moduleToDelete.name}" 吗？此操作不可恢复。`,
+            content: `确定要删除模块 "${moduleToDelete.name}" 吗？其下所有子模块和测试用例将一并删除，此操作不可恢复。`,
             okText: '确认',
             cancelText: '取消',
             onOk: async () => {
