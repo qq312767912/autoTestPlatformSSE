@@ -141,7 +141,17 @@ class Config:
         # 打包成 exe 时默认启用 GUI 登录，开发模式默认关闭
         self.use_gui = getattr(sys, 'frozen', False) and not container_mode
         self.api_username = "admin"
-        self.api_password = "admin123"
+        # 安全：不内置默认口令（原 admin123 已随源码公开）
+        self.api_password = ""
+        # API Key 认证（可选，优先级高于账号密码）：不发 /api/token/ 登录请求，
+        # 不会触发后端单设备 session_version 递增，避免挤掉浏览器登录会话
+        self.api_key = ""
+        # WS 认证共享密钥：与后端 UI_WS_ACTUATOR_TOKEN 一致（硬性要求，
+        # 未配置或配置错误时连接会被拒绝 close 4401；run_compose.sh 会自动同步）
+        self.ws_token = ""
+        # ws_token 是否来自环境变量 WHARTTEST_ACTUATOR_WS_TOKEN（容器部署）。
+        # load_from_env 会 pop 该变量，检测逻辑须以此标志判断注入来源
+        self.ws_token_from_env = False
         self.actuator_id: str | None = None
         self.actuator_name: str | None = None
         self.actuator_description: str | None = None
@@ -263,6 +273,11 @@ class Config:
                 raise RuntimeError(f'无法读取执行器 API 密码文件: {api_password_file}') from exc
         elif api_password := os.environ.pop('WHARTTEST_ACTUATOR_API_PASSWORD', None):
             self.api_password = api_password.strip()
+        if api_key := os.environ.get('WHARTTEST_ACTUATOR_API_KEY'):
+            self.api_key = api_key.strip()
+        if ws_token := os.environ.pop('WHARTTEST_ACTUATOR_WS_TOKEN', None):
+            self.ws_token = ws_token.strip()
+            self.ws_token_from_env = True
         if browser_type := os.environ.get('WHARTTEST_ACTUATOR_BROWSER_TYPE'):
             self.browser_type = browser_type.strip()
         if stealth_user_agent := os.environ.get('WHARTTEST_ACTUATOR_STEALTH_USER_AGENT'):
@@ -369,13 +384,15 @@ def check_ws_token_config(config: Config, config_path: Path) -> None:
     （GUI 改配置、环境变量注入等场景由后续流程自行处理）。
 
     检测逻辑：
-    - 环境变量 WHARTTEST_ACTUATOR_WS_TOKEN 已注入（容器部署）时跳过提示；
+    - ws_token 由环境变量 WHARTTEST_ACTUATOR_WS_TOKEN 注入（容器部署）时
+      跳过提示：注意 load_from_env 已把该变量从 os.environ pop 掉，
+      必须判断 config.ws_token 的来源标志而非环境变量；
     - config.toml 缺少 ws_token 字段 → 提示补字段并与 .env 的
       UI_WS_ACTUATOR_TOKEN 保持一致；
     - 字段存在但与期望值不一致 → 提示改为一致。
     """
     # 容器部署通过环境变量注入 token，值由编排层保证一致，无需检测
-    if os.environ.get('WHARTTEST_ACTUATOR_WS_TOKEN'):
+    if getattr(config, 'ws_token_from_env', False):
         return
 
     expected = load_expected_ws_token(config_path)
