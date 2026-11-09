@@ -1,0 +1,4 @@
+interface:
+  display_name: "Excel 转 UI 自动化用例"
+  short_description: "整理手工测试步骤与预期，保存到 WHartTest UI 自动化并标记采集和构建缺口"
+  default_prompt: "使用 $excel-to-ui-case 将这份 Excel 用例转换并保存到指定项目的 UI 自动化用例中，明确区分待采集与可执行用例。"

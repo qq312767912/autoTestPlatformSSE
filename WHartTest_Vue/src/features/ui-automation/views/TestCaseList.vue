@@ -86,6 +86,7 @@
             {{ batchDeleteLabel }}
           </a-button>
         </a-popconfirm>
+        <a-button v-if="canConvertBusinessCases" :disabled="!projectId" @click="conversionVisible=true">业务用例转 UI 用例</a-button>
         <a-button type="primary" @click="showAddModal">
           <template #icon><icon-plus /></template>
           {{ pageText.addCase }}
@@ -201,6 +202,8 @@
 </a-form>
     </a-modal>
 
+    <BusinessCaseConversionModal v-if="projectId" v-model:visible="conversionVisible" :project-id="projectId" :modules="moduleOptions" :initial-module-id="props.selectedModuleId || filters.module" @saved="fetchTestCases" />
+
     <!-- 步骤管理抽屉 -->
     <a-drawer
       v-model:visible="stepsDrawerVisible"
@@ -221,6 +224,8 @@
 </template>
 
 <script setup lang="ts">
+import BusinessCaseConversionModal from '../components/BusinessCaseConversionModal.vue'
+import { useAuthStore } from '@/store/authStore'
 import FileAttachmentPicker from '@/features/file-management/components/FileAttachmentPicker.vue'
 import ExecutionScreenModal from '../components/ExecutionScreenModal.vue'
 import { ref, reactive, computed, onMounted, watch, onUnmounted } from 'vue'
@@ -238,6 +243,9 @@ const props = defineProps<{
   selectedModuleId?: number
 }>()
 
+const authStore=useAuthStore()
+const conversionVisible=ref(false)
+const canConvertBusinessCases=computed(()=>authStore.hasPermission('ui_automation.add_uitestcase') && authStore.hasPermission('testcases.view_testcase'))
 const projectStore = useProjectStore()
 const projectId = computed(() => projectStore.currentProject?.id)
 const { locale, isEnglish, tl } = useAppI18n()
@@ -714,6 +722,7 @@ const selectAvailableActuator = (needSlots = 1): string | undefined => {
 }
 
 const runTestCase = async (record: UiTestCase) => {
+  if(record.step_count === 0){Message.warning('此用例尚未构建页面步骤和断言，请先完善后执行');return}
   // 先获取执行器列表
   await fetchActuators()
 
@@ -766,6 +775,7 @@ const runTestCase = async (record: UiTestCase) => {
 
 /** 批量执行选中的用例 */
 const runBatchTestCases = async () => {
+  if(testcaseData.value.some(item=>selectedRowKeys.value.includes(item.id) && item.step_count === 0)){Message.warning('选中项包含未构建步骤的草稿，请先完善或取消选择');return}
   if (selectedRowKeys.value.length === 0) {
     Message.warning(pageText.value.selectCasesToRun)
     return

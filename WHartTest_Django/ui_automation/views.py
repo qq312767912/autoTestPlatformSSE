@@ -638,6 +638,40 @@ class UiTestCaseViewSet(viewsets.ModelViewSet):
     ordering_fields = ['name', 'level', 'created_at']
     ordering = ['-created_at']
 
+    @action(detail=False, methods=['get'], url_path='conversion-sources')
+    def conversion_sources(self, request):
+        from .case_conversion import permitted_project, local_skill
+        from testcases.models import TestCase
+        project = permitted_project(request.user, request.query_params.get('project'))
+        query = TestCase.objects.filter(project=project).select_related('module').order_by('-updated_at', '-id')
+        search = str(request.query_params.get('search') or '').strip()[:200]
+        if search:
+            query = query.filter(name__icontains=search)
+        try:
+            page = max(1, int(request.query_params.get('page', 1)))
+            size = min(100, max(1, int(request.query_params.get('page_size', 20))))
+        except (ValueError, TypeError):
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError('分页参数无效。')
+        count = query.count()
+        rows = query[(page - 1) * size:page * size]
+        skill = local_skill()
+        return Response({'count': count, 'results': [{'id': row.pk, 'name': row.name,
+            'module_name': row.module.name, 'level': row.level, 'test_type': row.test_type,
+            'updated_at': row.updated_at} for row in rows], 'skill': {'name': skill['name'], 'sha256': skill['sha256']}})
+
+    @action(detail=False, methods=['post'], url_path='conversion-preview')
+    def conversion_preview(self, request):
+        from .case_conversion import permitted_project, target_module, preview_conversion
+        project = permitted_project(request.user, request.data.get('project'))
+        module = target_module(project, request.data.get('module'))
+        return Response(preview_conversion(request.user, project, module, request.data.get('source_ids')))
+
+    @action(detail=False, methods=['post'], url_path='conversion-apply')
+    def conversion_apply(self, request):
+        from .case_conversion import save_conversion
+        return Response(save_conversion(request.user, request.data.get('preview_token'), request))
+
     def get_queryset(self):
         """列表查询时排除大字段"""
         queryset = super().get_queryset()
