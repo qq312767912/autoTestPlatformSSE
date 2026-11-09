@@ -14,4 +14,5 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadWritePaths=/etc/hosts /var/lib/wharttest-host-sync /projects/ai-test-platform/backups/host-sync
+ReadOnlyPaths=/etc/hosts
+ReadWritePaths=/var/lib/wharttest-host-sync /projects/ai-test-platform/backups/host-sync

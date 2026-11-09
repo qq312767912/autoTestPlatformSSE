@@ -2,7 +2,7 @@ ARG PYTHON_BASE_IMAGE=python:3.11-alpine
 FROM ${PYTHON_BASE_IMAGE}
 
 ARG PIP_INDEX_URL=https://pypi.org/simple
-ARG ALPINE_MIRROR=https://dl-cdn.alpinelinux.org/alpine
+ARG ALPINE_MIRROR=https://mirrors.aliyun.com/alpine
 ARG OCI_REVISION=unknown
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 SEMGREP_SEND_METRICS=off

@@ -91,3 +91,21 @@ class GraphPromptTests(SimpleTestCase):
         self.assertEqual(findings[0]["verification_status"], "supported")
         self.assertTrue(findings[0]["target_commit_verified"])
         self.assertEqual(findings[0]["supporting_evidence"], ["调用方直接进入该分支"])
+
+    def test_failed_or_deferred_advisory_stays_pending_confirmation(self):
+        for deferred in (False, True):
+            with self.subTest(deferred=deferred):
+                findings, rejected = _apply_verification_results(
+                    [{"key": "keychain", "disposition": "advisory", "verification_deferred": deferred}], []
+                )
+                self.assertFalse(rejected)
+                self.assertEqual(findings[0]["disposition"], "needs_confirmation")
+                self.assertEqual(findings[0]["verification_status"], "not_verified" if deferred else "verification_failed")
+
+    def test_effective_advisory_verdict_remains_advisory(self):
+        findings, rejected = _apply_verification_results(
+            [{"key": "suggestion", "disposition": "advisory"}],
+            [{"key": "suggestion", "verdict": "advisory", "reason": "非正确性改进"}],
+        )
+        self.assertFalse(rejected)
+        self.assertEqual(findings[0]["disposition"], "advisory")

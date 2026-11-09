@@ -205,6 +205,7 @@ class CodeReviewMCP:
             yield prepared[0]
 
     def _run_semgrep(self, root, diffs):
+        self.static_coverage = {"percent": 0, "status": "failed", "requested_files": len(diffs)}
         paths = [item.get("path") for item in diffs if item.get("path") and (root / item.get("path")).is_file()]
         if not paths:
             return [], "Semgrep 无可扫描的变更文件"
@@ -233,8 +234,14 @@ class CodeReviewMCP:
             return [], f"Semgrep 未完成：{exc}"
         return self._normalize_semgrep(payload)
 
-    @staticmethod
-    def _normalize_semgrep(payload):
+    def _normalize_semgrep(self, payload):
+        requested = self.static_coverage.get("requested_files", 0)
+        scanned = (payload.get("paths") or {}).get("scanned") or []
+        errors = payload.get("errors") or []
+        successful = payload.get("scanner_exit_code", 0) in (0, 1) and not errors
+        percent = round(min(len(scanned), requested) / requested * 100, 1) if requested and successful else 0
+        self.static_coverage.update({"percent": percent, "status": "completed" if successful and percent == 100 else "partial" if successful else "failed",
+                                     "scanned_files": len(scanned), "error_count": len(errors)})
         severity_map = {"ERROR": "high", "WARNING": "medium", "INFO": "low"}
         findings = []
         for item in (payload.get("results") or [])[:200]:
@@ -258,6 +265,7 @@ class CodeReviewMCP:
 
     def run_static_checks(self, diffs):
         """运行仓库已安装的只读前端检查器；未安装时明确跳过而不伪造结果。"""
+        self.static_coverage = {"percent": 0, "status": "failed", "requested_files": len(diffs)}
         try:
             with self._repository_root() as root:
                 return self._run_static_checks_in_root(root, diffs)

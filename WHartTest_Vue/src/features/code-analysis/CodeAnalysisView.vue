@@ -48,7 +48,7 @@
           <div class="deletion"><b>-{{ selectedTask.change_report?.summary?.deletions || 0 }}</b><span>删除行</span></div>
           <div><b>{{ selectedTask.change_report?.summary?.changed_lines || 0 }}</b><span>总变更行</span></div>
           <div class="danger"><b>{{ selectedTask.change_report?.summary?.high_risk_count || 0 }}</b><span>高风险</span></div>
-          <div><b>{{ selectedTask.change_report?.summary?.risk_count || 0 }}</b><span>风险提示</span></div>
+          <div><b>{{ (selectedTask.change_report?.summary?.confirmed_count || 0) + (selectedTask.change_report?.summary?.needs_confirmation_count || 0) }}</b><span>风险提示</span></div>
           <div><b>{{ selectedTask.test_report?.summary?.test_point_count || 0 }}</b><span>需求测试点</span></div>
           <div><b>{{ displayedImpactCount(selectedTask) }}</b><span>重点影响</span></div>
         </div>
@@ -72,7 +72,7 @@
           <div><span>提交范围</span><b class="mono">{{ shortSha(selectedTask.base_sha) }} → {{ shortSha(selectedTask.head_sha) }}</b></div>
           <div><span>发起人</span><b>{{ selectedTask.creator_name }}</b></div>
           <div><span>完成时间</span><b>{{ formatTime(selectedTask.completed_at) }}</b></div>
-          <div><span>机器分析覆盖</span><b>{{ selectedTask.machine_coverage }}%</b></div>
+          <div><span>静态扫描覆盖</span><b>{{ selectedTask.machine_coverage }}%</b></div>
           <div><span>AI分析覆盖</span><b>{{ selectedTask.ai_coverage }}%</b></div>
           <div class="wide"><span>AI用量</span><b>{{ selectedTask.token_usage || 0 }} Token <a-tooltip content="本次AI分析读取的输入内容与生成内容的计量单位，用于观察上下文规模和推理成本，不代表分析质量。"><icon-question-circle class="help-icon" /></a-tooltip></b></div>
         </div>
@@ -135,8 +135,9 @@
               <span>触发路径 {{ item.trigger_reachable === false ? '未证明可达' : '已证明/待确认' }}</span>
             </div>
             <p>{{ item.file }} <a-tag class="risk-type" color="gray">{{ riskType(item) }}</a-tag></p>
-            <div class="code-snippet"><div class="snippet-caption"><span>风险凭据</span><small>{{ item.line_start ? `旧版本第 ${item.line_start} 行` : '未定位源码行' }}</small></div><div v-for="(line, index) in evidenceLines(item)" :key="index" class="snippet-line"><span>{{ item.line_start ? item.line_start + index : '—' }}</span><code>{{ line || ' ' }}</code></div></div>
+            <div class="code-snippet"><div class="snippet-caption"><span>风险凭据</span><small>{{ item.line_start ? `${item.line_side === 'old' ? '修改前' : '修改后'}第 ${item.line_start} 行` : '未定位源码行' }}</small></div><div v-for="(line, index) in evidenceLines(item)" :key="index" class="snippet-line"><span>{{ item.line_start ? item.line_start + index : '—' }}</span><code>{{ line || ' ' }}</code></div></div>
             <div class="finding-detail"><b>影响：</b><span>{{ item.impact || '需结合代码上下文和完整 Diff 确认实际影响范围' }}</span></div>
+            <div v-for="reference in item.policy_references || []" :key="reference.article + reference.requirement" class="finding-detail"><b>制度依据：</b><span>{{ reference.title }}，{{ reference.article }}：{{ reference.content }}</span></div>
             <div v-if="item.verification_reason" class="finding-detail"><b>核验结论：</b><span>{{ item.verification_reason }}</span></div>
             <div class="finding-detail"><b>证据链：</b><span>{{ evidenceStatusLabel(item.verification_trace?.evidence_status) }}<template v-if="item.verification_trace?.target_sha"> · 目标 {{ shortSha(item.verification_trace.target_sha) }}</template></span></div>
             <div v-if="item.verification_trace?.files_read?.length" class="finding-detail"><b>已查源码：</b><span>{{ item.verification_trace.files_read.join('、') }}</span></div>
@@ -360,6 +361,7 @@
 </template>
 
 <script setup lang="ts">
+import { relevantDiffFragment } from './diffEvidence';
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
 import { IconDelete, IconDown, IconDownload, IconFile, IconPlus, IconQuestionCircle, IconRefresh, IconSettings } from '@arco-design/web-vue/es/icon';
@@ -475,35 +477,7 @@ const ocrFailureType = (type:string) => ({network:'网络错误',rate_limit:'接
 const evidenceLines = (item:any) => String(item.evidence || '未提供代码证据').split(/\r?\n/);
 const diffLines = computed(() => diffText.value.split(/\r?\n/).filter((line, index, all) => line || index < all.length - 1));
 const diffLineClass = (line:string) => line.startsWith('+') && !line.startsWith('+++') ? 'added' : (line.startsWith('-') && !line.startsWith('---') ? 'removed' : (line.startsWith('@@') ? 'hunk' : ''));
-const relevantDiffFragment = (diff:string, targetLine?:number, evidence?:string) => {
-  const lines = String(diff || '').split(/\r?\n/);
-  const hunks:Array<{start:number;end:number;oldStart:number;oldCount:number;newStart:number;newCount:number}> = [];
-  lines.forEach((line,index) => {
-    const match = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
-    if (!match) return;
-    if (hunks.length) hunks[hunks.length - 1].end = index;
-    hunks.push({start:index,end:lines.length,oldStart:Number(match[1]),oldCount:Number(match[2] || 1),newStart:Number(match[3]),newCount:Number(match[4] || 1)});
-  });
-  if (!hunks.length) return lines.slice(0,24).join('\n');
-  const evidenceNeedle = String(evidence || '').split(/\r?\n/).map(line => line.trim()).find(line => line.length >= 8);
-  let hunk = targetLine ? hunks.find(item =>
-    (targetLine >= item.oldStart && targetLine < item.oldStart + Math.max(item.oldCount,1)) ||
-    (targetLine >= item.newStart && targetLine < item.newStart + Math.max(item.newCount,1))) : undefined;
-  if (!hunk && evidenceNeedle) hunk = hunks.find(item => lines.slice(item.start,item.end).some(line => line.includes(evidenceNeedle)));
-  hunk ||= hunks[0];
-  let oldLine = hunk.oldStart, newLine = hunk.newStart, anchor = hunk.start + 1;
-  for (let index=hunk.start+1; index<hunk.end; index++) {
-    const line = lines[index];
-    const matchesLine = !!targetLine && ((line.startsWith('-') && oldLine === targetLine) || (line.startsWith('+') && newLine === targetLine) || (!line.startsWith('+') && !line.startsWith('-') && (oldLine === targetLine || newLine === targetLine)));
-    const matchesEvidence = !!evidenceNeedle && line.includes(evidenceNeedle);
-    if (matchesLine || matchesEvidence) { anchor=index; break; }
-    if (!line.startsWith('+')) oldLine++;
-    if (!line.startsWith('-')) newLine++;
-  }
-  const from = Math.max(hunk.start + 1, anchor - 6);
-  const to = Math.min(hunk.end, anchor + 9);
-  return [lines[hunk.start], ...lines.slice(from,to)].join('\n');
-};
+
 const impactScopeCount = (task:AnalysisTask) => {
   const saved = task.change_report?.summary?.impact_scope_count;
   if (typeof saved === 'number') return saved;
@@ -609,12 +583,14 @@ async function prepareChangeHtmlReport(task:AnalysisTask):Promise<AnalysisTask>{
       const item=findings[index];
       try{
         const fullDiff=await loadDiff(item);
-        item.related_diff=relevantDiffFragment(fullDiff,item.line_start,item.evidence);
+        item.related_diff=relevantDiffFragment(fullDiff,item.line_start,item.evidence,item.line_side);
       }catch(error:unknown){item.related_diff_error=error instanceof Error ? error.message : '读取相关 Diff 失败'}
       if(item.severity==='high' && item.disposition==='confirmed'){
         try{
           const generated=item.patch_status ? item : await api.generateSuggestedPatch(task.id,item.key);
+          const resolvedDiff=item.related_diff;
           Object.assign(item,generated);
+          item.related_diff=resolvedDiff;
         }catch(error:unknown){
           item.patch_status='reference';
           item.patch_validation_message=error instanceof Error ? `建议修复生成失败：${error.message}` : '建议修复生成失败';
@@ -641,7 +617,7 @@ async function openLlmConfig(){llmConfigVisible.value=true;selectedPlatformLlmId
 async function usePlatformLlmConfig(){if(!selectedPlatformLlmId.value)return;platformLlmCopying.value=true;try{const saved=await api.copyPlatformLlmConfig(selectedPlatformLlmId.value);Object.assign(llmConfigForm,saved,{api_key:''});selectedPlatformLlmId.value=undefined;Message.success('已复制为代码审查专用配置，可继续调整或测试连接')}catch(e:any){Message.error(e.message||'复制 LLM 配置失败')}finally{platformLlmCopying.value=false}}
 async function saveLlmConfig(){if(!llmConfigForm.config_name||!llmConfigForm.api_url||!llmConfigForm.name||(!llmConfigForm.api_key&&!llmConfigForm.has_api_key)){Message.warning('请完整填写代码审查模型配置');return}llmConfigSaving.value=true;try{const saved=await api.saveCodeAnalysisLlmConfig({...llmConfigForm});Object.assign(llmConfigForm,saved,{api_key:''});llmConfigVisible.value=false;Message.success('代码审查专用 LLM 已保存')}catch(e:any){Message.error(e.message||'保存代码审查模型配置失败')}finally{llmConfigSaving.value=false}}
 async function testLlmConfig(){if(!llmConfigForm.id)return;llmConfigTesting.value=true;try{const result=await api.testCodeAnalysisLlmConfig(llmConfigForm.id);Message.success(result?.message||'连接测试成功')}catch(e:any){Message.error(e.message||'连接测试失败')}finally{llmConfigTesting.value=false}}
-async function openDiff(item:any){if(!selectedTask.value)return;diffVisible.value=true;diffLoading.value=true;diffText.value='';diffNotice.value='';diffFixPlan.value='';diffFixLocation.value='';diffTitle.value=`相关 Diff · ${item.file || '变更文件'}`;try{const payload=await api.getTaskDiff(selectedTask.value.id,item.file);diffText.value=relevantDiffFragment(payload?.diff||'',item.line_start,item.evidence)}catch(e:any){Message.error(e.message||'读取 Diff 失败')}finally{diffLoading.value=false}}
+async function openDiff(item:any){if(!selectedTask.value)return;diffVisible.value=true;diffLoading.value=true;diffText.value='';diffNotice.value='';diffFixPlan.value='';diffFixLocation.value='';diffTitle.value=`相关 Diff · ${item.file || '变更文件'}`;try{const payload=await api.getTaskDiff(selectedTask.value.id,item.file);diffText.value=relevantDiffFragment(payload?.diff||'',item.line_start,item.evidence,item.line_side)}catch(e:any){Message.error(e.message||'读取 Diff 失败')}finally{diffLoading.value=false}}
 async function openSuggestedPatch(item:any){
   if(!selectedTask.value || patchLoadingKey.value)return;
   if(item.severity!=='high' || item.disposition!=='confirmed'){Message.warning('仅已确认的高风险问题支持生成建议修复');return}

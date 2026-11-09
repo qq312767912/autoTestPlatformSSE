@@ -35,6 +35,7 @@ install -d -m 0755 "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR" "$BACKUP_DIR"
 install -m 0755 "$SOURCE_DIR/wharttest_host_sync.py" "$INSTALL_DIR/wharttest_host_sync.py"
 install -m 0600 "$TOKEN_SOURCE" "$CONFIG_DIR/test_host_sync_token"
 cat > "$CONFIG_DIR/host-sync.env" <<'EOF'
+HOST_SYNC_APPLY_HOST=false
 WHARTTEST_BACKEND_URL=http://127.0.0.1:8912
 TEST_HOST_SYNC_TOKEN_FILE=/etc/wharttest/test_host_sync_token
 HOST_SYNC_BACKUP_ROOT=/projects/ai-test-platform/backups/host-sync

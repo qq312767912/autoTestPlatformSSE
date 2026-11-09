@@ -1,3 +1,4 @@
+import { relevantDiffFragment } from './diffEvidence';
 import type { AnalysisTask, Finding, ReviewFile } from './types';
 
 export type ReportType = 'change' | 'test';
@@ -103,7 +104,7 @@ function renderUnifiedDiff(diff: string): string {
 }
 
 function renderRelatedDiff(item: Finding): string {
-  if (item.related_diff) return `<div class="evidence-title diff-title"><b>查看相关 Diff</b><span>修改前 / 修改后行号</span></div><div class="raw-diff">${renderUnifiedDiff(item.related_diff)}</div>`;
+  if (item.related_diff) return `<div class="evidence-title diff-title"><b>查看相关 Diff</b><span>修改前 / 修改后行号</span></div><div class="raw-diff">${renderUnifiedDiff(relevantDiffFragment(item.related_diff,item.line_start,item.evidence,item.line_side))}</div>`;
   const lines = item.change_lines || [];
   if (lines.length) return `<div class="evidence-title diff-title"><b>相关 Diff</b><span>${escapeHtml(item.diff_header || '')}</span></div><div class="evidence">
     ${lines.map(line => {
@@ -194,6 +195,7 @@ function buildChangeReport(task: AnalysisTask): string {
       ${item.replacement_evidence ? `<div class="detail"><b>替代证据</b><span>${richText(item.replacement_evidence)}</span></div>` : ''}
       ${item.missing_evidence ? `<div class="detail"><b>缺少的证据</b><span>${richText(item.missing_evidence)}</span></div>` : ''}
       ${item.severity_reason ? `<div class="detail"><b>定级依据</b><span>${richText(item.severity_reason)}</span></div>` : ''}
+      ${(item.policy_references || []).map(reference => `<div class="detail"><b>制度依据</b><span>${escapeHtml(reference.title)}，${escapeHtml(reference.article)}：${escapeHtml(reference.content)}</span></div>`).join('')}
       ${(item.document_references || []).map(document => `<div class="detail"><b>关联文档</b><span>${escapeHtml(document.title || '未命名')}（版本 ${escapeHtml(document.version || '未记录')}）：${escapeHtml(document.excerpt || document.reason || '无可用片段')}</span></div>`).join('')}
       ${findingDisposition(item) === 'needs_confirmation' && item.counter_evidence ? `<div class="detail"><b>待确认依据</b><span>${richText(item.counter_evidence)}</span></div>` : ''}
       <div class="detail"><b>处理建议</b><span>${richText(item.recommendation || '检查相关调用链并补充可复现验证；确认成立后再修改')}</span></div>
@@ -226,11 +228,12 @@ function buildChangeReport(task: AnalysisTask): string {
       ${metric('新增行', `+${numberValue(summary.additions)}`, 'positive')}
       ${metric('删除行', `-${numberValue(summary.deletions)}`, 'danger')}
       ${metric('总变更行', numberValue(summary.changed_lines))}
-      ${metric('核心问题', numberValue(summary.risk_count), 'danger')}
+      ${metric('核心问题', findings.filter(item => findingDisposition(item) !== 'advisory').length, 'danger')}
       ${metric('待开发确认', pending.length)}
+      ${metric('审查状态', ({completed:'完成',partial:'部分完成',degraded:'降级完成',failed:'失败'} as Record<string,string>)[task.status] || task.status)}
       ${metric('反证未完成', numberValue(summary.unverified_risk_count))}
       ${metric('改进建议', advisory.length)}
-      ${metric('机器覆盖率', `${numberValue(task.machine_coverage)}%`)}
+      ${metric('静态扫描覆盖率', `${numberValue(task.machine_coverage)}%`)}
       ${metric('AI 覆盖率', `${numberValue(task.ai_coverage)}%`)}
     </section>
     ${numberValue(summary.suppressed_risk_count) ? `<section class="section"><div class="summary"><h3>开发报告已聚焦</h3><p>平台已全量扫描 ${numberValue(summary.candidate_risk_count)} 条候选，本报告仅展示 ${numberValue(summary.risk_count)} 条核心问题；目标 Commit 反证核验排除 ${numberValue(summary.rejected_risk_count)} 条，其余低优先级或低证据候选不占用开发阅读篇幅。</p></div></section>` : ''}
@@ -243,7 +246,7 @@ function buildChangeReport(task: AnalysisTask): string {
     </section>
     <section class="section needs_confirmation" id="pending"><div class="section-head"><div><h2>待开发确认的风险</h2><p>扫描已覆盖，但需要业务约束、调用方或运行环境信息才能定性；确认后再决定是否修复</p></div><span class="count">${pending.length} 项</span></div>${renderCards(pending) || '<div class="empty">没有待确认风险</div>'}</section>
     <section class="section advisory" id="advisory"><div class="section-head"><div><h2>改进建议</h2><p>不作为缺陷统计，不影响确定缺陷的采纳率</p></div><span class="count">${advisory.length} 项</span></div>${renderCards(advisory) || '<div class="empty">没有改进建议</div>'}</section>
-    <section class="section" id="coverage"><div class="section-head"><div><h2>审查覆盖</h2><p>分别展示变更范围、机器扫描与 AI 语义审查结果</p></div><span class="count">${numberValue(coverage.reviewable_files ?? coverage.analyzed_files ?? summary.analyzed_files)} / ${numberValue(coverage.scope_files ?? summary.changed_files)} 个文件可语义审查</span></div><p class="scope-note">机器规则覆盖 ${numberValue(coverage.machine_percent ?? task.machine_coverage)}%，AI 语义审查覆盖 ${numberValue(coverage.ai_percent ?? task.ai_coverage)}%；AI 完成 ${numberValue(aiReview.reviewed_file_count)} 个、未完成 ${numberValue(aiReview.failed_file_count)} 个，排除 ${numberValue(coverage.excluded_files ?? summary.excluded_files)} 个。${escapeHtml(deepStrategy)}每个文件的实际状态会在下方单独标明。</p>${failedBatchDetails ? `<div class="summary"><h3>AI 失败批次</h3><ul>${failedBatchDetails}</ul></div>` : ''}${report.analysis_note ? `<div class="summary"><h3>实际执行链路</h3><p>${richText(report.analysis_note)}</p></div>` : ''}<div class="file-list">${files || '<div class="empty">未记录变更文件</div>'}</div></section>`;
+    <section class="section" id="coverage"><div class="section-head"><div><h2>审查覆盖</h2><p>分别展示变更范围、机器扫描与 AI 语义审查结果</p></div><span class="count">${numberValue(coverage.reviewable_files ?? coverage.analyzed_files ?? summary.analyzed_files)} / ${numberValue(coverage.scope_files ?? summary.changed_files)} 个文件可语义审查</span></div><p class="scope-note">静态扫描覆盖 ${numberValue(coverage.machine_percent ?? task.machine_coverage)}%，AI 语义审查覆盖 ${numberValue(coverage.ai_percent ?? task.ai_coverage)}%；AI 完成 ${numberValue(aiReview.reviewed_file_count)} 个、未完成 ${numberValue(aiReview.failed_file_count)} 个，排除 ${numberValue(coverage.excluded_files ?? summary.excluded_files)} 个。${escapeHtml(deepStrategy)}每个文件的实际状态会在下方单独标明。</p>${failedBatchDetails ? `<div class="summary"><h3>AI 失败批次</h3><ul>${failedBatchDetails}</ul></div>` : ''}${report.candidate_audit?.length ? `<details class="summary"><summary>候选去向（${report.candidate_audit.length} 项）</summary>${report.candidate_audit.map(item => `<p><b>${escapeHtml(item.key)} · ${escapeHtml(item.change)}</b><br>${escapeHtml(item.file)}<br>分类 ${escapeHtml(item.initial_disposition)} → ${escapeHtml(item.final_disposition)}；等级 ${escapeHtml(item.initial_severity)} → ${escapeHtml(item.final_severity)}；核验 ${escapeHtml(item.verification_status)}<br>${escapeHtml(item.reason)}</p>`).join('')}</details>` : ''}${report.analysis_note ? `<div class="summary"><h3>实际执行链路</h3><p>${richText(report.analysis_note)}</p></div>` : ''}<div class="file-list">${files || '<div class="empty">未记录变更文件</div>'}</div></section>`;
   return reportDocument(task, reportName(task, 'change'), body);
 }
 

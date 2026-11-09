@@ -11,7 +11,7 @@ ARG OCI_REVISION=unknown
 # ============================================
 FROM ${PYTHON_BASE_IMAGE} AS builder
 
-ARG ALPINE_MIRROR=https://dl-cdn.alpinelinux.org/alpine
+ARG ALPINE_MIRROR=https://mirrors.aliyun.com/alpine
 ARG PIP_INDEX_URL=https://pypi.org/simple
 ARG PIP_INDEX_FALLBACKS=
 ARG HF_ENDPOINT=https://huggingface.co
@@ -99,7 +99,7 @@ FROM ${PYTHON_BASE_IMAGE}
 
 ARG OCI_REVISION
 
-ARG ALPINE_MIRROR=https://dl-cdn.alpinelinux.org/alpine
+ARG ALPINE_MIRROR=https://mirrors.aliyun.com/alpine
 ARG HF_ENDPOINT=https://huggingface.co
 ARG NPM_REGISTRY=https://registry.npmjs.org
 
@@ -126,7 +126,7 @@ RUN sed -i "s#https://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" /etc/apk
     x11vnc \
     openbox \
     novnc \
-    py3-websockify \
+    websockify \
     libgomp \
     libpq \
     libjpeg-turbo \
@@ -216,7 +216,7 @@ RUN npm config set registry "${NPM_REGISTRY}" 2>/dev/null && \
     case "$(uname -m)" in \
       aarch64|arm64) echo "Skipping agent-browser browser install on ARM64" ;; \
       *) agent-browser install 2>/dev/null || true ;; \
-    esac || echo "WARN: agent-browser not available"
+    esac
 
 COPY bundled_skills/ /app/bundled_skills/
 

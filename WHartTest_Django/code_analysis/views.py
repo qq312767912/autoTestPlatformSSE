@@ -817,6 +817,8 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
                 f"- 排除文件：{coverage.get('excluded_files', summary.get('excluded_files', 0))}",
                 f"- OCR状态：{ocr_status.get('message') or '历史报告未记录 OCR 状态'}",
                 f"- Token消耗：{task.token_usage}", "",
+                "## 候选去向", "",
+                *[f"- {item.get('key')} · {item.get('file')}：{item.get('initial_disposition')} → {item.get('final_disposition')}；{item.get('verification_status')}；{item.get('reason')}" for item in report.get("candidate_audit", [])], "",
                 "## 风险与影响", "",
             ]
             findings = sorted(
@@ -841,6 +843,8 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
                     f"- 定级依据：{item.get('severity_reason') or '按已核验证据及影响范围判定'}",
                     f"- 建议：{item.get('recommendation') or '覆盖相关正常流程、异常分支及调用链后再决定是否修复'}", "",
                 ])
+                for reference in item.get("policy_references") or []:
+                    lines.append(f"- 制度依据：{reference.get('title')}，{reference.get('article')}：{reference.get('content')}")
                 for document in item.get("document_references") or []:
                     lines.append(f"- 关联文档：{document.get('title') or '未命名'}（版本 {document.get('version') or '未记录'}，更新 {document.get('updated_at') or '未记录'}）：{document.get('excerpt') or document.get('reason') or '无可用片段'}")
                 if item.get("severity") == "high":

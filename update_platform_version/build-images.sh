@@ -79,7 +79,7 @@ build_backend() {
     --platform "$PLATFORM" \
     --progress=plain \
     --build-arg PYTHON_BASE_IMAGE="${DOCKER_PYTHON_BASE_IMAGE:-python:3.11-alpine}" \
-    --build-arg ALPINE_MIRROR="${DOCKER_ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}" \
+    --build-arg ALPINE_MIRROR="${DOCKER_ALPINE_MIRROR:-https://mirrors.aliyun.com/alpine}" \
     --build-arg OCI_REVISION="$REV" \
     -f "$REPO_ROOT/WHartTest_Django/Dockerfile.alpine" \
     -t "$BACKEND_IMAGE" \
@@ -115,7 +115,7 @@ build_semgrep() {
     --platform "$PLATFORM" \
     --progress=plain \
     --build-arg PYTHON_BASE_IMAGE="${DOCKER_SEMGREP_PYTHON_BASE_IMAGE:-python:3.11-alpine}" \
-    --build-arg ALPINE_MIRROR="${DOCKER_ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}" \
+    --build-arg ALPINE_MIRROR="${DOCKER_ALPINE_MIRROR:-https://mirrors.aliyun.com/alpine}" \
     --build-arg OCI_REVISION="$REV" \
     -f "$REPO_ROOT/WHartTest_Semgrep/Dockerfile" \
     -t "$SEMGREP_IMAGE" \
@@ -133,7 +133,7 @@ build_crg() {
     --platform "$PLATFORM" \
     --progress=plain \
     --build-arg PYTHON_BASE_IMAGE="${DOCKER_CRG_PYTHON_BASE_IMAGE:-python:3.11-alpine}" \
-    --build-arg ALPINE_MIRROR="${DOCKER_ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}" \
+    --build-arg ALPINE_MIRROR="${DOCKER_ALPINE_MIRROR:-https://mirrors.aliyun.com/alpine}" \
     --build-arg OCI_REVISION="$REV" \
     -f "$REPO_ROOT/WHartTest_CRG/Dockerfile" \
     -t "$CRG_IMAGE" \

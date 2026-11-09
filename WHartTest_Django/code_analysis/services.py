@@ -1,4 +1,5 @@
 import fnmatch
+import fcntl
 import json
 import logging
 import os
@@ -20,6 +21,9 @@ from django.utils import timezone
 from django.db import close_old_connections, transaction
 
 from .models import AnalysisTask, AnalysisTaskExecutionLog, TestRequirementDraft, UserGitLabCredential
+
+from .review_reliability import parse_json_response, json_failure_diagnostic, verification_pending
+from .security_policy import policy_prompt, policy_references, verified_policy_violation, has_mandatory_policy_candidate
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +155,7 @@ AI_REVIEW_LANGUAGE_RULE = (
     "还有 test_requirements 的全部描述字段。代码标识符、文件路径、接口名、字段名和必要的原始代码片段保持原文，"
     "但解释这些证据的句子必须使用中文；即使 Diff、源码注释或业务上下文是英文，也不得输出英文审查结论。"
 )
-CODE_REVIEW_REPORT_SCHEMA_VERSION = 8
+CODE_REVIEW_REPORT_SCHEMA_VERSION = 9
 DEVELOPER_REPORT_FINDING_LIMIT = 15
 
 # OpenCodeReview 参数统一维护。内网自建模型不限制 token；OCR 需要保留原生上下文，
@@ -461,7 +465,26 @@ def _ocr_result_path(task):
 
 
 @contextmanager
+def _repository_guard(task):
+    locks = OCR_WORKSPACE_ROOT / ".locks"
+    locks.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (locks / (str(task.pk) + ".lock")).open("a") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
 def _managed_gitlab_repository(task):
+    with _repository_guard(task):
+        with _managed_gitlab_repository_unlocked(task) as prepared:
+            yield prepared
+
+
+@contextmanager
+def _managed_gitlab_repository_unlocked(task):
     """使用执行人的 Token创建或更新任务独占浅仓库，任务删除前持续保留。"""
     credential = UserGitLabCredential.objects.get(
         project=task.project,
@@ -525,6 +548,13 @@ def _managed_gitlab_repository(task):
 
 @contextmanager
 def _managed_local_repository(task):
+    with _repository_guard(task):
+        with _managed_local_repository_unlocked(task) as prepared:
+            yield prepared
+
+
+@contextmanager
+def _managed_local_repository_unlocked(task):
     """将本地仓库也物化为任务独占的浅仓库。
 
     CRG 容器只能看到受限的任务仓库挂载，不挂载平台整个
@@ -710,71 +740,9 @@ def _diff_line_stats(diff_text):
     return additions, deletions
 
 
-def _diff_evidence_for_finding(finding, diff_text, context_lines=3):
-    """为 HTML 报告保存可独立核验的 Diff 证据。
-
-    优先用 evidence 原文定位，其次使用模型/扫描器给出的行号；同时保留新旧行号，
-    避免“第 N 行”无法判断是修改前还是修改后。
-    """
-    hunks, current = [], None
-    old_line = new_line = None
-    for raw in str(diff_text or "").splitlines():
-        match = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", raw)
-        if match:
-            current = {"header": raw, "lines": []}
-            hunks.append(current)
-            old_line, new_line = int(match.group(1)), int(match.group(3))
-            continue
-        if current is None or raw.startswith(("---", "+++")):
-            continue
-        kind = "added" if raw.startswith("+") else ("removed" if raw.startswith("-") else "context")
-        current["lines"].append({
-            "type": kind,
-            "old_line": old_line if kind != "added" else None,
-            "new_line": new_line if kind != "removed" else None,
-            "content": raw[1:] if raw[:1] in {"+", "-", " "} else raw,
-        })
-        if kind != "added":
-            old_line += 1
-        if kind != "removed":
-            new_line += 1
-    if not hunks:
-        return {}
-    evidence_lines = [line.strip() for line in str(finding.get("evidence") or "").splitlines() if len(line.strip()) >= 4]
-    target_line = finding.get("line_start")
-    selected = anchor = None
-    for hunk in hunks:
-        for index, line in enumerate(hunk["lines"]):
-            if any(needle in line["content"].strip() or line["content"].strip() in needle for needle in evidence_lines):
-                selected, anchor = hunk, index
-                break
-        if selected:
-            break
-    if selected is None and target_line:
-        for hunk in hunks:
-            for index, line in enumerate(hunk["lines"]):
-                if target_line in {line["old_line"], line["new_line"]}:
-                    selected, anchor = hunk, index
-                    break
-            if selected:
-                break
-    selected = selected or hunks[0]
-    anchor = 0 if anchor is None else anchor
-    start, end = max(0, anchor - context_lines), min(len(selected["lines"]), anchor + context_lines + 1)
-    excerpt = selected["lines"][start:end]
-    if not any(line["type"] in {"added", "removed"} for line in excerpt):
-        changed = next((index for index, line in enumerate(selected["lines"]) if line["type"] != "context"), anchor)
-        start, end = max(0, changed - context_lines), min(len(selected["lines"]), changed + context_lines + 1)
-        excerpt = selected["lines"][start:end]
-    anchor_line = selected["lines"][anchor] if selected["lines"] else {}
-    line_side = "old" if anchor_line.get("type") == "removed" else "new"
-    resolved_line = anchor_line.get("old_line") if line_side == "old" else anchor_line.get("new_line")
-    return {
-        "diff_header": selected["header"],
-        "change_lines": excerpt,
-        "line_side": line_side,
-        "line_start": resolved_line or finding.get("line_start"),
-    }
+def _diff_evidence_for_finding(finding, diff_text, context_lines=6):
+    from .diff_evidence import locate_diff
+    return locate_diff(finding, diff_text, context_lines)
 
 
 def _attach_finding_diff_evidence(findings, analyzable_diffs):
@@ -913,6 +881,8 @@ def _is_pure_addition_hypothesis(finding):
     change = str(finding.get("change") or "").strip()
     impact = str(finding.get("impact") or "").strip()
     evidence = str(finding.get("evidence") or "").strip()
+    if any(r["mandatory"] and r["violation"] and r["applicable"] and r["evidence"] for r in policy_references(finding.get("policy_checks"))):
+        return False
     return bool(
         re.search(r"(?:^新增|^添加|中新增|引入新)", change)
         and not re.search(r"(?:删除|移除|取消|缺失|未校验|未鉴权)", change + evidence)
@@ -963,14 +933,21 @@ def _deduplicate_iteration_test_points(points):
 
 
 def _json_from_response(content):
-    text = content if isinstance(content, str) else str(content)
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
-    if fenced:
-        text = fenced.group(1)
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end < start:
-        raise ValueError("LLM未返回JSON对象")
-    return json.loads(text[start:end + 1])
+    return parse_json_response(content)
+
+
+def _parse_stage_json(response, task_id, stage, keys):
+    try:
+        return _json_from_response(getattr(response, "content", response))
+    except (ValueError, TypeError) as exc:
+        detail = json_failure_diagnostic(response, exc)
+        detail.update({"stage": stage, "candidate_keys": list(keys)})
+        try:
+            AnalysisTaskExecutionLog.objects.create(
+                task_id=task_id, event="stage_finished", message="模型 JSON 解析失败（已记录脱敏诊断）", detail=detail)
+        except Exception:
+            logger.warning("保存模型 JSON 诊断失败（异常内容未输出）")
+        raise
 
 
 def _review_payload_needs_chinese_retry(payload):
@@ -1834,6 +1811,8 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
         "\"disposition\":\"confirmed|needs_confirmation|advisory\",\"confidence\":0.0,\"evidence\":\"\",\"trigger\":\"\",\"impact\":\"\",\"recommendation\":\"\",\"test_title\":\"\",\"test_objective\":\"\",\"test_expected_result\":\"\"}],\"test_requirements\":[{\"title\":\"\","
         "\"objective\":\"\",\"expected_result\":\"\",\"priority\":\"high|medium|low\",\"test_type\":\"\"}]}。"
     )
+    prompt_head += policy_prompt()
+
     def analyze_batch(index, batch):
         # 各线程使用独立模型客户端，避免共享 HTTP 会话和回调状态。
         llm = create_llm_instance(config, temperature=0.1)
@@ -1842,14 +1821,14 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
         prompt = f"{prompt_head}\n业务上下文：\n{business_context}\n已读取的目标版本源码上下文（只读MCP）：\n{json.dumps(prompt_repository_context, ensure_ascii=False)[:18000]}\n机器已确认风险：{json.dumps(known, ensure_ascii=False)}\nDIFF:\n{batch_text}"
         response = llm.invoke(prompt)
         try:
-            payload = _json_from_response(getattr(response, "content", response))
+            payload = _parse_stage_json(response, task.pk, "AI初审", batch["files"])
         except (ValueError, TypeError, json.JSONDecodeError):
             # 内网模型偶发返回截断/非法 JSON；只重试当前批次。
             response = llm.invoke(
                 f"{prompt}\n\n上一次输出无法解析为 JSON。请重新审查当前批次，"
                 "仅输出符合约定 schema 的完整 JSON，不要使用 Markdown 代码块。"
             )
-            payload = _json_from_response(getattr(response, "content", response))
+            payload = _parse_stage_json(response, task.pk, "AI初审", batch["files"])
         usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
         tokens = int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0)
         if _review_payload_needs_chinese_retry(payload):
@@ -1857,7 +1836,7 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
                 f"{prompt}\n\n上一次回答包含英文审查结论，不符合要求。请重新生成，所有说明性内容必须为简体中文，"
                 "仅代码标识符、路径和原始代码片段保留原文。"
             )
-            payload = _json_from_response(getattr(response, "content", response))
+            payload = _parse_stage_json(response, task.pk, "AI初审", batch["files"])
             retry_usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
             tokens += int(retry_usage.get("total_tokens", retry_usage.get("input_tokens", 0) + retry_usage.get("output_tokens", 0)) or 0)
         return index, payload, tokens
@@ -1882,7 +1861,8 @@ def _run_ai_batches(task, analyzable_diffs, machine_findings, review_client=None
             impact_modules.extend(payload.get("impact_modules", []))
             for risk_index, risk in enumerate(payload.get("risks", [])):
                 if _is_unverified_syntax_claim(risk):
-                    continue
+                    risk["disposition"] = "needs_confirmation"
+                    risk["screening_note"] = "局部语法判断需目标源码核验，未直接排除"
                 test_title = str(risk.pop("test_title", "") or "").strip()
                 test_objective = str(risk.pop("test_objective", "") or "").strip()
                 test_expected = str(risk.pop("test_expected_result", "") or "").strip()
@@ -1938,6 +1918,9 @@ def _classify_finding(finding):
             disposition = "advisory"
         else:
             disposition = "needs_confirmation"
+    if disposition == "advisory" and has_mandatory_policy_candidate(item):
+        disposition = "needs_confirmation"
+    item["policy_references"] = policy_references(item.get("policy_checks"))
     item["disposition"] = disposition
     item["verified"] = disposition == "confirmed"
     return item
@@ -2015,16 +1998,30 @@ def _apply_verification_results(findings, verdicts):
                     item["verification_reason"]
                     or "反证核验缺少可达触发路径、支持证据或明确结论，不能作为确定缺陷"
                 )
+        # A proven mandatory-policy violation is a defect even without a production incident.
+        if verdict.get("verdict") != "rejected" and verified_policy_violation(verdict, trace):
+            decision = "confirmed"
+            item["confirmation_basis"] = "mandatory_policy_violation"
+        item["policy_references"] = policy_references(
+            verdict.get("policy_checks") if "policy_checks" in verdict else item.get("policy_checks")
+        )
+        # No effective counter-review verdict: retain the candidate for developer confirmation.
+        if not verdict and not direct_evidence_fallback:
+            decision = "needs_confirmation"
         item["verification_status"] = "direct_evidence_fallback" if direct_evidence_fallback else ({
             "confirmed": "supported", "needs_confirmation": "partially_supported",
             "rejected": "refuted", "advisory": "inconclusive",
         }.get(decision, "inconclusive") if verdict else (
             "not_verified" if item.get("verification_deferred") else "verification_failed"
         ))
+        item["initial_disposition"] = item.get("initial_disposition", item.get("disposition"))
+        item["initial_severity"] = item.get("initial_severity", item.get("severity"))
         item["verdict"] = decision
         if verdict.get("severity") in {"high", "medium", "low"}:
             item["severity"] = verdict["severity"]
-        if item.get("severity") == "high" and decision != "confirmed":
+        if not verdict and item.get("severity") == "high":
+            item["severity_reason"] = "反证未完成，保留原高风险初判；影响尚待核验，不能据失败自动降级"
+        if verdict and item.get("severity") == "high" and decision != "confirmed":
             high_impact_supported = bool(
                 verdict and item["supporting_evidence"] and item["trigger_reachable"] is True
                 and item["verification_reason"]
@@ -2230,7 +2227,7 @@ def _verify_findings_against_target(task, findings, review_client=None, force_mo
         candidates.append({
             **{key: finding.get(key) for key in (
                 "key", "change", "file", "severity", "disposition", "confidence",
-                "evidence", "trigger", "impact", "recommendation",
+                "evidence", "trigger", "impact", "recommendation", "policy_checks", "policy_references",
             )},
             "target_source_excerpt": target_excerpt,
             "related_code_matches": related,
@@ -2243,7 +2240,9 @@ def _verify_findings_against_target(task, findings, review_client=None, force_mo
         })
 
     verdicts, tokens, errors, failed_reasons = [], 0, [], {}
-    batches = [candidates[index:index + 10] for index in range(0, len(candidates), 10)]
+    batches = [candidates[index:index + 3] for index in range(0, len(candidates), 3)]
+
+    attempt_tokens = []
 
     def verify_batch(index, batch):
         prompt = (
@@ -2262,12 +2261,14 @@ def _verify_findings_against_target(task, findings, review_client=None, force_mo
             "仅输出严格 JSON：{\"items\":[{\"key\":\"\",\"verdict\":\"confirmed|needs_confirmation|rejected|advisory\","
             "\"severity\":\"high|medium|low\",\"reason\":\"\",\"supporting_evidence\":[\"\"],"
             "\"counter_evidence\":\"\",\"missing_evidence\":\"\",\"trigger_reachable\":true}]}\n"
+            + policy_prompt() +
             f"待核验候选：{json.dumps(batch, ensure_ascii=False)}"
         )
         response = create_llm_instance(config, temperature=0).invoke(prompt, response_format={"type": "json_object"})
-        payload = _json_from_response(getattr(response, "content", response))
         usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("token_usage", {})
         used = int(usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0)) or 0)
+        attempt_tokens.append(used)
+        payload = _parse_stage_json(response, task.pk, "反证核验", [item["key"] for item in batch])
         items = payload.get("items") if isinstance(payload, dict) else None
         if not isinstance(items, list):
             raise ValueError("反证输出缺少 items 列表")
@@ -2289,15 +2290,23 @@ def _verify_findings_against_target(task, findings, review_client=None, force_mo
             if len(valid) < len(expected):
                 try:
                     retry_batch = [candidate for candidate in batches[index] if str(candidate["key"]) not in valid]
-                    _, retry_items, retry_used = verify_batch(index, retry_batch)
-                    tokens += retry_used
-                    valid.update({str(item["key"]): item for item in retry_items if _valid_verification_item(item, expected)})
+                    for candidate in retry_batch:
+                        try:
+                            _, retry_items, retry_used = verify_batch(index, [candidate])
+                            tokens += retry_used
+                            single_expected = {str(candidate["key"])}
+                            valid.update({str(item["key"]): item for item in retry_items
+                                          if _valid_verification_item(item, single_expected)})
+                        except Exception as single_exc:
+                            failed_reasons[str(candidate["key"])] = (
+                                f"单项反证重试失败：{type(single_exc).__name__}: {str(single_exc)[:200]}")
+                            errors.append(f"候选 {candidate['key']} 单项重试失败：{type(single_exc).__name__}")
                 except Exception as retry_exc:
                     errors.append(f"批次{index + 1}失败（重试后）：{retry_exc}")
                     failure_reason = f"重试失败：{type(retry_exc).__name__}: {str(retry_exc)[:200]}"
             verdicts.extend(valid.values())
             for missing in expected - valid.keys():
-                failed_reasons[missing] = f"反证批次{index + 1}{failure_reason}"
+                failed_reasons.setdefault(missing, f"反证批次{index + 1}{failure_reason}")
     document_by_key = {str(item.get("key")): item.get("related_document_context") or [] for item in candidates}
     trace_by_key = {str(item.get("key")): item.get("verification_trace") or {} for item in candidates}
     enriched_findings = [
@@ -2307,10 +2316,10 @@ def _verify_findings_against_target(task, findings, review_client=None, force_mo
         for finding in findings
     ]
     active, rejected = _apply_verification_results(enriched_findings, verdicts)
-    note = f"反证审查完成，排除 {len(rejected)} 条候选"
+    note = f"反证核验 {len(verdicts)}/{len(findings)} 条完成，排除 {len(rejected)} 条候选"
     if errors:
         note += "；" + "；".join(errors)
-    return active, rejected, tokens, note
+    return active, rejected, sum(attempt_tokens), note
 
 
 def _prioritize_findings_for_report(findings, limit=None):
@@ -2344,6 +2353,7 @@ def _prioritize_findings_for_report(findings, limit=None):
     eligible = [
         item for item in ordered
         if item.get("disposition") == "confirmed"
+        or has_mandatory_policy_candidate(item)
         or (
             item.get("disposition") == "needs_confirmation"
             and item.get("severity") in {"high", "medium"}
@@ -2351,7 +2361,7 @@ def _prioritize_findings_for_report(findings, limit=None):
         )
     ]
     ordered = eligible
-    essential = [item for item in ordered if item.get("severity") == "high" or item.get("disposition") == "confirmed"]
+    essential = [item for item in ordered if item.get("severity") == "high" or item.get("disposition") == "confirmed" or has_mandatory_policy_candidate(item)]
     essential_keys = {str(item.get("key")) for item in essential}
     remaining = [item for item in ordered if str(item.get("key")) not in essential_keys]
     visible = [*essential, *remaining[:max(0, limit - len(essential))]]
@@ -2412,7 +2422,9 @@ def _cache_report_complete(task):
     if change.get("schema_version") != CODE_REVIEW_REPORT_SCHEMA_VERSION:
         return False
     if task.mode == "quick":
-        return True
+        return not report.get("coverage_gaps")
+    if verification_pending(change.get("findings") or []) or task.machine_coverage < 100 or task.ai_coverage < 100:
+        return False
     summary = report.get("iteration_summary") or {}
     ai_complete = (
         bool(summary.get("title")) and bool(summary.get("change_groups"))
@@ -2634,11 +2646,25 @@ def retry_verification_analysis(task: AnalysisTask):
                         "duration_ms": round((time.monotonic() - started) * 1000), "note": note[:500]})
         current["verification_retry_history"] = history[-20:]
         current.pop("verification_retry", None)
+        remaining = verification_pending(merged)
+        gaps = list((locked.test_report or {}).get("coverage_gaps") or [])
+        if not remaining:
+            gaps = [gap for gap in gaps if gap != "候选反证未完成，不能将 AI 文件覆盖率视为完整审查完成"]
+            locked.test_report = {**(locked.test_report or {}), "coverage_gaps": gaps}
+        by_key = {str(item.get("key")): item for item in [*merged, *rejected]}
+        for audit in current.get("candidate_audit") or []:
+            outcome = by_key.get(str(audit.get("key")))
+            if outcome:
+                audit.update({"final_disposition": outcome.get("verdict") or outcome.get("disposition"),
+                              "final_severity": outcome.get("severity"),
+                              "verification_status": outcome.get("verification_status"),
+                              "reason": outcome.get("verification_reason")})
         locked.change_report = _sanitize_json_value(current)
-        locked.status, locked.progress, locked.current_step = previous_status, 100, "未核验候选续审完成"
+        locked.status = "partial" if verification_pending(merged) else ("completed" if previous_status == "partial" and locked.ai_coverage >= 100 and locked.machine_coverage >= 100 and not (locked.test_report or {}).get("coverage_gaps") else previous_status)
+        locked.progress, locked.current_step = 100, "未核验候选续审完成"
         locked.token_usage += tokens
         locked.completed_at = timezone.now()
-        locked.save(update_fields=["change_report", "status", "progress", "current_step",
+        locked.save(update_fields=["change_report", "test_report", "status", "progress", "current_step",
                                    "token_usage", "completed_at", "updated_at"])
         AnalysisTaskExecutionLog.objects.create(task=locked, event="stage_finished", message="未核验候选续审完成",
                                                 detail=history[-1])
@@ -2732,10 +2758,13 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         # 确定性工具优先：只有实际运行的静态检查结果才能标记为 static_scan 风险。
         try:
             from .review_mcp import CodeReviewMCP
-            static_findings, static_notes = CodeReviewMCP(task, client if _task_repo(task).source_type != "local_git" else None).run_static_checks(analyzable_diffs)
+            static_mcp = CodeReviewMCP(task, client if _task_repo(task).source_type != "local_git" else None)
+            static_findings, static_notes = static_mcp.run_static_checks(analyzable_diffs)
+            static_coverage = getattr(static_mcp, "static_coverage", {"percent": 0, "status": "unavailable"})
             findings.extend(static_findings)
         except Exception as exc:
             static_notes = [f"静态检查不可用：{exc}"]
+            static_coverage = {"percent": 0, "status": "failed", "reason": type(exc).__name__}
 
         _ensure_not_cancelled(task)
         ai_failed = False
@@ -2842,12 +2871,13 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         _ensure_not_cancelled(task)
         task.status, task.progress, task.current_step = "generating_tests", 82, "生成测试分析报告"
         task.save(update_fields=["status", "progress", "current_step", "updated_at"])
+        candidate_inputs = [_classify_finding(item) for item in findings]
         all_candidates = [_classify_finding(item) for item in _merge_related_findings(_deduplicate_findings(findings))]
-        normal_changes = [item for item in all_candidates if _is_pure_addition_hypothesis(item)]
-        classified_findings = [item for item in all_candidates if not _is_pure_addition_hypothesis(item)]
+        normal_changes = []
+        classified_findings = list(all_candidates)
         # 全量扫描结论仍计入候选统计；只对最可能进入开发报告的候选做目标 Commit 反证核验，
         # 避免标准模式为大量低证据提示付出不必要的模型调用。
-        verification_candidates, _ = _prioritize_findings_for_report(classified_findings, limit=30)
+        verification_candidates, _ = _prioritize_findings_for_report(classified_findings)
         verified_findings, rejected_findings, verification_tokens, verification_note = _verify_findings_against_target(
             task, verification_candidates,
             client if _task_repo(task).source_type != "local_git" else None,
@@ -2873,6 +2903,21 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
             "verification_candidate_count": len(verification_candidates),
             "suppressed_count": max(0, len(classified_findings) - len(rejected_findings) - len(findings)),
         })
+        outcomes = {str(item.get("key")): item for item in [*findings, *rejected_findings]}
+        candidate_audit = []
+        aliases = {str(key): item for item in outcomes.values() for key in item.get("source_keys", [])}
+        identities = {(item.get("file"), item.get("evidence")): item for item in outcomes.values()}
+        for original in candidate_inputs:
+            outcome = outcomes.get(str(original.get("key"))) or aliases.get(str(original.get("key"))) or identities.get((original.get("file"), original.get("evidence")), {})
+            candidate_audit.append({
+                "key": original.get("key"), "merged_into": outcome.get("key") if outcome.get("key") != original.get("key") else None, "file": original.get("file"),
+                "change": original.get("change"), "initial_disposition": original.get("disposition"),
+                "initial_severity": original.get("severity"),
+                "final_disposition": outcome.get("verdict") or outcome.get("disposition"),
+                "final_severity": outcome.get("severity"),
+                "verification_status": outcome.get("verification_status", "not_verified"),
+                "reason": outcome.get("verification_reason", "未取得有效裁决"),
+            })
         findings = _attach_finding_diff_evidence(findings, analyzable_diffs)
         if task.mode == "standard":
             fix_tokens, fix_note = _generate_fix_patches(
@@ -2941,12 +2986,13 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
             "files": files, "findings": findings, "impact_modules": impact_modules,
             "impact_summary": sorted({x["impact"] for x in findings}),
             "analysis_note": "；".join([*static_notes, ai_note]),
+            "candidate_audit": candidate_audit,
             "graph_context": getattr(task, "_graph_context_snapshot", {
                 "status": "skipped",
                 "diagnostics": {"degraded_reason": "本次未执行 CRG 上下文增强"},
             }),
             "ocr_status": ocr_status,
-            "coverage": {"scope_files": len(files), "reviewable_files": len(analyzable_diffs), "analyzed_files": len(analyzable_diffs), "excluded_files": sum(1 for x in files if x["excluded"]), "machine_percent": 100, "ai_percent": ai_coverage, "ai_review": ai_review, "finding_screening": finding_screening},
+            "coverage": {"scope_files": len(files), "reviewable_files": len(analyzable_diffs), "analyzed_files": len(analyzable_diffs), "excluded_files": sum(1 for x in files if x["excluded"]), "machine_percent": static_coverage["percent"], "builtin_rule_percent": 100, "static_scan": static_coverage, "ai_percent": ai_coverage, "ai_review": ai_review, "finding_screening": finding_screening},
         })
         drafts = []
         # 代码审查报告中的高、中风险逐条生成风险测试点；低风险不生成专项测试点。
@@ -2979,14 +3025,21 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
         for draft in drafts:
             test_type_counts[draft["test_type"]] = test_type_counts.get(draft["test_type"], 0) + 1
         task.test_report = _sanitize_json_value({"summary": {"test_point_count": len(drafts), "high_priority_count": sum(1 for x in drafts if x["priority"] == "high"), "test_type_counts": test_type_counts}, "iteration_summary": iteration_summary, "test_requirements": drafts, "regression_suggestions": sorted({x["file"].split("/")[0] for x in findings if x.get("file")}), "coverage_gaps": coverage_gaps})
-        task.machine_coverage = 100
+        task.machine_coverage = static_coverage["percent"]
         task.ai_coverage = ai_coverage
         task.token_usage = token_usage
         ai_incomplete = task.mode != "quick" and bool(analyzable_diffs) and (ai_failed or ai_coverage < 100 or iteration_incomplete)
+        verification_incomplete = task.mode != "quick" and verification_pending(findings)
+        static_incomplete = task.mode != "quick" and bool(analyzable_diffs) and static_coverage["percent"] < 100
+        if verification_incomplete:
+            coverage_gaps.append("候选反证未完成，不能将 AI 文件覆盖率视为完整审查完成")
+        if static_incomplete:
+            coverage_gaps.append("静态扫描未完整执行，请查看静态扫描状态")
+        task.test_report["coverage_gaps"] = coverage_gaps
         # 深度模式明确包含 OCR；OCR 未完整覆盖时，即使 AI 已完成也应标识为降级完成。
         ocr_degraded = task.mode == "deep" and (not ocr_completed or ocr_coverage < 100) and not ai_incomplete
-        final_status = "partial" if ai_incomplete else ("degraded" if ocr_degraded else "completed")
-        task.status, task.progress, task.current_step, task.completed_at = final_status, 100, "分析完成", timezone.now()
+        final_status = "partial" if ai_incomplete or verification_incomplete or static_incomplete else ("degraded" if ocr_degraded else "completed")
+        task.status, task.progress, task.current_step, task.completed_at = final_status, 100, ("部分完成：存在未完成的审查阶段" if final_status == "partial" else "分析完成"), timezone.now()
         task.save()
         AnalysisTaskExecutionLog.objects.create(
             task=task, event=final_status,

@@ -1,0 +1,30 @@
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+const projectDir=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+const directory=fs.mkdtempSync(path.join(os.tmpdir(),'whart-review-export-'));
+try {
+ const bundle=async(entry,name)=>{const target=path.join(directory,name+'.mjs');await build({absWorkingDir:projectDir,entryPoints:[entry],bundle:true,platform:'node',format:'esm',outfile:target});return import('file://'+target)};
+ const {relevantDiffFragment}=await bundle('src/features/code-analysis/diffEvidence.ts','diff');
+ const {buildHtmlReport}=await bundle('src/features/code-analysis/reportExport.ts','report');
+ const lines=['// Header.swift','', 'import UIKit','',...Array.from({length:70},(_,i)=>`let value${i} = 0`),'func handleKnow() {','    exit(0)','}'];
+ const full=`@@ -0,0 +1,${lines.length} @@\n`+lines.map(line=>'+'+line).join('\n');
+ const excerpt=relevantDiffFragment(full,1,'handleKnow 直接调用 `exit(0)`');
+ assert.ok(excerpt.includes('+    exit(0)'));
+ assert.ok(!excerpt.includes('Header.swift'));
+ const h=excerpt.match(/^@@ -0,0 \+(\d+),(\d+) @@/);
+ assert.ok(h);assert.equal(Number(h[1]),70);assert.equal(Number(h[2]),8);
+ const finding={key:'p',change:'退出应用',file:'a.swift',severity:'high',source:'ai_analysis',confidence:.9,disposition:'needs_confirmation',line_start:1,evidence:'handleKnow 直接调用 `exit(0)`',related_diff:full};
+ const task={repository_name:'test',status:'partial',mode:'standard',change_report:{summary:{risk_count:2},files:[],findings:[finding,{...finding,key:'s',disposition:'advisory'}],candidate_audit:[{key:'p',change:'<script>unsafe</script>',file:'a.swift',initial_disposition:'confirmed',final_disposition:'needs_confirmation',initial_severity:'high',final_severity:'high',verification_status:'verification_failed',reason:'invalid JSON'}]},test_report:{}};
+ const html=buildHtmlReport(task,'change');
+ assert.ok(html.includes('exit(0)'));assert.ok(!html.includes('+// Header.swift'));
+ assert.ok(html.includes('候选去向'));assert.ok(html.includes('部分完成'));
+ assert.ok(html.includes('&lt;script&gt;unsafe&lt;/script&gt;'));assert.ok(!html.includes('<script>unsafe</script>'));
+ assert.ok(html.includes('<strong>1</strong><span>核心问题</span>'));
+ const removed=relevantDiffFragment('@@ -90,3 +90,2 @@\n before\n-oldUnsafe()\n after',1,'`oldUnsafe()`','old');
+ assert.ok(removed.includes('-oldUnsafe()'));assert.ok(removed.startsWith('@@ -90,3 +90,2 @@'));
+ console.log('Diff positioning, real hunk ranges, exported HTML, candidate audit and metrics passed');
+} finally {fs.rmSync(directory,{recursive:true,force:true})}

@@ -72,7 +72,7 @@ class HostSyncAgent:
         self.backup_root = Path(os.environ.get("HOST_SYNC_BACKUP_ROOT", "/projects/ai-test-platform/backups/host-sync"))
         self.state_file = Path(os.environ.get("HOST_SYNC_STATE_FILE", "/var/lib/wharttest-host-sync/state.json"))
         self.docker_bin = os.environ.get("HOST_SYNC_DOCKER_BIN", "docker")
-        self.apply_host_enabled = os.environ.get("HOST_SYNC_APPLY_HOST", "true").strip().lower() in {
+        self.apply_host_enabled = os.environ.get("HOST_SYNC_APPLY_HOST", "false").strip().lower() in {
             "1", "true", "yes", "on",
         }
 
@@ -117,7 +117,9 @@ class HostSyncAgent:
         # systemd 的 ReadWritePaths=/etc/hosts 会让该文件在服务的 mount namespace
         # 中成为单独挂载点，os.replace() 对挂载点会返回 EBUSY。优先原子替换，
         # 遇到挂载点限制时回退为原文件写入；写入前已经完成可恢复备份。
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.hosts_file.parent, delete=False) as handle:
+        # /etc is read-only under systemd; stage in the writable state directory.
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.state_file.parent, delete=False) as handle:
             handle.write(updated)
             handle.flush()
             os.fsync(handle.fileno())

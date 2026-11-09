@@ -101,17 +101,17 @@ class ReviewPipelineToolTests(SimpleTestCase):
                  "missing_evidence": "", "trigger_reachable": False} for key in keys
             ]}))
         create_llm.return_value.invoke.side_effect = invoke
-        task = SimpleNamespace(mode="standard", head_sha="head", repository=SimpleNamespace(source_type="local_git"))
+        task = SimpleNamespace(pk="test-task", mode="standard", head_sha="head", repository=SimpleNamespace(source_type="local_git"))
         findings = [{"key": f"k{index}", "file": "Demo.java", "source": "machine_rule",
                      "severity": "high", "disposition": "needs_confirmation", "evidence": "@NotNull"}
                     for index in range(11)]
         active, rejected, _tokens, note = _verify_findings_against_target(task, findings)
         self.assertEqual(len(rejected), 10)
         self.assertEqual(len(active), 1)
-        self.assertEqual(active[0]["severity"], "medium")
+        self.assertEqual(active[0]["severity"], "high")
         self.assertEqual(active[0]["verification_status"], "verification_failed")
         self.assertIn("Internal Server Error", active[0]["verification_reason"])
-        self.assertIn("批次2失败", note)
+        self.assertIn("批次4首轮失败", note)
 
     def test_verification_contract_rejects_incomplete_confirmed_and_invalid_types(self):
         valid = {"key": "k1", "verdict": "confirmed", "severity": "high", "reason": "匿名访问可复现",
@@ -152,7 +152,7 @@ class ReviewPipelineToolTests(SimpleTestCase):
                 items[-1].pop("trigger_reachable")
             return SimpleNamespace(content=json.dumps({"items": items}))
         create_llm.return_value.invoke.side_effect = invoke
-        task = SimpleNamespace(mode="standard", head_sha="head", repository=SimpleNamespace(source_type="local_git"))
+        task = SimpleNamespace(pk="test-task", mode="standard", head_sha="head", repository=SimpleNamespace(source_type="local_git"))
         findings = [{"key": key, "file": "Demo.java", "source": "machine_rule", "severity": "medium"}
                     for key in ("k1", "k2")]
         active, rejected, _tokens, _note = _verify_findings_against_target(task, findings)
@@ -166,7 +166,7 @@ class ReviewPipelineToolTests(SimpleTestCase):
         self.assertEqual(source, "structured")
         self.assertEqual(queries[:2], ["meetingID", "NotNull"])
 
-    def test_ssewebvote_normal_change_candidates_do_not_remain_high_when_verification_fails(self):
+    def test_ssewebvote_candidate_initial_severity_is_preserved_when_verification_fails(self):
         machine = [
             {"key": f"annotation:{subject}", "file": "Request.java", "source": "machine_rule",
              "subject": subject, "severity": "high", "disposition": "needs_confirmation",
@@ -188,7 +188,7 @@ class ReviewPipelineToolTests(SimpleTestCase):
         candidates = [item for item in merged if not _is_pure_addition_hypothesis(item)]
         active, _ = _apply_verification_results(candidates, [])
         self.assertEqual(len(active), 2)
-        self.assertTrue(all(item["severity"] != "high" for item in active))
+        self.assertTrue(all(item["severity"] == "high" for item in active))
         self.assertTrue(all(item["verification_status"] == "verification_failed" for item in active))
 
     def test_normal_added_configuration_with_only_conditional_impact_is_not_defect(self):
@@ -216,12 +216,12 @@ class ReviewPipelineToolTests(SimpleTestCase):
         self.assertEqual(merged[0]["source_keys"], ["ai:meeting", "rule:meeting"])
         self.assertEqual(merged[1]["subject"], "gdCode")
 
-    def test_unverified_text_rule_loses_unsupported_high_severity(self):
+    def test_unverified_text_rule_retains_initial_high_severity(self):
         active, _ = _apply_verification_results([{
             "key": "annotation:meeting", "source": "machine_rule", "severity": "high",
             "disposition": "needs_confirmation", "evidence": "@NotNull", "change": "删除 @NotNull 注解",
         }], [])
-        self.assertEqual(active[0]["severity"], "medium")
+        self.assertEqual(active[0]["severity"], "high")
         self.assertEqual(active[0]["verification_status"], "verification_failed")
         self.assertIn("原高风险初判", active[0]["severity_reason"])
 
@@ -232,7 +232,7 @@ class ReviewPipelineToolTests(SimpleTestCase):
         }], [])
         self.assertEqual(active[0]["verification_status"], "not_verified")
         self.assertIn("未进入有界反证批次", active[0]["verification_reason"])
-        self.assertEqual(active[0]["severity"], "medium")
+        self.assertEqual(active[0]["severity"], "high")
 
     def test_verified_high_risk_requires_reachable_supporting_evidence(self):
         finding = {"key": "permission", "source": "machine_rule", "severity": "high", "disposition": "needs_confirmation"}
@@ -304,13 +304,13 @@ class ReviewPipelineToolTests(SimpleTestCase):
         self.assertEqual(active[0]["verification_status"], "verification_failed")
         self.assertIn("不能作为确定缺陷", active[0]["verification_reason"])
 
-    def test_unverified_static_scan_confirmation_is_preserved(self):
+    def test_unverified_static_scan_is_pending_without_counter_review(self):
         active, rejected = _apply_verification_results([
             {"key": "syntax-error", "source": "static_scan", "disposition": "confirmed"},
         ], [])
         self.assertFalse(rejected)
-        self.assertEqual(active[0]["disposition"], "confirmed")
-        self.assertTrue(active[0]["verified"])
+        self.assertEqual(active[0]["disposition"], "needs_confirmation")
+        self.assertFalse(active[0]["verified"])
 
     def test_incomplete_ai_confirmation_is_downgraded(self):
         active, rejected = _apply_verification_results([
@@ -1243,7 +1243,9 @@ class AnalysisLifecycleTests(TransactionTestCase):
         run_analysis(task)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
-        self.assertEqual(task.change_report["summary"]["high_risk_count"], 0)
+        self.assertEqual(task.change_report["summary"]["high_risk_count"], 1)
+        self.assertEqual(task.change_report["findings"][0]["initial_severity"], "high")
+        self.assertEqual(task.change_report["findings"][0]["disposition"], "needs_confirmation")
         self.assertEqual(task.change_report["findings"][0]["verification_status"], "verification_failed")
         self.assertEqual(task.test_report["summary"]["test_point_count"], 1)
         self.assertEqual(task.ai_coverage, 0)
@@ -1329,7 +1331,7 @@ class AnalysisLifecycleTests(TransactionTestCase):
         with (
             patch("code_analysis.services.GitLabClient.compare", return_value=diff_payload),
             patch("code_analysis.services.GitLabClient.merge_base", return_value=""),
-            patch("code_analysis.review_mcp.CodeReviewMCP.run_static_checks", return_value=([], [])),
+            patch("code_analysis.review_mcp.CodeReviewMCP.run_static_checks", autospec=True, side_effect=lambda mcp, diffs: (setattr(mcp, "static_coverage", {"percent": 100, "status": "completed"}), ([], []))[1]),
             patch("code_analysis.services._analysis_stage", side_effect=lambda _task_id, _name, function, *args: function(*args)),
             patch("code_analysis.services._run_ai_batches", return_value=([], [], [], 5, 100, "AI分析完成")) as ai_batches,
             patch("code_analysis.services._run_open_code_review", return_value=([], 7, "OCR完成", True, 100, {"selected": 1, "completed": 1})) as ocr,
@@ -1717,3 +1719,34 @@ class AnalysisLifecycleTests(TransactionTestCase):
         self.assertEqual(task.status, "cancelled")
         terminate_ocr.assert_called_once_with(task.id)
         revoke.assert_called_once_with("celery-job-2", terminate=True, signal="SIGTERM")
+
+    def test_incomplete_static_or_verification_stage_marks_standard_task_partial(self):
+        diff={"diffs":[{"new_path":"a.py","diff":"@@ -1 +1 @@\n-old()\n+new()"}]}
+        summary={"title":"调整","change_groups":[{"name":"调整"}]}
+        points=[{"title":"验证调整","objective":"执行","expected_result":"符合预期","test_type":"迭代验证","priority":"medium"}]
+        candidate={"key":"ai:test","change":"Token兼容性风险","file":"a.py","severity":"high","source":"ai_analysis","confidence":.9,"disposition":"needs_confirmation","evidence":"new()","impact":"可能导致无法登录"}
+        for scanner_ok in (False,True):
+            with self.subTest(scanner_ok=scanner_ok):
+                task=AnalysisTask.objects.create(project=self.project,repository=self.repository,creator=self.user,executor=self.user,source_type="commits",base_sha="a"*40,head_sha="b"*40,mode="standard")
+                def static(mcp,diffs):
+                    mcp.static_coverage={"percent":100 if scanner_ok else 0,"status":"completed" if scanner_ok else "failed"}
+                    return [],["已执行 Semgrep" if scanner_ok else "静态扫描失败"]
+                pending={**candidate,"verification_status":"verification_failed","verification_reason":"JSON解析失败","target_commit_verified":False}
+                with (
+                    patch("code_analysis.services.GitLabClient.compare",return_value=diff),
+                    patch("code_analysis.services.GitLabClient.merge_base",return_value=""),
+                    patch("code_analysis.review_mcp.CodeReviewMCP.run_static_checks",autospec=True,side_effect=static),
+                    patch("code_analysis.services._run_ai_batches",return_value=([candidate],[],[],1,100,"AI完成")),
+                    patch("code_analysis.services._run_iteration_test_design",return_value=(summary,points,1,"迭代完成")),
+                    patch("code_analysis.services._run_context_test_enrichment",return_value=([],[],0,"")),
+                    patch("code_analysis.services._verify_findings_against_target",return_value=([pending],[],1,"反证失败")),
+                    patch("code_analysis.services._generate_fix_patches",return_value=(0,"")),
+                    patch("code_analysis.services._run_risk_test_design",return_value=({},0,"")),
+                ):
+                    run_analysis(task,force_refresh=True)
+                task.refresh_from_db()
+                self.assertEqual(task.status,"partial")
+                self.assertEqual(task.machine_coverage,100 if scanner_ok else 0)
+                self.assertEqual(task.ai_coverage,100)
+                self.assertEqual(task.change_report["candidate_audit"][0]["verification_status"],"verification_failed")
+                self.assertEqual(task.change_report["findings"][0]["severity"],"high")
