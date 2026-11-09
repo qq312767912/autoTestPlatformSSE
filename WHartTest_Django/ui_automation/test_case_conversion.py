@@ -50,8 +50,14 @@ class BusinessCaseConversionTests(TestCase):
         self.assertEqual(r.data['created_count'],1)
         target=UiTestCase.objects.get();self.assertTrue(target.name.startswith('[待采集]'))
         self.assertIn('显示登录对话框',target.description)
-        self.assertIn('原始业务用例',target.description)
-        self.assertIn('SHA256',target.description)
+        self.assertNotIn('source_key',target.description)
+        self.assertNotIn('SHA256',target.description)
+        self.assertNotIn('excel-to-ui-case',target.description)
+        self.assertEqual(target.conversion_metadata['source']['id'],self.source.pk)
+        self.assertEqual(target.conversion_metadata['skill']['name'],'excel-to-ui-case')
+        self.assertNotIn('private-value',str(target.conversion_metadata))
+        detail=self.client.get(BASE+str(target.pk)+'/')
+        self.assertNotIn('conversion_metadata',detail.data)
         self.assertNotIn('private-value',target.description)
         self.assertEqual(target.status,0)
         self.assertFalse(UiCaseStepsDetailed.objects.exists())
@@ -62,11 +68,43 @@ class BusinessCaseConversionTests(TestCase):
         preview=self.preview().data
         r=self.client.post(BASE+'conversion-apply/',{'preview_token':preview['preview_token']},format='json')
         self.assertEqual(r.status_code,200,r.data)
-        target=UiTestCase.objects.get();target.name='人工修改名称';target.save()
+        target=UiTestCase.objects.get();target.name='人工修改名称';target.description='人工修改描述';target.save()
         r=self.client.post(BASE+'conversion-apply/',{'preview_token':preview['preview_token']},format='json')
         self.assertEqual(r.data['reused_count'],1)
         self.assertEqual(UiTestCase.objects.count(),1)
         self.assertEqual(UiTestCase.objects.get().name,'人工修改名称')
+        self.assertEqual(UiTestCase.objects.get().description,'人工修改描述')
+
+    def test_legacy_metadata_is_migrated_and_replay_still_reuses(self):
+        import hashlib, importlib, json
+        from django.apps import apps
+        from django.db import connection
+        from types import SimpleNamespace
+        preview=self.preview().data
+        source,fingerprint=source_snapshot(self.source)
+        identity=f'testcase-management|{self.project.pk}|{self.module.pk}|{self.source.pk}|游客'
+        marker='[business-to-ui:'+hashlib.sha256(identity.encode()).hexdigest()+']'
+        old='\n'.join([marker,'[excel-to-ui-case]','source_key='+identity,
+            '来源：测试用例管理 / TC1 / 源用例',
+            'Skill：excel-to-ui-case；版本 SHA256：'+local_skill()['sha256'],
+            '转换模型：test-model','来源内容SHA256='+fingerprint,'角色：游客',
+            '转换状态：待采集；执行情况：未执行','前置条件：游客访问首页',
+            '转换步骤：','1. 点击登录','预期：显示登录对话框','缺口：未执行验证',
+            '原始业务用例（完整保留，凭据脱敏）：',json.dumps(source,ensure_ascii=False)])
+        case=UiTestCase.objects.create(project=self.project,module=self.module,name='已有用例',description=old)
+        manual=UiTestCase.objects.create(project=self.project,module=self.module,name='手工用例',description='SHA256 是业务检查内容')
+        migration=importlib.import_module('ui_automation.migrations.0024_uitestcase_conversion_metadata')
+        migration.separate_legacy_descriptions(apps,SimpleNamespace(connection=connection))
+        case.refresh_from_db();manual.refresh_from_db()
+        self.assertEqual(case.description,'角色：游客\n前置条件：游客访问首页\n操作步骤：\n1. 点击登录\n预期：显示登录对话框')
+        self.assertEqual(case.conversion_metadata['legacy_description'],old)
+        self.assertEqual(manual.description,'SHA256 是业务检查内容')
+        r=self.client.post(BASE+'conversion-apply/',{'preview_token':preview['preview_token']},format='json')
+        self.assertEqual(r.data['reused_count'],1)
+        self.assertFalse(r.data['results'][0]['source_changed'])
+        case.description='人工编辑业务描述';case.save()
+        migration.restore_legacy_descriptions(apps,SimpleNamespace(connection=connection))
+        case.refresh_from_db();self.assertEqual(case.description,'人工编辑业务描述')
 
     def test_source_or_skill_change_invalidates_preview(self):
         preview=self.preview().data

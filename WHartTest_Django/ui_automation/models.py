@@ -273,6 +273,7 @@ class UiTestCase(models.Model):
     )
     name = models.CharField(_('用例名称'), max_length=255)
     description = models.TextField(_('用例描述'), blank=True, null=True)
+    conversion_metadata = models.JSONField(_('转换追溯信息'), default=dict, blank=True, editable=False)
     level = models.CharField(_('用例等级'), max_length=2, choices=LEVEL_CHOICES, default='P2')
     status = models.SmallIntegerField(_('状态'), choices=STATUS_CHOICES, default=0)
     front_custom = models.JSONField(_('前置自定义参数'), default=list, blank=True)

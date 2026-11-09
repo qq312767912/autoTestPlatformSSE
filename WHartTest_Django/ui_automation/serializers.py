@@ -343,6 +343,11 @@ class UiTestCaseSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['status', 'result_data', 'error_message', 'creator', 'created_at', 'updated_at']
 
+    def get_fields(self):
+        fields = super().get_fields()
+        fields.pop('conversion_metadata', None)
+        return fields
+
     def get_step_count(self, obj):
         return obj.case_steps.count()
 

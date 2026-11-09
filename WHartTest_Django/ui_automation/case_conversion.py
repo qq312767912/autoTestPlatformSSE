@@ -221,24 +221,25 @@ def save_conversion(user, token, request):
         originals = {source['id']: source for source in data['sources']}
         for entry in data['entries']:
             identity = f"testcase-management|{project.pk}|{module.pk}|{entry['source_id']}|{entry['role'].casefold()}"
-            marker = '[business-to-ui:' + hashlib.sha256(identity.encode()).hexdigest() + ']'
-            existing = UiTestCase.objects.filter(project=project, module=module, description__startswith=marker+'\n').first()
+            existing = UiTestCase.objects.filter(project=project, module=module, conversion_metadata__source_key=identity).first()
             if existing:
                 results.append({'source_id': entry['source_id'], 'role': entry['role'], 'id': existing.pk, 'name': existing.name, 'result': 'reused',
-                                'source_changed': f"来源内容SHA256={data['fingerprints'][str(entry['source_id'])]}" not in (existing.description or ''),
+                                'source_changed': existing.conversion_metadata.get('source_fingerprint') != data['fingerprints'][str(entry['source_id'])],
                                 'note': '复用已有用例，人工内容及执行步骤均未覆盖'})
                 continue
             source = originals[entry['source_id']]
-            description = '\n'.join([marker, '[excel-to-ui-case]', f'source_key={identity}', f"来源：测试用例管理 / TC{source['id']} / {source['name']}",
-                f"Skill：{data['skill']['name']}；版本 SHA256：{data['skill']['sha256']}",
-                f"转换模型：{data['model']['name']}", f"来源内容SHA256={data['fingerprints'][str(entry['source_id'])]}", f"角色：{entry['role']}", '转换状态：待采集；执行情况：未执行',
-                '前置条件：' + entry['preconditions'], '转换步骤：',
+            description = '\n'.join([
+                *([f"角色：{entry['role']}"] if entry['role'] != '未指定' else []),
+                '前置条件：' + entry['preconditions'], '操作步骤：',
                 *[f"{index}. {step['action']}\n预期：{step['expected_result']}" for index, step in enumerate(entry['steps'], 1)],
-                '缺口：' + '；'.join(entry['gaps']), '原始业务用例（完整保留，凭据脱敏）：', json.dumps(source, ensure_ascii=False, indent=2)])
+            ])
+            metadata = {'source_key': identity, 'source_fingerprint': data['fingerprints'][str(entry['source_id'])],
+                        'skill': data['skill'], 'model': data['model'], 'source': source,
+                        'role': entry['role'], 'gaps': entry['gaps'], 'state': 'draft', 'verified': False}
             serializer = UiTestCaseSerializer(data={'project': project.pk, 'module': module.pk, 'name': entry['name'],
                                                      'level': entry['level'], 'description': description}, context={'request': request})
             serializer.is_valid(raise_exception=True)
-            case = serializer.save(creator=user)
+            case = serializer.save(creator=user, conversion_metadata=metadata)
             case.refresh_from_db()
             if case.description != description:
                 raise ValidationError('保存后的用例内容校验失败，已回滚本次导入。')
