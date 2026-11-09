@@ -1,17 +1,21 @@
 <template>
   <a-modal :visible="visible" title="业务用例转 UI 用例" :width="1080" :footer="false" :mask-closable="false" @cancel="close">
-    <a-alert type="info" style="margin-bottom:16px">使用本地 excel-to-ui-case 转换规则。原业务用例保留；本次保存待采集草稿，不会自动采集元素或执行被测系统。</a-alert>
+    <a-alert type="info" style="margin-bottom:16px">使用平台内置 excel-to-ui-case 转换规则。原业务用例保留；本次保存待采集草稿，不会自动采集元素或执行被测系统。</a-alert>
     <a-steps :current="stage" style="margin-bottom:20px">
       <a-step title="选择业务用例" /><a-step title="确认转换预览" /><a-step title="查看保存结果" />
     </a-steps>
     <template v-if="stage === 1">
       <div class="conversion-toolbar">
-        <a-select v-model="targetModule" placeholder="选择目标 UI 模块" style="width:300px" :disabled="busy">
+        <div class="conversion-module">
+          <span>目标 UI 模块 <span class="conversion-required">*</span></span>
+        <a-select v-model="targetModule" placeholder="请选择目标 UI 模块（必选）" style="width:300px" :disabled="busy" :error="moduleError">
           <a-option v-for="item in modules" :key="item.id" :value="item.id">{{ item.name }}</a-option>
         </a-select>
+        </div>
         <a-input-search v-model="search" placeholder="搜索测试用例管理中的用例名称" style="width:360px" :disabled="busy" @search="searchSources" />
         <span>已选 {{ selected.length }} / 20 条</span>
       </div>
+      <a-alert v-if="!modules.length" type="warning" style="margin-bottom:12px">当前项目暂无 UI 模块，请先在 UI 自动化中创建模块，再导入业务用例。</a-alert>
       <a-table :data="sources" :loading="loading" row-key="id" :selected-keys="selected" :row-selection="{ type:'checkbox', showCheckedAll:true }"
         :pagination="{ current:page, pageSize:20, total:total }" @selection-change="selectRows" @page-change="changePage">
         <template #columns>
@@ -22,7 +26,7 @@
         </template>
       </a-table>
       <a-empty v-if="!loading && !sources.length" description="当前项目暂无匹配的业务用例" />
-      <div class="conversion-footer"><a-button @click="close">取消</a-button><a-button type="primary" :loading="busy" :disabled="!targetModule || !selected.length || loading" @click="convert">生成转换预览</a-button></div>
+      <div class="conversion-footer"><span class="conversion-hint">{{ !targetModule ? '请先选择目标 UI 模块' : !selected.length ? '请勾选需要转换的业务用例' : `将转换 ${selected.length} 条业务用例` }}</span><a-button @click="close">取消</a-button><a-button type="primary" :loading="busy" :disabled="loading || busy" @click="convert">生成转换预览</a-button></div>
     </template>
     <template v-else-if="stage === 2">
       <p>选中 {{ sourceCount }} 条业务用例，转换为 {{ entries.length }} 条 UI 草稿。目标模块：{{ targetModuleName }}</p>
@@ -67,6 +71,7 @@ const emit=defineEmits<{(e:'update:visible',value:boolean):void;(e:'saved'):void
 const stage=ref(1),page=ref(1),total=ref(0),sourceCount=ref(0)
 const loading=ref(false),busy=ref(false),search=ref(''),targetModule=ref<number>()
 const sources=ref<Source[]>([]),selected=ref<number[]>([]),entries=ref<Entry[]>([]),previewToken=ref(''),saved=ref<Saved>()
+const moduleError=ref(false)
 const targetModuleName=computed(()=>props.modules.find(item=>item.id===targetModule.value)?.name || '')
 const errorText=(error:unknown)=>{
   const e=error as {response?:{data?:unknown};message?:string;error?:string}
@@ -98,6 +103,8 @@ function searchSources(){page.value=1;void loadSources()}
 function close(){if(busy.value){Message.info('正在处理，请稍候');return}version++;emit('update:visible',false)}
 function back(){stage.value=1;previewToken.value='';entries.value=[]}
 async function convert(){
+  if(!targetModule.value){moduleError.value=true;Message.warning(props.modules.length ? '请先选择目标 UI 模块' : '请先在 UI 自动化中创建模块');return}
+  if(!selected.value.length){Message.warning('请先勾选需要转换的业务用例');return}
   busy.value=true
   const generation=version
   try{
@@ -115,13 +122,16 @@ async function save(){
     saved.value=extractResponseData<Saved>(res);stage.value=3;emit('saved')
   }catch(error){Message.error(errorText(error))}finally{busy.value=false}
 }
-watch(()=>props.visible,value=>{if(value){stage.value=1;page.value=1;selected.value=[];search.value='';entries.value=[];previewToken.value='';saved.value=undefined;targetModule.value=props.initialModuleId;void loadSources()}},{immediate:true})
+watch(()=>props.visible,value=>{if(value){stage.value=1;page.value=1;selected.value=[];search.value='';entries.value=[];previewToken.value='';saved.value=undefined;moduleError.value=false;targetModule.value=props.modules.some(item=>item.id===props.initialModuleId) ? props.initialModuleId : props.modules.length===1 ? props.modules[0]?.id : undefined;void loadSources()}},{immediate:true})
+watch(targetModule,()=>{moduleError.value=false})
+watch(()=>props.modules,modules=>{if(props.visible && !targetModule.value && modules.length===1)targetModule.value=modules[0]?.id})
 watch(()=>props.projectId,()=>{version++;if(props.visible){emit('update:visible',false);Message.info('项目已切换，请重新选择业务用例')}})
 </script>
 
 <style scoped>
 .conversion-toolbar{display:flex;gap:12px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
-.conversion-footer{display:flex;justify-content:flex-end;gap:12px;margin-top:20px}
+.conversion-module{display:flex;flex-direction:column;gap:6px}.conversion-required{color:rgb(var(--danger-6))}.conversion-hint{margin-right:auto;color:var(--color-text-3)}
+.conversion-footer{align-items:center;display:flex;justify-content:flex-end;gap:12px;margin-top:20px}
 .conversion-previews{max-height:52vh;overflow:auto}.conversion-card{border:1px solid var(--color-border-2);border-radius:8px;padding:16px;margin-bottom:12px}
 .conversion-card-title{display:flex;justify-content:space-between;gap:12px}.conversion-card p{color:var(--color-text-2)}
 .conversion-text{white-space:pre-wrap;overflow-wrap:anywhere}.conversion-card li{margin:10px 0}.conversion-expected{white-space:pre-wrap;color:var(--color-text-2);margin-top:4px}
