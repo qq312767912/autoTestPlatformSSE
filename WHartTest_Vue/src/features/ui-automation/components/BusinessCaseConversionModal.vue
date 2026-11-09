@@ -13,7 +13,7 @@
         </a-select>
         </div>
         <a-input-search v-model="search" placeholder="搜索测试用例管理中的用例名称" style="width:360px" :disabled="busy" @search="searchSources" />
-        <span>已选 {{ selected.length }} / 20 条</span>
+        <span class="conversion-selected">已选 {{ selected.length }} / 20 条</span>
       </div>
       <a-alert v-if="!modules.length" type="warning" style="margin-bottom:12px">当前项目暂无 UI 模块，请先在 UI 自动化中创建模块，再导入业务用例。</a-alert>
       <a-table :data="sources" :loading="loading" row-key="id" :selected-keys="selected" :row-selection="{ type:'checkbox', showCheckedAll:true }"
@@ -129,7 +129,8 @@ watch(()=>props.projectId,()=>{version++;if(props.visible){emit('update:visible'
 </script>
 
 <style scoped>
-.conversion-toolbar{display:flex;gap:12px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+.conversion-toolbar{display:flex;gap:12px;align-items:flex-end;margin-bottom:16px;flex-wrap:wrap}
+.conversion-selected{display:inline-flex;align-items:center;min-height:32px}
 .conversion-module{display:flex;flex-direction:column;gap:6px}.conversion-required{color:rgb(var(--danger-6))}.conversion-hint{margin-right:auto;color:var(--color-text-3)}
 .conversion-footer{align-items:center;display:flex;justify-content:flex-end;gap:12px;margin-top:20px}
 .conversion-previews{max-height:52vh;overflow:auto}.conversion-card{border:1px solid var(--color-border-2);border-radius:8px;padding:16px;margin-bottom:12px}
