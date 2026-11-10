@@ -101,6 +101,8 @@ def build_benchmark_report(run) -> dict[str, Any]:
     from .code_review_benchmark import build_report
 
     base = build_report(run)
+    if run.status in {"cancelled", "failed"}:
+        base["status"] = run.status
     binding = getattr(run, "benchmark_binding", None)
     if binding is None:
         return base
@@ -200,6 +202,13 @@ def build_benchmark_report(run) -> dict[str, Any]:
             "upstream_revision": binding.version.upstream_revision,
             "adapter_version": binding.version.adapter_version,
             "mode": binding.mode,
+            "review_mode": (run.config or {}).get("review_mode", "standard"),
+            "preparation": {
+                "status": binding.status,
+                "prepared": len(binding.snapshot_manifest or []),
+                "total": len(binding.selected_case_keys or []),
+                "failed": sum(1 for item in (binding.snapshot_manifest or []) if item.get("error")),
+            },
             "license": entry.get("license", {}),
             "homepage": entry.get("homepage", ""),
             "languages": binding.version.language_counts,

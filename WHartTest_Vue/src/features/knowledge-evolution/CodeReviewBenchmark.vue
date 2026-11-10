@@ -1,7 +1,7 @@
 <template>
   <section class="benchmark">
     <header class="benchmark-head">
-      <div><h3>代码审查</h3><p>内置公开集直接选、预检、试跑或全量运行；内部集沿用 JSON 导入。</p></div>
+      <div><h3>代码审查测评</h3><p>先按测评目标选数据集，再预检样本，最后运行并查看报告。</p></div>
       <a-button size="small" :loading="loading" @click="refresh">刷新</a-button>
     </header>
 
@@ -13,24 +13,26 @@
     <div class="benchmark-layout">
       <aside class="benchmark-suites">
         <template v-if="tab === 'public'">
-          <div class="subhead"><b>公开测评集</b><small>全局只读 · 版本固定</small></div>
+          <div class="subhead"><b>选择测评目标</b><small>公开集只读 · 版本固定</small></div>
+          <p class="suite-guide">首次了解缺陷发现能力，建议先用 SWE-CARE 试跑；关注误报选 SWR-Bench；需要比较 Python、Java、C++ 选 AACR-Bench。</p>
           <div v-for="item in catalog" :key="item.benchmark_id" class="bench-card" :class="{ active: item.benchmark_id === activeBenchmarkId, disabled: !item.runnable }">
             <button type="button" class="bench-card-main" @click="selectBenchmark(item)">
-              <b>{{ item.short_name }}</b>
-              <small>{{ item.publisher }} · {{ item.license.spdx }}</small>
+              <span class="bench-title"><b>{{ item.short_name }}</b><a-tag v-if="item.short_name === 'SWE-CARE'" size="small" color="blue">首次推荐</a-tag></span>
+              <strong class="bench-purpose">{{ benchmarkGuide(item).purpose }}</strong>
+              <small>{{ benchmarkGuide(item).description }}</small>
               <span class="bench-langs">
                 <a-tag v-for="(count, lang) in item.languages.verified" :key="lang" size="small">{{ languageName(String(lang)) }} {{ count }}</a-tag>
                 <a-tag v-for="lang in item.languages.uncovered" :key="lang" size="small" color="gray">{{ languageName(String(lang)) }} 未覆盖</a-tag>
               </span>
               <span class="bench-meta">
                 <a-tag size="small" :color="stateColor(item.state)">{{ item.state_label }}</a-tag>
-                <em v-if="item.version_detail">v{{ item.version_detail.version }} · 有效 {{ item.version_detail.case_valid }}</em>
+                <em v-if="item.version_detail">平台有效 {{ item.version_detail.case_valid }} 条</em>
                 <em v-else>未准备，无法运行</em>
               </span>
             </button>
             <div class="bench-card-actions">
               <a-button v-if="item.state !== 'ready'" size="mini" :loading="preparing === item.benchmark_id" @click="prepareBenchmark(item)">准备数据</a-button>
-              <a-button size="mini" :disabled="!item.runnable" @click="openPreflight(item)">预检</a-button>
+              <a-button size="mini" :disabled="!item.runnable" @click="openPreflight(item)">预检样本</a-button>
             </div>
           </div>
           <a-empty v-if="!catalog.length && !loading" description="目录加载失败，请刷新" />
@@ -55,14 +57,21 @@
 
       <div class="benchmark-main">
         <template v-if="tab === 'public'">
+          <div class="workflow-steps"><span :class="{ current: !preflightResult }">1 选择测评集</span><span :class="{ current: Boolean(activeBenchmark && !preflightResult) }">2 预检样本</span><span :class="{ current: Boolean(preflightResult?.submittable && !report) }">3 运行测评</span><span :class="{ current: Boolean(report) }">4 查看报告</span></div>
           <div v-if="activeBenchmark" class="run-bar">
             <div>
               <b>{{ activeBenchmark.display_name }}</b>
-              <small>{{ activeBenchmark.version_detail ? `版本 ${activeBenchmark.version_detail.version}` : '尚未准备' }} · <a :href="activeBenchmark.homepage" target="_blank" rel="noopener noreferrer">官方来源</a></small>
+              <small>{{ benchmarkGuide(activeBenchmark).purpose }} · {{ activeBenchmark.version_detail ? `平台有效 ${activeBenchmark.version_detail.case_valid} 条` : '尚未准备' }} · <a :href="activeBenchmark.homepage" target="_blank" rel="noopener noreferrer">官方来源</a></small>
+              <p class="bench-explain">{{ benchmarkGuide(activeBenchmark).description }} {{ benchmarkGuide(activeBenchmark).caveat }}</p>
             </div>
-            <a-select v-model="runMode" style="width:120px">
+            <span>运行范围</span><a-select v-model="runMode" style="width:120px" @change="preflightResult = null">
               <a-option value="pilot">试跑（≤10）</a-option>
               <a-option value="full">全量</a-option>
+            </a-select>
+            <span>审查模式</span><a-select v-model="reviewMode" style="width:120px">
+              <a-option value="quick">快速</a-option>
+              <a-option value="standard">标准</a-option>
+              <a-option value="deep">深度</a-option>
             </a-select>
             <a-checkbox v-model="allowPartial">仅运行可用样本</a-checkbox>
             <a-button type="primary" :disabled="!activeBenchmark.runnable || !preflightResult?.submittable" :loading="busy" @click="runPublic">运行</a-button>
@@ -74,13 +83,19 @@
               <a-tag :color="preflightResult.submittable ? 'green' : 'red'">{{ preflightResult.submittable ? '可提交' : '不可提交' }}</a-tag>
             </div>
             <p v-if="preflightResult.blocked_reason" class="error">{{ preflightResult.blocked_reason }}</p>
-            <p class="hint">{{ preflightResult.estimate.basis }} · 预计 {{ preflightResult.estimate.tokens }} tokens</p>
+            <p class="hint">{{ preflightResult.estimate.basis }} · 预计 {{ preflightResult.estimate.tokens }} tokens（历史均值，仅供估算；审查模式会影响实际用量）</p>
             <div v-if="preflightResult.excluded.length" class="excluded">
               <b>排除清单（{{ preflightResult.excluded.length }}）</b>
               <span v-for="item in preflightResult.excluded.slice(0, 8)" :key="item.case_key">{{ item.case_key }}：{{ item.reasons.join('、') }}</span>
             </div>
           </div>
-          <a-empty v-else description="选择测评集后点击「预检」，确认样本与快照可用再运行" />
+          <div v-if="publicRuns.length" class="preflight">
+            <b>最近运行</b>
+            <a-select :model-value="selectedRunId" placeholder="选择测评记录" style="width:300px;margin-left:12px" @change="value => selectRun(String(value))">
+              <a-option v-for="item in publicRuns" :key="item.id" :value="item.id">{{ item.name }} · {{ item.status }}</a-option>
+            </a-select>
+          </div>
+          <div v-else class="next-action"><b>下一步：预检样本</b><p>点击左侧所选测评集的「预检样本」，查看可运行数量、排除原因与预计 Token；预检通过后才能运行。</p></div>
         </template>
 
         <template v-else>
@@ -96,9 +111,12 @@
           <div class="report-state">
             <strong>{{ report.benchmark.display_name }} 报告</strong>
             <a-tag :color="report.status === 'completed' ? 'green' : 'blue'">{{ report.status === 'completed' ? '运行结束' : '运行中' }}</a-tag>
-            <span>{{ report.benchmark.version }} · {{ report.benchmark.mode === 'pilot' ? '试跑' : '全量' }} · 许可 {{ report.benchmark.license.spdx }}</span>
+            <span>{{ report.benchmark.version }} · {{ report.benchmark.mode === 'pilot' ? '试跑' : '全量' }} · {{ ({ quick:'快速', standard:'标准', deep:'深度' } as Record<string,string>)[report.benchmark.review_mode || 'standard'] }}审查 · 许可 {{ report.benchmark.license.spdx }}</span>
             <a-button size="mini" @click="downloadReport">导出 JSON</a-button>
             <a-button size="mini" @click="loadReport">刷新报告</a-button>
+          </div>
+          <div v-if="report.benchmark.preparation && report.benchmark.preparation.prepared < report.benchmark.preparation.total" class="preflight">
+            正在准备仓库快照：{{ report.benchmark.preparation.prepared }} / {{ report.benchmark.preparation.total }}，失败 {{ report.benchmark.preparation.failed }}。准备完成后开始逐条审查。
           </div>
           <div class="report-kpis">
             <div><small>选中 / 排除</small><b>{{ report.benchmark.coverage.selected }} / {{ report.benchmark.coverage.excluded }}</b><em>失败 {{ report.benchmark.coverage.failed }} · 未核验 {{ report.benchmark.coverage.unverified }}</em></div>
@@ -154,6 +172,7 @@
           <a-empty v-if="!filteredCases.length" description="当前筛选条件下没有样本" />
         </template>
 
+        <div v-else-if="tab === 'public'" class="next-action"><b>报告会显示在这里</b><p>运行完成后，可查看缺陷召回、误报率、语言表现和逐样本证据。</p></div>
         <a-empty v-else description="选择测评集并运行后查看报告" />
       </div>
     </div>
@@ -161,7 +180,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { benchmarkGet as get, benchmarkPost as post } from './service';
 
@@ -173,7 +192,7 @@ interface Case { case_number:number; result_id:string; task_id:string|null; stat
 interface Metrics { cases:number; completed:number; failed:number; clean_cases:number; gold_issues:number; reported_findings:number; candidate_matches:number; verified_cases:number; verified_recall:number|null; verified_precision:number|null; clean_pr_false_positive_rate:number|null; avg_tokens:number|null; avg_duration_ms:number|null }
 interface GroupMetrics { n_selected:number; n_success:number; n_verified:number; gold_issues:number; recall:number|null; precision:number|null; noise_rate:number|null; line_precision:number|null; clean_pr_false_positive_rate:number|null; clean_cases:number; precision_note?:string }
 interface BenchmarkCaseRow { case_key:string; upstream_instance_id:string; repo:string; language:string; gold_count:number; findings:number; matches:number; status:string; verified:boolean; error:string|null }
-interface BenchmarkBlock { benchmark_id:string; display_name:string; version:string; mode:string; license:{spdx:string}; homepage:string; coverage:{selected:number;excluded:number;failed:number;unverified:number}; summary:GroupMetrics & {verified_hits?:number}; groups:{language:Record<string,GroupMetrics>}; native_metrics:{official_metric:string;implemented:boolean;value:number|null}; cases:BenchmarkCaseRow[] }
+interface BenchmarkBlock { benchmark_id:string; display_name:string; version:string; mode:string; review_mode?:string; preparation?:{status:string;prepared:number;total:number;failed:number}; license:{spdx:string}; homepage:string; coverage:{selected:number;excluded:number;failed:number;unverified:number}; summary:GroupMetrics & {verified_hits?:number}; groups:{language:Record<string,GroupMetrics>}; native_metrics:{official_metric:string;implemented:boolean;value:number|null}; cases:BenchmarkCaseRow[] }
 interface Suite { id:string; name:string; description:string; case_count:number }
 interface Run { id:string; name:string; status:string }
 interface Report { status:string; note:string; summary:Metrics; languages:Record<string,Metrics>; cases:Case[]; benchmark?:BenchmarkBlock }
@@ -190,17 +209,27 @@ const tab = ref<'public'|'internal'>('public');
 const catalog = ref<CatalogEntry[]>([]);
 const activeBenchmarkId = ref('');
 const runMode = ref<'pilot'|'full'>('pilot');
+const reviewMode = ref<'quick'|'standard'|'deep'>('standard');
 const allowPartial = ref(false);
 const preflightResult = ref<PreflightResult|null>(null);
 const preparing = ref('');
 const suites = ref<Suite[]>([]), runs = ref<Run[]>([]), report = ref<Report|null>(null), selectedSuiteId = ref(''), selectedRunId = ref('');
 const name = ref(''), dataset = ref(''), datasetVersion = ref(''), file = ref<File|null>(null);
 const showImport = ref(false), loading = ref(false), busy = ref(false), caseFilter = ref('all'), expandedCase = ref(''), editingCase = ref('');
+const publicRuns = ref<Run[]>([]);
+const savedRunKey = `code-review-benchmark-run:${props.projectId}`;
+let reportTimer: ReturnType<typeof setInterval> | undefined;
 const draftMatches = ref<Record<number,string>>({}), draftFindings = ref<Record<number,string>>({});
 const percent = (value:number|null|undefined) => value == null ? '待核验' : `${(value*100).toFixed(1)}%`;
 const duration = (value:number|null) => value == null ? '—' : `${(value/1000).toFixed(1)} 秒`;
 const languageName = (value:string) => ({python:'Python',java:'Java','c++':'C++'}[value] || value || '未标注');
 const stateColor = (state:string) => state === 'ready' ? 'green' : state === 'failed' ? 'red' : 'orange';
+const benchmarkGuide = (item:CatalogEntry) => {
+  if (item.short_name === 'SWE-CARE') return { purpose:'测缺陷发现能力', description:'以 Python 缺陷样本为主，适合建立首次基线。', caveat:'不适合单独评价 Java、C++ 或干净 PR 误报。' };
+  if (item.short_name === 'SWR-Bench') return { purpose:'测误报控制', description:'侧重干净 PR，观察审查是否产生缺乏证据的告警。', caveat:'不适合单独衡量缺陷召回。' };
+  if (item.short_name === 'AACR-Bench') return { purpose:'测跨语言审查', description:'包含 Python、Java、C++，适合比较不同语言表现。', caveat:'当前有效样本较少，报告需结合样本量解读。' };
+  return { purpose:'代码审查测评', description:'查看语言覆盖和有效样本，再决定是否运行。', caveat:'' };
+};
 const filteredCases = computed(() => report.value?.cases.filter(item => caseFilter.value==='all'||(caseFilter.value==='failed'?item.status==='failed':caseFilter.value==='verified'?Boolean(item.adjudication.completed):!item.adjudication.completed&&item.status!=='failed')) || []);
 const filteredBenchmarkCases = computed(() => report.value?.benchmark?.cases.filter(item => caseFilter.value==='all'||(caseFilter.value==='failed'?item.status==='failed':caseFilter.value==='verified'?item.verified:!item.verified&&item.status!=='failed')) || []);
 const usedFindings = computed(() => Object.values(draftMatches.value).filter(value => value!=='missed').map(Number));
@@ -222,6 +251,14 @@ async function load(){
   try {
     await loadCatalog();
     suites.value = await get<Suite[]>('/evaluation-suites/', { project: props.projectId, task_type: 'code_review' });
+    const publicSuite = suites.value.find(item => item.name.includes('内置公开集') && item.name.includes(activeBenchmark.value?.short_name || 'SWE-CARE'));
+    publicRuns.value = publicSuite ? (await get<Run[]>('/evaluation-runs/', { suite: publicSuite.id })).filter(item => item.status !== 'cancelled') : [];
+    if (!selectedRunId.value) {
+      const saved = localStorage.getItem(savedRunKey);
+      const latest = publicRuns.value.find(item => item.id === saved && ['pending','running'].includes(item.status)) || publicRuns.value.find(item => ['pending','running'].includes(item.status));
+      if (latest) { selectedRunId.value = latest.id; localStorage.setItem(savedRunKey, latest.id); await loadReport(); }
+      else localStorage.removeItem(savedRunKey);
+    }
     if (selectedSuiteId.value && !suites.value.some(item => item.id === selectedSuiteId.value)) { selectedSuiteId.value = ''; selectedRunId.value = ''; report.value = null; }
     if (selectedSuiteId.value) await loadRuns();
   } catch { Message.error('加载测评集失败'); } finally { loading.value = false; }
@@ -229,7 +266,7 @@ async function load(){
 function refresh(){ void load(); if (activeBenchmarkId.value) void openPreflight({ benchmark_id: activeBenchmarkId.value } as CatalogEntry); }
 async function loadRuns(){ if (!selectedSuiteId.value) return; runs.value = await get<Run[]>('/evaluation-runs/', { suite: selectedSuiteId.value }); }
 async function selectSuite(suite:Suite){ selectedSuiteId.value = suite.id; selectedRunId.value = ''; report.value = null; try { await loadRuns(); } catch { Message.error('加载运行记录失败'); } }
-function selectBenchmark(item:CatalogEntry){ activeBenchmarkId.value = item.benchmark_id; preflightResult.value = null; report.value = null; selectedRunId.value = ''; }
+function selectBenchmark(item:CatalogEntry){ activeBenchmarkId.value = item.benchmark_id; preflightResult.value = null; report.value = null; selectedRunId.value = ''; void load(); }
 async function prepareBenchmark(item:CatalogEntry){
   preparing.value = item.benchmark_id;
   try { await post(`/evaluation-benchmarks/${item.benchmark_id}/prepare/`, {}); Message.success('准备作业已提交，完成后刷新目录'); await loadCatalog(); }
@@ -241,7 +278,7 @@ async function openPreflight(item:CatalogEntry){
   activeBenchmarkId.value = item.benchmark_id;
   try {
     const languages = Object.keys(catalog.value.find(entry => entry.benchmark_id === item.benchmark_id)?.languages.verified || {}).join(',');
-    preflightResult.value = await get<PreflightResult>(`/evaluation-benchmarks/${item.benchmark_id}/preflight/`, { languages });
+    preflightResult.value = await get<PreflightResult>(`/evaluation-benchmarks/${item.benchmark_id}/preflight/`, { languages, ...(runMode.value === 'pilot' ? { limit: 10 } : {}) });
     if (!preflightResult.value.submittable) Message.warning(preflightResult.value.blocked_reason || '当前不可提交');
   } catch { Message.error('预检失败，请确认数据版本已准备'); }
 }
@@ -253,10 +290,12 @@ async function runPublic(){
     const languages = Object.keys(activeBenchmark.value.languages.verified || {});
     const result = await post<Run>('/evaluation-runs/run-code-review-public/', {
       project: props.projectId, benchmark_id: activeBenchmark.value.benchmark_id,
-      mode: runMode.value, allow_partial: allowPartial.value, languages,
+      mode: runMode.value, review_mode: reviewMode.value, allow_partial: allowPartial.value, languages,
     });
     Message.success('公开集运行已提交');
     selectedRunId.value = result.id;
+    localStorage.setItem(savedRunKey, result.id);
+    await load();
     await loadCatalog();
     await loadReport();
   } catch (error) { Message.error(error instanceof Error ? error.message : '提交失败，请检查模型配置与预检结果'); }
@@ -274,7 +313,7 @@ async function importCases(){
   finally { busy.value = false; }
 }
 async function run(){ if (!selectedSuiteId.value) return; busy.value = true; try { const result = await post<Run>('/evaluation-runs/run-code-review/', { suite: selectedSuiteId.value }); Message.success('审查任务已提交'); await loadRuns(); selectRun(result.id); } catch { Message.error('提交失败，请检查仓库、凭据与模型配置'); } finally { busy.value = false; } }
-function selectRun(runId:string){ selectedRunId.value = runId; expandedCase.value = ''; void loadReport(); }
+function selectRun(runId:string){ selectedRunId.value = runId; localStorage.setItem(savedRunKey, runId); expandedCase.value = ''; void loadReport(); }
 async function loadReport(){ if (!selectedRunId.value) return; try { report.value = await get<Report>(`/evaluation-runs/${selectedRunId.value}/code-review-report/`); } catch { Message.error('加载报告失败'); } }
 function downloadReport(){ if (!report.value) return; const blob = new Blob([JSON.stringify(report.value, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `code-review-benchmark-${selectedRunId.value}.json`; link.click(); URL.revokeObjectURL(url); }
 function toggleBenchmarkCase(item:BenchmarkCaseRow){ expandedCase.value = expandedCase.value === item.case_key ? '' : item.case_key; }
@@ -295,9 +334,11 @@ async function saveAdjudication(item:Case){
   } catch (error) { Message.error(error instanceof Error ? error.message : '保存核验失败'); }
   finally { busy.value = false; }
 }
-onMounted(load);
+onMounted(() => { void load(); reportTimer = setInterval(() => { if (selectedRunId.value && report.value && !['completed','failed'].includes(report.value.status)) void loadReport(); }, 15000); });
+onUnmounted(() => { if (reportTimer) clearInterval(reportTimer); });
 </script>
 
 <style scoped>
 .benchmark{margin-top:18px;border-top:1px solid var(--color-border-2);padding-top:18px}.benchmark-head,.subhead,.run-bar,.report-state,.case-head,.case-footer,.preflight-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.benchmark-head h3,.case-head h4,.benchmark-main h4{margin:0;font-size:15px}.benchmark-head p{margin:4px 0 0;color:var(--color-text-3);font-size:12px}.benchmark-tabs{margin-top:12px}.benchmark-layout{display:grid;grid-template-columns:270px minmax(0,1fr);gap:14px;margin-top:10px}.benchmark-suites{padding:12px;border:1px solid var(--color-border-2);border-radius:8px;background:var(--color-fill-1)}.benchmark-main{min-width:0}.subhead{margin-bottom:10px}.subhead small{color:var(--color-text-3);font-size:11px}.suite-item{display:block;width:100%;margin:5px 0;padding:11px;text-align:left;border:1px solid var(--color-border-2);border-radius:7px;background:var(--color-bg-2);cursor:pointer}.suite-item.active{border-color:#165dff;background:rgb(var(--arcoblue-1))}.suite-item b,.suite-item small,.run-bar b,.run-bar small{display:block}.suite-item small,.run-bar small{margin-top:4px;color:var(--color-text-3);font-size:11px}.bench-card{margin:8px 0;border:1px solid var(--color-border-2);border-radius:8px;background:var(--color-bg-2);overflow:hidden}.bench-card.active{border-color:#165dff}.bench-card.disabled{opacity:.72}.bench-card-main{display:grid;gap:5px;width:100%;padding:11px;text-align:left;border:0;background:transparent;cursor:pointer}.bench-card-main b{font-size:13px}.bench-card-main small{color:var(--color-text-3);font-size:11px}.bench-langs{display:flex;flex-wrap:wrap;gap:4px}.bench-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:2px}.bench-meta em{color:var(--color-text-3);font-size:11px;font-style:normal}.bench-card-actions{display:flex;justify-content:flex-end;gap:8px;padding:0 11px 10px}.import-form{display:grid;gap:7px;margin:8px 0 13px}.import-form input[type=file]{max-width:220px;font-size:11px}.import-form small{color:var(--color-text-3);line-height:1.5}.run-bar{flex-wrap:wrap;padding:10px 12px;border:1px solid var(--color-border-2);border-radius:8px}.run-bar>div{flex:1}.preflight{margin-top:10px;padding:12px;border:1px solid var(--color-border-2);border-radius:8px;background:var(--color-fill-1)}.preflight .hint,.preflight .excluded{color:var(--color-text-3);font-size:11px}.preflight .excluded{display:grid;gap:2px;margin-top:6px}.report-state{justify-content:flex-start;flex-wrap:wrap;margin-top:14px}.report-state span{flex:1;color:var(--color-text-3);font-size:11px}.report-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:10px}.report-kpis>div{padding:12px;border:1px solid var(--color-border-2);border-radius:7px}.report-kpis small,.report-kpis b,.report-kpis em{display:block}.report-kpis small,.report-kpis em{color:var(--color-text-3);font-size:11px;font-style:normal}.report-kpis b{margin:7px 0;font-size:21px}.report-cost{display:flex;flex-wrap:wrap;gap:16px;padding:10px 0;color:var(--color-text-3);font-size:12px}.language-table{margin-top:8px;border:1px solid var(--color-border-2);border-radius:8px;overflow:hidden}.table-title,.table-line{display:grid;grid-template-columns:1.1fr .9fr .7fr .8fr .8fr .9fr .9fr;gap:6px;padding:8px 11px;font-size:12px}.table-title{background:var(--color-fill-1);color:var(--color-text-3)}.table-line{border-top:1px solid var(--color-border-2)}.case-head{margin-top:16px}.case-item{margin-top:8px;border:1px solid var(--color-border-2);border-radius:8px;overflow:hidden}.case-toggle{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:10px 12px;border:0;background:var(--color-bg-2);cursor:pointer}.case-toggle b,.case-toggle small{display:block;font-size:12px}.case-toggle small{color:var(--color-text-3);font-size:11px}.case-detail{padding:10px 12px;border-top:1px solid var(--color-border-2);background:var(--color-fill-1)}.judgement-line{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px dashed var(--color-border-2)}.judgement-line b,.judgement-line small{display:block;font-size:12px}.judgement-line small{color:var(--color-text-3);font-size:11px}.error{padding:8px 11px;color:#cb2634;font-size:12px}.hint{color:var(--color-text-3);font-size:11px}
+.suite-guide{margin:0 0 12px;color:var(--color-text-2);font-size:12px;line-height:1.6}.bench-title{display:flex;align-items:center;justify-content:space-between;gap:8px}.bench-purpose{color:rgb(var(--primary-6));font-size:12px}.bench-explain{margin:6px 0 0;color:var(--color-text-2);font-size:12px;line-height:1.5}.workflow-steps{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}.workflow-steps span{padding:6px 10px;border-radius:6px;background:var(--color-fill-2);color:var(--color-text-3);font-size:12px}.workflow-steps span.current{background:rgb(var(--arcoblue-1));color:rgb(var(--primary-6));font-weight:600}.next-action{margin-top:12px;padding:16px;border:1px dashed var(--color-border-2);border-radius:8px;background:var(--color-fill-1)}.next-action b{font-size:13px}.next-action p{margin:6px 0 0;color:var(--color-text-3);font-size:12px;line-height:1.6}
 </style>

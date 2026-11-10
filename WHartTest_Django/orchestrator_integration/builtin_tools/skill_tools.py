@@ -285,6 +285,9 @@ def _collect_skill_artifacts(
         if not file_path or not _is_allowed_artifact_file(file_path):
             return
         source_path = os.path.abspath(file_path)
+        # 源 Skill 的说明和参考资料属于输入，不是本次生成产物。
+        if os.path.basename(source_path).lower() == 'skill.md' or any(part in source_path.replace(os.sep, '/') for part in ('/references/', '/schemas/', '/templates/')):
+            return
         stable_path = source_path
         try:
             artifact_root = os.path.abspath(artifacts_dir)
@@ -296,6 +299,9 @@ def _collect_skill_artifacts(
         except (OSError, ValueError) as exc:
             logger.warning("[execute_skill_script] 持久化产物失败 %s: %s", source_path, exc)
             return
+        if stable_path.lower().endswith('.xlsx'):
+            from knowledge_evolution.plan_workbook_feedback import enhance_plan_workbook
+            enhance_plan_workbook(stable_path)
         payload = _build_artifact_payload(stable_path, display_name=os.path.basename(source_path))
         if not payload:
             return
@@ -312,6 +318,9 @@ def _collect_skill_artifacts(
 
     for candidate in _extract_artifact_candidates(output_text):
         if candidate.startswith("/media/"):
+            resolved = os.path.abspath(os.path.join(str(settings.MEDIA_ROOT), candidate[len("/media/"):]))
+            if os.path.commonpath([os.path.abspath(str(settings.MEDIA_ROOT)), resolved]) == os.path.abspath(str(settings.MEDIA_ROOT)):
+                add_file(resolved)
             continue
         if os.path.isabs(candidate):
             add_file(candidate)

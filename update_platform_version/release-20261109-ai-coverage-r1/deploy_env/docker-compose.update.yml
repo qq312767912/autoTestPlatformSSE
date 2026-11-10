@@ -1,0 +1,195 @@
+x-actuator-common: &actuator-common
+  image: wharttest-250-actuator:update-ac65a6fb-v2.8-r3-auth-failfast-arm64
+  pull_policy: never
+  # 麒麟 ARM64 64KB 页环境中通过 PATH/symlink 启动 `python main.py`
+  # 可能在 CPython getpath 阶段异常；使用绝对解释器和脚本路径规避。
+  entrypoint: ["/usr/local/bin/python3.12"]
+  command: ["/app/main.py"]
+  restart: unless-stopped
+  init: true
+  shm_size: "${ACTUATOR_SHM_SIZE:-1gb}"
+  mem_limit: "${ACTUATOR_MEMORY_LIMIT:-2g}"
+  cpus: "${ACTUATOR_CPU_LIMIT:-1.0}"
+  environment: &actuator-environment
+    WHARTTEST_ACTUATOR_WS_URL: ws://backend:8000/ws/ui/actuator/
+    WHARTTEST_ACTUATOR_API_URL: http://backend:8000
+    WHARTTEST_ACTUATOR_API_USERNAME: ${ACTUATOR_API_USERNAME:-admin}
+    WHARTTEST_ACTUATOR_API_PASSWORD_FILE: /run/secrets/actuator_api_password
+    WHARTTEST_ACTUATOR_USE_GUI: "false"
+    WHARTTEST_ACTUATOR_HEADLESS: "true"
+    WHARTTEST_ACTUATOR_PERSISTENT: "false"
+    WHARTTEST_ACTUATOR_BROWSER_TYPE: chromium
+    WHARTTEST_ACTUATOR_TRACE_ENABLED: "true"
+    VISION_MCP_URL: http://vision-mcp:8010/mcp
+    VISION_MCP_SHARED_DIR: /app/data/vision-mcp-captcha
+  secrets:
+    - actuator_api_password
+  volumes:
+    - /projects/ai-test-platform/offline-images/data:/app/data
+  extra_hosts:
+    - "www.test.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+    - "www.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+    - "static.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+    - "static.test.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+    - "media.sseinfo.com:${SSE_TEST_HOST_IP:-10.122.215.111}"
+  networks:
+    - wharttest-network
+
+# 与内网当前 docker-compose.offline.yml 叠加使用，覆盖升级服务并新增三个执行器。
+services:
+  crg-service:
+    image: ${CRG_IMAGE:-wharttest-250-crg:update-20261109-ai-coverage-r1-reused-arm64}
+    pull_policy: never
+    container_name: wharttest-crg
+    restart: unless-stopped
+    environment:
+      CRG_INTERNAL_TOKEN: ${CRG_INTERNAL_TOKEN:?CRG_INTERNAL_TOKEN must be set by 04-deploy.sh}
+      CRG_BUILD_TIMEOUT: ${CRG_BUILD_TIMEOUT:-600}
+      CRG_QUERY_TIMEOUT: ${CRG_QUERY_TIMEOUT:-120}
+    volumes:
+      - /projects/ai-test-platform/offline-images/data/code-analysis-repositories:/repositories:ro
+      - /projects/ai-test-platform/offline-images/data/code-review-graphs:/graphs
+    networks:
+      - wharttest-network
+
+  semgrep-scanner:
+    image: ${SEMGREP_SCANNER_IMAGE:-wharttest-250-semgrep:update-20261109-ai-coverage-r1-arm64}
+    pull_policy: never
+    container_name: wharttest-semgrep
+    networks:
+      - wharttest-network
+    restart: unless-stopped
+
+  backend:
+    image: wharttest-250-backend:update-20261109-ai-coverage-r1-arm64
+    # 录制浏览器/本地虚拟执行器运行在 Backend 容器内，与独立 Actuator
+    # 一样需要内网 SSE 域名映射，否则 page.goto 会报 ERR_NAME_NOT_RESOLVED。
+    extra_hosts:
+      - "www.test.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "www.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "static.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "static.test.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "media.sseinfo.com:${SSE_TEST_HOST_IP:-10.122.215.111}"
+    volumes:
+      # 唯一保留的挂载：Celery 单 Worker 配置。
+      # ⚠️ 自 update-ac65a6fb-v2.8-r1 起，Backend 镜像已完整包含此前的全部代码修复
+      #    （用例审查并发与重试、代码审查共同祖先比较等），因此不再挂载 hotfix/ 代码覆盖层。
+      #    挂载旧副本会盖掉新镜像的改动，并让 05-verify.sh 失去“镜像是否真的更新”的判别力。
+      #    确需在不重建镜像的前提下临时改后端代码时，叠加 docker-compose.hotfix.yml
+      #    （19/22/23-apply-*-hotfix.sh 会自动叠加）。
+      - /projects/ai-test-platform/update_platform_version/deploy_env/supervisord.single-worker.conf:/app/supervisord.conf:ro
+    secrets:
+      - test_host_sync_token
+    environment:
+      TEST_HOST_SYNC_TOKEN_FILE: /run/secrets/test_host_sync_token
+      RECORDER_DESKTOP_ENABLED: "true"
+      RECORDER_DESKTOP_DISPLAY: ":99"
+      RECORDER_DESKTOP_PUBLIC_URL: "/novnc/vnc.html?autoconnect=1&resize=scale&reconnect=1&show_dot=1"
+      # 内网 Redis 当前未启用 AUTH。基础 Compose 若残留 REDIS_PASSWORD 拼接，
+      # Celery 会显示 redis://:**@redis:6379/0，连接重试约 20 秒后退出。
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_BROKER_READ_URL: redis://redis:6379/0
+      CELERY_BROKER_WRITE_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      CHANNEL_REDIS_URL: redis://redis:6379/2
+      DJANGO_CACHE_REDIS_URL: redis://redis:6379/1
+      VISION_MCP_URL: http://vision-mcp:8010/mcp
+      VISION_API_BASE_URL: ${VISION_API_BASE_URL:-}
+      VISION_MCP_BASE_URL: ${VISION_MCP_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      VISION_API_CHAT_PATH: ${VISION_API_CHAT_PATH:-}
+      VISION_MCP_CHAT_COMPLETIONS_PATH: ${VISION_MCP_CHAT_COMPLETIONS_PATH:-/chat/completions}
+      VISION_API_KEY: ${VISION_API_KEY:-}
+      VISION_MCP_API_KEY: ${VISION_MCP_API_KEY:-}
+      VISION_MODEL: ${VISION_MODEL:-}
+      VISION_MCP_MODEL: ${VISION_MCP_MODEL:-glm-4.6v-flash}
+      VISION_API_TIMEOUT_SECONDS: ${VISION_API_TIMEOUT_SECONDS:-}
+      VISION_MCP_TIMEOUT_SECONDS: ${VISION_MCP_TIMEOUT_SECONDS:-120}
+      # Semgrep 独立扫描器，避免污染 Backend 的 Alpine/musl 运行时。
+      SEMGREP_SCANNER_URL: http://semgrep-scanner:8080
+      CODE_REVIEW_GRAPH_URL: http://crg-service:8080
+      CODE_REVIEW_GRAPH_TOKEN: ${CRG_INTERNAL_TOKEN:?CRG_INTERNAL_TOKEN must be set by 04-deploy.sh}
+      CODE_REVIEW_GRAPH_ENABLED: ${CODE_REVIEW_GRAPH_ENABLED:-true}
+    depends_on:
+      semgrep-scanner:
+        condition: service_healthy
+      crg-service:
+        condition: service_healthy
+
+  frontend:
+    image: wharttest-250-frontend:update-20261109-ai-coverage-r1-arm64
+    # 与后端共享持久化媒体目录，确保 Skill 生成的交付物可由 Nginx 下载。
+    volumes:
+      - /projects/ai-test-platform/offline-images/data/media:/app/data/media:ro
+
+  playwright-mcp:
+    entrypoint: ["/bin/sh", "/opt/wharttest/playwright-mcp-entrypoint.sh"]
+    command: ["--no-sandbox", "--host", "0.0.0.0", "--allowed-hosts", "*"]
+    volumes:
+      - /projects/ai-test-platform/update_platform_version/deploy_env/playwright-mcp-entrypoint.sh:/opt/wharttest/playwright-mcp-entrypoint.sh:ro
+      - /projects/ai-test-platform/update_platform_version/deploy_env/playwright-mcp-config.template.json:/opt/wharttest/playwright-mcp-config.template.json:ro
+    extra_hosts:
+      - "www.test.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "www.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "static.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "static.test.sse.com.cn:${SSE_TEST_HOST_IP:-10.122.215.111}"
+      - "media.sseinfo.com:${SSE_TEST_HOST_IP:-10.122.215.111}"
+
+  vision-mcp:
+    image: wharttest-250-vision-mcp:update-01339484-arm64-r2
+    container_name: wharttest-vision-mcp
+    environment:
+      VISION_MCP_BASE_URL: ${VISION_MCP_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      VISION_MCP_CHAT_COMPLETIONS_PATH: ${VISION_MCP_CHAT_COMPLETIONS_PATH:-/chat/completions}
+      VISION_MCP_API_KEY: ${VISION_MCP_API_KEY:-}
+      VISION_MCP_MODEL: ${VISION_MCP_MODEL:-glm-4.6v-flash}
+      VISION_MCP_OCR_PROVIDER: ${VISION_MCP_OCR_PROVIDER:-rapidocr}
+      VISION_MCP_TRANSPORT: streamable-http
+      VISION_MCP_HOST: 0.0.0.0
+      VISION_MCP_PORT: 8010
+      VISION_MCP_PATH: /mcp
+      VISION_MCP_TIMEOUT_SECONDS: ${VISION_MCP_TIMEOUT_SECONDS:-120}
+      VISION_MCP_MAX_RETRIES: ${VISION_MCP_MAX_RETRIES:-2}
+    ports:
+      - "8923:8010"
+    volumes:
+      - /projects/ai-test-platform/offline-images/data:/app/data
+      - /projects/ai-test-platform/offline-images/data/playwright-screenshots:/tmp/playwright-output:ro
+    networks:
+      - wharttest-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,urllib.error; r=urllib.request.Request('http://127.0.0.1:8010/mcp', method='GET');\ntry: urllib.request.urlopen(r, timeout=5)\nexcept urllib.error.HTTPError as e: raise SystemExit(0 if e.code < 500 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  actuator-01:
+    <<: *actuator-common
+    container_name: wharttest-actuator-01
+    environment:
+      <<: *actuator-environment
+      WHARTTEST_ACTUATOR_ID: actuator-01
+      WHARTTEST_ACTUATOR_NAME: 内网执行器-01
+
+  actuator-02:
+    <<: *actuator-common
+    container_name: wharttest-actuator-02
+    environment:
+      <<: *actuator-environment
+      WHARTTEST_ACTUATOR_ID: actuator-02
+      WHARTTEST_ACTUATOR_NAME: 内网执行器-02
+
+  actuator-03:
+    <<: *actuator-common
+    container_name: wharttest-actuator-03
+    environment:
+      <<: *actuator-environment
+      WHARTTEST_ACTUATOR_ID: actuator-03
+      WHARTTEST_ACTUATOR_NAME: 内网执行器-03
+
+secrets:
+  actuator_api_password:
+    file: /projects/ai-test-platform/update_platform_version/deploy_env/secrets/actuator_api_password
+  test_host_sync_token:
+    file: /projects/ai-test-platform/update_platform_version/deploy_env/secrets/test_host_sync_token

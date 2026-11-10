@@ -1,0 +1,28 @@
+版本：20261109-ai-coverage-r1
+目标：linux/arm64；麒麟 64KB 页需内网实机验收
+
+本次完整构建并传输：
+- wharttest-250-backend:update-20261109-ai-coverage-r1-arm64
+  Dockerfile: WHartTest_Django/Dockerfile.alpine
+  Alpine/musl；@alibaba-group/open-code-review + ocr；系统 Chromium + Node Playwright
+- wharttest-250-frontend:update-20261109-ai-coverage-r1-arm64
+  Dockerfile: WHartTest_Vue/Dockerfile
+- wharttest-250-semgrep:update-20261109-ai-coverage-r1-arm64
+  Dockerfile: WHartTest_Semgrep/Dockerfile
+  Alpine/musl ARM64；semgrep==1.178.0
+
+补充传输（复用已验证本地 Alpine 镜像）：
+- wharttest-250-crg:update-20261109-ai-coverage-r1-reused-arm64
+  OCI revision=local，code-review-graph=2.3.9
+
+复用内网现有镜像，不随本包传输：
+- wharttest-250-actuator:update-ac65a6fb-v2.8-r3-auth-failfast-arm64
+- wharttest-250-vision-mcp:update-01339484-arm64-r2
+- postgres:16-alpine、redis:7-alpine
+- 内网已验证的 qdrant-kylin-arm64:v1.16.0-page64k
+- 内网现有 MCP / Playwright MCP / Host Sync
+
+00-preflight.sh 检查前三项复用镜像；01-precheck.sh 核对基础环境。
+本地 semgrep:latest 是 Debian，不可替代本次 Alpine Semgrep。
+镜像分卷在 deploy_env 同级 images/，每卷最多 280MiB。
+源码清单见 source-manifest.json，包含当前工作区变更，不仅是 Git HEAD。

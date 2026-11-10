@@ -1,0 +1,44 @@
+{
+  "frontend": {
+    "platform": "linux/arm64",
+    "revision": "20261109-ai-coverage-r1",
+    "archive_verified": true
+  },
+  "semgrep": {
+    "platform": "linux/arm64",
+    "libc": "musl",
+    "semgrep": "1.178.0",
+    "actual_scan_findings": 1,
+    "actual_scan_errors": 0,
+    "archive_verified": true
+  },
+  "prior_local_graph_tests": {
+    "passed": 6,
+    "note": "现有本地容器测试；新镜像仍需独立运行"
+  },
+  "target_64kb_verified": false,
+  "backend": {
+    "platform": "linux/arm64",
+    "libc": "musl",
+    "open_code_review": "1.13.6",
+    "django_check": "passed",
+    "graph_regression_tests_passed": 6
+  },
+  "images": {
+    "wharttest-250-backend:update-20261109-ai-coverage-r1-arm64": {
+      "id": "sha256:04720535f95ebdcc550c9ba069be775dad83852b653314cd29461f09bae28d35",
+      "size": 889301105,
+      "revision": "20261109-ai-coverage-r1"
+    },
+    "wharttest-250-frontend:update-20261109-ai-coverage-r1-arm64": {
+      "id": "sha256:ae9ef000854683b9deacd7f5a2b624ed3307bcbc34ee304e90ed7faf8449f2ee",
+      "size": 31156547,
+      "revision": "20261109-ai-coverage-r1"
+    },
+    "wharttest-250-semgrep:update-20261109-ai-coverage-r1-arm64": {
+      "id": "sha256:239c664c7ea30d3baf9fb4dc34f07dc78311b6e123d1896429ded8c6478f2649",
+      "size": 131919299,
+      "revision": "20261109-ai-coverage-r1"
+    }
+  }
+}

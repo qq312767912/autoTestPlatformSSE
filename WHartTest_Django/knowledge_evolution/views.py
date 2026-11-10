@@ -1610,6 +1610,7 @@ class EvaluationRunViewSet(
             languages=languages,
             include_clean=include_clean,
             mode=str(request.data.get("mode") or "pilot"),
+            review_mode=str(request.data.get("review_mode") or "standard"),
             allow_partial=bool(request.data.get("allow_partial")),
             name=str(request.data.get("name") or ""),
             model_config=model_config,
@@ -1620,6 +1621,7 @@ class EvaluationRunViewSet(
             "benchmark_id": run.benchmark_binding.benchmark_id,
             "version": version.version,
             "mode": run.benchmark_binding.mode,
+            "review_mode": run.config.get("review_mode", "standard"),
             "selected_cases": len(run.benchmark_binding.selected_case_keys),
             "excluded_cases": len(run.benchmark_binding.excluded_cases),
         }
@@ -1638,6 +1640,7 @@ class EvaluationRunViewSet(
             "version_status": binding.version.status,
             "manifest_digest": binding.version.manifest_digest,
             "mode": binding.mode,
+            "review_mode": (run.config or {}).get("review_mode", "standard"),
             "status": binding.status,
             "selected_case_keys": binding.selected_case_keys,
             "excluded_cases": binding.excluded_cases,

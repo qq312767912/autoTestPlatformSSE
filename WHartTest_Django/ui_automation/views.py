@@ -24,6 +24,7 @@ from file_management.services import maybe_cleanup_unreferenced_files, sync_file
 
 logger = logging.getLogger('ui_automation')
 
+from .filters import UiTestCaseFilter
 from .models import (
     UiModule, UiPage, UiElement, UiPageSteps, UiPageStepsDetailed,
     UiTestCase, UiCaseStepsDetailed, UiExecutionRecord, UiPublicData, UiEnvironmentConfig,
@@ -633,7 +634,7 @@ class UiTestCaseViewSet(viewsets.ModelViewSet):
     queryset = UiTestCase.objects.select_related('project', 'module', 'creator')
     serializer_class = UiTestCaseSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['project', 'module', 'level', 'status']
+    filterset_class = UiTestCaseFilter
     search_fields = ['name']
     ordering_fields = ['name', 'level', 'created_at']
     ordering = ['-created_at']

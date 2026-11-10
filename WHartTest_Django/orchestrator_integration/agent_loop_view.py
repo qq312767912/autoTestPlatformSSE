@@ -131,10 +131,16 @@ def _discover_persisted_skill_artifacts(project_id: object, source_id: str) -> l
         # 同一会话会为图片提取、脚本执行、最终交付分别建隔离目录。只拿“最新目录”
         # 会被最后更新的图片临时目录抢走，明明已有 stage_result 也登记成空。
         # 优先选择真正提交了结构化结果的最新目录；没有时才回落到普通交付目录。
-        structured_candidates = [
-            path for path in candidates
-            if os.path.isfile(os.path.join(path, "stage_result.json"))
-        ]
+        structured_candidates = []
+        for directory in candidates:
+            try:
+                with open(os.path.join(directory, "stage_result.json"), encoding="utf-8") as handle:
+                    result = json.load(handle)
+                # 同名的 JSON Schema 是 Skill 输入，不能冒充阶段结果。
+                if isinstance(result, dict) and isinstance(result.get("items"), list) and result.get("stage"):
+                    structured_candidates.append(directory)
+            except (OSError, ValueError):
+                pass
         deliverable_candidates = [
             path for path in candidates
             if any(
@@ -162,7 +168,15 @@ def _discover_persisted_skill_artifacts(project_id: object, source_id: str) -> l
         for name in dict.fromkeys(names):
             path = os.path.join(run_dir, os.path.basename(name))
             if not os.path.isfile(path):
-                continue
+                # 各工具调用使用独立目录，协议和交付文件可能不在同一目录。
+                matches = [os.path.join(directory, os.path.basename(name)) for directory in candidates
+                           if os.path.isfile(os.path.join(directory, os.path.basename(name)))]
+                if not matches:
+                    continue
+                path = max(matches, key=os.path.getmtime)
+            if path.lower().endswith('.xlsx'):
+                from knowledge_evolution.plan_workbook_feedback import enhance_plan_workbook
+                enhance_plan_workbook(path)
             digest = hashlib.sha256()
             size = 0
             with open(path, "rb") as handle:

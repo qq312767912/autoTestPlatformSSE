@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE_COMPOSE="${BASE_COMPOSE:-/projects/ai-test-platform/offline-images/docker-compose.offline.yml}"
+UPDATE_DIR="$(cd "$(dirname "$0")" && pwd)"
+OVERRIDE_COMPOSE="$UPDATE_DIR/docker-compose.update.yml"
+
+# 不依赖 deploy_env 内容易因覆盖解压而丢失的 .latest-backup 标记；只要同级
+# backups/ 下存在当天任意一次由 02-backup.sh 完成的完整备份，即可继续部署。
+PACKAGE_DIR="$(cd "$UPDATE_DIR/.." && pwd)"
+BACKUP_ROOT="${BACKUP_ROOT:-$PACKAGE_DIR/backups}"
+TODAY="$(date '+%Y%m%d')"
+backup_dir=""
+
+if [ -s "$UPDATE_DIR/.latest-backup" ]; then
+  candidate="$(cat "$UPDATE_DIR/.latest-backup")"
+  case "$(basename "$candidate")" in
+    "$TODAY"-*) [ -f "$candidate/BACKUP_COMPLETE" ] && backup_dir="$candidate" ;;
+  esac
+fi
+
+if [ -z "$backup_dir" ]; then
+  for candidate in "$BACKUP_ROOT/$TODAY-"*; do
+    [ -d "$candidate" ] || continue
+    [ -f "$candidate/BACKUP_COMPLETE" ] || continue
+    backup_dir="$candidate"
+  done
+fi
+
+if [ -z "$backup_dir" ]; then
+  echo "当天未发现由 02-backup.sh 生成的完整备份，部署中止。请先执行 02-backup.sh" >&2
+  exit 1
+fi
+
+printf '%s\n' "$backup_dir" > "$UPDATE_DIR/.latest-backup"
+echo "[备份] 已确认当天执行过 02-backup.sh：$backup_dir"
+
+compose=(docker compose -p offline-images -f "$BASE_COMPOSE" -f "$OVERRIDE_COMPOSE")
+
+crg_token_file="$UPDATE_DIR/secrets/crg_internal_token"
+if [ ! -s "$crg_token_file" ]; then
+  mkdir -p "$UPDATE_DIR/secrets"
+  umask 077
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32 > "$crg_token_file"
+  else
+    python3 -c 'import secrets; print(secrets.token_hex(32))' > "$crg_token_file"
+  fi
+fi
+chmod 600 "$crg_token_file"
+CRG_INTERNAL_TOKEN="$(cat "$crg_token_file")"
+export CRG_INTERNAL_TOKEN
+
+data_root="/projects/ai-test-platform/offline-images/data"
+if [ "${EUID}" -eq 0 ]; then
+  install -d -m 0755 "$data_root/code-analysis-repositories"
+  install -d -m 0750 -o 10001 -g 10001 "$data_root/code-review-graphs"
+elif command -v sudo >/dev/null 2>&1; then
+  sudo install -d -m 0755 "$data_root/code-analysis-repositories"
+  sudo install -d -m 0750 -o 10001 -g 10001 "$data_root/code-review-graphs"
+else
+  echo "创建 CRG 持久化目录需要 root 权限，当前用户非 root 且系统无 sudo" >&2
+  exit 1
+fi
+
+host_sync_token="$UPDATE_DIR/secrets/test_host_sync_token"
+if [ ! -s "$host_sync_token" ]; then
+  mkdir -p "$UPDATE_DIR/secrets"
+  umask 077
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32 > "$host_sync_token"
+  else
+    python3 -c 'import secrets; print(secrets.token_hex(32))' > "$host_sync_token"
+  fi
+fi
+chmod 600 "$host_sync_token"
+
+bash "$UPDATE_DIR/00-preflight.sh"
+"${compose[@]}" config >/dev/null
+
+# 内网不使用微信插件宿主。基础 Compose 中该服务仍是 restart: unless-stopped，
+# 因此每次部署都显式关闭其自动重启策略并停止容器，避免宿主机重启后恢复旧 Node.js 进程。
+WEIXIN_DISABLE_SCRIPT="$UPDATE_DIR/09-disable-weixin-plugin-host.sh"
+if [ ! -f "$WEIXIN_DISABLE_SCRIPT" ]; then
+  echo "缺少微信插件宿主停用脚本：$WEIXIN_DISABLE_SCRIPT" >&2
+  exit 1
+fi
+bash "$WEIXIN_DISABLE_SCRIPT"
+
+wait_healthy() {
+  local container="$1"
+  local limit="${2:-180}"
+  local elapsed=0
+  while [ "$elapsed" -lt "$limit" ]; do
+    status="$(docker inspect "$container" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{if .State.Running}}running{{else}}stopped{{end}}{{end}}' 2>/dev/null || true)"
+    case "$status" in
+      healthy|running) echo "[通过] $container: $status"; return 0 ;;
+      # 容器初次启动会执行数据库迁移、技能同步和超时任务收尾，
+      # healthcheck 在此期间可能短暂进入 unhealthy，应继续等待至上限。
+      unhealthy) ;;
+      stopped) docker logs --tail 100 "$container"; return 1 ;;
+    esac
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+  docker logs --tail 100 "$container" || true
+  echo "$container 健康检查超时" >&2
+  return 1
+}
+
+# ------------------------------------------------------------------ 内置技能
+# 容器内 /app/bundled_skills 由基础 compose 的 `./skills:/app/bundled_skills:ro`
+# 挂载自宿主机外置目录——不在镜像内，也不随升级包自动落地，必须在这里补齐，
+# 否则 05-verify.sh 的技能断言必然失败。
+# 放在 up 之前：Backend 启动时 entrypoint 会自动执行 init_skills，
+# 先刷好宿主机目录，容器第一次起来读到的就是包内版本。
+SKILLS_SYNC="$UPDATE_DIR/24-sync-bundled-skills.sh"
+
+if [ -f "$SKILLS_SYNC" ]; then
+  echo "[技能] 同步内置技能到宿主机外置目录（写前自动整目录备份，可回退）"
+  # 这里【故意不传 SKILLS_DIR】：目标目录由 24 自己从 BASE_COMPOSE 推导。
+  # 24 用「SKILLS_DIR 是否由外部给定」来区分“自动推导”和“用户手动指定”，
+  # 自动推导时才会把「推导结果 vs 容器实际挂载源」当硬校验（不一致即中止）。
+  # 若由本脚本代传，24 会误判成用户手动指定，从而绕过该校验。
+  # 用户 export SKILLS_DIR 时仍会被 24 继承，并正确进入“手动指定”语义。
+  SKILLS_SYNC_BY_DEPLOY=1 BASE_COMPOSE="$BASE_COMPOSE" UPDATE_DIR="$UPDATE_DIR" \
+    bash "$SKILLS_SYNC" --apply --force
+else
+  echo "[警告] 未找到 $SKILLS_SYNC，跳过内置技能同步；05-verify.sh 的技能断言可能失败" >&2
+fi
+
+echo "[升级] 启动 Semgrep Scanner 和 CRG，并替换 Backend 和 Frontend（Backend 入口脚本会执行数据库迁移）"
+"${compose[@]}" up -d --pull never --no-deps semgrep-scanner
+wait_healthy wharttest-semgrep 180
+"${compose[@]}" up -d --pull never --no-deps crg-service
+wait_healthy wharttest-crg 180
+"${compose[@]}" up -d --pull never --no-deps backend frontend
+wait_healthy wharttest-backend 300
+wait_healthy wharttest-frontend 180
+
+# 刷新数据库中的技能快照。
+# Backend 的 entrypoint 只在容器「被重建」时才跑 init_skills；只换技能文件、不换镜像时
+# 容器不会重建，数据库里仍是旧内容——而审查送进模型的正是 Skill.skill_content。
+# init_skills 对已存在技能是「覆盖更新」且保留 is_active，故这里无条件补一次，幂等安全。
+echo "[技能] 刷新数据库中的技能快照"
+if docker exec wharttest-backend /opt/venv/bin/python /app/manage.py init_skills; then
+  echo "[通过] 技能快照已刷新"
+else
+  echo "[失败] init_skills 执行失败，请排查后单独重跑：" >&2
+  echo "       docker exec wharttest-backend /opt/venv/bin/python /app/manage.py init_skills" >&2
+  exit 1
+fi
+
+echo "[恢复] Backend 网络恢复后重新拉起三个执行器"
+# 不直接 compose up：deploy_env 被覆盖时执行器密码 secret 可能缺失或为空。
+# 统一交给 07 恢复已有 secret、校验平台登录凭据并逐个重建，避免三个执行器
+# 因缺少 bind 源同时创建失败。
+bash "$UPDATE_DIR/07-start-actuators.sh"
+wait_healthy wharttest-actuator-01 180
+wait_healthy wharttest-actuator-02 180
+wait_healthy wharttest-actuator-03 180
+
+echo "[配置] 安装宿主机域名同步服务"
+if [ "${EUID}" -eq 0 ]; then
+  bash "$UPDATE_DIR/30-install-host-sync.sh"
+elif command -v sudo >/dev/null 2>&1; then
+  sudo bash "$UPDATE_DIR/30-install-host-sync.sh"
+else
+  echo "[警告] 当前用户非 root 且系统无 sudo，请稍后以 root 执行 30-install-host-sync.sh" >&2
+fi
+
+echo "Backend、Frontend、Semgrep Scanner、CRG 升级完成，三个执行器已恢复；微信插件宿主已停用；域名同步服务已安装。"
+echo "请执行 05-verify.sh，并进行登录、代码审查、用例审查等人工验收。"

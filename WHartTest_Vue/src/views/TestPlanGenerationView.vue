@@ -493,7 +493,7 @@ const primaryArtifacts = computed(() => {
   const contracted = candidates.filter(isPlanDeliverable);
   if (contracted.length) return latestByName(contracted);
   const hinted = candidates.filter(file => DELIVERABLE_HINT.test(file.name));
-  return hinted.length ? latestByName(hinted) : latestByName(candidates);
+  return latestByName(hinted);
 });
 
 const latestByName = (files: ToolFileAttachment[]) => {
@@ -512,7 +512,7 @@ const historicalArtifacts = computed(() => {
 const intermediateArtifacts = computed(() => {
   const hiddenHistoryUrls = new Set(historicalArtifacts.value.map(file => file.url));
   const primaryUrls = new Set(primaryArtifacts.value.map(file => file.url));
-  return allArtifacts.value.filter(file => !primaryUrls.has(file.url) && !hiddenHistoryUrls.has(file.url));
+  return latestByName(allArtifacts.value.filter(file => !primaryUrls.has(file.url) && !hiddenHistoryUrls.has(file.url) && !/^(SKILL\.md|stage_result\.json)$/i.test(file.name)));
 });
 
 const categoryLabels: Record<DocumentCategory, string> = {

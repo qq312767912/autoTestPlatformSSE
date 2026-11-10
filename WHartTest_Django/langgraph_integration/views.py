@@ -2533,6 +2533,17 @@ class ChatHistoryAPIView(APIView):
                     f"ChatHistoryAPIView: Failed to calculate token count: {e}"
                 )
 
+            # 使用经权限检查的项目/会话范围补回真实交付附件，兼容旧工具消息漏附件。
+            from orchestrator_integration.agent_loop_view import _discover_persisted_skill_artifacts
+            artifacts = _discover_persisted_skill_artifacts(project_id, str(session_id))
+            if artifacts:
+                from django.conf import settings
+                attachments = [{"type": "file", "name": item["name"], "size": item["size"],
+                                "url": settings.MEDIA_URL.rstrip('/') + '/' + item["path"]}
+                               for item in artifacts]
+                history_messages.append({"type": "tool", "content": json.dumps(attachments, ensure_ascii=False),
+                                         "id": "persisted-artifacts", "tool_name": "persisted_artifacts"})
+
             return Response(
                 {
                     "status": "success",

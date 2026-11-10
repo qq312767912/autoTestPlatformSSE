@@ -1,0 +1,13 @@
+FROM python:3.11-alpine
+
+RUN apk add --no-cache docker-cli
+
+WORKDIR /app
+COPY wharttest_host_sync.py /app/wharttest_host_sync.py
+
+ENV WHARTTEST_BACKEND_URL=http://backend:8000 \
+    HOST_SYNC_APPLY_HOST=false \
+    HOST_SYNC_DOCKER_BIN=docker \
+    HOST_SYNC_STATE_FILE=/var/lib/wharttest-host-sync/state.json
+
+CMD ["/bin/sh", "-c", "while true; do python /app/wharttest_host_sync.py || true; sleep \"${HOST_SYNC_INTERVAL_SECONDS:-30}\"; done"]

@@ -1,0 +1,2 @@
+FROM wharttest-new-frontend:public-benchmarks
+COPY . /usr/share/nginx/html/

@@ -1,0 +1,99 @@
+import importlib.util
+import os
+from pathlib import Path
+import tempfile
+import unittest
+from unittest import mock
+
+
+MODULE_PATH = Path(__file__).with_name("wharttest_host_sync.py")
+SPEC = importlib.util.spec_from_file_location("wharttest_host_sync", MODULE_PATH)
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+
+
+class ManagedBlockTests(unittest.TestCase):
+    def test_adds_block_without_changing_existing_content(self):
+        original = "127.0.0.1 localhost\n10.0.0.2 custom.local\n"
+        block = MODULE.render_managed_block([
+            {"hostname": "b.example.com", "ipv4": "10.0.0.4"},
+            {"hostname": "a.example.com", "ipv4": "10.0.0.3"},
+        ])
+        updated = MODULE.replace_managed_block(original, block)
+        self.assertIn("10.0.0.2 custom.local", updated)
+        self.assertLess(updated.index("a.example.com"), updated.index("b.example.com"))
+
+    def test_replaces_only_managed_block(self):
+        original = "before\n# BEGIN WHARTTEST MANAGED HOSTS\n10.0.0.1 old.example.com\n# END WHARTTEST MANAGED HOSTS\nafter\n"
+        block = MODULE.render_managed_block([{"hostname": "new.example.com", "ipv4": "10.0.0.9"}])
+        updated = MODULE.replace_managed_block(original, block)
+        self.assertEqual(updated.splitlines()[0], "before")
+        self.assertEqual(updated.splitlines()[-1], "after")
+        self.assertNotIn("old.example.com", updated)
+
+    def test_rejects_incomplete_markers(self):
+        with self.assertRaises(ValueError):
+            MODULE.replace_managed_block("# BEGIN WHARTTEST MANAGED HOSTS\n", "block")
+
+    def test_verifies_checksum(self):
+        mappings = [{"hostname": "a.example.com", "ipv4": "10.0.0.3"}]
+        import hashlib
+        checksum = hashlib.sha256(MODULE.canonical_payload(mappings).encode()).hexdigest()
+        MODULE.verify_checksum(mappings, checksum)
+        with self.assertRaises(ValueError):
+            MODULE.verify_checksum(mappings, "0" * 64)
+
+    def test_agent_token_can_come_from_environment(self):
+        with mock.patch.dict(os.environ, {
+            "TEST_HOST_SYNC_TOKEN_FILE": "/missing/token",
+            "TEST_HOST_SYNC_TOKEN": "local-token",
+        }, clear=False):
+            self.assertEqual(MODULE.HostSyncAgent()._token(), "local-token")
+
+    def test_container_only_mode_disables_host_update(self):
+        with mock.patch.dict(os.environ, {"HOST_SYNC_APPLY_HOST": "false"}, clear=False):
+            self.assertFalse(MODULE.HostSyncAgent().apply_host_enabled)
+
+    def test_apply_host_falls_back_when_atomic_replace_hits_mount_point(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hosts = root / "hosts"
+            hosts.write_text("127.0.0.1 localhost\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {
+                "HOST_SYNC_HOSTS_FILE": str(hosts),
+                "HOST_SYNC_BACKUP_ROOT": str(root / "backups"),
+                "HOST_SYNC_STATE_FILE": str(root / "state.json"),
+            }, clear=False):
+                agent = MODULE.HostSyncAgent()
+                busy = OSError(16, "Device or resource busy")
+                with mock.patch.object(MODULE.os, "replace", side_effect=busy):
+                    changed = agent.apply_host("# BEGIN WHARTTEST MANAGED HOSTS\n10.0.0.3\ta.example.com\n# END WHARTTEST MANAGED HOSTS\n")
+            self.assertTrue(changed)
+            self.assertIn("10.0.0.3\ta.example.com", hosts.read_text(encoding="utf-8"))
+            self.assertEqual(len(list((root / "backups").glob("*/hosts"))), 1)
+
+    def test_discovers_required_private_cloud_containers(self):
+        running = "\n".join([
+            "wharttest-backend",
+            "wharttest-actuator-1",
+            "wharttest-actuator-2",
+            "wharttest-actuator-3",
+            "wharttest-playwright-mcp",
+            "wharttest-vision-mcp",
+            "unrelated-container",
+        ])
+        with mock.patch.object(MODULE.subprocess, "run") as run:
+            run.return_value.stdout = running
+            names = {name for name, _node_type, _display_name in MODULE.HostSyncAgent().discover_containers()}
+        self.assertEqual(names, {
+            "wharttest-backend",
+            "wharttest-actuator-1",
+            "wharttest-actuator-2",
+            "wharttest-actuator-3",
+            "wharttest-playwright-mcp",
+            "wharttest-vision-mcp",
+        })
+
+
+if __name__ == "__main__":
+    unittest.main()

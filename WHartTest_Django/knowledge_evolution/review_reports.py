@@ -24,7 +24,7 @@ from .evidence_graph import iter_evidence_issues
 from .quality_summary import QUALITY_SUMMARY_VERSION
 
 #: 生成器版本（派生产物上要带）。
-REVIEW_REPORT_VERSION = "review-report/v1"
+REVIEW_REPORT_VERSION = "review-report/v2"
 
 #: 确认报告文件名（平台派生产物）。
 REVIEW_REPORT_FILENAME = "阶段确认报告.xlsx"
@@ -257,6 +257,8 @@ def validate_submission(rows: list[dict]) -> dict:
                 "message": f"人工结论只能是 {'、'.join(REVIEW_VERDICTS)}，当前为「{verdict}」",
             })
             continue
+        if "人工标记结果" in row and verdict == "删除" and not str(row.get("不采纳原因") or "").strip():
+            errors.append({"row": label, "code": "missing_required_field", "message": "不采纳必须填写不采纳原因"})
         for field in VERDICT_REQUIRED_FIELDS.get(verdict, ()):
             if not str(row.get(field) or "").strip():
                 errors.append({
@@ -305,7 +307,36 @@ def build_review_workbook(
     workbook.remove(workbook.active)
 
     item_rows = build_review_rows(stage_result, graph=graph)
-    _write_sheet(workbook, SHEET_ITEM_ROWS, item_rows)
+    export_rows = []
+    for row in item_rows:
+        export_rows.append({**{k: v for k, v in row.items() if k not in HUMAN_COLUMNS},
+                            "人工标记结果": "", "修改点": "", "不采纳原因": ""})
+    _write_sheet(workbook, SHEET_ITEM_ROWS, export_rows)
+    if export_rows:
+        from openpyxl.worksheet.datavalidation import DataValidation
+        from openpyxl.utils import get_column_letter
+        sheet = workbook[SHEET_ITEM_ROWS]
+        column = get_column_letter(list(export_rows[0]).index("人工标记结果") + 1)
+        validation = DataValidation(type="list", formula1='"采纳,不采纳,待修改"', allow_blank=True)
+        validation.errorTitle = "请选择人工标记结果"
+        validation.error = "仅支持采纳、不采纳、待修改"
+        validation.showErrorMessage = True
+        validation.errorStyle = "stop"
+        sheet.add_data_validation(validation)
+        validation.add(f"{column}2:{column}{len(export_rows) + 1}")
+        sheet.freeze_panes = "A2"
+        sheet.auto_filter.ref = sheet.dimensions
+        totals = workbook.create_sheet("人工标记统计")
+        totals.append(["人工标记结果", "数量", "占比"])
+        source = f"'{SHEET_ITEM_ROWS}'!{column}2:{column}{len(export_rows) + 1}"
+        for index, label in enumerate(("采纳", "不采纳", "待修改", "未标记"), 2):
+            formula = f'=COUNTBLANK({source})' if label == "未标记" else f'=COUNTIF({source},A{index})'
+            totals.append([label, formula, f'=B{index}/{len(export_rows)}'])
+            totals.cell(index, 3).number_format = "0.00%"
+        totals.append(["方案项总数", len(export_rows)])
+    else:
+        _write_sheet(workbook, "人工标记统计", [{"人工标记结果": label, "数量": 0}
+                     for label in ("采纳", "不采纳", "待修改", "未标记", "方案项总数")])
     _write_sheet(workbook, SHEET_EVIDENCE_ISSUES, build_evidence_issue_rows(graph))
     _write_sheet(workbook, SHEET_EXECUTION_SUMMARY, build_execution_summary_rows(quality))
 
@@ -439,6 +470,13 @@ def parse_review_workbook(payload: bytes) -> dict:
         )
 
     rows = _cells_to_rows(workbook[SHEET_ITEM_ROWS])
+    for row in rows:
+        if "人工标记结果" in row:
+            verdict = str(row.get("人工标记结果") or "").strip()
+            row["人工结论"] = {"采纳": "采纳", "不采纳": "删除", "待修改": "修改后采纳"}.get(verdict, verdict)
+            row["修改内容"] = row.get("修改点") or ""
+            row["备注"] = row.get("不采纳原因") or ""
+            row["修改类型"] = "其他" if verdict in ("不采纳", "待修改") else ""
     evidence_total, evidence_verified = _evidence_totals(workbook)
     human_rows = [
         row for row in rows

@@ -1,0 +1,13 @@
+{
+  "revision": "20261109-ai-coverage-r1",
+  "source_head": "97a354b4b624f669d2279391529e9f9b1c104d07",
+  "dirty_worktree": true,
+  "files": {
+    "WHartTest_Django/Dockerfile.alpine": "15e638d6af5f2ece75dbd81a9af1b5f3a70a1f79aed4d5725e3892d1fcebabbc",
+    "WHartTest_Django/requirements.txt": "d53bed1d4c7b30789b3aa66fd04dd12e071ee6772ef0ed818c8404eacd6fedbd",
+    "WHartTest_Django/code_analysis/services.py": "410e1af7518bfe596958972f7f73c17cab1d7579ecc7a1a6db063512f23b0e45",
+    "WHartTest_Vue/Dockerfile": "d8a3e02c38f551d6d37372a455983c549202ff9ab013393c6c7003695bcc2230",
+    "WHartTest_Semgrep/Dockerfile": "bfd583cc634086f4ff1f822b1bab1b6b5fb9bc2b111644a9688e30a931c9cdc4",
+    "WHartTest_Semgrep/requirements.txt": "97b0bcce6b6241adb93668008be61317de5efa7216c340e787604efb75366a90"
+  }
+}

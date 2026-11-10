@@ -1,0 +1,4 @@
+services:
+  frontend:
+    image: wharttest-new-frontend:benchmark-ui-20261102
+    pull_policy: never

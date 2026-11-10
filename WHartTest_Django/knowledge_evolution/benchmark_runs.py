@@ -108,6 +108,7 @@ def create_public_run(
     languages: list[str] | None = None,
     include_clean: bool | None = None,
     mode: str = "pilot",
+    review_mode: str = "standard",
     allow_partial: bool = False,
     name: str = "",
     model_config=None,
@@ -116,6 +117,8 @@ def create_public_run(
         raise ValidationError({"version": f"数据版本不可运行：{version.status}"})
     if mode not in {"pilot", "full"}:
         raise ValidationError({"mode": "运行模式须为 pilot 或 full"})
+    if review_mode not in {"quick", "standard", "deep"}:
+        raise ValidationError({"review_mode": "审查模式须为 quick、standard 或 deep"})
     limit = PILOT_LIMIT if mode == "pilot" else None
     model_ready = model_config is not None
     result = preflight(
@@ -151,6 +154,7 @@ def create_public_run(
                 "benchmark_id": version.benchmark_id,
                 "version": version.version,
                 "mode": mode,
+                "review_mode": review_mode,
                 "judge": "manual",
                 "model_config_id": getattr(model_config, "pk", None),
                 "model_name": getattr(model_config, "name", ""),
@@ -176,6 +180,7 @@ def create_public_run(
                 "snapshot_cached": result["snapshot_cached"],
             },
             model_snapshot={
+                "review_mode": review_mode,
                 "model_config_id": getattr(model_config, "pk", None),
                 "name": getattr(model_config, "name", ""),
                 "model_name": getattr(model_config, "model_name", ""),
@@ -188,6 +193,8 @@ def create_public_run(
 
 def prepare_run(run: EvaluationRun, *, defer_review: bool = True) -> dict[str, Any]:
     """准备快照并创建标准审查任务；重复调用不会重复创建任务。"""
+    if EvaluationRun.objects.filter(pk=run.pk, status="cancelled").exists():
+        return {"status": "cancelled"}
     binding = run.benchmark_binding
     cases = list(BenchmarkCase.objects.filter(
         version=binding.version, upstream_instance_id__in=[
@@ -198,16 +205,24 @@ def prepare_run(run: EvaluationRun, *, defer_review: bool = True) -> dict[str, A
     binding.save(update_fields=["status"])
     snapshots, snapshot_manifest = [], []
     for case in cases:
+        if EvaluationRun.objects.filter(pk=run.pk, status="cancelled").exists():
+            return {"status": "cancelled", "snapshots": len(snapshots)}
         try:
             snapshot = ensure_snapshot(case.repo, case.base_sha, case.head_sha)
         except SnapshotError as exc:
             snapshot_manifest.append({"case_key": case.case_key, "error": str(exc)[:300]})
+            binding.snapshot_manifest = snapshot_manifest
+            binding.save(update_fields=["snapshot_manifest"])
             continue
         snapshots.append(snapshot)
         snapshot_manifest.append({
             "case_key": case.case_key, "repo": case.repo, "path": snapshot.path,
             "size_bytes": snapshot.size_bytes, "files": snapshot.file_count,
         })
+        binding.snapshot_manifest = snapshot_manifest
+        binding.save(update_fields=["snapshot_manifest"])
+    if EvaluationRun.objects.filter(pk=run.pk, status="cancelled").exists():
+        return {"status": "cancelled", "snapshots": len(snapshots)}
     binding.snapshot_manifest = snapshot_manifest
     failed_snapshots = [item for item in snapshot_manifest if item.get("error")]
     if failed_snapshots:
@@ -253,7 +268,7 @@ def prepare_run(run: EvaluationRun, *, defer_review: bool = True) -> dict[str, A
                 base_sha=case.base_sha,
                 head_sha=case.head_sha,
                 title=f"公开测评 {case.benchmark_id} {case.upstream_instance_id}"[:500],
-                mode="standard",
+                mode=(run.config or {}).get("review_mode", "standard"),
                 status="queued",
             )
             EvaluationResult.objects.create(
@@ -293,6 +308,8 @@ def prepare_run(run: EvaluationRun, *, defer_review: bool = True) -> dict[str, A
 @shared_task(bind=True, max_retries=2)
 def execute_benchmark_run(self, run_id: str) -> dict[str, Any]:
     run = EvaluationRun.objects.select_related("suite", "benchmark_binding").get(pk=run_id)
+    if run.status == "cancelled":
+        return {"status": "cancelled"}
     try:
         return prepare_run(run)
     except Exception as exc:
