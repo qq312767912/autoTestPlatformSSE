@@ -133,6 +133,90 @@ class KnowledgeBaseViewSet(BaseModelViewSet):
     ordering_fields = ["created_at", "updated_at", "name"]
     ordering = ["-created_at"]
 
+    @action(detail=True, methods=['post'], url_path='ones')
+    def ones(self, request, pk=None):
+        """浏览 ONES 页面，或将选中的页面保存后派发索引。"""
+        from .ones_import import OnesClient, OnesRequestSerializer, page_text
+        import requests
+        kb = self.get_object()
+        if not request.user.has_perm('knowledge.add_document'):
+            return Response({'error': '没有导入文档权限'}, status=403)
+        serializer = OnesRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        client = None
+        try:
+            client = OnesClient(data['email'], data['password'])
+            space = data.get('space_uuid')
+            if not space:
+                return Response({'spaces': [{'uuid': s['uuid'], 'title': s.get('title') or s.get('name', '')} for s in client.spaces()]})
+            pages = client.pages(space)
+            selected = data.get('page_uuids')
+            if not selected:
+                return Response({'pages': [{'uuid': p['uuid'], 'title': p.get('title', ''), 'parent_uuid': p.get('parent_uuid')} for p in pages]})
+            allowed = {p['uuid'] for p in pages}
+            if not set(selected).issubset(allowed):
+                return Response({'error': '所选页面不属于当前空间'}, status=400)
+            results = []
+            if data.get('preview'):
+                for page_id in dict.fromkeys(selected):
+                    page = client.page(page_id)
+                    attachments = list(client.attachments(space, page.get('content')))
+                    results.append({'uuid': page_id, 'title': page.get('title', page_id), 'attachments': attachments})
+                return Response({'results': results})
+            for page_id in dict.fromkeys(selected):
+                try:
+                    page = client.page(page_id)
+                    content = page_text(page.get('content'))
+                    if not content:
+                        raise ValueError('页面正文为空')
+                    url = f'{client.base}/wiki/#/team/{client.team}/space/{space}/page/{page_id}'
+                    document = kb.documents.filter(url=url).first()
+                    if not document:
+                        document = Document(knowledge_base=kb, url=url, uploader=request.user)
+                    document.title = (page.get('title') or page_id)[:200]
+                    document.content = content
+                    document.document_type = 'txt'
+                    document.status = 'pending'
+                    document.error_message = ''
+                    document.save()
+                    _dispatch_document_task(document)
+                    warnings = []
+                    from django.core.files.base import ContentFile
+                    try:
+                        for attachment in client.attachments(space, page.get('content')):
+                            resource = attachment['uuid']
+                            if resource not in data.get('attachment_uuids', []):
+                                continue
+                            source = url + '/attachment/' + resource
+                            if kb.documents.filter(url=source).exists():
+                                continue
+                            try:
+                                name, body = client.download(resource)
+                            except (ValueError, requests.RequestException) as exc:
+                                warnings.append(f'附件 {attachment.get("name") or resource} 下载失败（{type(exc).__name__}）')
+                                continue
+                            extension = os.path.splitext(name)[1].lower().lstrip('.')
+                            if extension not in dict(Document.DOCUMENT_TYPES) or extension == 'url':
+                                warnings.append(f'附件 {name} 暂不支持索引')
+                                continue
+                            attached = Document(knowledge_base=kb, title=name[:200],
+                                                url=source, uploader=request.user,
+                                                document_type=extension, file_size=len(body))
+                            attached.file.save(name, ContentFile(body), save=True)
+                            _dispatch_document_task(attached)
+                    except Exception as exc:
+                        warnings.append(f'附件下载中断：{type(exc).__name__}，请单独重试失败附件')
+                    results.append({'uuid': page_id, 'status': 'imported', 'warnings': warnings})
+                except (ValueError, requests.RequestException) as exc:
+                    results.append({'uuid': page_id, 'status': 'failed', 'error': str(exc)})
+            return Response({'results': results})
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=400)
+        finally:
+            if client:
+                client.session.close()
+
     def get_permissions(self):
         """返回此视图所需权限的实例列表"""
         # 获取基础权限（用户认证 + 模型权限）

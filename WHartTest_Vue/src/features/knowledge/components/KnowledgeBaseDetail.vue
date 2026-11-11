@@ -71,6 +71,7 @@
         <div class="section-header">
           <h4>{{ text.documentManagement }}</h4>
           <a-space>
+            <a-button size="small" @click="onesVisible = true">从 ONES 导入</a-button>
             <a-button type="outline" size="small" @click="fetchDocuments" :loading="documentsLoading">
               <template #icon><icon-refresh /></template>
               {{ text.refresh }}
@@ -243,6 +244,7 @@
       </div>
     </div>
 
+    <OnesImportModal :visible="onesVisible" :knowledge-base-id="knowledgeBase.id" @close="onesVisible = false" @imported="fetchDocuments(); $emit('refresh')" />
     <!-- 上传文档弹窗 -->
     <DocumentUploadModal
       :visible="isUploadModalVisible"
@@ -268,6 +270,7 @@ import { useProjectStore } from '@/store/projectStore';
 import { KnowledgeService } from '../services/knowledgeService';
 import type { KnowledgeBase, Document, QueryResponse } from '../types/knowledge';
 import DocumentUploadModal from './DocumentUploadModal.vue';
+import OnesImportModal from './OnesImportModal.vue';
 import DocumentDetailModal from './DocumentDetailModal.vue';
 import { useAppI18n } from '@/composables/useAppI18n';
 import { translateLegacyText, type AppLocale } from '@/i18n';
@@ -415,6 +418,7 @@ const text = computed(() => (
 ));
 
 const projectStore = useProjectStore();
+const onesVisible = ref(false);
 
 // 响应式数据
 const documents = ref<Document[]>([]);
