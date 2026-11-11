@@ -36,6 +36,8 @@ export type DocumentCategory =
   | 'requirement_specification'
   | 'technical_design';
 
+export type DocumentManagementMode = 'ordinary' | 'consolidated';
+
 // 需求文档接口
 export interface RequirementDocument {
   id: string;
@@ -43,6 +45,7 @@ export interface RequirementDocument {
   description: string | null;
   document_type: DocumentType;
   document_category: DocumentCategory;
+  management_mode?: DocumentManagementMode;
   file?: string; // 文件URL
   content?: string | null;
   status: DocumentStatus;
@@ -69,6 +72,7 @@ export interface CreateDocumentRequest {
   description?: string;
   document_type: DocumentType;
   document_category: DocumentCategory;
+  management_mode?: DocumentManagementMode;
   project: string; // 项目ID，虽然后端期望数字，但我们在服务层转换
   file?: File;
   content?: string;

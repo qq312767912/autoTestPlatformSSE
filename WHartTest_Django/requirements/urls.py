@@ -1,5 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from .comparison_views import RequirementComparisonViewSet
 from .views import (
     RequirementDocumentViewSet,
     RequirementModuleViewSet,
@@ -19,6 +20,8 @@ router.register(r"issues", ReviewIssueViewSet, basename="review-issues")
 router.register(
     r"module-results", ModuleReviewResultViewSet, basename="module-review-results"
 )
+
+router.register(r'comparisons', RequirementComparisonViewSet, basename='requirement-comparisons')
 
 # API 路由地址由 router 自动生成。
 urlpatterns = [

@@ -40,6 +40,7 @@
             {{ option.label }}
           </a-option>
         </a-select>
+        <a-button :disabled="!currentProjectId" @click="comparisonVisible = true">版本对比与提取</a-button>
         <a-button type="primary" @click="showUploadModal">
           <template #icon><icon-plus /></template>
           {{ pageText.uploadDocument }}
@@ -83,6 +84,7 @@
         <!-- 操作列 -->
         <template #actions="{ record }">
           <div class="actions-wrapper">
+            <a-button v-if="record.management_mode === 'consolidated'" type="text" size="small" @click="comparisonVisible = true">对比迭代</a-button>
             <a-button type="text" size="small" @click="viewDocument(record)">
               {{ pageText.details }}
             </a-button>
@@ -176,6 +178,16 @@
             :rows="3"
           />
         </a-form-item>
+        <a-form-item :label="pageText.managementMode" field="management_mode">
+          <a-radio-group v-model="uploadForm.management_mode">
+            <a-radio value="ordinary">{{ pageText.ordinaryDocument }}</a-radio>
+            <a-radio value="consolidated">{{ pageText.consolidatedDocument }}</a-radio>
+          </a-radio-group>
+          <template #extra>
+            {{ uploadForm.management_mode === 'consolidated' ? pageText.consolidatedHint : pageText.ordinaryHint }}
+          </template>
+        </a-form-item>
+
         <a-form-item :label="pageText.uploadMethod" field="uploadType">
           <a-radio-group v-model="uploadForm.uploadType" @change="handleUploadTypeChange">
             <a-radio value="file">{{ pageText.uploadFile }}</a-radio>
@@ -236,6 +248,8 @@
       </a-form>
     </a-modal>
 
+    <DocumentComparisonModal :key="String(currentProjectId || '')" :visible="comparisonVisible" :project-id="String(currentProjectId || '')" @close="comparisonVisible = false" />
+
     <!-- 评审配置模态框 -->
     <a-modal
       v-model:visible="reviewConfigVisible"
@@ -270,6 +284,7 @@ import { Message } from '@arco-design/web-vue';
 import { IconPlus, IconUpload, IconFile, IconDelete } from '@arco-design/web-vue/es/icon';
 import { useAppI18n } from '@/composables/useAppI18n';
 import { useProjectStore } from '@/store/projectStore';
+import DocumentComparisonModal from '../components/DocumentComparisonModal.vue';
 import { RequirementDocumentService } from '../services/requirementService';
 import { normalizeListPayload } from '@/features/api-testing/services/responseHelpers';
 import type {
@@ -282,6 +297,7 @@ import type {
 } from '../types';
 
 // 状态仓库与路由
+const comparisonVisible = ref(false);
 const projectStore = useProjectStore();
 const router = useRouter();
 const { isEnglish } = useAppI18n();
@@ -316,6 +332,11 @@ const pageText = computed(() => (
         enterDocumentTitle: 'Enter document title',
         documentDescription: 'Document description',
         enterDocumentDescription: 'Enter document description (optional)',
+        managementMode: 'Document management',
+        ordinaryDocument: 'Ordinary document',
+        consolidatedDocument: 'Consolidated document',
+        ordinaryHint: 'Analyze this upload as an independent requirements document.',
+        consolidatedHint: 'Requirements maintained across iterations. Use version comparison to upload old and new DOCX files, review changes, and extract them.',
         uploadMethod: 'Upload method',
         uploadFile: 'Upload file',
         directInput: 'Direct input',
@@ -381,6 +402,11 @@ const pageText = computed(() => (
         enterDocumentTitle: '请输入文档标题',
         documentDescription: '文档描述',
         enterDocumentDescription: '请输入文档描述（可选）',
+        managementMode: '文档管理方式',
+        ordinaryDocument: '普通文档',
+        consolidatedDocument: '一本化文档',
+        ordinaryHint: '作为独立需求文档解析。',
+        consolidatedHint: '同一份文档持续维护多个迭代。可使用“版本对比与提取”上传旧版、新版，确认差异后下载。',
         uploadMethod: '上传方式',
         uploadFile: '上传文件',
         directInput: '直接输入',
@@ -535,6 +561,7 @@ const uploadForm = reactive<CreateDocumentRequest & { uploadType: 'file' | 'cont
   description: '',
   document_type: 'pdf',
   document_category: 'business_requirement',
+  management_mode: 'ordinary',
   project: '',
   uploadType: 'file',
   file: undefined,
@@ -606,6 +633,15 @@ const columns = computed(() => [
     dataIndex: 'document_type',
     slotName: 'document_type',
     width: 80
+  },
+  {
+    title: pageText.value.managementMode,
+    dataIndex: 'management_mode',
+    width: 120,
+    render: ({ record }: { record: RequirementDocument }) =>
+      record.management_mode === 'consolidated'
+        ? pageText.value.consolidatedDocument
+        : pageText.value.ordinaryDocument
   },
   {
     title: pageText.value.statsColumn,
@@ -859,6 +895,7 @@ const resetUploadForm = () => {
     description: '',
     document_type: 'pdf',
     document_category: activeCategory.value,
+    management_mode: 'ordinary',
     project: String(currentProjectId.value || ''),
     uploadType: 'file',
     file: undefined,

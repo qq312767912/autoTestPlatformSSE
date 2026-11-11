@@ -65,6 +65,12 @@ class RequirementDocument(models.Model):
         default='business_requirement',
         db_index=True,
     )
+    management_mode = models.CharField(
+        _('文档管理方式'),
+        max_length=20,
+        choices=[('ordinary', '普通文档'), ('consolidated', '一本化文档')],
+        default='ordinary',
+    )
     file = models.FileField(
         _('文件'),
         upload_to=requirement_document_upload_path,
@@ -521,3 +527,19 @@ class ModuleReviewResult(models.Model):
 
     def __str__(self):
         return f"{self.module.title} - {self.module_rating or '未评级'}"
+
+
+class RequirementComparison(models.Model):
+    """Immutable source pair and deterministic diff, scoped to a project and creator."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(Project, on_delete=models.CASCADE)
+    creator = models.ForeignKey(User, on_delete=models.CASCADE)
+    old_file = models.FileField(upload_to='requirement_comparisons/%Y/%m/')
+    new_file = models.FileField(upload_to='requirement_comparisons/%Y/%m/')
+    old_name = models.CharField(max_length=255)
+    new_name = models.CharField(max_length=255)
+    result = models.JSONField(default=dict)
+    confirmed_hunks = models.JSONField(default=list)
+    iteration_title = models.CharField(max_length=200, blank=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
