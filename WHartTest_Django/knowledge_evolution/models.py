@@ -55,7 +55,7 @@ class GenerationOutput(models.Model):
         "projects.Project", on_delete=models.CASCADE, related_name="generation_outputs"
     )
     trace = models.ForeignKey(
-        RetrievalTrace, on_delete=models.PROTECT, related_name="generation_outputs"
+        RetrievalTrace, on_delete=models.RESTRICT, related_name="generation_outputs"
     )
     capability = models.ForeignKey(
         "knowledge_evolution.CapabilityDefinition", null=True, blank=True,
@@ -110,11 +110,11 @@ class FeedbackEvent(models.Model):
         "projects.Project", on_delete=models.CASCADE, related_name="knowledge_feedback_events"
     )
     output = models.ForeignKey(
-        GenerationOutput, on_delete=models.PROTECT, null=True, blank=True,
+        GenerationOutput, on_delete=models.RESTRICT, null=True, blank=True,
         related_name="feedback_events",
     )
     trace = models.ForeignKey(
-        RetrievalTrace, on_delete=models.PROTECT, null=True, blank=True,
+        RetrievalTrace, on_delete=models.RESTRICT, null=True, blank=True,
         related_name="feedback_events",
     )
     knowledge_versions = models.ManyToManyField(

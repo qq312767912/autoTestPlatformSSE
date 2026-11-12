@@ -80,7 +80,7 @@ class GoldDataset(models.Model):
     scope_key = models.SlugField(max_length=64, blank=True, default="", db_index=True)
     governance = models.JSONField(default=dict, blank=True)
     taxonomy_version = models.ForeignKey(
-        TestAssetTaxonomy, on_delete=models.PROTECT, null=True, blank=True,
+        TestAssetTaxonomy, on_delete=models.RESTRICT, null=True, blank=True,
         related_name="gold_datasets",
     )
     approver = models.ForeignKey(
@@ -203,11 +203,11 @@ class GoldCase(models.Model):
     version = models.ForeignKey(GoldDatasetVersion, on_delete=models.CASCADE, related_name="cases")
     source_output = models.ForeignKey(
         "knowledge_evolution.GenerationOutput", null=True, blank=True,
-        on_delete=models.PROTECT, related_name="gold_cases",
+        on_delete=models.RESTRICT, related_name="gold_cases",
     )
     source_feedback = models.ForeignKey(
         "knowledge_evolution.FeedbackEvent", null=True, blank=True,
-        on_delete=models.PROTECT, related_name="gold_cases",
+        on_delete=models.RESTRICT, related_name="gold_cases",
     )
     task_type = models.CharField(max_length=32, db_index=True)
     title = models.CharField(max_length=255)
@@ -302,10 +302,10 @@ class AnnotationConflict(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     case = models.OneToOneField(GoldCase, on_delete=models.CASCADE, related_name="annotation_conflict")
     primary_annotation = models.ForeignKey(
-        GoldAnnotation, on_delete=models.PROTECT, related_name="primary_conflicts"
+        GoldAnnotation, on_delete=models.RESTRICT, related_name="primary_conflicts"
     )
     review_annotation = models.ForeignKey(
-        GoldAnnotation, on_delete=models.PROTECT, related_name="review_conflicts"
+        GoldAnnotation, on_delete=models.RESTRICT, related_name="review_conflicts"
     )
     differing_fields = models.JSONField(default=list, blank=True)
     state = models.CharField(max_length=16, choices=STATE_CHOICES, default="open", db_index=True)

@@ -412,7 +412,7 @@ class KnowledgeVersion(StateMachineMixin, models.Model):
     content = models.TextField(help_text="知识原子：对象 + 约束/行为 + 条件 + 适用域")
     content_hash = models.CharField(max_length=64, db_index=True)
     source_snapshot = models.ForeignKey(
-        SourceSnapshot, on_delete=models.PROTECT, related_name="versions"
+        SourceSnapshot, on_delete=models.RESTRICT, related_name="versions"
     )
     previous_version = models.ForeignKey(
         "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="successors"
@@ -609,7 +609,7 @@ class KnowledgeEvidence(models.Model):
         KnowledgeVersion, on_delete=models.CASCADE, related_name="evidences"
     )
     snapshot = models.ForeignKey(
-        SourceSnapshot, on_delete=models.PROTECT, related_name="evidences"
+        SourceSnapshot, on_delete=models.RESTRICT, related_name="evidences"
     )
     relation = models.CharField(
         max_length=20, choices=RELATION_CHOICES, default="supported_by", db_index=True
@@ -848,10 +848,10 @@ class KnowledgeConflict(StateMachineMixin, models.Model):
         "projects.Project", on_delete=models.CASCADE, related_name="knowledge_conflicts"
     )
     left_asset = models.ForeignKey(
-        KnowledgeAsset, on_delete=models.PROTECT, related_name="conflicts_as_left"
+        KnowledgeAsset, on_delete=models.RESTRICT, related_name="conflicts_as_left"
     )
     right_asset = models.ForeignKey(
-        KnowledgeAsset, on_delete=models.PROTECT, related_name="conflicts_as_right"
+        KnowledgeAsset, on_delete=models.RESTRICT, related_name="conflicts_as_right"
     )
     left_version = models.ForeignKey(
         KnowledgeVersion, on_delete=models.SET_NULL, null=True, blank=True,

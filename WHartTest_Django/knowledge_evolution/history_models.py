@@ -62,7 +62,7 @@ class HistoryImportItem(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     batch = models.ForeignKey(HistoryImportBatch, on_delete=models.CASCADE, related_name="items")
     role = models.CharField(max_length=16, choices=ROLE_CHOICES)
-    file = models.ForeignKey("file_management.FileAsset", on_delete=models.PROTECT)
+    file = models.ForeignKey("file_management.FileAsset", on_delete=models.RESTRICT)
     file_hash = models.CharField(max_length=64)
     metadata = models.JSONField(default=dict, blank=True)
 
@@ -79,13 +79,13 @@ class HistoryReplay(models.Model):
     ]
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     project = models.ForeignKey("projects.Project", on_delete=models.CASCADE, related_name="history_replays")
-    batch = models.ForeignKey(HistoryImportBatch, on_delete=models.PROTECT, related_name="replays")
+    batch = models.ForeignKey(HistoryImportBatch, on_delete=models.RESTRICT, related_name="replays")
     flywheel_run = models.OneToOneField(
-        "knowledge_evolution.FlywheelRun", on_delete=models.PROTECT, related_name="history_replay",
+        "knowledge_evolution.FlywheelRun", on_delete=models.RESTRICT, related_name="history_replay",
     )
     gold_version = models.ForeignKey(
         "knowledge_evolution.GoldDatasetVersion", null=True, blank=True,
-        on_delete=models.PROTECT, related_name="history_replays",
+        on_delete=models.RESTRICT, related_name="history_replays",
     )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft", db_index=True)
     execution_lock = models.JSONField(default=dict)

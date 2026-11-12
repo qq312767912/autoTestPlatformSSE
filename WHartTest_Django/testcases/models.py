@@ -65,7 +65,7 @@ class TestCase(models.Model):
     )
     module = models.ForeignKey(
         'TestCaseModule',
-        on_delete=models.PROTECT, # 有用例时不能删除模块
+        on_delete=models.RESTRICT, # 有用例时不能删除模块
         null=False,  # 不允许为空
         blank=False, # 表单中必填
         related_name='testcases',

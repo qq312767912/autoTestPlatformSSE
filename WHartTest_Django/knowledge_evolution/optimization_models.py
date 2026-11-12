@@ -69,7 +69,7 @@ class OptimizationExperiment(models.Model):
         OptimizationProposal, on_delete=models.CASCADE, related_name="experiments"
     )
     gold_dataset_version = models.ForeignKey(
-        "knowledge_evolution.GoldDatasetVersion", on_delete=models.PROTECT,
+        "knowledge_evolution.GoldDatasetVersion", on_delete=models.RESTRICT,
         related_name="optimization_experiments",
     )
     baseline_run = models.ForeignKey(
@@ -114,11 +114,11 @@ class EvolutionExperiment(models.Model):
         "projects.Project", on_delete=models.CASCADE, related_name="evolution_experiments",
     )
     output = models.ForeignKey(
-        "knowledge_evolution.GenerationOutput", on_delete=models.PROTECT,
+        "knowledge_evolution.GenerationOutput", on_delete=models.RESTRICT,
         related_name="evolution_experiments",
     )
     baseline_skill_version = models.ForeignKey(
-        "skills.SkillVersion", on_delete=models.PROTECT,
+        "skills.SkillVersion", on_delete=models.RESTRICT,
         related_name="baseline_evolution_experiments",
     )
     attributions = models.ManyToManyField(
@@ -133,7 +133,7 @@ class EvolutionExperiment(models.Model):
     evaluation_report = models.JSONField(default=dict, blank=True)
     round_number = models.PositiveSmallIntegerField(default=1)
     parent = models.OneToOneField(
-        "self", null=True, blank=True, on_delete=models.PROTECT,
+        "self", null=True, blank=True, on_delete=models.RESTRICT,
         related_name="next_round",
     )
     created_by = models.ForeignKey(
@@ -179,7 +179,7 @@ class EvolutionVariant(models.Model):
     label = models.CharField(max_length=8, choices=LABEL_CHOICES)
     mutation_strategy = models.CharField(max_length=64)
     skill_version = models.ForeignKey(
-        "skills.SkillVersion", null=True, blank=True, on_delete=models.PROTECT,
+        "skills.SkillVersion", null=True, blank=True, on_delete=models.RESTRICT,
         related_name="evolution_variants",
     )
     sandbox_key = models.CharField(max_length=128, unique=True)

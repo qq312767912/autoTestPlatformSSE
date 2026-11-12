@@ -7,7 +7,7 @@ from django.db import models
 class SkillAssessmentSession(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     project = models.ForeignKey('projects.Project', on_delete=models.CASCADE)
-    source_version = models.ForeignKey('skills.SkillVersion', on_delete=models.PROTECT)
+    source_version = models.ForeignKey('skills.SkillVersion', on_delete=models.RESTRICT)
     source_sha256 = models.CharField(max_length=64)
     mode = models.CharField(max_length=16)
     cases = models.JSONField(default=list)
@@ -30,6 +30,6 @@ class SkillAssessmentSession(models.Model):
 
 class SkillAgentTaskBinding(models.Model):
     session = models.OneToOneField('langgraph_integration.ChatSession', on_delete=models.CASCADE)
-    source_version = models.ForeignKey('skills.SkillVersion', on_delete=models.PROTECT)
+    source_version = models.ForeignKey('skills.SkillVersion', on_delete=models.RESTRICT)
     source_sha256 = models.CharField(max_length=64)
     created_at = models.DateTimeField(auto_now_add=True)

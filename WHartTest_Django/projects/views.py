@@ -4,6 +4,8 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.shortcuts import get_object_or_404
 from django.db import transaction
+from django.db.models.deletion import ProtectedError, RestrictedError
+from rest_framework.exceptions import ValidationError
 from django.db.models import Count, Q
 from django.contrib.auth.models import User
 from django.utils import timezone
@@ -17,7 +19,6 @@ from .serializers import (
 from .permissions import (
     IsProjectMember, 
     IsProjectAdmin, 
-    IsProjectOwner,
     HasProjectMemberPermission
 )
 from accounts.serializers import UserDetailSerializer
@@ -68,14 +69,16 @@ class ProjectViewSet(BaseModelViewSet):
         if self.action == 'statistics':
             return [IsAuthenticated(), IsProjectMember()]
 
+        # 删除按目标项目角色授权，不额外要求全局 delete_project 权限。
+        if self.action == 'destroy':
+            return [IsAuthenticated(), IsProjectAdmin()]
+
         # 其他操作需要基础权限（用户认证 + Django模型权限）
         base_permissions = super().get_permissions()
         
         # 在基础权限之上叠加项目角色权限，保证“模型权限 + 业务角色”双层防线。
         if self.action in ['update', 'partial_update']:
             return base_permissions + [IsProjectAdmin()]
-        elif self.action == 'destroy':
-            return base_permissions + [IsProjectOwner()]
         elif self.action == 'retrieve':
             return base_permissions + [IsProjectMember()]
         elif self.action == 'create':
@@ -87,6 +90,13 @@ class ProjectViewSet(BaseModelViewSet):
 
         # 对于其他操作，使用基础权限
         return base_permissions
+
+    def perform_destroy(self, instance):
+        try:
+            with transaction.atomic():
+                instance.delete()
+        except (ProtectedError, RestrictedError) as exc:
+            raise ValidationError('项目存在其他资产仍在使用的受保护关联，请先解除关联后再删除。') from exc
 
     def perform_create(self, serializer):
         """

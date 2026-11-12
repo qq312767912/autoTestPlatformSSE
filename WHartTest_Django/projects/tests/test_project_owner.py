@@ -126,3 +126,68 @@ class ProjectOwnerTests(TestCase):
         owner_role = ProjectMember.objects.get(project=self.project, user=self.owner)
         self.assertEqual(admin_role.role, 'admin')
         self.assertEqual(owner_role.role, 'admin')
+
+    def test_project_managers_can_delete_without_global_permission(self):
+        for user in (self.owner, self.admin):
+            with self.subTest(user=user.username):
+                project = Project.objects.create(name='Deletable', creator=self.owner)
+                ProjectMember.objects.create(project=project, user=user,
+                                             role='owner' if user == self.owner else 'admin')
+                self.assertFalse(user.has_perm('projects.delete_project'))
+                self.client.force_authenticate(user=user)
+                response = self.client.delete(reverse('project-detail', args=[project.pk]))
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertFalse(Project.objects.filter(pk=project.pk).exists())
+
+    def test_member_and_nonmember_cannot_delete(self):
+        outsider = User.objects.create_user(username='outsider')
+        for user in (self.member, outsider):
+            with self.subTest(user=user.username):
+                self.client.force_authenticate(user=user)
+                response = self.client.delete(reverse('project-detail', args=[self.project.pk]))
+                self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+                self.assertTrue(Project.objects.filter(pk=self.project.pk).exists())
+
+    def test_superuser_can_delete_without_membership(self):
+        user = User.objects.create_superuser(username='root', password='test')
+        self.client.force_authenticate(user=user)
+        response = self.client.delete(reverse('project-detail', args=[self.project.pk]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_anonymous_cannot_delete(self):
+        response = self.client.delete(reverse('project-detail', args=[self.project.pk]))
+        self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+        self.assertTrue(Project.objects.filter(pk=self.project.pk).exists())
+
+    def test_project_deletion_includes_cases_but_module_deletion_is_restricted(self):
+        from django.db.models.deletion import RestrictedError
+        from testcases.models import TestCaseModule, TestCase as FunctionalCase
+        module = TestCaseModule.objects.create(project=self.project, name='Module')
+        case = FunctionalCase.objects.create(project=self.project, module=module, name='Case')
+        with self.assertRaises(RestrictedError):
+            module.delete()
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.delete(reverse('project-detail', args=[self.project.pk]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(FunctionalCase.objects.filter(pk=case.pk).exists())
+
+    def test_cross_project_reference_blocks_deletion(self):
+        from testcases.models import TestCaseModule, TestCase as FunctionalCase
+        other = Project.objects.create(name='Other', creator=self.member)
+        module = TestCaseModule.objects.create(project=self.project, name='Shared module')
+        case = FunctionalCase.objects.create(project=other, module=module, name='External case')
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.delete(reverse('project-detail', args=[self.project.pk]))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(Project.objects.filter(pk=self.project.pk).exists())
+        self.assertTrue(FunctionalCase.objects.filter(pk=case.pk).exists())
+
+    def test_project_deletion_does_not_recreate_file_settings(self):
+        from file_management.models import FileAsset, FileReference, FileManagementSetting
+        asset = FileAsset.objects.create(project=self.project, original_name='test.txt', file='test.txt')
+        FileReference.objects.create(project=self.project, file=asset,
+                                     ref_type=FileReference.REF_LLM_CHAT, ref_id='test')
+        project_id = self.project.pk
+        self.project.delete()
+        self.assertFalse(FileManagementSetting.objects.filter(project_id=project_id).exists())
+        self.assertFalse(FileReference.objects.filter(project_id=project_id).exists())

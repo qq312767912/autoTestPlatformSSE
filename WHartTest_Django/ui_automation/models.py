@@ -96,7 +96,7 @@ class UiPage(models.Model):
         related_name='ui_pages', verbose_name=_('所属项目')
     )
     module = models.ForeignKey(
-        UiModule, on_delete=models.PROTECT,
+        UiModule, on_delete=models.RESTRICT,
         related_name='pages', verbose_name=_('所属模块')
     )
     name = models.CharField(_('页面名称'), max_length=64)
@@ -181,11 +181,11 @@ class UiPageSteps(models.Model):
         related_name='ui_page_steps', verbose_name=_('所属项目')
     )
     page = models.ForeignKey(
-        UiPage, on_delete=models.PROTECT,
+        UiPage, on_delete=models.RESTRICT,
         related_name='page_steps', verbose_name=_('所属页面')
     )
     module = models.ForeignKey(
-        UiModule, on_delete=models.PROTECT,
+        UiModule, on_delete=models.RESTRICT,
         related_name='page_steps', verbose_name=_('所属模块')
     )
     name = models.CharField(_('步骤名称'), max_length=64)
@@ -268,7 +268,7 @@ class UiTestCase(models.Model):
         related_name='ui_testcases', verbose_name=_('所属项目')
     )
     module = models.ForeignKey(
-        UiModule, on_delete=models.PROTECT,
+        UiModule, on_delete=models.RESTRICT,
         related_name='testcases', verbose_name=_('所属模块')
     )
     name = models.CharField(_('用例名称'), max_length=255)
@@ -310,7 +310,7 @@ class UiCaseStepsDetailed(models.Model):
         related_name='case_steps', verbose_name=_('所属用例')
     )
     page_step = models.ForeignKey(
-        UiPageSteps, on_delete=models.PROTECT,
+        UiPageSteps, on_delete=models.RESTRICT,
         related_name='case_usages', verbose_name=_('引用页面步骤')
     )
     case_sort = models.IntegerField(_('步骤顺序'), default=0)

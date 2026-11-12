@@ -252,7 +252,7 @@ class BenchmarkRunBinding(models.Model):
         related_name="benchmark_binding",
     )
     version = models.ForeignKey(
-        BenchmarkDatasetVersion, on_delete=models.PROTECT, related_name="run_bindings",
+        BenchmarkDatasetVersion, on_delete=models.RESTRICT, related_name="run_bindings",
     )
     benchmark_id = models.CharField(max_length=32, db_index=True)
     mode = models.CharField(max_length=16, choices=MODE_CHOICES, default="pilot")
