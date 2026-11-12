@@ -1861,14 +1861,23 @@ async function openHubAgentTask() {
   } catch(error) {skillTaskError.value = toErrorMessage(error,'读取 Skill 任务失败');}
   finally {skillTaskLoading.value=false;}
 }
+let skillBindingRequest = 0;
 watch(()=>[sessionId.value,projectStore.currentProjectId],async()=>{
+  const request = ++skillBindingRequest;
   const id=sessionId.value,project=projectStore.currentProjectId;
   skillTaskBinding.value=null;
-  if(!id||!project){skillTaskError.value='';return;}
+  skillTaskError.value='';
+  skillTaskLoading.value=false;
+  if(!id||!project)return;
   skillTaskLoading.value=true;
-  try {const binding=await getSkillAgentTask(Number(project),id);if(sessionId.value===id&&projectStore.currentProjectId===project){skillTaskBinding.value=binding;skillTaskError.value='';}}
-  catch(error){if(sessionId.value===id)skillTaskError.value=toErrorMessage(error,'读取任务版本绑定失败，请重试');}
-  finally {if(sessionId.value===id)skillTaskLoading.value=false;}
+  try {
+    const binding=await getSkillAgentTask(Number(project),id);
+    if(request===skillBindingRequest){skillTaskBinding.value=binding;skillTaskError.value='';}
+  } catch(error) {
+    if(request===skillBindingRequest)skillTaskError.value=toErrorMessage(error,'读取任务版本绑定失败，请重试');
+  } finally {
+    if(request===skillBindingRequest)skillTaskLoading.value=false;
+  }
 });
 watch(()=>[route.query.skill_task,projectStore.currentProjectId],()=>{if(isMountedLoadComplete)void openHubAgentTask();});
 
