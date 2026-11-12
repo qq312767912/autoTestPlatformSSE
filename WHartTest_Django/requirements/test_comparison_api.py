@@ -73,3 +73,41 @@ class ComparisonApiTests(TestCase):
     def test_anonymous_upload_rejected(self):
         self.client.force_authenticate(None)
         self.assertIn(self.upload().status_code, (401, 403))
+
+    def test_restore_rebuilds_legacy_diff_and_resets_confirmation(self):
+        record_id = self.upload().data['id']
+        record = RequirementComparison.objects.get(pk=record_id)
+        result = record.result
+        result.pop('schema_version')
+        record.result = result
+        record.confirmed_hunks = ['h0']
+        from django.utils import timezone
+        record.confirmed_at = timezone.now()
+        record.save()
+        response = self.client.get(f'/comparisons/{record_id}/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['result']['schema_version'], 2)
+        self.assertIsNone(response.data['confirmed_at'])
+        self.assertEqual(response.data['confirmed_hunks'], [])
+        self.assertIn('pairs', response.data['result']['hunks'][0])
+
+    def test_image_preview_and_access_control(self):
+        import base64
+        from docx import Document
+        from .test_document_comparison import save
+        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
+        doc = Document(); doc.add_picture(BytesIO(png))
+        response = self.client.post('/comparisons/', {
+            'project': self.project.pk,
+            'old_file': SimpleUploadedFile('old.docx', document('旧')),
+            'new_file': SimpleUploadedFile('new.docx', save(doc)),
+        }, format='multipart')
+        self.assertEqual(response.status_code, 201)
+        rid = next(iter(response.data['result']['assets']['new']))
+        path = f"/comparisons/{response.data['id']}/image/?side=new&rid={rid}"
+        preview = self.client.get(path)
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview['Content-Type'], 'image/png')
+        self.assertEqual(self.client.get(path.replace(rid, 'invalid')).status_code, 400)
+        self.client.force_authenticate(self.other)
+        self.assertEqual(self.client.get(path).status_code, 404)

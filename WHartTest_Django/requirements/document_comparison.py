@@ -3,12 +3,17 @@ from copy import deepcopy
 from difflib import SequenceMatcher
 from hashlib import sha256
 from io import BytesIO
+import re
 from zipfile import ZipFile, BadZipFile
 
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
 from docx.oxml.ns import qn
 from lxml import etree
+
+
+SCHEMA_VERSION = 2
+MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
 
 
 class ComparisonError(ValueError):
@@ -33,16 +38,18 @@ class ParsedDocument:
         self.default_style_id = self.doc.styles.default(WD_STYLE_TYPE.PARAGRAPH).style_id
         self.blocks = []
         self.warnings = set()
+        self.issues = []
+        self.assets = {}
         headings = []
         for index, element in enumerate(self.body_blocks(self.doc.element.body)):
             if element.tag not in (qn('w:p'), qn('w:tbl')):
                 if element.tag != qn('w:sectPr'):
-                    self.warnings.add('存在非标准正文结构，未纳入对比，请核对原文。')
+                    self.issues.append({'block_id': f'b{index}', 'path': ' / '.join(h[1] for h in headings), 'kind': 'unsupported', 'message': f'正文结构 {etree.QName(element).localname} 未纳入对比'})
                 continue
             clean = self.clean(element)
             text = self.text(clean)
-            if any(etree.QName(e).localname in ('footnoteReference', 'endnoteReference', 'OLEObject', 'chart', 'object', 'fldChar', 'instrText', 'cellDel', 'cellMerge') for e in clean.iter()):
-                self.warnings.add('存在脚注、域、图表或特殊表格修订；若选择相关内容，导出会要求调整范围，避免静默丢失。')
+            if any(etree.QName(e).localname in ('footnoteReference', 'endnoteReference', 'OLEObject', 'chart', 'object', 'cellDel', 'cellMerge') for e in clean.iter()):
+                self.issues.append({'block_id': f'b{index}', 'path': ' / '.join(h[1] for h in headings), 'kind': 'unsupported_export', 'message': '包含脚注、图表、嵌入对象或特殊表格修订，选择此块时导出需要进一步处理'})
             if not text.strip():
                 continue
             level = self.heading_level(element)
@@ -53,16 +60,19 @@ class ParsedDocument:
                                 'path': ' / '.join(h[1] for h in headings),
                                 'headings': [h[1] for h in headings],
                                 'kind': 'table' if element.tag == qn('w:tbl') else 'paragraph',
-                                'key': self.comparison_key(clean, text)})
-        self.warnings.add('表格按整表显示差异，图片按文件内容标识对比；自动编号和纯样式变化不作为业务差异。')
-        self.warnings.add('对比范围为正文和表格；页眉页脚、批注和纯格式变化不参与对比。')
+                                'key': self.comparison_key(clean, text),
+                                'images': self.images(clean),
+                                'table': self.table_preview(clean) if element.tag == qn('w:tbl') else None})
+        self.warnings.add('对比正文、表格和图片；页眉页脚、批注、自动编号及纯样式变化不参与对比。Word域按文档已保存的显示结果处理。')
 
     def body_blocks(self, parent):
         for child in parent:
+            if not isinstance(child.tag, str):
+                continue
             local = etree.QName(child).localname
             if local in ('sdt', 'sdtContent', 'customXml', 'ins', 'moveTo'):
                 yield from self.body_blocks(child)
-            elif local not in ('sdtPr', 'sdtEndPr', 'del', 'moveFrom'):
+            elif local not in ('sdtPr', 'sdtEndPr', 'del', 'moveFrom', 'bookmarkStart', 'bookmarkEnd', 'proofErr', 'permStart', 'permEnd', 'commentRangeStart', 'commentRangeEnd'):
                 yield child
 
     def style_chain(self, style_id):
@@ -100,6 +110,18 @@ class ParsedDocument:
 
     def clean(self, element):
         clone = deepcopy(element)
+        # Choice and Fallback represent the same shape; keep one representation only.
+        for alternate in list(clone.iter(MC + 'AlternateContent')):
+            choice = alternate.find(MC + 'Choice')
+            branch = choice if choice is not None else alternate.find(MC + 'Fallback')
+            parent = alternate.getparent()
+            if parent is not None:
+                offset = parent.index(alternate)
+                if branch is not None:
+                    for child in list(branch):
+                        parent.insert(offset, child)
+                        offset += 1
+                parent.remove(alternate)
         for row in list(clone.iter(qn('w:tr'))):
             if row.find('./' + qn('w:trPr') + '/' + qn('w:del')) is not None:
                 row.getparent().remove(row)
@@ -111,8 +133,19 @@ class ParsedDocument:
             parent = node.getparent()
             if parent is None:
                 continue
+            if not isinstance(node.tag, str):
+                parent.remove(node)
+                continue
             local = etree.QName(node).localname
-            if local in ('del', 'moveFrom'):
+            if local in ('fldChar', 'instrText'):
+                parent.remove(node)
+            elif local == 'fldSimple':
+                offset = parent.index(node)
+                for child in list(node):
+                    parent.insert(offset, child)
+                    offset += 1
+                parent.remove(node)
+            elif local in ('del', 'moveFrom'):
                 parent.remove(node)
             elif local in ('ins', 'moveTo'):
                 # Property markers aren't text wrappers.
@@ -146,6 +179,28 @@ class ParsedDocument:
             return value if value is not None and value < 9 else None
         except (ValueError, TypeError):
             return None
+
+    def images(self, element):
+        images = []
+        seen = set()
+        for node in element.iter():
+            if node.tag not in (qn('a:blip'), '{urn:schemas-microsoft-com:vml}imagedata'):
+                continue
+            rid = node.get(qn('r:embed')) or node.get(qn('r:id'))
+            rel = self.doc.part.rels.get(rid)
+            if rel is None or rel.is_external or not rel.reltype.endswith('/image') or rid in seen:
+                continue
+            seen.add(rid)
+            self.assets[rid] = {'part_name': str(rel.target_part.partname).lstrip('/'), 'content_type': rel.target_part.content_type}
+            images.append({'rid': rid, 'digest': sha256(rel.target_part.blob).hexdigest()[:12]})
+        return images
+
+    def table_preview(self, element):
+        return [[{'text': self.text(cell),
+                  'span': int(cell.find('./' + qn('w:tcPr') + '/' + qn('w:gridSpan')).get(qn('w:val'), '1'))
+                    if cell.find('./' + qn('w:tcPr') + '/' + qn('w:gridSpan')) is not None else 1}
+                 for cell in tr.findall(qn('w:tc'))]
+                for tr in element.findall(qn('w:tr'))]
 
     def comparison_key(self, element, text):
         if element.tag != qn('w:tbl'):
@@ -181,7 +236,19 @@ class ParsedDocument:
                 rid = node.get(qn('r:embed')) or node.get(qn('r:id'))
                 related = self.doc.part.related_parts.get(rid)
                 parts.append('[图片:' + (sha256(related.blob).hexdigest()[:12] if related else '外部引用') + ']')
-        return ''.join(parts).strip()
+        return re.sub(r'\n[ \t]*\n(?:[ \t]*\n)*', '\n\n', ''.join(parts)).strip()
+
+
+def segments(old_text, new_text):
+    if len(old_text) + len(new_text) > 16000:
+        return ([{'text': old_text, 'changed': True}], [{'text': new_text, 'changed': True}])
+    left, right = [], []
+    for tag, i, ii, j, jj in SequenceMatcher(None, old_text, new_text, autojunk=False).get_opcodes():
+        if ii > i:
+            left.append({'text': old_text[i:ii], 'changed': tag != 'equal'})
+        if jj > j:
+            right.append({'text': new_text[j:jj], 'changed': tag != 'equal'})
+    return left, right
 
 
 def compare_documents(old_data, new_data):
@@ -190,30 +257,38 @@ def compare_documents(old_data, new_data):
     hunks = []
     added = deleted = 0
     for number, operations in enumerate(matcher.get_grouped_opcodes(2)):
-        rows = []
+        rows, pairs = [], []
         for tag, i1, i2, j1, j2 in operations:
             if tag == 'equal':
                 for i, j in zip(range(i1, i2), range(j1, j2)):
-                    rows.append(row('context', old.blocks[i], i+1, j+1))
+                    left = row('context', old.blocks[i], i+1, j+1)
+                    right = row('context', new.blocks[j], i+1, j+1)
+                    rows.append(left)
+                    pairs.append({'old': left, 'new': right})
             else:
-                if tag in ('delete', 'replace'):
-                    for i in range(i1, i2):
-                        rows.append(row('delete', old.blocks[i], i+1, None))
-                        deleted += 1
-                if tag in ('insert', 'replace'):
-                    for j in range(j1, j2):
-                        rows.append(row('add', new.blocks[j], None, j+1))
-                        added += 1
-        hunks.append({'id': f'h{number}', 'rows': rows})
-    return {'old_hash': old.digest, 'new_hash': new.digest, 'hunks': hunks,
+                removed = [row('delete', old.blocks[i], i+1, None) for i in range(i1, i2)] if tag in ('delete', 'replace') else []
+                inserted = [row('add', new.blocks[j], None, j+1) for j in range(j1, j2)] if tag in ('insert', 'replace') else []
+                deleted += len(removed)
+                added += len(inserted)
+                rows.extend(removed + inserted)
+                for index in range(max(len(removed), len(inserted))):
+                    left = removed[index] if index < len(removed) else None
+                    right = inserted[index] if index < len(inserted) else None
+                    if left and right and left['block_kind'] == right['block_kind'] == 'paragraph':
+                        left['segments'], right['segments'] = segments(left['text'], right['text'])
+                    pairs.append({'old': left, 'new': right})
+        hunks.append({'id': f'h{number}', 'rows': rows, 'pairs': pairs})
+    issues = [dict(issue, side=side) for side, parsed in [('old', old), ('new', new)] for issue in parsed.issues]
+    return {'schema_version': SCHEMA_VERSION, 'old_hash': old.digest, 'new_hash': new.digest, 'hunks': hunks,
             'added': added, 'deleted': deleted, 'warnings': sorted(old.warnings | new.warnings),
+            'issues': issues, 'assets': {'old': old.assets, 'new': new.assets},
             'old_blocks': len(old.blocks), 'new_blocks': len(new.blocks)}
 
 
 def row(kind, block, old_line, new_line):
     return {'kind': kind, 'text': block['text'], 'block_id': block['id'],
             'path': block['path'], 'block_kind': block['kind'],
-            'old_line': old_line, 'new_line': new_line}
+            'old_line': old_line, 'new_line': new_line, 'images': block['images'], 'table': block['table']}
 
 
 def export_selection(new_data, comparison, selected, title):
@@ -222,6 +297,8 @@ def export_selection(new_data, comparison, selected, title):
     hunks = {h['id']: h for h in comparison['hunks']}
     if set(selected) - set(hunks):
         raise ComparisonError('所选变更块已失效，请重新对比。')
+    if comparison.get('schema_version') != SCHEMA_VERSION:
+        raise ComparisonError('解析规则已更新，请恢复上次对比或重新对比，核对后再提取。')
     parsed = ParsedDocument(new_data)
     if parsed.digest != comparison['new_hash']:
         raise ComparisonError('源文档已变化，请重新对比。')
@@ -241,8 +318,8 @@ def export_selection(new_data, comparison, selected, title):
             target.add_paragraph('来源章节：' + block['path'])
         previous_path = block['path']
         node = deepcopy(block['element'])
-        if any(etree.QName(e).localname in ('footnoteReference', 'endnoteReference', 'altChunk', 'OLEObject', 'chart', 'object', 'fldChar', 'instrText', 'cellDel', 'cellMerge', 'numPicBullet') for e in node.iter()):
-            raise ComparisonError('所选内容含脚注、域、图表或嵌入对象，暂不能完整导出。请调整选择或在原文中另存普通内容。')
+        if any(etree.QName(e).localname in ('footnoteReference', 'endnoteReference', 'altChunk', 'OLEObject', 'chart', 'object', 'cellDel', 'cellMerge', 'numPicBullet') for e in node.iter()):
+            raise ComparisonError(f'所选内容“{block["path"] or block["id"]}”含脚注、图表或嵌入对象，暂不能完整导出；普通Word域已可导出。请调整相关变更块。')
         for element in node.iter():
             for attr in list(element.attrib):
                 if attr not in (qn('r:id'), qn('r:embed'), qn('r:link')):

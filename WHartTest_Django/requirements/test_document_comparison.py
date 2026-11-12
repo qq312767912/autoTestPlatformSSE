@@ -159,3 +159,55 @@ class DocumentComparisonTests(unittest.TestCase):
         result = compare_documents(linked('https://example.org/old'), linked('https://example.org/new'))
         self.assertEqual(result['added'], 1)
         self.assertIn('https://example.org/new', result['hunks'][0]['rows'][-1]['text'])
+
+    def test_word_fields_export_cached_results_and_split_highlights(self):
+        from docx.oxml.ns import qn
+        doc = Document()
+        p = doc.add_paragraph('见：')
+        for field_type in ['begin', 'separate']:
+            run = p.add_run()._r
+            marker = OxmlElement('w:fldChar')
+            marker.set(qn('w:fldCharType'), field_type)
+            run.append(marker)
+            if field_type == 'begin':
+                instruction = OxmlElement('w:instrText')
+                instruction.text = ' PAGEREF _Toc123 '
+                p.add_run()._r.append(instruction)
+        p.add_run('第60页')
+        end = OxmlElement('w:fldChar')
+        end.set(qn('w:fldCharType'), 'end')
+        p.add_run()._r.append(end)
+        simple = OxmlElement('w:fldSimple')
+        simple.set(qn('w:instr'), 'REF section')
+        simple.append(OxmlElement('w:r'))
+        simple[0].append(OxmlElement('w:t'))
+        simple[0][0].text = '业务章节'
+        p._p.append(simple)
+        data = save(doc)
+        result = compare_documents(document('见：第30页'), data)
+        pair = result['hunks'][0]['pairs'][0]
+        self.assertTrue(any(s['changed'] and '6' in s['text'] for s in pair['new']['segments']))
+        exported, _ = extract(data, result, ['h0'])
+        self.assertIn('第60页业务章节', '\n'.join(p.text for p in exported.paragraphs))
+        self.assertEqual(list(exported.element.iter(qn('w:fldChar'))), [])
+        self.assertEqual(list(exported.element.iter(qn('w:instrText'))), [])
+
+    def test_bookmarks_and_choice_fallback_do_not_duplicate_or_warn(self):
+        from docx.oxml.ns import qn
+        from lxml import etree
+        doc = Document()
+        p = doc.add_paragraph()
+        mc = '{http://schemas.openxmlformats.org/markup-compatibility/2006}'
+        alternate = etree.Element(mc+'AlternateContent')
+        for tag in ['Choice', 'Fallback']:
+            branch = etree.SubElement(alternate, mc+tag)
+            run = OxmlElement('w:r')
+            text = OxmlElement('w:t')
+            text.text = '唯一正文'
+            run.append(text)
+            branch.append(run)
+        p._p.append(alternate)
+        doc.element.body.insert(0, OxmlElement('w:bookmarkEnd'))
+        parsed = ParsedDocument(save(doc))
+        self.assertEqual(parsed.blocks[0]['text'], '唯一正文')
+        self.assertEqual(parsed.issues, [])

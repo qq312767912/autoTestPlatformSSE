@@ -1,4 +1,7 @@
 from pathlib import Path
+from io import BytesIO
+from zipfile import ZipFile, BadZipFile
+from PIL import Image, UnidentifiedImageError
 from uuid import uuid4
 
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -14,7 +17,7 @@ from rest_framework.exceptions import ValidationError
 
 from projects.models import Project
 from .models import RequirementComparison
-from .document_comparison import ComparisonError, compare_documents, export_selection
+from .document_comparison import ComparisonError, compare_documents, export_selection, SCHEMA_VERSION
 
 
 class RequirementComparisonViewSet(viewsets.GenericViewSet):
@@ -69,7 +72,38 @@ class RequirementComparisonViewSet(viewsets.GenericViewSet):
                 'iteration_title': record.iteration_title, 'confirmed_at': record.confirmed_at}
 
     def retrieve(self, request, pk=None):
-        return Response(self.payload(self.get_object()))
+        record = self.get_object()
+        if record.result.get('schema_version') != SCHEMA_VERSION:
+            with record.old_file.open('rb') as old, record.new_file.open('rb') as new:
+                record.result = compare_documents(old.read(), new.read())
+            record.confirmed_hunks = []
+            record.confirmed_at = None
+            record.save(update_fields=['result', 'confirmed_hunks', 'confirmed_at'])
+        return Response(self.payload(record))
+
+    @action(detail=True, methods=['get'], url_path='image')
+    def image(self, request, pk=None):
+        record = self.get_object()
+        side, rid = request.query_params.get('side'), request.query_params.get('rid')
+        if side not in ('old', 'new') or not rid:
+            raise ValidationError('图片参数无效。')
+        asset = record.result.get('assets', {}).get(side, {}).get(rid)
+        if not asset or not asset.get('content_type', '').startswith('image/'):
+            raise ValidationError('图片不属于本次对比。')
+        source = record.old_file if side == 'old' else record.new_file
+        try:
+            with source.open('rb') as stream, ZipFile(stream) as package:
+                content = package.read(asset['part_name'])
+            with Image.open(BytesIO(content)) as image:
+                image.thumbnail((900, 700))
+                output = BytesIO()
+                image.convert('RGBA').save(output, format='PNG')
+        except (UnidentifiedImageError, OSError, KeyError, BadZipFile, Image.DecompressionBombError):
+            raise ValidationError('此图片格式暂无法预览，原图仍保留在导出文档中。')
+        response = HttpResponse(output.getvalue(), content_type='image/png')
+        response['Cache-Control'] = 'private, max-age=300'
+        response['X-Content-Type-Options'] = 'nosniff'
+        return response
 
     @action(detail=True, methods=['post'], url_path='confirm-extract')
     def confirm_extract(self, request, pk=None):
