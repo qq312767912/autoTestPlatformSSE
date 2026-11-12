@@ -8,18 +8,30 @@
         <div class="upload-grid">
           <div class="upload-panel">
             <label>旧版文档 · 修改前</label>
-            <label class="file-picker" :class="{ 'file-picker-disabled': busy }">
-              <span>{{ oldFile || session ? '重新选择旧版文档' : '上传旧版文档' }}</span>
-              <input aria-label="上传旧版文档" type="file" accept=".docx" :disabled="busy" @change="chooseFile($event, 'old')" />
-            </label>
+            <a-upload class="document-upload" :file-list="[]" :auto-upload="false" :show-file-list="false"
+              :multiple="false" :disabled="busy" accept=".docx" draggable :on-before-upload="validateDocument"
+              @change="(_files, file) => chooseUpload(file, 'old')">
+              <template #upload-button>
+                <div class="upload-target">
+                  <a-button type="primary" :disabled="busy">{{ oldFile || session ? '重新选择旧版文档' : '上传旧版文档' }}</a-button>
+                  <span>或将旧版 DOCX 文件拖到这里</span>
+                </div>
+              </template>
+            </a-upload>
             <span class="file-name" :title="oldFile?.name || session?.old_name">{{ oldFile?.name || session?.old_name || '请选择 DOCX 文件' }}</span>
           </div>
           <div class="upload-panel">
             <label>新版文档 · 修改后</label>
-            <label class="file-picker" :class="{ 'file-picker-disabled': busy }">
-              <span>{{ newFile || session ? '重新选择新版文档' : '上传新版文档' }}</span>
-              <input aria-label="上传新版文档" type="file" accept=".docx" :disabled="busy" @change="chooseFile($event, 'new')" />
-            </label>
+            <a-upload class="document-upload" :file-list="[]" :auto-upload="false" :show-file-list="false"
+              :multiple="false" :disabled="busy" accept=".docx" draggable :on-before-upload="validateDocument"
+              @change="(_files, file) => chooseUpload(file, 'new')">
+              <template #upload-button>
+                <div class="upload-target">
+                  <a-button type="primary" :disabled="busy">{{ newFile || session ? '重新选择新版文档' : '上传新版文档' }}</a-button>
+                  <span>或将新版 DOCX 文件拖到这里</span>
+                </div>
+              </template>
+            </a-upload>
             <span class="file-name" :title="newFile?.name || session?.new_name">{{ newFile?.name || session?.new_name || '请选择 DOCX 文件' }}</span>
           </div>
         </div>
@@ -86,6 +98,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { Message } from '@arco-design/web-vue';
+import type { FileItem } from '@arco-design/web-vue/es/upload/interfaces';
 import ComparisonDiffCell from './ComparisonDiffCell.vue';
 import { compareFiles, extractComparison, loadComparison, comparisonError, type ComparisonSession } from '../services/comparisonService';
 
@@ -116,18 +129,20 @@ watch(() => props.projectId, () => {
 watch(() => props.visible, (visible) => {
   if (visible) savedId.value = sessionStorage.getItem(storageKey.value) || '';
 }, { immediate: true });
-function chooseFile(event: Event, side: 'old' | 'new') {
-  const file = (event.target as HTMLInputElement).files?.[0];
+function validateDocument(file: File): boolean {
+  if (!file.name.toLowerCase().endsWith('.docx')) {
+    error.value = '版本对比仅支持 .docx 文件。';
+    return false;
+  }
+  return true;
+}
+function chooseUpload(item: FileItem, side: 'old' | 'new') {
+  const file = item.file;
+  if (busy.value || !file || !validateDocument(file)) return;
   session.value = undefined;
   selected.value = [];
   confirmed.value = false;
   error.value = '';
-  if (side === 'old') oldFile.value = undefined;
-  else newFile.value = undefined;
-  if (file && !file.name.toLowerCase().endsWith('.docx')) {
-    error.value = '版本对比仅支持 .docx 文件。';
-    return;
-  }
   if (side === 'old') oldFile.value = file;
   else newFile.value = file;
 }
@@ -191,13 +206,11 @@ async function extract() {
 .intro { margin: 0; color: var(--color-text-2); }
 .upload-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .upload-panel { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 14px; border: 1px solid var(--color-border-2); border-radius: 6px; background: var(--color-fill-1); }
-.upload-panel > label:not(.file-picker) { width: 100%; color: var(--color-text-2); font-weight: 500; }
-.file-picker { position: relative; display: inline-flex; align-items: center; justify-content: center; min-height: 32px; padding: 0 14px; border: 1px solid var(--color-border-3); border-radius: 3px; background: var(--color-bg-2); color: var(--color-text-1); cursor: pointer; font-size: 14px; }
-.file-picker:hover { border-color: rgb(var(--primary-6)); color: rgb(var(--primary-6)); }
-.file-picker:focus-within { outline: 2px solid rgb(var(--primary-3)); outline-offset: 2px; }
-.file-picker input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
-.file-picker-disabled { opacity: .5; cursor: not-allowed; }
-.file-picker-disabled input { cursor: not-allowed; }
+.upload-panel > label { width: 100%; color: var(--color-text-2); font-weight: 500; }
+.document-upload { width: 100%; }
+.upload-target { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 18px; border: 1px dashed var(--color-border-3); border-radius: 4px; background: var(--color-bg-2); cursor: pointer; }
+.upload-target:hover { border-color: rgb(var(--primary-6)); }
+.upload-target > span { color: var(--color-text-3); font-size: 12px; }
 .file-name { min-width: 0; flex: 1; color: var(--color-text-3); overflow-wrap: anywhere; font-size: 12px; }
 .compare-actions { display: flex; gap: 12px; margin-top: 16px; }
 .compare-actions > .arco-input-wrapper { max-width: 560px; }

@@ -25,3 +25,12 @@ docx-revisions 的 accepted_text 按 Word 修订语义处理，手工删除线�
 ```
 
 API测试使用内存SQLite和临时媒体目录，不会连接业务数据库；同时校验迁移与模型一致。性能程序使用现有功能的解析与导出代码，默认写出 `/tmp/whart-shipped-comparison-benchmark.json`，并断言预期的两处修改均被识别。
+
+## 上传控件组件测试（不需要浏览器扩展）
+
+```sh
+npm install --prefix /tmp/whart-upload-unit jsdom@29.1.1
+node scripts/docx_evaluation/test_upload_component.cjs
+```
+
+在隔离DOM中挂载真实Vue组件与Arco上传组件，模拟文件选择与拖放事件。覆盖双文件状态、重新选择、大写扩展名、无效格式及开始按钮状态，不访问用户文件、不发送网络请求，也不验证系统文件选择窗口是否正常弹出。验证环境Node 25.9.0。
