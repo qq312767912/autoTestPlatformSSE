@@ -8,14 +8,18 @@
         <div class="upload-grid">
           <div class="upload-panel">
             <label>旧版文档 · 修改前</label>
-            <input ref="oldInput" aria-label="旧版文档" type="file" accept=".docx" hidden @change="chooseFile($event, 'old')" />
-            <a-button :disabled="busy" @click="oldInput?.click()">{{ oldFile || session ? '重新选择旧版文档' : '上传旧版文档' }}</a-button>
+            <label class="file-picker" :class="{ 'file-picker-disabled': busy }">
+              <span>{{ oldFile || session ? '重新选择旧版文档' : '上传旧版文档' }}</span>
+              <input aria-label="上传旧版文档" type="file" accept=".docx" :disabled="busy" @change="chooseFile($event, 'old')" />
+            </label>
             <span class="file-name" :title="oldFile?.name || session?.old_name">{{ oldFile?.name || session?.old_name || '请选择 DOCX 文件' }}</span>
           </div>
           <div class="upload-panel">
             <label>新版文档 · 修改后</label>
-            <input ref="newInput" aria-label="新版文档" type="file" accept=".docx" hidden @change="chooseFile($event, 'new')" />
-            <a-button :disabled="busy" @click="newInput?.click()">{{ newFile || session ? '重新选择新版文档' : '上传新版文档' }}</a-button>
+            <label class="file-picker" :class="{ 'file-picker-disabled': busy }">
+              <span>{{ newFile || session ? '重新选择新版文档' : '上传新版文档' }}</span>
+              <input aria-label="上传新版文档" type="file" accept=".docx" :disabled="busy" @change="chooseFile($event, 'new')" />
+            </label>
             <span class="file-name" :title="newFile?.name || session?.new_name">{{ newFile?.name || session?.new_name || '请选择 DOCX 文件' }}</span>
           </div>
         </div>
@@ -90,8 +94,6 @@ const emit = defineEmits<{ close: [] }>();
 const oldFile = ref<File>();
 const newFile = ref<File>();
 const title = ref('');
-const oldInput = ref<HTMLInputElement>();
-const newInput = ref<HTMLInputElement>();
 const displayMode = ref('split');
 const session = ref<ComparisonSession>();
 const selected = ref<string[]>([]);
@@ -189,7 +191,13 @@ async function extract() {
 .intro { margin: 0; color: var(--color-text-2); }
 .upload-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .upload-panel { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 14px; border: 1px solid var(--color-border-2); border-radius: 6px; background: var(--color-fill-1); }
-.upload-panel label { width: 100%; color: var(--color-text-2); font-weight: 500; }
+.upload-panel > label:not(.file-picker) { width: 100%; color: var(--color-text-2); font-weight: 500; }
+.file-picker { position: relative; display: inline-flex; align-items: center; justify-content: center; min-height: 32px; padding: 0 14px; border: 1px solid var(--color-border-3); border-radius: 3px; background: var(--color-bg-2); color: var(--color-text-1); cursor: pointer; font-size: 14px; }
+.file-picker:hover { border-color: rgb(var(--primary-6)); color: rgb(var(--primary-6)); }
+.file-picker:focus-within { outline: 2px solid rgb(var(--primary-3)); outline-offset: 2px; }
+.file-picker input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.file-picker-disabled { opacity: .5; cursor: not-allowed; }
+.file-picker-disabled input { cursor: not-allowed; }
 .file-name { min-width: 0; flex: 1; color: var(--color-text-3); overflow-wrap: anywhere; font-size: 12px; }
 .compare-actions { display: flex; gap: 12px; margin-top: 16px; }
 .compare-actions > .arco-input-wrapper { max-width: 560px; }
