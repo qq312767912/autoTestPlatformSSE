@@ -34,7 +34,7 @@ class DocumentComparisonTests(unittest.TestCase):
         doc, report = extract(new, result, ['h0'])
         text = '\n'.join(p.text for p in doc.paragraphs)
         self.assertIn('超时60秒', text)
-        self.assertNotIn('超时30秒', text.split('取消与修改需求')[0]); self.assertIn('超时30秒', text)
+        self.assertEqual(doc.paragraphs[0].text, '文档修订内容汇总报告'); self.assertIn('超时30秒', text); self.assertTrue(any(r.font.strike for p in doc.paragraphs for r in p.runs if '30' in r.text))
         self.assertIn('超时30秒', report)
         self.assertEqual(Document(BytesIO(old)).paragraphs[0].text, '超时30秒')
 
@@ -105,7 +105,7 @@ class DocumentComparisonTests(unittest.TestCase):
         result = compare_documents(old, new)
         doc, report = extract(new, result, ['h0'])
         self.assertIn('删掉', report)
-        self.assertIn('删掉', '\n'.join(p.text for p in doc.paragraphs)); self.assertIn('取消与修改需求', '\n'.join(p.text for p in doc.paragraphs))
+        self.assertIn('删掉', '\n'.join(p.text for p in doc.paragraphs)); self.assertEqual(doc.paragraphs[0].text, '文档修订内容汇总报告'); self.assertTrue(any(r.font.strike for p in doc.paragraphs for r in p.runs if '删掉' in r.text))
         for ids in [[], ['missing'], 'h0', [1]]:
             with self.assertRaises(ComparisonError):
                 extract(new, result, ids)

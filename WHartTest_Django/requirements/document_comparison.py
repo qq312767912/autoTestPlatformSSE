@@ -291,7 +291,7 @@ def row(kind, block, old_line, new_line):
             'old_line': old_line, 'new_line': new_line, 'images': block['images'], 'table': block['table']}
 
 
-def export_selection(new_data, comparison, selected, title):
+def export_selection(new_data, comparison, selected, title, old_data=None, source_name=None):
     if not selected or not isinstance(selected, list) or any(not isinstance(v, str) for v in selected):
         raise ComparisonError('请至少选择一个变更块。')
     hunks = {h['id']: h for h in comparison['hunks']}
@@ -299,75 +299,19 @@ def export_selection(new_data, comparison, selected, title):
         raise ComparisonError('所选变更块已失效，请重新对比。')
     if comparison.get('schema_version') != SCHEMA_VERSION:
         raise ComparisonError('解析规则已更新，请恢复上次对比或重新对比，核对后再提取。')
-    parsed = ParsedDocument(new_data)
-    if parsed.digest != comparison['new_hash']:
+    if old_data is not None and sha256(old_data).hexdigest() != comparison['old_hash']:
+        raise ComparisonError('旧版源文档已变化，请重新对比。')
+    if sha256(new_data).hexdigest() != comparison['new_hash']:
         raise ComparisonError('源文档已变化，请重新对比。')
     selected_rows = [r for h in comparison['hunks'] if h['id'] in selected for r in h['rows'] if r['kind'] != 'context']
-    wanted = {r['block_id'] for r in selected_rows if r['kind'] == 'add'}
-    # Preserve complete leaf sections, following the report script's section contract.
-    changed_paths = {b['path'] for b in parsed.blocks if b['id'] in wanted and b['path']}
-    for block in parsed.blocks:
-        if block['path'] in changed_paths:
-            wanted.add(block['id'])
-    target = Document()
-    # Use fresh package: never ship hidden, unselected source bodies or comments.
-    target.part._styles_part._element = deepcopy(parsed.doc.styles.element)
-    target.part.numbering_part._element = deepcopy(parsed.doc.part.numbering_part.element)
-    target.add_heading(title, 0)
-    target.add_paragraph('本文件保留所选变更所在小节的当前有效内容；同节未修改内容作为上下文保留。失效规则也作为业务变更保留，详见后文及变更说明.md。')
-    previous_path = None
-    for block in parsed.blocks:
-        if block['id'] not in wanted:
-            continue
-        if block['path'] and block['path'] != previous_path and block['text'] != block['headings'][-1]:
-            target.add_heading(block['path'], level=1)
-        previous_path = block['path']
-        node = deepcopy(block['element'])
-        if any(etree.QName(e).localname in ('footnoteReference', 'endnoteReference', 'altChunk', 'OLEObject', 'chart', 'object', 'cellDel', 'cellMerge', 'numPicBullet') for e in node.iter()):
-            raise ComparisonError(f'所选内容“{block["path"] or block["id"]}”含脚注、图表或嵌入对象，暂不能完整导出；普通Word域已可导出。请调整相关变更块。')
-        for element in node.iter():
-            for attr in list(element.attrib):
-                if attr not in (qn('r:id'), qn('r:embed'), qn('r:link')):
-                    continue
-                rid = element.get(attr)
-                rel = parsed.doc.part.rels.get(rid)
-                if rel is None:
-                    raise ComparisonError('所选内容存在失效的附件引用。')
-                if rel.reltype.endswith('/image') and not rel.is_external:
-                    new_rid, _ = target.part.get_or_add_image(BytesIO(rel.target_part.blob))
-                elif rel.reltype.endswith('/hyperlink') and rel.is_external:
-                    new_rid = target.part.relate_to(rel.target_ref, rel.reltype, is_external=True)
-                else:
-                    raise ComparisonError('所选内容含暂不支持的外部图片或附件引用。')
-                element.set(attr, new_rid)
-        target.element.body.insert(len(target.element.body)-1, node)
-    removed_rows = [r for r in selected_rows if r['kind'] == 'delete']
-    if removed_rows:
-        target.add_heading('取消与修改需求', level=1)
-        target.add_paragraph('以下删除/修改原规则同样属于本次选择的变更需求。删除原文仅作证据，不表示原功能仍需实现；局部删除不等于取消整个功能，需结合当前规则确认范围。')
-        for index, removed in enumerate(removed_rows, 1):
-            target.add_heading(f'变更需求 {index}', level=2)
-            target.add_paragraph('来源：' + (removed['path'] or removed['block_id']))
-            target.add_paragraph('变更要求：确认取消或修改下列原规则的业务范围及测试影响。')
-            target.add_paragraph('删除/修改前原文（仅作对照，不表示整段全部取消）：')
-            target.add_paragraph(removed['text'])
-            paired = next((pair.get('new') for h in comparison['hunks'] if h['id'] in selected
-                           for pair in h.get('pairs', [])
-                           if pair.get('old') and pair['old']['kind'] == 'delete'
-                           and pair['old']['block_id'] == removed['block_id']), None)
-            if paired and paired['kind'] == 'add':
-                target.add_paragraph('对应修改后的当前内容：')
-                target.add_paragraph(paired['text'])
-    if not wanted:
-        target.add_paragraph('本次选择只有删除项，以上取消/修改需求仍需分析与测试，无新增现行正文。')
-    output = BytesIO()
-    target.save(output)
+    from .revision_report import comparison_report
+    report_docx = comparison_report(new_data, comparison, selected, old_data, source_name or title + '.docx')
     report = [f'# {title}', '', f"旧版 SHA256：{comparison['old_hash']}", f"新版 SHA256：{comparison['new_hash']}", '',
-              '以下是人工选择的变更记录，删除内容不属于有效需求正文。', '']
+              '以下是人工选择的变更记录。删除原文是取消/修改需求的证据，不表示原规则仍生效。', '']
     for r in selected_rows:
         report.extend([f"## {'新增或修改后' if r['kind'] == 'add' else '删除或修改前'} · {r['path'] or '正文'}", '', r['text'], ''])
     bundle = BytesIO()
     with ZipFile(bundle, 'w') as archive:
-        archive.writestr('迭代需求.docx', output.getvalue())
+        archive.writestr('迭代需求.docx', report_docx)
         archive.writestr('变更说明.md', '\n'.join(report))
     return bundle.getvalue()

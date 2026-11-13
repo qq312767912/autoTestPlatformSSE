@@ -115,8 +115,8 @@ class RequirementComparisonViewSet(viewsets.GenericViewSet):
             raise ValidationError('迭代名称含无效字符。')
         selected = request.data.get('hunk_ids')
         try:
-            with record.new_file.open('rb') as source:
-                bundle = export_selection(source.read(), record.result, selected, title.strip())
+            with record.new_file.open('rb') as source, record.old_file.open('rb') as baseline:
+                bundle = export_selection(source.read(), record.result, selected, title.strip(), baseline.read(), record.new_name)
         except ComparisonError as exc:
             raise ValidationError(str(exc))
         record.confirmed_hunks = selected
