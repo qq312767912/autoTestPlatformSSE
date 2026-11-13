@@ -210,6 +210,8 @@ class Config:
             self.use_gui = data['server'].get('use_gui', self.use_gui)
             self.api_username = data['server'].get('api_username', self.api_username)
             self.api_password = data['server'].get('api_password', self.api_password)
+            self.api_key = data['server'].get('api_key', self.api_key)
+            self.ws_token = data['server'].get('ws_token', self.ws_token)
 
         # 执行器配置
         if 'actuator' in data:
