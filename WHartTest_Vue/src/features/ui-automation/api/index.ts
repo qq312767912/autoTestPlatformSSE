@@ -376,7 +376,7 @@ export const recorderApi = {
   finish: (sessionId: string) =>
     request.post<RecorderFinishResult>(`${BASE_URL}/recorder-sessions/${sessionId}/finish/`),
 
-  saveLoginState: (sessionId: string, body?: { name?: string; auth_state_id?: number }) =>
+  saveLoginState: (sessionId: string, body?: { name?: string }) =>
     request.post<RecorderSaveLoginStateResult>(`${BASE_URL}/recorder-sessions/${sessionId}/save-login-state/`, body ?? {}),
 
   cancel: (sessionId: string) =>
