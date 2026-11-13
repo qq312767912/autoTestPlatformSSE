@@ -35,8 +35,9 @@
             <span class="file-name" :title="newFile?.name || session?.new_name">{{ newFile?.name || session?.new_name || '请选择 DOCX 文件' }}</span>
           </div>
         </div>
+        <label class="iteration-label">本次迭代名称（必填）</label>
         <div class="compare-actions">
-          <a-input v-model="title" :max-length="200" placeholder="本次迭代名称，例如 V3.2.5 登录流程调整" :disabled="busy" aria-label="本次迭代名称" />
+          <a-input ref="titleInput" v-model="title" :max-length="200" placeholder="本次迭代名称，例如 V3.2.5 登录流程调整" :disabled="busy" aria-label="本次迭代名称" />
           <a-button type="primary" :loading="comparing" :disabled="busy || !oldFile || !newFile" @click="compare">开始对比</a-button>
           <a-button v-if="!session && savedId" :disabled="busy" @click="restore">恢复上次对比</a-button>
         </div>
@@ -86,9 +87,14 @@
         </div>
         <div class="extract-footer">
           <a-checkbox v-model="confirmed" :disabled="busy || !selected.length">我已核对所选变更，确认这是本次迭代范围</a-checkbox>
-          <a-button type="primary" :loading="extracting" :disabled="busy || !confirmed || !selected.length || !title.trim()" @click="extract">确认并提取所选 Diff</a-button>
+          <a-button type="primary" :loading="extracting" :title="extractHint" :disabled="busy || !confirmed || !selected.length" @click="extract">确认并提取所选 Diff</a-button>
+          <span v-if="extractHint" class="extract-hint" role="status">{{ extractHint }}</span>
           <span v-if="session.confirmed_at" class="muted">上次确认：{{ new Date(session.confirmed_at).toLocaleString() }}</span>
         </div>
+        <a-alert v-if="downloadUrl" type="success">
+          提取已完成。若浏览器没有自动下载，请
+          <a :href="downloadUrl" :download="downloadName">点击下载提取结果（ZIP）</a>。
+        </a-alert>
       </template>
       <a-alert v-if="error" type="error">{{ error }}</a-alert>
     </a-space>
@@ -96,7 +102,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, ref, watch, onBeforeUnmount } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import type { FileItem } from '@arco-design/web-vue/es/upload/interfaces';
 import ComparisonDiffCell from './ComparisonDiffCell.vue';
@@ -107,6 +113,9 @@ const emit = defineEmits<{ close: [] }>();
 const oldFile = ref<File>();
 const newFile = ref<File>();
 const title = ref('');
+const titleInput = ref<{ focus: () => void }>();
+const downloadUrl = ref('');
+const downloadName = ref('');
 const displayMode = ref('split');
 const session = ref<ComparisonSession>();
 const selected = ref<string[]>([]);
@@ -116,7 +125,21 @@ const extracting = ref(false);
 const error = ref('');
 const savedId = ref('');
 const busy = computed(() => comparing.value || extracting.value);
-watch(title, () => { confirmed.value = false; });
+const extractHint = computed(() => {
+  if (extracting.value) return '正在生成提取结果，请稍候…';
+  if (comparing.value) return '正在对比文档，请稍候…';
+  if (!selected.value.length) return '请先选择变更块，或点击全选。';
+  if (!confirmed.value) return '请勾选“我已核对所选变更”后提取。';
+  if (!title.value.trim()) return '请填写顶部的本次迭代名称；点击提取会定位到输入框。';
+  return '';
+});
+function clearDownload() {
+  if (downloadUrl.value) URL.revokeObjectURL(downloadUrl.value);
+  downloadUrl.value = '';
+  downloadName.value = '';
+}
+watch([title, selected, () => props.projectId], clearDownload);
+onBeforeUnmount(clearDownload);
 const storageKey = computed(() => `requirement-comparison:${props.projectId}`);
 watch(() => props.projectId, () => {
   session.value = undefined;
@@ -184,17 +207,25 @@ async function restore() {
   finally { comparing.value = false; }
 }
 async function extract() {
-  if (!session.value || !confirmed.value) return;
+  if (!session.value || !confirmed.value || !selected.value.length || busy.value) return;
+  if (!title.value.trim()) {
+    error.value = '请先填写本次迭代名称，再点击确认并提取。';
+    titleInput.value?.focus();
+    return;
+  }
   extracting.value = true;
   error.value = '';
   try {
     const blob = await extractComparison(session.value.id, title.value.trim(), selected.value);
-    const url = URL.createObjectURL(blob);
+    clearDownload();
+    downloadUrl.value = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.href = url;
+    link.href = downloadUrl.value;
     link.download = `${title.value.trim().replace(/[\\/:*?"<>|]/g, '_')}-diff.zip`;
+    downloadName.value = link.download;
+    document.body.appendChild(link);
     link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    link.remove();
     session.value.confirmed_at = new Date().toISOString();
     Message.success('已提取，请解压后将迭代需求 DOCX 上传为普通文档。');
   } catch (e) { error.value = e instanceof Error ? e.message : comparisonError(e);
@@ -212,8 +243,10 @@ async function extract() {
 .upload-target:hover { border-color: rgb(var(--primary-6)); }
 .upload-target > span { color: var(--color-text-3); font-size: 12px; }
 .file-name { min-width: 0; flex: 1; color: var(--color-text-3); overflow-wrap: anywhere; font-size: 12px; }
-.compare-actions { display: flex; gap: 12px; margin-top: 16px; }
+.iteration-label { display: block; margin-top: 16px; color: var(--color-text-2); font-size: 13px; }
+.compare-actions { display: flex; gap: 12px; margin-top: 8px; }
 .compare-actions > .arco-input-wrapper { max-width: 560px; }
+.extract-hint { color: rgb(var(--orange-6)); font-size: 12px; }
 .muted { color: var(--color-text-3); font-size: 12px; }
 .comparison-rules, .comparison-issues { padding: 10px 14px; border: 1px solid var(--color-border-2); border-radius: 5px; font-size: 12px; color: var(--color-text-2); }
 .comparison-rules summary, .comparison-issues summary { cursor: pointer; font-size: 13px; }

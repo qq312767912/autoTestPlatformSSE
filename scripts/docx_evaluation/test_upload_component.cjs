@@ -33,7 +33,10 @@ async function main() {
       build.onResolve({ filter: /comparisonService$/ }, () => ({ path: 'service-stub', namespace: 'stub' }));
       build.onResolve({ filter: /ComparisonDiffCell\.vue$/ }, () => ({ path: 'diff-cell-stub', namespace: 'stub' }));
       build.onLoad({ filter: /.*/, namespace: 'stub' }, args => ({ contents: args.path === 'service-stub'
-        ? 'export const compareFiles=()=>{throw Error("Unexpected network")}; export const extractComparison=compareFiles; export const loadComparison=compareFiles; export const comparisonError=String;'
+        ? `export const compareFiles=()=>{throw Error('Unexpected network')};
+export const extractComparison=async()=>new Blob(['synthetic zip'],{type:'application/zip'});
+export const loadComparison=async()=>({id:'unit',old_name:'old.docx',new_name:'new.docx',iteration_title:'',confirmed_at:null,confirmed_hunks:[],result:{hunks:[{id:'h0',rows:[],pairs:[]}],added:1,deleted:1,warnings:[]}});
+export const comparisonError=String;`
         : 'export default {render:()=>null};' }));
       build.onLoad({ filter: /\.vue$/ }, args => {
         const { descriptor } = compiler.parse(fs.readFileSync(args.path, 'utf8'));
@@ -48,6 +51,9 @@ async function main() {
   compiled._compile(result.outputFiles[0].text, compiled.filename);
   const { createApp, nextTick } = projectRequire('vue');
   const Arco = projectRequire('@arco-design/web-vue');
+  // Toast transitions are outside this component's file/download state contract.
+  Arco.Message.success = () => ({ close() {} });
+  sessionStorage.setItem('requirement-comparison:unit-project', 'unit');
   const app = createApp(compiled.exports.default, { visible: true, projectId: 'unit-project' });
   app.use(Arco.default || Arco).mount('#app');
   const flush = async () => { await nextTick(); await new Promise(resolve => setTimeout(resolve, 15)); await nextTick(); };
@@ -76,8 +82,34 @@ async function main() {
   await choose(0, 'invalid.pdf');
   assert.equal(names()[0], 'replacement.DOCX', 'Invalid selection must preserve the valid file');
   assert.match(document.body.textContent, /版本对比仅支持/);
+  const button = text => [...document.querySelectorAll('button')].find(node => node.textContent.trim() === text);
+  button('恢复上次对比').click();
+  await flush();
+  assert.equal(button('确认并提取所选 Diff').disabled, true, 'Review confirmation must be required');
+  const confirm = [...document.querySelectorAll('label.arco-checkbox')].find(node => node.textContent.includes('我已核对'));
+  confirm.querySelector('input').click();
+  await flush();
+  assert.equal(button('确认并提取所选 Diff').disabled, false, 'Missing name must produce an actionable validation, not a silent disabled button');
+  button('确认并提取所选 Diff').click();
+  await flush();
+  assert.match(document.body.textContent, /请先填写本次迭代名称/);
+  const name = document.querySelector('.compare-actions input');
+  assert.equal(document.activeElement, name, 'Missing name must focus the name field');
+  name.value = '迭代测试';
+  name.dispatchEvent(new Event('input', { bubbles: true }));
+  await flush();
+  assert.equal(confirm.querySelector('input').checked, true, 'Editing the label must not reset review confirmation');
+  document.addEventListener('click', event => { if (event.target.tagName === 'A') event.preventDefault(); });
+  button('确认并提取所选 Diff').click();
+  await flush();
+  const download = document.querySelector('a[download]');
+  assert.ok(download, 'Successful extraction must leave a user-clickable download link');
+  assert.equal(download.download, '迭代测试-diff.zip');
+  button('清空').click();
+  await flush();
+  assert.equal(document.querySelector('a[download]'), null, 'Changed selection must invalidate the previous download');
   app.unmount();
   dom.window.close();
-  console.log('PASS: select old, drop new, reselect, uppercase DOCX, reject invalid file, compare enablement; no network calls');
+  console.log('PASS: select old, drop new, reselect, uppercase DOCX, reject invalid file, compare enablement, name validation, focus, confirmation preservation and explicit download link; no network calls');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; dom.window.close(); });
