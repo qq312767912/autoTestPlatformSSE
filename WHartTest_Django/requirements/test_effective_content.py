@@ -8,7 +8,7 @@ class EffectiveContentTests(unittest.TestCase):
     def test_markdown_deletion_and_literal_code(self):
         text='有效~~旧要求~~新要求 <del>删除</del> `<del>代码</del>`\n```md\n~~代码~~\n```'
         result=effective_markdown(text)
-        self.assertNotIn('旧要求',result.split('> 【取消/修改需求】')[0]); self.assertIn('旧要求',result.split('> 【取消/修改需求】')[1])
+        self.assertNotIn('旧要求',result.split('> **变更记录｜')[0]); self.assertIn('旧要求',result.split('> **变更记录｜')[1])
         self.assertNotIn('<del>删除',result)
         self.assertIn('~~代码~~',result)
         self.assertIn('`<del>代码</del>`',result)
@@ -17,7 +17,7 @@ class EffectiveContentTests(unittest.TestCase):
         stream=BytesIO();d.save(stream)
         result=Document(BytesIO(effective_docx(stream.getvalue())))
         self.assertTrue(result.paragraphs[0].text.startswith('有效\n'))
-        self.assertIn('删除原文：删除', result.paragraphs[0].text)
+        self.assertIn('原文：有效~~删除~~', result.paragraphs[0].text)
 
     def test_export_preserves_unchanged_section_context(self):
         from .document_comparison import compare_documents,export_selection
@@ -40,7 +40,7 @@ class EffectiveContentTests(unittest.TestCase):
         notes=word_change_requirements(out.getvalue())
         self.assertIn('30秒',notes);self.assertIn('超时60秒',notes);self.assertIn('修改原规则',notes)
         md=effective_markdown('~~取消短信登录~~')
-        self.assertIn('取消原规则',md);self.assertIn('取消短信登录',md)
+        self.assertIn('整段删除',md);self.assertIn('取消短信登录',md)
         self.assertEqual(effective_markdown(md),md)
 
     def test_original_renderer_layout_and_manual_strike_fix(self):
@@ -96,11 +96,27 @@ class EffectiveContentTests(unittest.TestCase):
         d.add_heading('债券公告',1);d.add_paragraph('独立规则')
         stream=BytesIO();d.save(stream)
         result=Document(BytesIO(effective_docx(stream.getvalue())))
-        self.assertIn('删除原文：通过日期区间筛选',result.paragraphs[1].text)
-        self.assertIn('删除原文：旧筛选条件',result.tables[0].cell(0,0).text)
+        self.assertIn('~~通过日期区间筛选~~',result.paragraphs[1].text)
+        self.assertIn('~~旧筛选条件~~',result.tables[0].cell(0,0).text)
         self.assertEqual(result.paragraphs[-1].text,'独立规则')
         md=effective_markdown('# 公司公告\n默认~~旧日期筛选~~\n# 债券公告\n独立规则')
         company,bond=md.split('# 债券公告')
-        self.assertIn('删除原文：旧日期筛选',company)
-        self.assertNotIn('删除原文',bond)
+        self.assertIn('~~旧日期筛选~~',company)
+        self.assertNotIn('变更记录',bond)
         self.assertEqual(effective_markdown(md),md)
+
+    def test_nonadjacent_deletions_keep_original_positions(self):
+        d=Document();p=d.add_paragraph()
+        p.add_run('高级筛选').font.strike=True
+        p.add_run('检索：证券代码或简称')
+        p.add_run('、关键字、板块分类查询或者重置').font.strike=True
+        stream=BytesIO();d.save(stream)
+        text=Document(BytesIO(effective_docx(stream.getvalue()))).paragraphs[0].text
+        self.assertTrue(text.startswith('检索：证券代码或简称\n\n'))
+        self.assertIn('~~高级筛选~~检索：证券代码或简称~~、关键字、板块分类查询或者重置~~',text)
+        self.assertNotIn('处理要求',text)
+        self.assertEqual(effective_markdown(text),text)
+        md='检索：~~高级筛选~~证券代码~~旧规则~~简称'
+        result=effective_markdown(md)
+        self.assertIn('原文：检索：~~高级筛选~~证券代码~~旧规则~~简称',result)
+        self.assertEqual(effective_markdown(result),result)

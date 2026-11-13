@@ -16,9 +16,9 @@ processor=DocumentProcessor();content=processor.preprocess_content(processor._ex
 splitter=object.__new__(ModuleSplitter)
 modules=splitter._split_by_heading_level(content,'h1',False)
 assert len(modules)==2,modules
-assert '删除原文：通过日期区间筛选' in modules[0]['content'],modules[0]
-assert '删除原文：关键字、板块分类查询' in modules[0]['content']
+assert '~~通过日期区间筛选~~' in modules[0]['content'],modules[0]
+assert '~~关键字、板块分类查询~~' in modules[0]['content']
 assert '表格旧规则' in modules[0]['content']
-assert '删除原文' not in modules[1]['content']
+assert '变更记录' not in modules[1]['content']
 assert '取消与修改需求（' not in content
 print('PASS: actual Word parser -> preprocessing -> module splitter; paragraph/table deletion stays in company module')

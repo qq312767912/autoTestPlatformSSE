@@ -6,7 +6,7 @@ from .document_comparison import ParsedDocument
 
 def paragraph_change(parsed, paragraph, index):
     from docx.oxml.ns import qn
-    deleted, context = [], []
+    deleted, context, segments = [], [], []
     for run in paragraph.iter(qn('w:r')):
         if next((p for p in run.iterancestors() if p.tag == qn('w:p')), None) is not paragraph:
             continue
@@ -14,23 +14,28 @@ def paragraph_change(parsed, paragraph, index):
         ancestors = list(run.iterancestors())
         context.append(text)
         row_deleted = any(p.tag == qn('w:tr') and p.find('./'+qn('w:trPr')+'/'+qn('w:del')) is not None for p in ancestors)
-        if parsed.strike(run) or row_deleted or any(p.tag in (qn('w:del'), qn('w:moveFrom')) for p in ancestors):
+        is_deleted = parsed.strike(run) or row_deleted or any(p.tag in (qn('w:del'), qn('w:moveFrom')) for p in ancestors)
+        if segments and segments[-1][0] == is_deleted:
+            segments[-1] = (is_deleted, segments[-1][1] + text)
+        else:
+            segments.append((is_deleted, text))
+        if is_deleted:
             deleted.append(text)
     if not ''.join(deleted).strip(): return None
     return {'source': f'Word原段落 {index}（含表格内段落）', 'before': ''.join(context),
-            'deleted': ''.join(deleted), 'current': parsed.text(parsed.clean(paragraph))}
+            'deleted': ''.join(deleted), 'segments': segments, 'current': parsed.text(parsed.clean(paragraph))}
 
 
 def inline_change(record):
     def literal(value):
-        value = re.sub(r'\x00CODE\d+\x00', '〔代码片段保留在正文〕', value)
-        return value.replace('~', r'\~').replace('<', '&lt;').replace('>', '&gt;').replace('\n', ' / ')
-    return '\n'.join(['> 【取消/修改需求】以下删除标记同样是业务变更，不是仍生效的旧规则。',
-        '> 类型：' + ('修改原规则' if record['current'].strip() else '取消原规则（范围待确认）'),
-        '> 来源：' + record['source'], '> 删除原文：' + literal(record['deleted']),
-        '> 原文上下文：' + literal(record['before']),
-        '> 当前有效内容：' + literal(record['current'] or '此处无剩余正文'),
-        '> 处理要求：识别取消或修改的功能/规则范围及测试影响；局部删字不等于整项功能取消，迭代归属需确认。'])
+        value = re.sub(r'\x00CODE\d+\x00', '〔代码片段〕', value)
+        # Do not let source text introduce headings, HTML or Markdown formatting.
+        return re.sub(r'([\\`*_~\[\]])', r'\\\1', value).replace('<', '&lt;').replace('>', '&gt;').replace('\n', ' / ')
+    segments = record.get('segments', [(False, record['before'])])
+    marked = ''.join(('~~' + literal(value) + '~~') if deleted and value.strip() else literal(value)
+                     for deleted, value in segments)
+    kind = '局部修改' if record['current'].strip() else '整段删除'
+    return ('> **变更记录｜' + kind + '**（删除线内容为取消/修改证据，非现行要求）\n>\n> 原文：' + marked)
 
 
 def effective_docx(data):
@@ -53,7 +58,7 @@ def effective_docx(data):
             key = paragraph.attrib.pop(marker, None)
             if not key: continue
             found.add(key)
-            run = Paragraph(paragraph, parsed.doc).add_run('\n' + inline_change(records[key]))
+            run = Paragraph(paragraph, parsed.doc).add_run('\n\n' + inline_change(records[key]))
             run.font.strike = False; run.font.double_strike = False
         body.replace(original, clean)
         # A tracked-deleted table row vanishes from the clean tree. Preserve its
@@ -71,6 +76,7 @@ def effective_markdown(text):
     protected = []
     def protect(match):
         protected.append(match.group()); return f'\x00CODE{len(protected)-1}\x00'
+    text = re.sub(r'^> \*\*变更记录｜[^\n]*\n>\n> 原文：[^\n]*', protect, text, flags=re.M)
     masked = re.sub(r'```[\s\S]*?```|~~~[^\n]*\n[\s\S]*?\n~~~|`[^`\n]*`', protect, text)
     pieces = re.split(r'(\n[ \t]*\n|^#{1,6}[ \t]+[^\n]*(?:\n|$))', masked, flags=re.M)
     for index, paragraph in enumerate(pieces):
@@ -80,7 +86,16 @@ def effective_markdown(text):
         current = re.sub(r'<(del|s|strike)\b[^>]*>[\s\S]*?</\1\s*>', '', paragraph, flags=re.I)
         current = re.sub(r'(?<![\\~])~~(?!~)([\s\S]*?)(?<!~)~~(?!~)', '', current)
         before = re.sub(r'</?(?:del|s|strike)\b[^>]*>', '', paragraph, flags=re.I).replace('~~', '')
-        record = {'source': f'Markdown原内容块 {index+1}', 'before': before, 'deleted': '；'.join(removed), 'current': current}
+        segments = []
+        pattern = r'(?<![\\~])~~(?!~)([\s\S]*?)(?<!~)~~(?!~)|<(del|s|strike)\b[^>]*>([\s\S]*?)</\2\s*>'
+        offset = 0
+        for match in re.finditer(pattern, paragraph, re.I):
+            segments.append((False, paragraph[offset:match.start()]))
+            segments.append((True, match.group(1) if match.group(1) is not None else match.group(3)))
+            offset = match.end()
+        segments.append((False, paragraph[offset:]))
+        record = {'source': f'Markdown原内容块 {index+1}', 'before': before, 'segments': segments,
+                  'deleted': '；'.join(removed), 'current': current}
         pieces[index] = current.rstrip() + '\n\n' + inline_change(record) + '\n\n'
     result = ''.join(pieces)
     for index, code in enumerate(protected): result = result.replace(f'\x00CODE{index}\x00', code)
