@@ -291,7 +291,7 @@ def row(kind, block, old_line, new_line):
             'old_line': old_line, 'new_line': new_line, 'images': block['images'], 'table': block['table']}
 
 
-def export_selection(new_data, comparison, selected, title, old_data=None, source_name=None):
+def export_selection(new_data, comparison, selected, title, old_data=None, source_name=None, *, docx_only=False):
     if not selected or not isinstance(selected, list) or any(not isinstance(v, str) for v in selected):
         raise ComparisonError('请至少选择一个变更块。')
     hunks = {h['id']: h for h in comparison['hunks']}
@@ -306,6 +306,8 @@ def export_selection(new_data, comparison, selected, title, old_data=None, sourc
     selected_rows = [r for h in comparison['hunks'] if h['id'] in selected for r in h['rows'] if r['kind'] != 'context']
     from .revision_report import comparison_report
     report_docx = comparison_report(new_data, comparison, selected, old_data, source_name or title + '.docx')
+    if docx_only:
+        return report_docx
     report = [f'# {title}', '', f"旧版 SHA256：{comparison['old_hash']}", f"新版 SHA256：{comparison['new_hash']}", '',
               '以下是人工选择的变更记录。删除原文是取消/修改需求的证据，不表示原规则仍生效。', '']
     for r in selected_rows:

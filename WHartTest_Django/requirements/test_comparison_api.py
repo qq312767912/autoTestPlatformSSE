@@ -33,8 +33,14 @@ class ComparisonApiTests(TestCase):
         download = self.client.post(f'/comparisons/{record_id}/confirm-extract/',
                                     {'title': '迭代一', 'hunk_ids': ['h0']}, format='json')
         self.assertEqual(download.status_code, 200)
+        self.assertEqual(download['Content-Type'], 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+        self.assertIn('.docx', download['Content-Disposition'])
+        from docx import Document
+        report = Document(BytesIO(download.content))
+        self.assertEqual(report.paragraphs[0].text, '文档修订内容汇总报告')
         with ZipFile(BytesIO(download.content)) as archive:
-            self.assertIn('迭代需求.docx', archive.namelist())
+            self.assertIn('word/document.xml', archive.namelist())
+            self.assertNotIn('变更说明.md', archive.namelist())
         record = RequirementComparison.objects.get(pk=record_id)
         self.assertEqual(record.confirmed_hunks, ['h0'])
         self.assertIsNotNone(record.confirmed_at)

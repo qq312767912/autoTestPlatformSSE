@@ -116,14 +116,14 @@ class RequirementComparisonViewSet(viewsets.GenericViewSet):
         selected = request.data.get('hunk_ids')
         try:
             with record.new_file.open('rb') as source, record.old_file.open('rb') as baseline:
-                bundle = export_selection(source.read(), record.result, selected, title.strip(), baseline.read(), record.new_name)
+                bundle = export_selection(source.read(), record.result, selected, title.strip(), baseline.read(), record.new_name, docx_only=True)
         except ComparisonError as exc:
             raise ValidationError(str(exc))
         record.confirmed_hunks = selected
         record.iteration_title = title.strip()
         record.confirmed_at = timezone.now()
         record.save(update_fields=['confirmed_hunks', 'iteration_title', 'confirmed_at'])
-        response = HttpResponse(bundle, content_type='application/zip')
-        response['Content-Disposition'] = 'attachment; filename="iteration-diff.zip"'
+        response = HttpResponse(bundle, content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+        response['Content-Disposition'] = 'attachment; filename="iteration-diff.docx"'
         response['Cache-Control'] = 'no-store'
         return response

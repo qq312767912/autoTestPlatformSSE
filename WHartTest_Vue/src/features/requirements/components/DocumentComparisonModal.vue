@@ -48,7 +48,7 @@
           <summary>对比与提取规则</summary>
           <p>全程不调用 AI。按接受修订后的正文对比，手工删除线视为删除；域按文档已保存的显示结果处理。行号为内容块序号，不是 Word 页码。</p>
           <p v-for="warning in session.result.warnings" :key="warning">{{ warning }}</p>
-          <p>下载包包含“迭代需求.docx”和“变更说明.md”。DOCX 按修订汇总报告格式生成：完整保留改动小节，新增绿色、删除灰色删除线；删除内容会在需求解析时识别为取消/修改需求，变更说明保留原文证据。可将 DOCX 重新上传为普通需求文档。</p>
+          <p>直接下载一个 DOCX 文档。文档 按修订汇总报告格式生成：完整保留改动小节，新增绿色、删除灰色删除线；删除内容会在需求解析时识别为取消/修改需求，并保留原文证据。可将 DOCX 重新上传为普通需求文档。</p>
         </details>
         <details v-if="session.result.issues?.length" class="comparison-issues" open>
           <summary>有 {{ session.result.issues.length }} 处内容需要核对</summary>
@@ -93,7 +93,7 @@
         </div>
         <a-alert v-if="downloadUrl" type="success">
           提取已完成。若浏览器没有自动下载，请
-          <a :href="downloadUrl" :download="downloadName">点击下载提取结果（ZIP）</a>。
+          <a :href="downloadUrl" :download="downloadName">点击下载提取结果（DOCX）</a>。
         </a-alert>
       </template>
       <a-alert v-if="error" type="error">{{ error }}</a-alert>
@@ -221,13 +221,13 @@ async function extract() {
     downloadUrl.value = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = downloadUrl.value;
-    link.download = `${title.value.trim().replace(/[\\/:*?"<>|]/g, '_')}-diff.zip`;
+    link.download = `${title.value.trim().replace(/[\\/:*?"<>|]/g, '_')}-diff.docx`;
     downloadName.value = link.download;
     document.body.appendChild(link);
     link.click();
     link.remove();
     session.value.confirmed_at = new Date().toISOString();
-    Message.success('已提取，请解压后将迭代需求 DOCX 上传为普通文档。');
+    Message.success('已提取 DOCX，可直接上传为普通需求文档。');
   } catch (e) { error.value = e instanceof Error ? e.message : comparisonError(e);
   } finally { extracting.value = false; }
 }
