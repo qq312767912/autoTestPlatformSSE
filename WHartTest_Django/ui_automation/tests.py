@@ -265,6 +265,24 @@ class UiModuleSortingTests(TestCase):
         self.child1_2 = UiModule.objects.create(project=self.project, name='Child 1-2', parent=self.root1, creator=self.user, order=2)
         self.root2 = UiModule.objects.create(project=self.project, name='Root 2', creator=self.user, order=2)
 
+    def test_parent_case_filter_and_tree_order(self):
+        from .models import UiTestCase
+        from .filters import UiTestCaseFilter, UiModuleTreeOrderingFilter
+        from .serializers import UiTestCaseListSerializer
+        from rest_framework.request import Request
+        from rest_framework.test import APIRequestFactory
+        cases = [UiTestCase.objects.create(project=self.project, module=module,
+                 name=module.name, creator=self.user)
+                 for module in (self.child1_2, self.child1_1_1, self.root1, self.child1_1, self.root2)]
+        selected = UiTestCaseFilter({'project': self.project.pk, 'module': self.root1.pk},
+                                   queryset=UiTestCase.objects.all()).qs
+        request = Request(APIRequestFactory().get('/', {'project': self.project.pk}))
+        ordered = UiModuleTreeOrderingFilter().filter_queryset(request, selected, None)
+        self.assertEqual(list(ordered.values_list('module_id', flat=True)),
+                         [self.root1.pk, self.child1_1.pk, self.child1_1_1.pk, self.child1_2.pk])
+        self.assertEqual(UiTestCaseListSerializer(cases[1]).data['module_name'],
+                         'Root 1 > Child 1-1 > Child 1-1-1')
+
     def test_get_max_depth(self):
         """测试模块子树的最大深度"""
         self.assertEqual(self.root1.get_max_depth(), 3)

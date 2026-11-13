@@ -316,7 +316,7 @@ class UiCaseStepsWithDetailSerializer(serializers.ModelSerializer):
 
 class UiTestCaseListSerializer(serializers.ModelSerializer):
     """测试用例列表序列化器（精简字段，提升性能）"""
-    module_name = serializers.CharField(source='module.name', read_only=True)
+    module_name = serializers.CharField(source='module.__str__', read_only=True)
     creator_name = serializers.CharField(source='creator.username', read_only=True)
     step_count = serializers.SerializerMethodField()
 
