@@ -1,5 +1,7 @@
 """从明确指定、已审查的源包发布新版本；不信任或覆盖旧版本字节。"""
 import json
+import shutil
+import tempfile
 from pathlib import Path
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
@@ -20,10 +22,36 @@ class Command(BaseCommand):
         parser.add_argument('--source-dir', required=True)
         parser.add_argument('--source-revision', default='')
         parser.add_argument('--apply', action='store_true')
+        parser.add_argument('--exclude-source-file', action='append', default=[])
 
     def handle(self, *args, **options):
-        skill = Skill.objects.select_related('project', 'creator', 'active_version').get(pk=options['skill_id'])
         source = Path(options['source_dir']).resolve()
+        exclusions = options['exclude_source_file']
+        if not exclusions:
+            return self._publish(source, options)
+        with tempfile.TemporaryDirectory() as temporary:
+            staged = Path(temporary) / 'package'
+            shutil.copytree(source, staged)
+            excluded = set()
+            for filename in exclusions:
+                relative = Path(filename)
+                if relative.is_absolute() or '..' in relative.parts or not (relative.name.startswith('test_') or relative.name.endswith('_test_support.py')):
+                    raise CommandError('仅允许显式排除测试文件')
+                target = staged / relative
+                if not target.is_file():
+                    raise CommandError(f'待排除测试文件不存在：{filename}')
+                excluded.add(target)
+            for target in excluded:
+                for reference in staged.rglob('*'):
+                    if reference.is_file() and reference not in excluded and reference.suffix in {'.py', '.md'}:
+                        if target.stem in reference.read_text(errors='ignore'):
+                            raise CommandError(f'运行文件仍引用 {target.name}，不能排除')
+            for target in excluded:
+                target.unlink()
+            return self._publish(staged, options)
+
+    def _publish(self, source, options):
+        skill = Skill.objects.select_related('project', 'creator', 'active_version').get(pk=options['skill_id'])
         manifest, _ = parse_manifest(source)
         if manifest.get('name') != skill.name:
             raise CommandError('源包与目标 Skill 名称不同，禁止发布')
@@ -45,7 +73,7 @@ class Command(BaseCommand):
             if key is None:
                 raise CommandError('创建者没有有效 API Key，未发布')
         record = {'skill_id': skill.pk, 'old_active_version': str(skill.active_version_id or ''), 'old_path': skill.skill_path,
-                  'old_integrity': integrity, 'source_fingerprint': fingerprint, 'source_revision': options['source_revision']}
+                  'old_integrity': integrity, 'source_fingerprint': fingerprint, 'source_revision': options['source_revision'], 'excluded_test_files': options['exclude_source_file']}
         journal_dir = Path(settings.MEDIA_ROOT).parent / 'upgrade-backups' / 'platform-skill'
         journal_dir.mkdir(parents=True, exist_ok=True)
         journal = journal_dir / f'{skill.pk}-{timezone.now().strftime("%Y%m%d%H%M%S%f")}.json'
@@ -63,7 +91,7 @@ class Command(BaseCommand):
                 source_dir=source, version_override=version_label, project=skill.project, actor=skill.creator,
                 api_key=key.key if key else None, source_type='platform_upgrade',
                 source_metadata={'source_fingerprint': fingerprint, 'source_revision': options['source_revision'],
-                                 'replaces_version': str(old.pk) if old else None, 'previous_package_integrity': bool(integrity and integrity.get('ok'))})
+                                 'replaces_version': str(old.pk) if old else None, 'previous_package_integrity': bool(integrity and integrity.get('ok')), 'excluded_test_files': options['exclude_source_file']})
             if updated.pk != skill.pk:
                 raise CommandError('发布版本归属异常')
             if not SkillVersionService.verify_package_integrity(version).get('ok'):
