@@ -31,8 +31,8 @@ def append_generation_instructions(prompt, mode):
     return (prompt or '') + '\n\n' + INTERFACE_CASE_LIVE_VERIFICATION_INSTRUCTION
 
 
-def generation_middleware(middleware, mode):
+def generation_middleware(middleware, mode, project_id=None):
     result = list(middleware or [])
     if mode in GENERATION_MODES:
-        result.append(GenerationInterfaceCaseGuardMiddleware(mode))
+        result.append(GenerationInterfaceCaseGuardMiddleware(mode, project_id))
     return result

@@ -1757,7 +1757,7 @@ class AgentLoopStreamAPIView(View):
                     system_prompt=effective_prompt,
                 )
 
-                middleware = generation_middleware(middleware, getattr(request, "_api_generation_mode", ""))
+                middleware = generation_middleware(middleware, getattr(request, "_api_generation_mode", ""), project_id)
                 agent = create_agent(
                     llm,
                     tools,
@@ -3034,7 +3034,7 @@ class AgentLoopResumeAPIView(View):
                         f"\n本轮已锁定 Skill：{resume_version.skill.name}；版本：{resume_version.version}；SHA256：{resume_version.package_sha256}。"
                         "先读取该精确版本指令，禁止切换 Skill。")
                 resume_system_prompt = append_generation_instructions(resume_system_prompt, resume_generation_mode)
-                middleware = generation_middleware(middleware, resume_generation_mode)
+                middleware = generation_middleware(middleware, resume_generation_mode, project_id)
 
                 # 6. 创建 agent
                 agent = create_agent(

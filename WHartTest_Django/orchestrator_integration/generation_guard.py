@@ -35,9 +35,10 @@ def _flag(tokens, name):
 
 
 class GenerationInterfaceCaseGuardMiddleware(AgentMiddleware):
-    def __init__(self, mode='interface_case'):
+    def __init__(self, mode='interface_case', project_id=None):
         super().__init__()
         self.mode = mode
+        self.project_id = str(project_id) if project_id is not None else None
         self._drift_counts = {'tool': 0, 'param': 0}
 
     @property
@@ -57,6 +58,17 @@ class GenerationInterfaceCaseGuardMiddleware(AgentMiddleware):
             action, _, _ = _flag(tokens, '--action')
         else:
             action = call.get('name') or ''
+        if self.project_id is not None:
+            projects = []
+            for index, token in enumerate(tokens):
+                if token == '--project_id':
+                    projects.append(tokens[index + 1] if index + 1 < len(tokens) else '')
+                elif token.startswith('--project_id='):
+                    projects.append(token.split('=', 1)[1])
+            if not command and args.get('project_id') is not None:
+                projects.append(str(args['project_id']))
+            if any(str(project) != self.project_id for project in projects):
+                return request, _error(request, f'本次生成任务已绑定项目 {self.project_id}，禁止切换到其他项目。')
         forbidden = SCENARIO_ALTERNATIVES if self.mode == 'scenario' else INTERFACE_ALTERNATIVES
         if action in forbidden:
             self._drift_counts['tool'] += 1

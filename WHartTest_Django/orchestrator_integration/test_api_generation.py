@@ -73,6 +73,14 @@ class InterfaceGuardTests(SimpleTestCase):
         self.assertEqual(GenerationInterfaceCaseGuardMiddleware().wrap_tool_call(request, handler).status, 'error')
         handler.assert_not_called()
 
+    def test_project_scope_cannot_be_changed_by_duplicate_flags(self):
+        guard = GenerationInterfaceCaseGuardMiddleware(project_id=22)
+        handler = Mock()
+        for command in ['python tools.py --project_id 1 --action list_interfaces', 'python tools.py --project_id=22 --project_id=1 --action=create_interface_case']:
+            request = ToolRequest({'id': 'project', 'name': 'execute_skill_script', 'args': {'command': command}})
+            self.assertEqual(guard.wrap_tool_call(request, handler).status, 'error')
+        handler.assert_not_called()
+
     def test_verification_policy_applies_to_both_generation_modes(self):
         self.assertEqual(append_generation_instructions('base', ''), 'base')
         for mode in ('interface_case', 'scenario'):
