@@ -21,6 +21,9 @@ class UiWsUpgradeTests(TestCase):
                 script.write_text(script.read_text().replace("def _base_url():\n    return 'http://backend'\n", "BASE_URL = 'http://backend'\nAPI_KEY = ''\n").replace("_base_url().replace", "BASE_URL.replace"))
             template = Path(temporary) / "template.py"
             template.write_text("def _get_ws_token():\n    return 'test-token'\ndef _ws_url_with_token():\n    return '/ws/ui/web/?token=' + _get_ws_token()\n")
+            if getattr(self, "migrated_version", False):
+                manifest = root / "SKILL.md"
+                manifest.write_text(manifest.read_text().replace("version: 1.0.0", "version: 0.0.0-migrated"))
             actor = User.objects.create_user(username="upgrade-user")
             project = Project.objects.create(name="Upgrade")
             skill, old = SkillVersionService.create_candidate_from_dir(source_dir=root, project=project, actor=actor)
@@ -40,4 +43,8 @@ class UiWsUpgradeTests(TestCase):
 
     def test_legacy_constant_script_is_upgraded_without_overwriting(self):
         self.legacy_constants = True
+        self.test_upgrade_preserves_old_package_and_is_idempotent()
+
+    def test_migrated_version_suffix_produces_valid_upgrade_version(self):
+        self.migrated_version = True
         self.test_upgrade_preserves_old_package_and_is_idempotent()
