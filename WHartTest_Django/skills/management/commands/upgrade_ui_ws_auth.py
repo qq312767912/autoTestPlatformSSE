@@ -18,6 +18,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--apply", action="store_true")
+        parser.add_argument("--exclude-legacy-helper", choices=["weknora_kb.py"], action="append", default=[])
         parser.add_argument("--tool-source", default="/app/bundled_skills/ui-automation-skill/ui_automation_tools.py")
 
     def handle(self, *args, **options):
@@ -75,6 +76,17 @@ class Command(BaseCommand):
             with tempfile.TemporaryDirectory() as temporary:
                 staged = Path(temporary) / "package"
                 shutil.copytree(root, staged)
+                omitted = []
+                for filename in options["exclude_legacy_helper"]:
+                    candidate = staged / filename
+                    if candidate.exists():
+                        for reference in staged.rglob("*"):
+                            if reference.is_file() and reference != candidate and reference.suffix in {".md", ".py", ".json", ".yaml", ".yml"}:
+                                if filename.removesuffix(".py") in reference.read_text(errors="ignore"):
+                                    raise CommandError(f"{filename} 仍被引用，不允许排除")
+                        candidate.unlink()
+                        omitted.append(filename)
+                record["omitted_unreferenced_legacy_files"] = omitted
                 for relative, text in replacements.items():
                     (staged / relative).write_text(text)
                 base_version = (baseline.version if baseline else "1.0.0").split("+")[0].split("-")[0]
@@ -82,7 +94,7 @@ class Command(BaseCommand):
                     locked = Skill.objects.select_for_update().get(pk=skill.pk)
                     if locked.active_version_id != skill.active_version_id or locked.skill_path != skill.skill_path:
                         raise CommandError("Skill 绑定已变化，停止升级")
-                    updated, version = SkillVersionService.create_candidate_from_dir(source_dir=staged, version_override=base_version + "-ws-auth", project=skill.project, actor=skill.creator, source_type="platform_upgrade", source_metadata={"reason": "v2.9.2 WS authentication", "baseline_version": str(baseline.pk) if baseline else None})
+                    updated, version = SkillVersionService.create_candidate_from_dir(source_dir=staged, version_override=base_version + "-ws-auth", project=skill.project, actor=skill.creator, source_type="platform_upgrade", source_metadata={"reason": "v2.9.2 WS authentication", "baseline_version": str(baseline.pk) if baseline else None, "omitted_unreferenced_legacy_files": omitted})
                     if updated.pk != skill.pk:
                         raise CommandError("候选版本归属不匹配，停止升级")
                     locked.active_version = version
