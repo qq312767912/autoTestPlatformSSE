@@ -29,7 +29,7 @@ class SkillAssessmentSession(models.Model):
 
 
 class SkillAgentTaskBinding(models.Model):
-    generation_mode = models.CharField(max_length=32, blank=True, default='')
+    generation_mode = models.CharField(max_length=32, blank=True, default='', db_default='')
     session = models.OneToOneField('langgraph_integration.ChatSession', on_delete=models.CASCADE)
     source_version = models.ForeignKey('skills.SkillVersion', on_delete=models.RESTRICT)
     source_sha256 = models.CharField(max_length=64)
