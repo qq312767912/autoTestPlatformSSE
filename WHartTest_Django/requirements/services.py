@@ -221,7 +221,8 @@ class DocumentProcessor:
                 return self._extract_from_file(document.file, document)
 
             if document.content:
-                return document.content
+                from .effective_content import effective_markdown
+                return effective_markdown(document.content)
 
             if document.file:
                 return self._extract_from_file(document.file, document)
@@ -336,7 +337,8 @@ class DocumentProcessor:
 
     def _extract_from_markdown(self, file) -> str:
         """提取Markdown文件内容"""
-        return self._extract_from_txt(file)  # Markdown本质上是文本文件
+        from .effective_content import effective_markdown
+        return effective_markdown(self._extract_from_txt(file))
 
     def _extract_from_pdf(self, file) -> str:
         """提取PDF文件内容"""
@@ -389,7 +391,10 @@ class DocumentProcessor:
             file.seek(0)
 
             # 使用python-docx读取Word文档
-            doc = Document(file)
+            from io import BytesIO
+            from .effective_content import effective_docx
+            file.seek(0)
+            doc = Document(BytesIO(effective_docx(file.read())))
 
             logger.info(
                 f"开始提取Word文档，段落数: {len(doc.paragraphs)}, 表格数: {len(doc.tables)}"
@@ -646,7 +651,10 @@ class DocumentProcessor:
 
             # 重置文件指针
             file.seek(0)
-            doc = Document(file)
+            from io import BytesIO
+            from .effective_content import effective_docx
+            file.seek(0)
+            doc = Document(BytesIO(effective_docx(file.read())))
 
             # 简单提取段落
             paragraphs = []

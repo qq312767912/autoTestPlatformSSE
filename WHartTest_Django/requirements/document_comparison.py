@@ -304,18 +304,23 @@ def export_selection(new_data, comparison, selected, title):
         raise ComparisonError('源文档已变化，请重新对比。')
     selected_rows = [r for h in comparison['hunks'] if h['id'] in selected for r in h['rows'] if r['kind'] != 'context']
     wanted = {r['block_id'] for r in selected_rows if r['kind'] == 'add'}
+    # Preserve complete leaf sections, following the report script's section contract.
+    changed_paths = {b['path'] for b in parsed.blocks if b['id'] in wanted and b['path']}
+    for block in parsed.blocks:
+        if block['path'] in changed_paths:
+            wanted.add(block['id'])
     target = Document()
     # Use fresh package: never ship hidden, unselected source bodies or comments.
     target.part._styles_part._element = deepcopy(parsed.doc.styles.element)
     target.part.numbering_part._element = deepcopy(parsed.doc.part.numbering_part.element)
     target.add_heading(title, 0)
-    target.add_paragraph('本文件包含人工确认的新增或修改后的内容。删除记录另见变更说明.md。')
+    target.add_paragraph('本文件保留所选变更所在小节的当前有效内容；同节未修改内容作为上下文保留。删除记录另见变更说明.md。')
     previous_path = None
     for block in parsed.blocks:
         if block['id'] not in wanted:
             continue
         if block['path'] and block['path'] != previous_path and block['text'] != block['headings'][-1]:
-            target.add_paragraph('来源章节：' + block['path'])
+            target.add_heading(block['path'], level=1)
         previous_path = block['path']
         node = deepcopy(block['element'])
         if any(etree.QName(e).localname in ('footnoteReference', 'endnoteReference', 'altChunk', 'OLEObject', 'chart', 'object', 'cellDel', 'cellMerge', 'numPicBullet') for e in node.iter()):

@@ -29,5 +29,5 @@ with tempfile.TemporaryDirectory(prefix='whart-comparison-tests-') as media:
     call_command('makemigrations', 'requirements', check=True, dry_run=True, verbosity=1)
     from django.test.utils import get_runner
     runner = get_runner(settings)(verbosity=2)
-    failures = runner.run_tests(['requirements.test_document_comparison', 'requirements.test_comparison_api'])
+    failures = runner.run_tests(['requirements.test_effective_content', 'requirements.test_document_comparison', 'requirements.test_comparison_api'])
     raise SystemExit(bool(failures))

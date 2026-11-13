@@ -57,6 +57,9 @@ class RequirementDocumentUploadSerializer(serializers.ModelSerializer):
         """验证文档内容"""
         if not data.get('file') and not data.get('content'):
             raise serializers.ValidationError("必须提供文件或文档内容")
+        if data.get('content'):
+            from .effective_content import effective_markdown
+            data['content'] = effective_markdown(data['content'])
         return data
 
 
