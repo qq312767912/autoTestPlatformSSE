@@ -141,9 +141,10 @@ export function useApiCaseGeneration() {
       if (projectId.value !== targetProjectId) throw new Error(tl('项目已切换，请重新选择生成范围'));
       const binding = await createSkillAgentTask(targetProjectId, formData.skillVersionId, formData.caseType);
       requestData.session_id = binding.session_id;
+      localStorage.setItem('langgraph_session_id', binding.session_id);
       showStartNotification();
 
-      sendChatMessageStream(
+      void sendChatMessageStream(
         requestData,
         (sessionId) => {
           localStorage.setItem('langgraph_session_id', sessionId);
@@ -154,6 +155,8 @@ export function useApiCaseGeneration() {
             topK: 5,
           }));
         },
+        undefined,
+        (message) => Notification.error({ title: tl('生成任务失败'), content: message, duration: 8000 }),
       );
     } catch (error: any) {
       Notification.error({
