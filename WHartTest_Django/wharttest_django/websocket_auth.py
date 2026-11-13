@@ -154,3 +154,22 @@ def warn_insecure_ws_config() -> None:
             "UI_WS_ACTUATOR_TOKEN 未配置：所有执行器 WS 连接都将被拒绝（4401）。"
             "请运行 run_compose.sh（自动生成并同步密钥），或手动设置该环境变量"
         )
+
+
+class RedactWebSocketTokenFilter(logging.Filter):
+    """避免 ASGI 连接日志记录 URL 中的认证凭据。"""
+
+    def filter(self, record):
+        import re
+        text = record.getMessage()
+        safe = re.sub(r"([?&]token=)[^\s&\"']+", r"\1[REDACTED]", text)
+        if safe != text:
+            record.msg, record.args = safe, ()
+        return True
+
+
+def install_ws_log_redaction():
+    for name in ("uvicorn.error", "uvicorn.access"):
+        logger = logging.getLogger(name)
+        if not any(isinstance(item, RedactWebSocketTokenFilter) for item in logger.filters):
+            logger.addFilter(RedactWebSocketTokenFilter())
