@@ -89,6 +89,12 @@ class Command(BaseCommand):
                 record["omitted_unreferenced_legacy_files"] = omitted
                 for relative, text in replacements.items():
                     (staged / relative).write_text(text)
+                # 旧包可能已注入平台 Key；按平台导出规则还原后扫描，再由服务注入。
+                from skills.packaging import redact_text
+                for script in staged.rglob("*.py"):
+                    text, changed = redact_text(script.read_text())
+                    if changed:
+                        script.write_text(text)
                 api_key = None
                 from skills.platform_skills import is_internal_platform_skill
                 if is_internal_platform_skill(skill.name):
