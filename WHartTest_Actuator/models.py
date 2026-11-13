@@ -40,6 +40,7 @@ class QueueModel(BaseModel):
     """任务队列消息模型"""
     func_name: str
     func_args: dict[str, Any]
+    user: Optional[str] = None  # 本地排队时固化发起人，避免后续消息改写执行中的用户
 
 
 class SocketDataModel(BaseModel):

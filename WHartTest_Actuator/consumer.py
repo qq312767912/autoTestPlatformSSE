@@ -319,7 +319,7 @@ class TaskConsumer:
             return
 
         # 记录发起用户
-        self._current_user = socket_data.user
+        socket_data.data.user = socket_data.user
 
         # 停止请求不经任务队列：任务队列被长任务占用时（单消费者串行），
         # 入队的停止请求要等当前任务结束才被处理——在接收循环立即执行，
@@ -348,7 +348,8 @@ class TaskConsumer:
                     'actuator_id': getattr(self.config, 'actuator_id', None),
                     'env_config_id': args.get('env_config_id'),
                 },
-                self._current_user,
+                task.user,
+                task_token=args.get("task_token"),
             )
 
     async def process_tasks(self):
@@ -382,6 +383,7 @@ class TaskConsumer:
 
         handler = handlers.get(task.func_name)
         if handler:
+            self._current_user = task.user
             self.ws_client.set_task_token((task.func_args or {}).get("task_token"))
             try:
                 await handler(task.func_args)

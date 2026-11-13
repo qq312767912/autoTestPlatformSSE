@@ -71,7 +71,7 @@ class UiWebSocketAuthMiddleware:
         ):
             return await self.app(scope, receive, send)
 
-        query = parse_qs(scope.get('query_string', b'').decode('utf-8'))
+        query = parse_qs(scope.get('query_string', b'').decode('utf-8', errors='replace'))
         token = (query.get('token') or [''])[0]
 
         if path.startswith('/ws/ui/actuator/'):
@@ -136,7 +136,7 @@ class UiWebSocketAuthMiddleware:
             return False, None
         if not token:
             return False, None
-        if secrets.compare_digest(token, expected):
+        if secrets.compare_digest(token.encode("utf-8"), expected.encode("utf-8")):
             return True, None
         return False, None
 
