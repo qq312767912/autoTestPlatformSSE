@@ -392,10 +392,9 @@ class DocumentProcessor:
 
             # 使用python-docx读取Word文档
             from io import BytesIO
-            from .effective_content import effective_docx, word_change_requirements
+            from .effective_content import effective_docx
             file.seek(0)
             source_data = file.read()
-            change_notes = word_change_requirements(source_data)
             doc = Document(BytesIO(effective_docx(source_data)))
 
             logger.info(
@@ -477,8 +476,6 @@ class DocumentProcessor:
                             extracted_tables += 1
 
             content = "\n\n".join(content_parts)
-            if change_notes:
-                content += "\n\n" + change_notes
 
             # 按文档顺序保存图片
             if document and image_rids:
@@ -656,10 +653,9 @@ class DocumentProcessor:
             # 重置文件指针
             file.seek(0)
             from io import BytesIO
-            from .effective_content import effective_docx, word_change_requirements
+            from .effective_content import effective_docx
             file.seek(0)
             source_data = file.read()
-            change_notes = word_change_requirements(source_data)
             doc = Document(BytesIO(effective_docx(source_data)))
 
             # 简单提取段落
@@ -677,8 +673,6 @@ class DocumentProcessor:
                     paragraphs.append(table_content)
 
             content = "\n\n".join(paragraphs)
-            if change_notes:
-                content += "\n\n" + change_notes
             logger.warning(f"使用简化方法提取Word文档内容，段落数: {len(paragraphs)}")
             return content
 
@@ -2126,7 +2120,13 @@ class RequirementModuleService:
 
             # 提取文档内容
             logger.info(f"开始处理文档 {document.id}: {document.title}")
-            content = self.document_processor.extract_content(document)
+            # Explicit splitting must recover deletion evidence from the original
+            # Word file, rather than a previously flattened content cache. Passing
+            # no document preserves existing image annotations and review state.
+            if document.file and document.document_type == "docx":
+                content = self.document_processor._extract_from_word(document.file)
+            else:
+                content = self.document_processor.extract_content(document)
             if not content:
                 raise Exception("无法提取文档内容")
 

@@ -8,7 +8,7 @@ class EffectiveContentTests(unittest.TestCase):
     def test_markdown_deletion_and_literal_code(self):
         text='有效~~旧要求~~新要求 <del>删除</del> `<del>代码</del>`\n```md\n~~代码~~\n```'
         result=effective_markdown(text)
-        self.assertNotIn('旧要求',result.split('## 取消与修改需求')[0]); self.assertIn('旧要求',result.split('## 取消与修改需求')[1])
+        self.assertNotIn('旧要求',result.split('> 【取消/修改需求】')[0]); self.assertIn('旧要求',result.split('> 【取消/修改需求】')[1])
         self.assertNotIn('<del>删除',result)
         self.assertIn('~~代码~~',result)
         self.assertIn('`<del>代码</del>`',result)
@@ -16,7 +16,8 @@ class EffectiveContentTests(unittest.TestCase):
         d=Document();p=d.add_paragraph('有效');p.add_run('删除').font.strike=True
         stream=BytesIO();d.save(stream)
         result=Document(BytesIO(effective_docx(stream.getvalue())))
-        self.assertEqual(result.paragraphs[0].text,'有效')
+        self.assertTrue(result.paragraphs[0].text.startswith('有效\n'))
+        self.assertIn('删除原文：删除', result.paragraphs[0].text)
 
     def test_export_preserves_unchanged_section_context(self):
         from .document_comparison import compare_documents,export_selection
@@ -86,3 +87,20 @@ class EffectiveContentTests(unittest.TestCase):
         with ZipFile(BytesIO(export_selection(new,r,['h0'],'图片删除',old))) as z:
             out=Document(BytesIO(z.read('迭代需求.docx')))
         self.assertTrue(any(rel.target_part.blob==png for rel in out.part.rels.values() if rel.reltype.endswith('/image')))
+
+    def test_deletion_stays_in_original_section_and_table(self):
+        d=Document();d.add_heading('公司公告',1)
+        p=d.add_paragraph('默认展示公告');p.add_run('通过日期区间筛选').font.strike=True
+        table=d.add_table(rows=1,cols=1)
+        table.cell(0,0).paragraphs[0].add_run('旧筛选条件').font.strike=True
+        d.add_heading('债券公告',1);d.add_paragraph('独立规则')
+        stream=BytesIO();d.save(stream)
+        result=Document(BytesIO(effective_docx(stream.getvalue())))
+        self.assertIn('删除原文：通过日期区间筛选',result.paragraphs[1].text)
+        self.assertIn('删除原文：旧筛选条件',result.tables[0].cell(0,0).text)
+        self.assertEqual(result.paragraphs[-1].text,'独立规则')
+        md=effective_markdown('# 公司公告\n默认~~旧日期筛选~~\n# 债券公告\n独立规则')
+        company,bond=md.split('# 债券公告')
+        self.assertIn('删除原文：旧日期筛选',company)
+        self.assertNotIn('删除原文',bond)
+        self.assertEqual(effective_markdown(md),md)
