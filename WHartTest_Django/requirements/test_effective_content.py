@@ -115,6 +115,8 @@ class EffectiveContentTests(unittest.TestCase):
         self.assertTrue(text.startswith('检索：证券代码或简称\n\n'))
         self.assertIn('~~高级筛选~~检索：证券代码或简称~~、关键字、板块分类查询或者重置~~',text)
         self.assertNotIn('处理要求',text)
+        self.assertIn('划线部分为删除内容，需纳入需求变更分析',text)
+        self.assertNotIn('非现行要求',text)
         self.assertEqual(effective_markdown(text),text)
         md='检索：~~高级筛选~~证券代码~~旧规则~~简称'
         result=effective_markdown(md)

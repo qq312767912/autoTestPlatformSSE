@@ -35,7 +35,7 @@ def inline_change(record):
     marked = ''.join(('~~' + literal(value) + '~~') if deleted and value.strip() else literal(value)
                      for deleted, value in segments)
     kind = '局部修改' if record['current'].strip() else '整段删除'
-    return ('> **变更记录｜' + kind + '**（删除线内容为取消/修改证据，非现行要求）\n>\n> 原文：' + marked)
+    return ('> **变更记录｜' + kind + '**（划线部分为删除内容，需纳入需求变更分析）\n>\n> 原文：' + marked)
 
 
 def effective_docx(data):
