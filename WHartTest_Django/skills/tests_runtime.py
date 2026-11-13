@@ -60,7 +60,7 @@ class RuntimeTestBase(TestCase):
         project = project or self.project
         return SkillVersionService.create_candidate_from_dir(
             source_dir=self.make_package(name=name, version=version, body=body),
-            project=project, actor=self.user,
+            project=project, actor=self.user, source_type="project_copy",
         )
 
     def activate(self, version):

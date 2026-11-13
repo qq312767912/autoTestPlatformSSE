@@ -41,16 +41,24 @@ class Command(BaseCommand):
                 text = file.read_text()
                 if "def _get_ws_token(" in text or "/ws/ui/web/" not in text:
                     continue
-                old = "_base_url().replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/ui/web/'"
-                if old not in text or "def execute_testcase(" not in text:
+                suffix = ".replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/ui/web/'"
+                forms = ["_base_url()" + suffix, "BASE_URL" + suffix]
+                if not any(form in text for form in forms) or "def execute_testcase(" not in text:
                     raise CommandError(f"Skill {skill.pk} 脚本格式不同，请人工适配；未覆盖")
-                text = text.replace(old, "_ws_url_with_token()")
-                text += helper
+                for form in forms:
+                    text = text.replace(form, "_ws_url_with_token()")
+                prefix = ""
+                if "def _base_url(" not in text:
+                    prefix += '\ndef _base_url():\n    import os\n    return (os.environ.get("WHARTTEST_BACKEND_URL") or BASE_URL).rstrip("/")\n'
+                if "def _api_key(" not in text:
+                    prefix += '\ndef _api_key():\n    import os\n    return (os.environ.get("WHARTTEST_API_KEY") or API_KEY).strip()\n'
+                upgrade_helper = prefix + helper
+                text += upgrade_helper
                 # 函数查找发生在模块加载后；必须放在 CLI main 调用之前。
                 marker = "if __name__ == "
                 pos = text.find(marker)
                 if pos >= 0:
-                    text = text[:pos] + helper + '\n' + text[pos:-len(helper)]
+                    text = text[:pos] + upgrade_helper + '\n' + text[pos:-len(upgrade_helper)]
                 ast.parse(text)
                 replacements[file.relative_to(root)] = text
             if not replacements:

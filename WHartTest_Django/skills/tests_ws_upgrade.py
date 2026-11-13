@@ -16,6 +16,9 @@ class UiWsUpgradeTests(TestCase):
             root.mkdir()
             (root / "SKILL.md").write_text("---\nname: ws-upgrade-test\ndescription: 测试\nversion: 1.0.0\nstage: case_review\n---\n测试\n")
             (root / "ui_automation_tools.py").write_text("def _base_url():\n    return 'http://backend'\ndef execute_testcase():\n    ws_url = _base_url().replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/ui/web/'\n    return ws_url\nif __name__ == '__main__':\n    execute_testcase()\n")
+            if getattr(self, "legacy_constants", False):
+                script = root / "ui_automation_tools.py"
+                script.write_text(script.read_text().replace("def _base_url():\n    return 'http://backend'\n", "BASE_URL = 'http://backend'\nAPI_KEY = ''\n").replace("_base_url().replace", "BASE_URL.replace"))
             template = Path(temporary) / "template.py"
             template.write_text("def _get_ws_token():\n    return 'test-token'\ndef _ws_url_with_token():\n    return '/ws/ui/web/?token=' + _get_ws_token()\n")
             actor = User.objects.create_user(username="upgrade-user")
@@ -34,3 +37,7 @@ class UiWsUpgradeTests(TestCase):
             self.assertLess(updated_script.index("def _get_ws_token"), updated_script.index("if __name__"))
             call_command("upgrade_ui_ws_auth", tool_source=str(template), apply=True)
             self.assertEqual(SkillVersion.objects.filter(skill=skill).count(), 2)
+
+    def test_legacy_constant_script_is_upgraded_without_overwriting(self):
+        self.legacy_constants = True
+        self.test_upgrade_preserves_old_package_and_is_idempotent()
