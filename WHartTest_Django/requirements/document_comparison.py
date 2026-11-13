@@ -314,7 +314,7 @@ def export_selection(new_data, comparison, selected, title):
     target.part._styles_part._element = deepcopy(parsed.doc.styles.element)
     target.part.numbering_part._element = deepcopy(parsed.doc.part.numbering_part.element)
     target.add_heading(title, 0)
-    target.add_paragraph('本文件保留所选变更所在小节的当前有效内容；同节未修改内容作为上下文保留。删除记录另见变更说明.md。')
+    target.add_paragraph('本文件保留所选变更所在小节的当前有效内容；同节未修改内容作为上下文保留。失效规则也作为业务变更保留，详见后文及变更说明.md。')
     previous_path = None
     for block in parsed.blocks:
         if block['id'] not in wanted:
@@ -341,8 +341,25 @@ def export_selection(new_data, comparison, selected, title):
                     raise ComparisonError('所选内容含暂不支持的外部图片或附件引用。')
                 element.set(attr, new_rid)
         target.element.body.insert(len(target.element.body)-1, node)
+    removed_rows = [r for r in selected_rows if r['kind'] == 'delete']
+    if removed_rows:
+        target.add_heading('取消与修改需求', level=1)
+        target.add_paragraph('以下删除/修改原规则同样属于本次选择的变更需求。删除原文仅作证据，不表示原功能仍需实现；局部删除不等于取消整个功能，需结合当前规则确认范围。')
+        for index, removed in enumerate(removed_rows, 1):
+            target.add_heading(f'变更需求 {index}', level=2)
+            target.add_paragraph('来源：' + (removed['path'] or removed['block_id']))
+            target.add_paragraph('变更要求：确认取消或修改下列原规则的业务范围及测试影响。')
+            target.add_paragraph('删除/修改前原文（仅作对照，不表示整段全部取消）：')
+            target.add_paragraph(removed['text'])
+            paired = next((pair.get('new') for h in comparison['hunks'] if h['id'] in selected
+                           for pair in h.get('pairs', [])
+                           if pair.get('old') and pair['old']['kind'] == 'delete'
+                           and pair['old']['block_id'] == removed['block_id']), None)
+            if paired and paired['kind'] == 'add':
+                target.add_paragraph('对应修改后的当前内容：')
+                target.add_paragraph(paired['text'])
     if not wanted:
-        target.add_paragraph('本次选择只有删除项，没有新增或修改后的正文。请查阅变更说明中的删除记录。')
+        target.add_paragraph('本次选择只有删除项，以上取消/修改需求仍需分析与测试，无新增现行正文。')
     output = BytesIO()
     target.save(output)
     report = [f'# {title}', '', f"旧版 SHA256：{comparison['old_hash']}", f"新版 SHA256：{comparison['new_hash']}", '',

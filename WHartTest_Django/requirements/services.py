@@ -392,9 +392,11 @@ class DocumentProcessor:
 
             # 使用python-docx读取Word文档
             from io import BytesIO
-            from .effective_content import effective_docx
+            from .effective_content import effective_docx, word_change_requirements
             file.seek(0)
-            doc = Document(BytesIO(effective_docx(file.read())))
+            source_data = file.read()
+            change_notes = word_change_requirements(source_data)
+            doc = Document(BytesIO(effective_docx(source_data)))
 
             logger.info(
                 f"开始提取Word文档，段落数: {len(doc.paragraphs)}, 表格数: {len(doc.tables)}"
@@ -475,6 +477,8 @@ class DocumentProcessor:
                             extracted_tables += 1
 
             content = "\n\n".join(content_parts)
+            if change_notes:
+                content += "\n\n" + change_notes
 
             # 按文档顺序保存图片
             if document and image_rids:
@@ -652,9 +656,11 @@ class DocumentProcessor:
             # 重置文件指针
             file.seek(0)
             from io import BytesIO
-            from .effective_content import effective_docx
+            from .effective_content import effective_docx, word_change_requirements
             file.seek(0)
-            doc = Document(BytesIO(effective_docx(file.read())))
+            source_data = file.read()
+            change_notes = word_change_requirements(source_data)
+            doc = Document(BytesIO(effective_docx(source_data)))
 
             # 简单提取段落
             paragraphs = []
@@ -671,6 +677,8 @@ class DocumentProcessor:
                     paragraphs.append(table_content)
 
             content = "\n\n".join(paragraphs)
+            if change_notes:
+                content += "\n\n" + change_notes
             logger.warning(f"使用简化方法提取Word文档内容，段落数: {len(paragraphs)}")
             return content
 

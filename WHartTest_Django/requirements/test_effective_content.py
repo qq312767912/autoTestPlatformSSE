@@ -8,7 +8,7 @@ class EffectiveContentTests(unittest.TestCase):
     def test_markdown_deletion_and_literal_code(self):
         text='有效~~旧要求~~新要求 <del>删除</del> `<del>代码</del>`\n```md\n~~代码~~\n```'
         result=effective_markdown(text)
-        self.assertNotIn('旧要求',result)
+        self.assertNotIn('旧要求',result.split('## 取消与修改需求')[0]); self.assertIn('旧要求',result.split('## 取消与修改需求')[1])
         self.assertNotIn('<del>删除',result)
         self.assertIn('~~代码~~',result)
         self.assertIn('`<del>代码</del>`',result)
@@ -30,4 +30,14 @@ class EffectiveContentTests(unittest.TestCase):
         with ZipFile(BytesIO(bundle)) as z:
             doc=Document(BytesIO(z.read('迭代需求.docx')))
         text='\n'.join(p.text for p in doc.paragraphs)
-        self.assertIn('共同前提',text);self.assertIn('共同后置规则',text);self.assertNotIn('超时30秒',text)
+        self.assertIn('共同前提',text);self.assertIn('共同后置规则',text);self.assertNotIn('超时30秒',text.split('取消与修改需求')[0]);self.assertIn('超时30秒',text.split('取消与修改需求')[1])
+
+    def test_change_evidence_is_preserved_and_idempotent(self):
+        from .effective_content import word_change_requirements
+        d=Document();p=d.add_paragraph('超时');p.add_run('30秒').font.strike=True;p.add_run('60秒')
+        out=BytesIO();d.save(out)
+        notes=word_change_requirements(out.getvalue())
+        self.assertIn('30秒',notes);self.assertIn('超时60秒',notes);self.assertIn('修改原规则',notes)
+        md=effective_markdown('~~取消短信登录~~')
+        self.assertIn('取消原规则',md);self.assertIn('取消短信登录',md)
+        self.assertEqual(effective_markdown(md),md)
