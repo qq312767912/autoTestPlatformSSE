@@ -211,6 +211,8 @@ def _build_artifact_payload(file_path: str, display_name: Optional[str] = None) 
         return None
 
     mime_type, _ = mimetypes.guess_type(file_path)
+    if not mime_type and file_path.lower().endswith(".md"):
+        mime_type = "text/markdown"
     if file_path.lower().endswith(".drawio"):
         mime_type = mime_type or "application/vnd.jgraph.mxfile"
 
@@ -457,7 +459,7 @@ def get_skill_tools(
             return SkillRuntimeResolver.runnable_version(skill) if skill else None
         from skills.models import SkillVersion
 
-        return (
+        version = (
             SkillVersion.objects.select_related("skill", "release")
             .filter(
                 pk=current_selected_skill_version_id,
@@ -466,6 +468,9 @@ def get_skill_tools(
             )
             .first()
         )
+        if version is None:
+            raise ValueError("本次任务已锁定其他 Skill 精确版本，禁止切换")
+        return version
 
     @langchain_tool
     def read_skill_content(skill_name: str) -> str:

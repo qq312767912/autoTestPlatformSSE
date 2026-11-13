@@ -67,108 +67,6 @@ class ApiInterfaceViewSet(BaseModelViewSet):
     def get_permissions(self):
         return [IsAuthenticated(), HasModelPermission(), IsProjectMemberForResource()]
 
-    def get_queryset(self):
-        project_pk = self.kwargs.get('project_pk')
-        queryset = ApiInterface.objects.filter(project_id=project_pk).select_related(
-            'module', 'created_by'
-        )
-
-        no_module = self.request.query_params.get('no_module')
-        if no_module and no_module.lower() in ('true', '1', 'yes'):
-            queryset = queryset.filter(module__isnull=True)
-        else:
-            module_id = self.request.query_params.get('module_id')
-            if module_id:
-                queryset = queryset.filter(module_id=module_id)
-
-        status_value = self.request.query_params.get('status')
-        if status_value:
-            queryset = queryset.filter(status=status_value)
-
-        search = (self.request.query_params.get('search') or '').strip()
-        if search:
-            queryset = queryset.filter(
-                Q(name__icontains=search)
-                | Q(url__icontains=search)
-                | Q(method__icontains=search)
-            )
-
-        # 排序：支持 created_at / updated_at / id / name，前缀 - 表示降序
-        ordering = (self.request.query_params.get('ordering') or '').strip()
-        allowed_ordering = {
-            'created_at', '-created_at',
-            'updated_at', '-updated_at',
-            'id', '-id',
-            'name', '-name',
-        }
-        if ordering in allowed_ordering:
-            queryset = queryset.order_by(ordering)
-        else:
-            queryset = queryset.order_by('-created_at')
-
-        return queryset
-
-    def perform_create(self, serializer):
-        from projects.models import Project
-        project = get_object_or_404(Project, pk=self.kwargs.get('project_pk'))
-        serializer.save(created_by=self.request.user, project=project)
-
-    @action(
-        detail=False,
-        methods=['post'],
-        url_path='import-openapi',
-        parser_classes=[MultiPartParser, FormParser, JSONParser],
-    )
-    def import_openapi(self, request, *args, **kwargs):
-        """Import HTTP interfaces from a supported API document."""
-        from projects.models import Project
-
-        project = get_object_or_404(Project, pk=self.kwargs.get('project_pk'))
-        upload = request.FILES.get('file')
-        filename = getattr(upload, 'name', '') if upload else ''
-        source_type = str(request.data.get('source_type') or '')
-        source_url = request.data.get('source_url')
-        strip_base_url = _parse_bool(request.data.get('strip_base_url'), default=True)
-        create_environments = _parse_bool(request.data.get('create_environments'), default=False)
-
-        try:
-            if source_url:
-                content, filename = fetch_api_document(str(source_url))
-                source_type = 'swagger'
-            elif upload:
-                content = upload.read()
-            else:
-                content = request.data.get('document', request.data.get('content'))
-
-            if content in (None, ''):
-                return Response(
-                    {'detail': 'Please provide an API document, Swagger URL, or cURL command.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            parsed = parse_api_document(
-                content,
-                filename=filename,
-                source_type=source_type,
-                strip_base_url=strip_base_url,
-            )
-            result = import_openapi_interfaces(
-                document=parsed.document,
-                project=project,
-                user=request.user,
-                request=request,
-                view=self,
-                strip_base_url=strip_base_url,
-                create_environments=create_environments,
-            )
-            result['format'] = parsed.source_format
-            result['version'] = parsed.source_version
-        except OpenAPIError as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
-        response_status = status.HTTP_201_CREATED if result['created_count'] else status.HTTP_200_OK
-        return Response(result, status=response_status)
-
     @action(
         detail=False,
         methods=['post'],
@@ -252,7 +150,230 @@ class ApiInterfaceViewSet(BaseModelViewSet):
         except OpenAPIError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        return Response(result)
+        # 持久化：提取成功的接口固化约束快照，后续生成用例无需再传文档
+        from .constraint_store import store_interface_constraints
+        from .models import ApiInterfaceConstraint
+
+        matched_ids = [
+            item.get('interface_id') for item in result.get('interfaces', [])
+            if item.get('matched') and item.get('interface_id') in interface_map
+        ]
+        if matched_ids:
+            try:
+                parsed_doc = parse_api_document(
+                    content,
+                    filename=filename,
+                    source_type=source_type,
+                    strip_base_url=strip_base_url,
+                )
+                store_interface_constraints(
+                    project=project,
+                    document=parsed_doc.document,
+                    document_format=result.get('format', ''),
+                    document_version=result.get('version', ''),
+                    document_name=filename or '',
+                    interface_ids=matched_ids,
+                )
+            except OpenAPIError as exc:
+                logger.warning('persist constraints after extract failed: %s', exc)
+
+        return Response({
+            **result,
+            'persisted': ApiInterfaceConstraint.objects.filter(
+                interface_id__in=[item.id for item in interfaces],
+            ).values_list('interface_id', flat=True),
+        })
+
+
+    @action(detail=False, methods=['get'], url_path='constraints')
+    def constraints(self, request, *args, **kwargs):
+        """查询已固化的接口参数约束（按接口 ID 批量）。
+
+        GET /api-interfaces/constraints/?interface_ids=1,2,3
+        返回 {constraints: [{interface_id, name, method, url, format, version,
+        document_name, constraints, updated_at}], missing: [无约束的接口 ID]}
+        """
+        from .models import ApiInterfaceConstraint
+
+        raw_ids = request.query_params.get('interface_ids', '')
+        try:
+            target_ids = [int(item) for item in raw_ids.split(',') if item.strip()]
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': 'interface_ids 必须是逗号分隔的接口 ID。'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not target_ids:
+            return Response(
+                {'detail': '请提供要查询约束的接口 ID 列表 interface_ids。'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        interfaces = ApiInterface.objects.filter(
+            project_id=self.kwargs.get('project_pk'),
+            id__in=target_ids,
+        )
+        interface_map = {item.id: item for item in interfaces}
+        missing_ids = [item_id for item_id in target_ids if item_id not in interface_map]
+        if missing_ids:
+            return Response(
+                {'detail': f'以下接口不存在或不属于当前项目：{missing_ids}。'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        records = (
+            ApiInterfaceConstraint.objects
+            .filter(interface_id__in=target_ids)
+            .select_related('interface')
+        )
+        items = [
+            {
+                'interface_id': record.interface_id,
+                'name': record.interface.name,
+                'method': record.interface.method,
+                'url': record.interface.url,
+                'matched': record.matched,
+                'format': record.document_format,
+                'version': record.document_version,
+                'document_name': record.document_name,
+                'constraints': record.constraints,
+                'updated_at': record.updated_at,
+            }
+            for record in records
+        ]
+        constraint_ids = {item['interface_id'] for item in items}
+        return Response({
+            'constraints': items,
+            'missing': [item_id for item_id in target_ids if item_id not in constraint_ids],
+        })
+
+
+    def get_queryset(self):
+        project_pk = self.kwargs.get('project_pk')
+        queryset = ApiInterface.objects.filter(project_id=project_pk).select_related(
+            'module', 'created_by', 'constraint'
+        )
+
+        no_module = self.request.query_params.get('no_module')
+        if no_module and no_module.lower() in ('true', '1', 'yes'):
+            queryset = queryset.filter(module__isnull=True)
+        else:
+            module_id = self.request.query_params.get('module_id')
+            if module_id:
+                queryset = queryset.filter(module_id=module_id)
+
+        status_value = self.request.query_params.get('status')
+        if status_value:
+            queryset = queryset.filter(status=status_value)
+
+        search = (self.request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search)
+                | Q(url__icontains=search)
+                | Q(method__icontains=search)
+            )
+
+        # 排序：支持 created_at / updated_at / id / name，前缀 - 表示降序
+        ordering = (self.request.query_params.get('ordering') or '').strip()
+        allowed_ordering = {
+            'created_at', '-created_at',
+            'updated_at', '-updated_at',
+            'id', '-id',
+            'name', '-name',
+        }
+        if ordering in allowed_ordering:
+            queryset = queryset.order_by(ordering)
+        else:
+            queryset = queryset.order_by('-created_at')
+
+        return queryset
+
+    def perform_create(self, serializer):
+        from projects.models import Project
+        project = get_object_or_404(Project, pk=self.kwargs.get('project_pk'))
+        serializer.save(created_by=self.request.user, project=project)
+
+    def perform_update(self, serializer):
+        from .models import ApiInterfaceConstraint
+        fields = {'url', 'method', 'type', 'params', 'path_params', 'headers', 'body'}
+        changed = any(field in serializer.validated_data and getattr(serializer.instance, field) != serializer.validated_data[field] for field in fields)
+        with transaction.atomic():
+            super().perform_update(serializer)
+            if changed:
+                ApiInterfaceConstraint.objects.filter(interface=serializer.instance).delete()
+
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path='import-openapi',
+        parser_classes=[MultiPartParser, FormParser, JSONParser],
+    )
+    def import_openapi(self, request, *args, **kwargs):
+        """Import HTTP interfaces from a supported API document."""
+        from projects.models import Project
+
+        project = get_object_or_404(Project, pk=self.kwargs.get('project_pk'))
+        upload = request.FILES.get('file')
+        filename = getattr(upload, 'name', '') if upload else ''
+        source_type = str(request.data.get('source_type') or '')
+        source_url = request.data.get('source_url')
+        strip_base_url = _parse_bool(request.data.get('strip_base_url'), default=True)
+        create_environments = _parse_bool(request.data.get('create_environments'), default=False)
+
+        # 导入位置模式：create_module（创建新模块）/ existing_module（使用已有模块）
+        import_mode = str(request.data.get('import_mode') or '').strip()
+        if import_mode in ('', 'auto', 'legacy'):
+            import_mode = ''
+        import_mode = import_mode or None
+        module_name = str(request.data.get('module_name') or '')
+        try:
+            target_module_id = request.data.get('module_id', request.data.get('target_module_id'))
+            target_module_id = int(target_module_id) if target_module_id not in (None, '') else None
+        except (TypeError, ValueError):
+            target_module_id = None
+
+        try:
+            if source_url:
+                content, filename = fetch_api_document(str(source_url))
+                source_type = 'swagger'
+            elif upload:
+                content = upload.read()
+            else:
+                content = request.data.get('document', request.data.get('content'))
+
+            if content in (None, ''):
+                return Response(
+                    {'detail': 'Please provide an API document, Swagger URL, or cURL command.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            parsed = parse_api_document(
+                content,
+                filename=filename,
+                source_type=source_type,
+                strip_base_url=strip_base_url,
+            )
+            result = import_openapi_interfaces(
+                document=parsed.document,
+                project=project,
+                user=request.user,
+                request=request,
+                view=self,
+                strip_base_url=strip_base_url,
+                create_environments=create_environments,
+                import_mode=import_mode,
+                module_name=module_name,
+                target_module_id=target_module_id,
+                document_name=filename or "",
+            )
+            result['format'] = parsed.source_format
+            result['version'] = parsed.source_version
+        except OpenAPIError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        response_status = status.HTTP_201_CREATED if result['created_count'] else status.HTTP_200_OK
+        return Response(result, status=response_status)
 
     @action(detail=False, methods=['get'], url_path='export-openapi')
     def export_openapi(self, request, *args, **kwargs):
@@ -382,6 +503,21 @@ class ApiInterfaceViewSet(BaseModelViewSet):
         serializer = self.get_serializer(data=duplicate_data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
+
+        # 复制接口时同步复制约束快照，副本与源接口共用同一份文档解析结果
+        from .models import ApiInterfaceConstraint
+
+        source_constraint = getattr(source, 'constraint', None)
+        if source_constraint is not None:
+            ApiInterfaceConstraint.objects.create(
+                interface=serializer.instance,
+                document_format=source_constraint.document_format,
+                document_version=source_constraint.document_version,
+                document_name=source_constraint.document_name,
+                matched=source_constraint.matched,
+                constraints=deepcopy(source_constraint.constraints),
+            )
+
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 

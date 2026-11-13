@@ -30,6 +30,17 @@ python api_automation_tools.py --action list_interfaces --project_id 1 --params 
 python api_automation_tools.py --action list_modules --project_id 1 --base_url http://127.0.0.1:8000 --api_key wharttest-default-mcp-key-2025
 ```
 
+## 接口约束快照
+
+生成接口用例前，MUST 读取接口导入时保存的参数约束：
+
+```bash
+python api_automation_tools.py --action get_interface_constraints --project_id 1 --interface_ids 10,11
+```
+
+返回的 `constraints` 为已有快照，`missing` 为没有可信快照的接口 ID。MUST 将缺失约束标记为未知，NEVER 编造字段范围、枚举或业务规则。
+生成任务保存单接口用例时 MUST 使用内联 JSON payload，便于执行层校验归属参数；场景用例仍可使用文件 payload。
+
 ## 用例概览
 
 接口自动化测试中，**用例管理**分为两个页签，对应两种不同的用例类型：

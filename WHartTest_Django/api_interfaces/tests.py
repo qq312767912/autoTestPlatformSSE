@@ -4,7 +4,7 @@ from unittest.mock import patch, MagicMock
 from urllib.error import URLError
 
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.contrib.auth.models import User, Permission
 from django.contrib.contenttypes.models import ContentType
 from rest_framework.test import APIClient
@@ -12,7 +12,7 @@ from rest_framework import status
 
 from projects.models import Project, ProjectMember
 from api_modules.models import ApiModule
-from .models import ApiInterface, ApiInterfaceResult
+from .models import ApiInterfaceConstraint, ApiInterface, ApiInterfaceResult
 from .serializers import ApiInterfaceSerializer
 from api_environments.models import ApiEnvironment, ApiEnvironmentVariable
 from .exchange import fetch_api_document
@@ -1696,24 +1696,29 @@ class ApiInterfaceAPITest(TestCase):
         self.assertEqual(response.data['updated_count'], 1)
         self.assertEqual(ApiInterface.objects.filter(project=self.project).count(), 1)
 
-    def test_import_openapi_auto_modules_and_overwrite(self):
-        """直接导入：按 tag 自动创建模块，无 tag 的接口用文档 title 兜底建模块；
-        method+url 一致时覆盖更新，不产生重复接口。"""
+    def test_import_openapi_existing_module_overwrites_within_module(self):
+        """使用已有模块导入：路径（method+url）一致的接口在目标模块内覆盖，
+        其他模块的同名接口不受影响；路径不一致的接口作为新接口导入。"""
         auth_module = ApiModule.objects.create(name='Auth', project=self.project, created_by=self.user)
+        billing_module = ApiModule.objects.create(name='Billing', project=self.project, created_by=self.user)
         ApiInterface.objects.create(
             name='Login', type='http', method='POST', url='/login',
             body={'type': 'raw', 'content': {'username': 'old', 'password': 'x'}},
             project=self.project, module=auth_module, created_by=self.user,
         )
+        ApiInterface.objects.create(
+            name='Billing Login', type='http', method='POST', url='/login',
+            body={'type': 'raw', 'content': {'username': 'billing'}},
+            project=self.project, module=billing_module, created_by=self.user,
+        )
 
         document = {
             'openapi': '3.0.3',
-            'info': {'title': 'User API', 'version': '1.0.0'},
+            'info': {'title': 'Auth API', 'version': '1.0.0'},
             'paths': {
                 '/login': {
                     'post': {
                         'summary': 'Login',
-                        'tags': ['Auth'],
                         'requestBody': {
                             'content': {
                                 'application/json': {
@@ -1730,6 +1735,76 @@ class ApiInterfaceAPITest(TestCase):
                         'responses': {'200': {'description': 'OK'}},
                     },
                 },
+                '/register': {
+                    'post': {
+                        'summary': 'Register',
+                        'responses': {'201': {'description': 'Created'}},
+                    },
+                },
+            },
+        }
+        uploaded = SimpleUploadedFile(
+            'openapi.json',
+            json.dumps(document).encode('utf-8'),
+            content_type='application/json',
+        )
+
+        response = self.client.post(
+            f'{self.base_url}import-openapi/',
+            {
+                'file': uploaded,
+                'source_type': 'swagger',
+                'import_mode': 'existing_module',
+                'module_id': str(auth_module.id),
+            },
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data['created_count'], 1)
+        self.assertEqual(response.data['updated_count'], 1)
+        self.assertEqual(response.data['target_module_id'], auth_module.id)
+        self.assertEqual(
+            ApiInterface.objects.filter(project=self.project, module=auth_module).count(),
+            2,
+        )
+        # /login 在 Auth 模块内被覆盖为新文档内容
+        login = ApiInterface.objects.get(project=self.project, module=auth_module, url='/login')
+        self.assertEqual(login.body['content'], {'username': '', 'password': ''})
+        # Billing 模块的同名接口不得被覆盖
+        billing_login = ApiInterface.objects.get(project=self.project, module=billing_module, url='/login')
+        self.assertEqual(billing_login.body['content'], {'username': 'billing'})
+        # 再次导入完全相同文档：无新增、无修改（内容一致跳过覆盖）
+        uploaded_again = SimpleUploadedFile(
+            'openapi.json',
+            json.dumps(document).encode('utf-8'),
+            content_type='application/json',
+        )
+        second_response = self.client.post(
+            f'{self.base_url}import-openapi/',
+            {
+                'file': uploaded_again,
+                'source_type': 'swagger',
+                'import_mode': 'existing_module',
+                'module_id': str(auth_module.id),
+            },
+            format='multipart',
+        )
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.data['created_count'], 0)
+        self.assertEqual(second_response.data['updated_count'], 0)
+        self.assertEqual(
+            ApiInterface.objects.filter(project=self.project, module=auth_module).count(),
+            2,
+        )
+
+    def test_import_openapi_create_module_sets_parent(self):
+        """创建新模块导入：文档接口导入到新模块下，tag 作为其子模块；
+        再次导入相同文档不产生重复接口。"""
+        document = {
+            'openapi': '3.0.3',
+            'info': {'title': 'User API', 'version': '1.0.0'},
+            'paths': {
                 '/users': {
                     'get': {
                         'summary': 'List Users',
@@ -1753,36 +1828,35 @@ class ApiInterfaceAPITest(TestCase):
 
         response = self.client.post(
             f'{self.base_url}import-openapi/',
-            {'file': uploaded, 'source_type': 'swagger'},
+            {
+                'file': uploaded,
+                'source_type': 'swagger',
+                'import_mode': 'create_module',
+                'module_name': '用户中心',
+            },
             format='multipart',
         )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         self.assertEqual(response.data['created_count'], 2)
-        self.assertEqual(response.data['updated_count'], 1)
-        # tag 'Auth' 复用已有模块，tag 'Users' 自动创建新模块
-        self.assertEqual(
-            ApiInterface.objects.get(project=self.project, url='/login').module_id,
-            auth_module.id,
-        )
-        users_module = ApiModule.objects.get(project=self.project, name='Users')
-        self.assertIsNone(users_module.parent)
+        self.assertEqual(response.data['updated_count'], 0)
+        parent = ApiModule.objects.get(project=self.project, name='用户中心')
+        self.assertIsNone(parent.parent)
+        self.assertEqual(response.data['target_module_id'], parent.id)
+        self.assertEqual(response.data['target_module_name'], '用户中心')
+        # tag 'Users' 生成子模块，挂在目标模块下
+        child = ApiModule.objects.get(project=self.project, name='Users')
+        self.assertEqual(child.parent_id, parent.id)
         self.assertEqual(
             ApiInterface.objects.get(project=self.project, url='/users').module_id,
-            users_module.id,
+            child.id,
         )
-        # 无 tag 的接口用文档 title 兜底建模块
-        title_module = ApiModule.objects.get(project=self.project, name='User API')
         self.assertEqual(
             ApiInterface.objects.get(project=self.project, url='/ping').module_id,
-            title_module.id,
+            parent.id,
         )
-        # /login 在 Auth 模块内被覆盖为新文档内容
-        login = ApiInterface.objects.get(project=self.project, module=auth_module, url='/login')
-        self.assertEqual(login.body['content'], {'username': '', 'password': ''})
-        self.assertEqual(ApiInterface.objects.filter(project=self.project).count(), 3)
 
-        # 再次导入相同文档：method+url 一致全部走覆盖更新，不新增
+        # 再次导入相同文档：接口在目标模块子树内匹配，内容一致跳过覆盖
         uploaded_again = SimpleUploadedFile(
             'openapi.json',
             json.dumps(document).encode('utf-8'),
@@ -1790,14 +1864,179 @@ class ApiInterfaceAPITest(TestCase):
         )
         second_response = self.client.post(
             f'{self.base_url}import-openapi/',
-            {'file': uploaded_again, 'source_type': 'swagger'},
+            {
+                'file': uploaded_again,
+                'source_type': 'swagger',
+                'import_mode': 'create_module',
+                'module_name': '用户中心',
+            },
             format='multipart',
         )
         self.assertEqual(second_response.status_code, status.HTTP_200_OK)
         self.assertEqual(second_response.data['created_count'], 0)
-        self.assertEqual(second_response.data['updated_count'], 3)
-        self.assertEqual(ApiInterface.objects.filter(project=self.project).count(), 3)
-        self.assertEqual(ApiModule.objects.filter(project=self.project).count(), 3)
+        self.assertEqual(second_response.data['updated_count'], 0)
+        self.assertEqual(ApiInterface.objects.filter(project=self.project).count(), 2)
+        self.assertEqual(ApiModule.objects.filter(project=self.project).count(), 2)
+
+    def test_import_openapi_create_module_content_change_counts_modified(self):
+        """创建新模块导入：路径一致但请求头/请求体/参数变化时覆盖原接口并计为修改。"""
+        document = {
+            'openapi': '3.0.3',
+            'info': {'title': 'Demo', 'version': '1.0.0'},
+            'paths': {
+                '/orders': {
+                    'post': {
+                        'summary': 'Create Order',
+                        'requestBody': {
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'sku': {'type': 'string'},
+                                            'count': {'type': 'integer'},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                        'responses': {'200': {'description': 'OK'}},
+                    },
+                },
+            },
+        }
+        uploaded = SimpleUploadedFile(
+            'openapi.json',
+            json.dumps(document).encode('utf-8'),
+            content_type='application/json',
+        )
+        post_kwargs = {
+            'file': uploaded,
+            'source_type': 'swagger',
+            'import_mode': 'create_module',
+            'module_name': '订单模块',
+        }
+        first = self.client.post(f'{self.base_url}import-openapi/', post_kwargs, format='multipart')
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.data)
+        self.assertEqual(first.data['created_count'], 1)
+
+        # 修改接口请求体（新增一个字段）
+        document['paths']['/orders']['post']['requestBody']['content']['application/json']['schema']['properties']['note'] = {'type': 'string'}
+        uploaded_changed = SimpleUploadedFile(
+            'openapi.json',
+            json.dumps(document).encode('utf-8'),
+            content_type='application/json',
+        )
+        post_kwargs['file'] = uploaded_changed
+        second = self.client.post(f'{self.base_url}import-openapi/', post_kwargs, format='multipart')
+        self.assertEqual(second.status_code, status.HTTP_200_OK, second.data)
+        self.assertEqual(second.data['created_count'], 0)
+        self.assertEqual(second.data['updated_count'], 1)
+        order = ApiInterface.objects.get(project=self.project, url='/orders')
+        self.assertEqual(order.body['content'], {'sku': '', 'count': 0, 'note': ''})
+        self.assertEqual(ApiInterface.objects.filter(project=self.project).count(), 1)
+
+    def test_import_openapi_mode_validation(self):
+        """导入位置参数校验：缺少模块名 / 模块ID / 非法模块时返回 400。"""
+        document = {
+            'openapi': '3.0.3',
+            'info': {'title': 'X', 'version': '1.0.0'},
+            'paths': {'/ping': {'get': {'summary': 'Ping', 'responses': {'200': {'description': 'OK'}}}}},
+        }
+        uploaded = SimpleUploadedFile(
+            'openapi.json',
+            json.dumps(document).encode('utf-8'),
+            content_type='application/json',
+        )
+
+        missing_name = self.client.post(
+            f'{self.base_url}import-openapi/',
+            {'file': uploaded, 'source_type': 'swagger', 'import_mode': 'create_module'},
+            format='multipart',
+        )
+        self.assertEqual(missing_name.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(ApiInterface.objects.filter(project=self.project).count(), 0)
+
+        missing_module = self.client.post(
+            f'{self.base_url}import-openapi/',
+            {'file': uploaded, 'source_type': 'swagger', 'import_mode': 'existing_module'},
+            format='multipart',
+        )
+        self.assertEqual(missing_module.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(ApiInterface.objects.filter(project=self.project).count(), 0)
+
+        other = Project.objects.create(name='Other Project', creator=self.user)
+        other_module = ApiModule.objects.create(name='Other', project=other, created_by=self.user)
+        foreign_module = self.client.post(
+            f'{self.base_url}import-openapi/',
+            {
+                'file': uploaded,
+                'source_type': 'swagger',
+                'import_mode': 'existing_module',
+                'module_id': str(other_module.id),
+            },
+            format='multipart',
+        )
+        self.assertEqual(foreign_module.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(ApiInterface.objects.filter(project=self.project).count(), 0)
+
+    def test_import_openapi_second_module_same_name_allowed(self):
+        """同一份文档分别导入到两个不同新模块：接口名称不唯一，
+        第二次不必加后缀，同名接口允许存在于不同模块。"""
+        document = {
+            'openapi': '3.0.3',
+            'info': {'title': 'Lock API', 'version': '1.0.0'},
+            'paths': {
+                '/unlockscreen': {
+                    'post': {
+                        'summary': '解锁屏幕',
+                        'responses': {'200': {'description': 'OK'}},
+                    },
+                },
+            },
+        }
+
+        def make_upload():
+            return SimpleUploadedFile(
+                'openapi.json',
+                json.dumps(document).encode('utf-8'),
+                content_type='application/json',
+            )
+
+        first = self.client.post(
+            f'{self.base_url}import-openapi/',
+            {
+                'file': make_upload(),
+                'source_type': 'swagger',
+                'import_mode': 'create_module',
+                'module_name': '模块A',
+            },
+            format='multipart',
+        )
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.data)
+        module_a = ApiModule.objects.get(project=self.project, name='模块A')
+        self.assertEqual(
+            ApiInterface.objects.get(project=self.project, module=module_a).name,
+            '解锁屏幕',
+        )
+
+        second = self.client.post(
+            f'{self.base_url}import-openapi/',
+            {
+                'file': make_upload(),
+                'source_type': 'swagger',
+                'import_mode': 'create_module',
+                'module_name': '模块B',
+            },
+            format='multipart',
+        )
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED, second.data)
+        self.assertEqual(second.data['created_count'], 1)
+        self.assertEqual(second.data['updated_count'], 0)
+        module_b = ApiModule.objects.get(project=self.project, name='模块B')
+        new_interface = ApiInterface.objects.get(project=self.project, module=module_b, url='/unlockscreen')
+        self.assertEqual(new_interface.name, '解锁屏幕')
+        self.assertEqual(ApiInterface.objects.filter(project=self.project).count(), 2)
 
     def test_import_openapi_with_self_referencing_schema(self):
         """自引用 schema（树形结构）导入不应触发无限递归。"""
@@ -3646,14 +3885,17 @@ class ConstraintExtractorServiceTest(TestCase):
             },
         }
         result = self._extract(document, [{'interface_id': 1, 'name': '新增', 'method': 'POST', 'url': '/api/plants'}])
-        names = [item['name'] for item in result['interfaces'][0]['body_fields']]
+        fields = {item['name']: item for item in result['interfaces'][0]['body_fields']}
+        names = list(fields)
         self.assertIn('crop', names)
         self.assertIn('tags', names)
-        # 无约束叶子字段（crop_id/name）折叠进子级摘要行
-        crop_summary = next(item for item in result['interfaces'][0]['body_fields'] if item['name'] == 'crop.(无约束字段)')
-        self.assertIn('crop_id', crop_summary['description'])
-        tags_summary = next(item for item in result['interfaces'][0]['body_fields'] if item['name'] == 'tags[](无约束字段)')
-        self.assertIn('name', tags_summary['description'])
+        # 无约束叶子字段（crop_id/name）逐行保留，约束列留空
+        self.assertIn('crop.crop_id', names)
+        self.assertIn('tags[]name', names)
+        self.assertEqual(fields['crop.crop_id']['type'], 'string')
+        self.assertEqual(fields['crop.crop_id']['constraints'], {})
+        self.assertFalse(fields['crop.crop_id']['required'])
+        self.assertEqual(fields['tags[]name']['type'], 'string')
 
     def test_extract_query_path_params(self):
         """提取 path/query 参数及 required 标记"""
@@ -3711,10 +3953,11 @@ class ConstraintExtractorServiceTest(TestCase):
         result = self._extract(document, [{'interface_id': 1, 'name': '登录', 'method': 'POST', 'url': '/api/login'}])
         response = result['interfaces'][0]['response']
         self.assertEqual(response['success_code'], 200)
-        names = [item['name'] for item in response['fields']]
-        # data 对象存在（token 无约束折叠进子级摘要）
-        self.assertIn('data', names)
-        self.assertTrue(any('token' in (item.get('description') or '') for item in response['fields'] if item['name'] == 'data.(无约束字段)'))
+        fields = {item['name']: item for item in response['fields']}
+        # data 对象与其叶子 token 均逐行保留（token 无约束，约束列留空）
+        self.assertIn('data', fields)
+        self.assertIn('data.token', fields)
+        self.assertEqual(fields['data.token']['type'], 'string')
 
     def test_unmatched_interface_reported(self):
         """文档中不存在的接口进入 unmatched 清单"""
@@ -3779,14 +4022,16 @@ class ConstraintExtractorServiceTest(TestCase):
         result = self._extract(document, [{'interface_id': 1, 'name': '上传', 'method': 'POST', 'url': '/api/uploads'}])
         interface = result['interfaces'][0]
         body_fields = interface['body_fields']
-        # title 无约束声明 → 折叠进摘要（schema 内含 required 但 title 不在其中）
-        summary = next((f for f in body_fields if f['name'] == '(无约束字段)'), None)
-        self.assertIsNotNone(summary)
-        self.assertIn('title', summary['description'])
+        # title 无约束声明 → 逐行保留（mode 为 formData 参数带 required 标记）
+        title = next(f for f in body_fields if f['name'] == 'title')
+        self.assertEqual(title['type'], 'string')
+        self.assertEqual(title['constraints'], {})
+        self.assertFalse(title['required'])
+        self.assertIn('mode', [f['name'] for f in body_fields])
 
 
-    def test_shared_schema_deduplicated_across_interfaces(self):
-        """多个接口共享同一 requestBody schema 时，只在首个接口展开，其余引用"""
+    def test_shared_schema_expanded_for_every_interface(self):
+        """多个接口共享同一 requestBody schema 时，每个接口的快照都完整展开（自包含）"""
         document = {
             'openapi': '3.0.0',
             'info': {'title': 'Demo', 'version': '1.0'},
@@ -3812,8 +4057,9 @@ class ConstraintExtractorServiceTest(TestCase):
         ])
         first, second = result['interfaces']
         self.assertTrue(any(f['name'] == 'email' for f in first['body_fields']))
-        self.assertEqual(second['body_fields'], [])
-        self.assertTrue(any('共享 schema' in n and '接口 [1]' in n for n in second['notes']))
+        # 第二个接口同样完整展开，不引用首个接口
+        self.assertTrue(any(f['name'] == 'email' for f in second['body_fields']))
+        self.assertFalse(any('共享 schema' in n for n in second['notes']))
 
     def test_deep_self_reference_collapsed(self):
         """自引用树形 schema（dept.children.children...）展开到限制层数后折叠"""
@@ -3844,8 +4090,8 @@ class ConstraintExtractorServiceTest(TestCase):
         self.assertFalse(any(name.startswith('children[]children[]') for name in names))
         self.assertTrue(any('折叠' in n for n in result['interfaces'][0]['notes']))
 
-    def test_constraint_free_leaf_fields_aggregated(self):
-        """无约束叶子字段聚合为一行摘要，有约束字段保留"""
+    def test_constraint_free_leaf_fields_kept(self):
+        """无约束叶子字段逐行保留（名称/类型/必填恒有，约束列留空），有约束字段正常提取"""
         document = {
             'openapi': '3.0.0',
             'info': {'title': 'Demo', 'version': '1.0'},
@@ -3866,14 +4112,19 @@ class ConstraintExtractorServiceTest(TestCase):
             },
         }
         result = self._extract(document, [{'interface_id': 1, 'name': 'n', 'method': 'POST', 'url': '/system/user'}])
-        fields = result['interfaces'][0]['body_fields']
-        names = [f['name'] for f in fields]
-        self.assertIn('email', names)
-        summary = next(f for f in fields if f['name'] == '(无约束字段)')
-        self.assertIn('sex', summary['description'])
-        self.assertIn('avatar', summary['description'])
-        self.assertIn('status', summary['description'])
-        self.assertNotIn('sex', names)
+        fields = {f['name']: f for f in result['interfaces'][0]['body_fields']}
+        names = list(fields)
+        # 全部字段逐行保留，包括无约束的 sex/avatar/status
+        for key in ('email', 'sex', 'avatar', 'status'):
+            self.assertIn(key, names)
+        self.assertEqual(fields['email']['constraints'], {'format': 'email'})
+        self.assertTrue(fields['email']['required'])
+        for key in ('sex', 'avatar', 'status'):
+            self.assertEqual(fields[key]['constraints'], {})
+            self.assertFalse(fields[key]['required'])
+        # 不再产出聚合摘要行
+        self.assertNotIn('(无约束字段)', names)
+
 
 
 class ExtractConstraintsAPITest(TestCase):
@@ -3984,3 +4235,165 @@ class ExtractConstraintsAPITest(TestCase):
             format='json',
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+
+@override_settings(LICENSE_MODE='off')
+class ConstraintStoreTest(TestCase):
+    """导入/提取时固化参数约束快照 + constraints 查询端点"""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username='store_user', password='testpass')
+        self.project = Project.objects.create(name='Store Project', creator=self.user)
+        ProjectMember.objects.create(project=self.project, user=self.user, role='admin')
+        _grant_interface_perms(self.user)
+        self.client.force_authenticate(user=self.user)
+        self.base_url = f'/api/projects/{self.project.pk}/api-interfaces/'
+        self.document = {
+            'openapi': '3.0.0',
+            'info': {'title': 'Demo', 'version': '1.0'},
+            'paths': {
+                '/api/orders': {
+                    'post': {
+                        'requestBody': {
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'required': ['amount'],
+                                        'properties': {
+                                            'amount': {'type': 'integer', 'minimum': 1, 'maximum': 99},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                        'responses': {'200': {'description': 'ok'}},
+                    },
+                },
+            },
+        }
+
+    def _import_document(self):
+        uploaded = SimpleUploadedFile(
+            'openapi.json',
+            json.dumps(self.document).encode('utf-8'),
+            content_type='application/json',
+        )
+        return self.client.post(f'{self.base_url}import-openapi/', {'file': uploaded}, format='multipart')
+
+    def test_import_persists_constraints(self):
+        """导入接口文档时自动解析并固化参数约束"""
+        response = self._import_document()
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data.get('stored_constraints'), 1)
+
+        interface = ApiInterface.objects.get(project=self.project, method='POST', url='/api/orders')
+        constraint = interface.constraint
+        self.assertTrue(constraint.matched)
+        self.assertEqual(constraint.document_format, 'openapi')
+        self.assertEqual(constraint.document_name, 'openapi.json')
+        amount = next(f for f in constraint.constraints['body_fields'] if f['name'] == 'amount')
+        self.assertEqual(amount['constraints']['maximum'], 99)
+
+    def test_reimport_updates_constraints(self):
+        """重复导入时更新既有约束快照而不是新增"""
+        self._import_document()
+        self.document['paths']['/api/orders']['post']['requestBody']['content']['application/json']['schema']['properties']['amount']['maximum'] = 100
+        second = self._import_document()
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        interface = ApiInterface.objects.get(project=self.project, method='POST', url='/api/orders')
+        self.assertEqual(ApiInterfaceConstraint.objects.filter(interface=interface).count(), 1)
+        amount = next(f for f in interface.constraint.constraints['body_fields'] if f['name'] == 'amount')
+        self.assertEqual(amount['constraints']['maximum'], 100)
+
+    def test_constraints_endpoint_returns_snapshot(self):
+        """constraints 端点返回固化的约束快照与缺失清单"""
+        self._import_document()
+        interface = ApiInterface.objects.get(project=self.project, method='POST', url='/api/orders')
+
+        response = self.client.get(
+            f'{self.base_url}constraints/',
+            {'interface_ids': f'{interface.id}'},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data['constraints']), 1)
+        item = response.data['constraints'][0]
+        self.assertEqual(item['interface_id'], interface.id)
+        self.assertEqual(item['format'], 'openapi')
+        self.assertIn('body_fields', item['constraints'])
+        self.assertEqual(response.data['missing'], [])
+
+        # 未导入文档的接口进入 missing
+        other = ApiInterface.objects.create(
+            name='No Doc', type=ApiInterface.TYPE_HTTP, method='GET', url='/other',
+            project=self.project, created_by=self.user,
+        )
+        response = self.client.get(
+            f'{self.base_url}constraints/',
+            {'interface_ids': f'{interface.id},{other.id}'},
+        )
+        self.assertEqual(response.data['missing'], [other.id])
+
+    def test_constraints_endpoint_requires_ids(self):
+        """缺少 interface_ids 或接口不属于项目时返回 400"""
+        response = self.client.get(f'{self.base_url}constraints/')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        other_project = Project.objects.create(name='Other', creator=self.user)
+        other_interface = ApiInterface.objects.create(
+            name='Other', type=ApiInterface.TYPE_HTTP, method='GET', url='/x',
+            project=other_project, created_by=self.user,
+        )
+        response = self.client.get(
+            f'{self.base_url}constraints/',
+            {'interface_ids': f'{other_interface.id}'},
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_extract_constraints_persists(self):
+        """extract-constraints 接口同样固化约束并返回 persisted 清单"""
+        interface = ApiInterface.objects.create(
+            name='创建订单', type=ApiInterface.TYPE_HTTP, method='POST', url='/api/orders',
+            project=self.project, created_by=self.user,
+        )
+        response = self.client.post(
+            f'{self.base_url}extract-constraints/',
+            {'document': json.dumps(self.document), 'interface_ids': [interface.id]},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(interface.id, list(response.data['persisted']))
+        self.assertTrue(ApiInterfaceConstraint.objects.filter(interface=interface).exists())
+
+    def test_duplicate_copies_constraints(self):
+        """复制接口时同步复制约束快照"""
+        self._import_document()
+        interface = ApiInterface.objects.get(project=self.project, method='POST', url='/api/orders')
+        response = self.client.post(f'{self.base_url}{interface.id}/duplicate/', {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        duplicate = ApiInterface.objects.get(id=response.data['id'])
+        self.assertTrue(ApiInterfaceConstraint.objects.filter(interface=duplicate).exists())
+        self.assertEqual(
+            duplicate.constraint.constraints['body_fields'],
+            interface.constraint.constraints['body_fields'],
+        )
+
+
+
+class ConstraintInvalidationTests(ConstraintStoreTest):
+    def test_editing_definition_invalidates_snapshot(self):
+        response = self._import_document()
+        interface_id = response.data['imported_ids'][0]
+        self.assertTrue(ApiInterfaceConstraint.objects.filter(interface_id=interface_id).exists())
+        updated = self.client.patch(f'{self.base_url}{interface_id}/', {'url': '/different'}, format='json')
+        self.assertEqual(updated.status_code, 200)
+        self.assertFalse(ApiInterfaceConstraint.objects.filter(interface_id=interface_id).exists())
+
+    def test_renaming_keeps_document_constraints(self):
+        response = self._import_document()
+        interface_id = response.data['imported_ids'][0]
+        updated = self.client.patch(f'{self.base_url}{interface_id}/', {'name': '新名称'}, format='json')
+        self.assertEqual(updated.status_code, 200)
+        self.assertTrue(ApiInterfaceConstraint.objects.filter(interface_id=interface_id).exists())

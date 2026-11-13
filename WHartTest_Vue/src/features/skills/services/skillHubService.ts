@@ -361,8 +361,8 @@ export interface SkillAgentTaskBinding {
   package_sha256: string
 }
 
-export async function createSkillAgentTask(project:number, source_version_id:string):Promise<SkillAgentTaskBinding>{
-  return callEvo({url:'/knowledge-evolution/skill-agent-tasks/',method:'POST',data:{project,source_version_id}})
+export async function createSkillAgentTask(project:number, source_version_id:string, generation_mode = ''):Promise<SkillAgentTaskBinding>{
+  return callEvo({url:'/knowledge-evolution/skill-agent-tasks/',method:'POST',data:{project,source_version_id,generation_mode}})
 }
 export async function getSkillAgentTask(project:number,session_id:string):Promise<SkillAgentTaskBinding|null>{
   const data=await callEvo<{binding:SkillAgentTaskBinding|null}>({url:'/knowledge-evolution/skill-agent-tasks/',method:'GET',params:{project,session_id}})

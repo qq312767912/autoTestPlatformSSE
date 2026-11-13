@@ -48,6 +48,7 @@ from langchain_core.messages import (
 from langchain.agents import create_agent
 from wharttest_django.checkpointer import get_async_checkpointer
 
+from .api_generation_runtime import resolve_generation_mode, append_generation_instructions, generation_middleware
 from .middleware_config import (
     get_middleware_from_config,
     get_user_tool_approvals,
@@ -1703,6 +1704,8 @@ class AgentLoopStreamAPIView(View):
                 ) + PLAYWRIGHT_SCRIPT_INSTRUCTION
                 logger.info(f"AgentLoopStreamAPI: 已追加脚本生成指令")
 
+            effective_prompt = append_generation_instructions(effective_prompt, getattr(request, "_api_generation_mode", ""))
+
             # 9. 构建用户消息（支持多模态：上传图片 + HTTP(S) 图片 + 需求文档图片）
             user_message_for_llm = user_message
             if llm_attachment_context:
@@ -1754,6 +1757,7 @@ class AgentLoopStreamAPIView(View):
                     system_prompt=effective_prompt,
                 )
 
+                middleware = generation_middleware(middleware, getattr(request, "_api_generation_mode", ""))
                 agent = create_agent(
                     llm,
                     tools,
@@ -2417,6 +2421,11 @@ class AgentLoopStreamAPIView(View):
             )
         except DjangoValidationError as exc:
             return api_error_response("；".join(exc.messages), 409)
+        try:
+            request._api_generation_mode = await sync_to_async(resolve_generation_mode)(
+                session_id=session_id, actor=request.user, project_id=project_id, message=user_message)
+        except DjangoValidationError as exc:
+            return api_error_response("；".join(exc.messages), 409)
         if request._flywheel_attempt is not None:
             # 受控模式下版本由 attempt（= 流程锁）决定。请求体里显式传了别的版本
             # 说明这一轮不是从受控页面发起的（或有人改了请求），必须拒绝而不是静默忽略
@@ -2960,6 +2969,12 @@ class AgentLoopResumeAPIView(View):
                             f"AgentLoopResumeAPI: ❌ Knowledge tool creation failed: {e}"
                         )
 
+                from knowledge_evolution.skill_agent_tasks import resolve_agent_task_version
+                resume_version_id = await sync_to_async(resolve_agent_task_version)(
+                    session_id=session_id, project_id=project_id, actor=user)
+                resume_generation_mode = await sync_to_async(resolve_generation_mode)(
+                    session_id=session_id, project_id=project_id, actor=user)
+
                 # 加载内置工具
                 try:
                     from orchestrator_integration.builtin_tools import get_builtin_tools
@@ -2978,6 +2993,7 @@ class AgentLoopResumeAPIView(View):
                         test_case_id=None,
                         chat_session_id=session_id,
                         auth_state_id=resume_auth_state_id,
+                        selected_skill_version_id=resume_version_id,
                     )
                     tools.extend(builtin_tools)
                     logger.info(
@@ -3011,10 +3027,20 @@ class AgentLoopResumeAPIView(View):
                     system_prompt=resume_system_prompt,
                 )
 
+                if resume_version_id:
+                    from skills.models import SkillVersion
+                    resume_version = await sync_to_async(SkillVersion.objects.select_related("skill").get)(pk=resume_version_id)
+                    resume_system_prompt = (resume_system_prompt or "") + (
+                        f"\n本轮已锁定 Skill：{resume_version.skill.name}；版本：{resume_version.version}；SHA256：{resume_version.package_sha256}。"
+                        "先读取该精确版本指令，禁止切换 Skill。")
+                resume_system_prompt = append_generation_instructions(resume_system_prompt, resume_generation_mode)
+                middleware = generation_middleware(middleware, resume_generation_mode)
+
                 # 6. 创建 agent
                 agent = create_agent(
                     llm,
                     tools,
+                    system_prompt=resume_system_prompt,
                     checkpointer=checkpointer,
                     middleware=middleware,
                 )

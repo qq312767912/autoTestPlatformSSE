@@ -67,6 +67,7 @@ ID_ARGUMENTS = [
     ('variable_id', '环境变量 ID'),
     ('header_id', '全局请求头 ID'),
     ('function_id', '自定义函数 ID'),
+    ('interface_ids', '接口 ID 列表（逗号分隔）'),
     ('interface_id', '接口 ID'),
     ('interface_result_id', '接口调试结果 ID'),
     ('tag_id', '用例标签 ID'),
@@ -294,6 +295,10 @@ def _build_actions():
                 args, f'api-interfaces/{_require(args.interface_id, "interface_id")}/duplicate/'
             ),
             'quick_debug_interface': lambda args: _post_action(args, 'api-interfaces/quick_debug/'),
+            'get_interface_constraints': lambda args: _get_action(
+                args,
+                f'api-interfaces/constraints/?interface_ids={_require(args.interface_ids, "interface_ids")}',
+            ),
             'get_tag_statistics': lambda args: _get_action(args, 'api-testcase-tags/statistics/'),
             'get_testcase_group_tree': lambda args: _get_action(args, 'api-testcase-groups/tree/'),
             'get_group_testcases': lambda args: _get_action(
@@ -389,7 +394,7 @@ def main():
     parser.add_argument('--params', help='查询参数 JSON，支持 @文件路径')
 
     for arg_name, help_text in ID_ARGUMENTS:
-        parser.add_argument(f'--{arg_name}', type=int, help=help_text)
+        parser.add_argument(f'--{arg_name}', type=str if arg_name == 'interface_ids' else int, help=help_text)
     parser.add_argument('--case_type', help='任务套件用例类型：scenario 或 interface')
 
     args = parser.parse_args()

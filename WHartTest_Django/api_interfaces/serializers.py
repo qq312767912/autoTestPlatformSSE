@@ -19,6 +19,7 @@ class ApiInterfaceModuleInfoSerializer(serializers.Serializer):
 
 class ApiInterfaceSerializer(serializers.ModelSerializer):
     module_info = ApiInterfaceModuleInfoSerializer(source='module', read_only=True)
+    constraint_snapshot = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     created_by_name = serializers.CharField(
         source='created_by.username',
@@ -30,6 +31,21 @@ class ApiInterfaceSerializer(serializers.ModelSerializer):
         model = ApiInterface
         fields = '__all__'
         read_only_fields = ['project', 'created_by', 'created_at', 'updated_at']
+
+    def get_constraint_snapshot(self, obj):
+        """附带回源文档解析出的参数约束快照（预览视图数据源；无快照返回 None）。"""
+        snapshot = getattr(obj, 'constraint', None)
+        if snapshot is None:
+            return None
+        return {
+            'matched': snapshot.matched,
+            'format': snapshot.document_format,
+            'version': snapshot.document_version,
+            'document_name': snapshot.document_name,
+            'constraints': snapshot.constraints,
+            'updated_at': snapshot.updated_at,
+        }
+
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

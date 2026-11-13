@@ -15,7 +15,7 @@ from .hub_assessment_models import SkillAgentTaskBinding
 
 def binding_view(binding):
     version = binding.source_version
-    return {'session_id': binding.session.session_id, 'project_id': binding.session.project_id,
+    return {'generation_mode': binding.generation_mode, 'session_id': binding.session.session_id, 'project_id': binding.session.project_id,
             'skill_version_id': str(version.pk), 'skill_name': version.skill.name,
             'version': version.version, 'package_sha256': binding.source_sha256}
 
@@ -56,6 +56,9 @@ class SkillAgentTaskViewSet(viewsets.ViewSet):
     def create(self, request):
         project = self.project(request)
         version = get_object_or_404(SkillVersion.objects.select_related('skill', 'release'), pk=request.data.get('source_version_id'))
+        generation_mode = str(request.data.get('generation_mode') or '')
+        if generation_mode not in {'', 'interface_case', 'scenario'}:
+            return Response({'detail': '不支持的生成模式'}, status=400)
         try:
             verify_source(version)
             if not version.is_runnable:
@@ -63,7 +66,7 @@ class SkillAgentTaskViewSet(viewsets.ViewSet):
             with transaction.atomic():
                 session = ChatSession.objects.create(session_id=uuid.uuid4().hex, user=request.user, project=project,
                     title=f'Skill 任务 · {version.skill.name} @ {version.version}'[:200])
-                binding = SkillAgentTaskBinding.objects.create(session=session, source_version=version, source_sha256=version.package_sha256)
+                binding = SkillAgentTaskBinding.objects.create(session=session, source_version=version, source_sha256=version.package_sha256, generation_mode=generation_mode)
             return Response(binding_view(binding), status=201)
         except ValidationError as exc:
             return Response({'detail': '；'.join(exc.messages)}, status=400)
