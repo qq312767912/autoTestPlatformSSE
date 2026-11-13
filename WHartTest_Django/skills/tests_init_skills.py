@@ -159,7 +159,7 @@ class LegacyBehaviourPreservedTests(InitSkillsBase):
         self.assertTrue((target / "SKILL.md").is_file())
         self.assertTrue((target / "references" / "rules.md").is_file())
         skill.refresh_from_db()
-        self.assertEqual(skill.description, "预置技能 legacy-skill")
+        self.assertEqual(skill.description, "旧描述")  # 启动同步保留人工维护的非空简介
 
     def test_new_bundled_skill_is_imported(self):
         """库里没有的预置技能，照旧创建记录并落盘，且不带版本包语义。"""
@@ -170,3 +170,12 @@ class LegacyBehaviourPreservedTests(InitSkillsBase):
         self.assertEqual(skill.skill_path, f"skills/{self.project.id}/{skill.id}")
         self.assertTrue((Path(skill.get_full_path()) / "SKILL.md").is_file())
         self.assertFalse(skill.versions.exists(), "预置导入不该顺带生成版本包")
+
+    def test_same_name_in_other_project_is_not_overwritten(self):
+        other = Project.objects.create(name="其他项目")
+        skill = Skill.objects.create(project=other, creator=self.admin, name="shared-name", skill_content="用户内容", description="用户简介")
+        self.make_bundled("shared-name")
+        self.run_sync()
+        skill.refresh_from_db()
+        self.assertEqual(skill.skill_content, "用户内容")
+        self.assertTrue(Skill.objects.filter(project=self.project, name="shared-name").exists())
