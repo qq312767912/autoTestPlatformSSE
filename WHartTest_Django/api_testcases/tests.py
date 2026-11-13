@@ -9,6 +9,7 @@ from rest_framework.test import APIClient
 from rest_framework import status
 
 from projects.models import Project, ProjectMember
+from api_environments.models import ApiEnvironment, ApiEnvironmentVariable
 from api_interfaces.models import ApiInterface
 from .models import (
     ApiTestCaseTag, ApiTestCaseGroup, ApiTestCase,
@@ -2380,6 +2381,9 @@ class ApiInterfaceCaseAPITest(TestCase):
             },
             user=self.user,
         )
+
+        mock_runner_class.assert_called_once_with(interface_case)
+        self.assertEqual(mock_runner.run_testcase.call_args.args[0]['id'], environment.id)
 
         variable = ApiEnvironmentVariable.objects.get(environment=environment, name='token')
         self.assertEqual(variable.value, 'abc123')

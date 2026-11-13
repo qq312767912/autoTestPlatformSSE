@@ -343,7 +343,7 @@ class InterfaceCaseExecutionService:
         interface_case.config = config
         interface_case._case_verify_explicit = verify_source == 'testcase'
 
-        runner = TestCaseRunner(interface_case, environment=environment)
+        runner = TestCaseRunner(interface_case)
         runner.run_testcase(environment)
 
         summary = runner.get_summary()
