@@ -451,7 +451,10 @@ def get_skill_tools(
 
     def _selected_version_for(skill_name: str):
         if not current_selected_skill_version_id:
-            return None
+            from skills.models import Skill
+            from skills.runtime import SkillRuntimeResolver
+            skill = Skill.objects.filter(name=skill_name, is_active=True).first()
+            return SkillRuntimeResolver.runnable_version(skill) if skill else None
         from skills.models import SkillVersion
 
         return (

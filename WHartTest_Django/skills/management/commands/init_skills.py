@@ -139,7 +139,7 @@ class Command(BaseCommand):
                     # 条件：Skill 已激活到不可变版本包；动作：整体跳过（连描述都不改）；
                     # 结果：版本包哈希与库内记录保持一致，派生链路不会凭空失败。
                     full_path = existing.get_full_path()
-                    if _is_immutable_package_target(full_path):
+                    if _is_immutable_package_target(full_path) or (existing.active_version_id and existing.active_version.package_path):
                         self.stdout.write(self.style.WARNING(
                             f'  跳过 {skill_name}（已激活到版本包目录，'
                             f'内容更新请走版本发布通道）'
