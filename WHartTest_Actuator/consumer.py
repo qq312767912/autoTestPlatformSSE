@@ -382,7 +382,11 @@ class TaskConsumer:
 
         handler = handlers.get(task.func_name)
         if handler:
-            await handler(task.func_args)
+            self.ws_client.set_task_token((task.func_args or {}).get("task_token"))
+            try:
+                await handler(task.func_args)
+            finally:
+                self.ws_client.set_task_token(None)
         else:
             logger.warning(f"未知任务类型: {task.func_name}")
 

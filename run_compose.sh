@@ -191,6 +191,9 @@ resolve_mode_and_compose() {
     DEPLOY_MODE="local"
   fi
 
+  python3 "$SCRIPT_DIR/deploy-scripts/prepare_ws_auth.py" --env-file "$ENV_FILE"
+  load_env_file
+
   case "$DEPLOY_MODE" in
     local)
       COMPOSE_FILE=${COMPOSE_FILE:-${DOCKER_LOCAL_COMPOSE_FILE:-docker-compose.local.yml}}
@@ -2173,6 +2176,9 @@ main() {
     run_db_init
     return 0
   fi
+
+  python3 "$SCRIPT_DIR/deploy-scripts/prepare_ws_auth.py" --env-file "$ENV_FILE"
+  load_env_file
 
   case "$DEPLOY_MODE" in
     local)

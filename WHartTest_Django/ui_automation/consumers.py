@@ -43,6 +43,46 @@ class SocketUserManager:
 
     _web_users: dict[str, 'UiAutomationConsumer'] = {}      # 前端用户连接
     _actuator_users: dict[str, 'UiAutomationConsumer'] = {} # 执行器连接
+    _actuator_last_seen: dict[str, float] = {}               # 执行器最后活跃时间（time.monotonic）
+    _case_actuators: dict[str, tuple[str, float]] = {}       # case_id(str) -> (执行器ID, 登记时间)
+    # 判活阈值：超过该时长无任何消息（含协议层 ping 之外的应用层活动）视为连接失活，
+    # 允许同 ID 新连接接管注册（网络半开时旧连接的 disconnect 永远不会触发）
+    ACTUATOR_STALE_SECONDS = 60.0
+
+    _CASE_MAP_TTL_SECONDS = 6 * 60 * 60  # 用例→执行器映射保留 6 小时（覆盖批次最长下发 TTL）
+
+    @classmethod
+    def register_actuator_cases(cls, case_ids, actuator_id: str) -> None:
+        """批次下发时登记用例与执行器的归属（供精确停止路由）。"""
+        import time
+        now = time.monotonic()
+        # 顺带过期清理，防无限增长
+        expired = [k for k, (_, ts) in cls._case_actuators.items() if now - ts > cls._CASE_MAP_TTL_SECONDS]
+        for k in expired:
+            cls._case_actuators.pop(k, None)
+        for cid in case_ids or []:
+            cls._case_actuators[str(cid)] = (str(actuator_id), now)
+
+    @classmethod
+    def get_actuator_id_by_case(cls, case_id) -> Optional[str]:
+        entry = cls._case_actuators.get(str(case_id))
+        return entry[0] if entry else None
+
+    @classmethod
+    def touch_actuator(cls, actuator_id: str):
+        """刷新执行器最后活跃时间（每次收到消息时调用）"""
+        if actuator_id in cls._actuator_users:
+            import time
+            cls._actuator_last_seen[actuator_id] = time.monotonic()
+
+    @classmethod
+    def is_actuator_stale(cls, actuator_id: str) -> bool:
+        """判断注册表中的执行器连接是否已失活（半开连接：TCP 未断但再无消息）"""
+        import time
+        last_seen = cls._actuator_last_seen.get(actuator_id)
+        if last_seen is None:
+            return False
+        return (time.monotonic() - last_seen) > cls.ACTUATOR_STALE_SECONDS
 
     @classmethod
     def add_web_user(cls, user_id: str, consumer: 'UiAutomationConsumer'):
@@ -61,16 +101,34 @@ class SocketUserManager:
         否则攻击者可用已在线执行器的 ID 顶掉真实连接，截获后续全部任务载荷。"""
         existing = cls._actuator_users.get(actuator_id)
         if existing is not None and existing is not consumer:
-            logger.warning(
-                f"拒绝执行器注册: ID {actuator_id} 已在线（疑似抢注），拒绝新连接"
-            )
-            return False
+            if cls.is_actuator_stale(actuator_id):
+                # 旧连接失活（网络半开：disconnect 永远不会触发）：允许新连接接管
+                logger.warning(
+                    f"执行器 {actuator_id} 旧连接超过 {cls.ACTUATOR_STALE_SECONDS:.0f}s 无活动，"
+                    f"判定失活，允许新连接接管"
+                )
+                try:
+                    existing._stale_superseded = True
+                except Exception:
+                    pass
+            else:
+                logger.warning(
+                    f"拒绝执行器注册: ID {actuator_id} 已在线且活跃（疑似抢注），拒绝新连接"
+                )
+                return False
+        import time
         cls._actuator_users[actuator_id] = consumer
+        cls._actuator_last_seen[actuator_id] = time.monotonic()
         logger.info(f"执行器连接: {actuator_id}, 当前执行器数: {len(cls._actuator_users)}")
         return True
-    
+
     @classmethod
-    def remove_actuator(cls, actuator_id: str):
+    def remove_actuator(cls, actuator_id: str, consumer=None):
+        # 校验身份：被接管的旧连接迟到的 disconnect 不能误删新连接的注册
+        if consumer is not None and cls._actuator_users.get(actuator_id) is not consumer:
+            logger.info(f"执行器 {actuator_id} 旧连接迟到的断开事件，忽略（已由新连接接管）")
+            return
+        cls._actuator_last_seen.pop(actuator_id, None)
         if actuator_id in cls._actuator_users:
             del cls._actuator_users[actuator_id]
             logger.info(f"执行器断开: {actuator_id}, 当前执行器数: {len(cls._actuator_users)}")
@@ -131,7 +189,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         # - recent_users: user -> 最近一次任务下发时间戳（当前执行器只回传
         #   user 字段，不回显 args 自定义字段，故以“近期下发过该用户任务”
         #   作为回传来源校验依据）
-        self.actuator_task_tokens: dict[str, str] = {}
+        self.actuator_task_tokens: dict[str, tuple[str, float]] = {}
         self.actuator_recent_users: dict[str, float] = {}
         # 录制器浏览器执行状态（步骤调试/用例执行兜底；支持关闭画布即中断）
         self._recorder_exec_task = None
@@ -154,7 +212,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
 
     def _localize(self, message: str) -> str:
         return translate_app_text(message, self.language)
-    
+
     async def _reject(self, code: int) -> None:
         """拒绝连接：先 accept 握手再带码关闭。
 
@@ -257,7 +315,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
 
         await self.channel_layer.group_discard(self.group_name, self.channel_name)
 
-        if self.is_actuator:
+        if self.is_actuator and SocketUserManager.get_actuator_by_id(self.user_id) is self:
             self.actuator_task_tokens.clear()
             self.actuator_recent_users.clear()
             try:
@@ -269,14 +327,17 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                     )
             except Exception as exc:
                 logger.warning(f"clear leases on disconnect failed: {exc}")
-            SocketUserManager.remove_actuator(self.user_id)
-        else:
-            SocketUserManager.remove_web_user(self.user_id)
+            SocketUserManager.remove_actuator(self.user_id, self)
+        elif not self.is_actuator:
+            if SocketUserManager.get_web_user(self.user_id) is self:
+                SocketUserManager.remove_web_user(self.user_id)
 
         logger.info(f"{'执行器' if self.is_actuator else 'Web'}断开: {self.user_id}, code: {close_code}")
 
     async def receive(self, text_data=None, bytes_data=None):
         """接收消息"""
+        if self.is_actuator:
+            SocketUserManager.touch_actuator(self.user_id)
         if not text_data:
             return
 
@@ -305,6 +366,9 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         """路由消息到对应处理器"""
         func_name = socket_data.data.func_name
         func_args = socket_data.data.func_args
+
+        if self.ws_auth and self.ws_auth.get("kind") == "web":
+            socket_data.user = self.user_id
 
         # 前端发送的执行请求 -> 转发给执行器
         if self.is_actuator:
@@ -624,37 +688,74 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
     def register_actuator_task(self, actuator, args: dict, target_user: str) -> None:
         """任务下发时登记来源：一次性 token + 发起人近期下发记录。
 
-        - token 放入 func_args 一并下发：新版执行器回显后可做一一对应强校验；
-          旧版执行器不回显，退化为下面的近期来源校验。
+        - token 放入 func_args 一并下发：执行器结果回显 task_token 时做一一
+          对应强校验（见 verify_result_source）；不回显则退化为近期来源校验。
         - recent_users 记录该执行器最近给各发起人下发任务的时间，结果回传时
           校验 user 必须命中，防止执行器/攻击者伪造任意用户的结果。
+        - token/user 登记均带时间戳并在每次登记时统一过期清理（TTL 见
+          _TASK_TOKEN_TTL_SECONDS），长连接下不会无限增长。
         """
         if actuator is None:
             return
+        # 登记用例→执行器归属（供前端精确停止路由；单用例/批量均覆盖）
+        try:
+            _case_ids = (args or {}).get('case_ids') or (
+                [args['case_id']] if (args or {}).get('case_id') else []
+            )
+            if _case_ids and actuator.user_id:
+                SocketUserManager.register_actuator_cases(_case_ids, actuator.user_id)
+        except Exception:
+            pass
         token = uuid.uuid4().hex
         now = time.monotonic()
         tokens = getattr(actuator, 'actuator_task_tokens', None)
         if isinstance(tokens, dict):
-            tokens[token] = target_user
+            tokens[token] = (target_user, now)
         recent = getattr(actuator, 'actuator_recent_users', None)
         if isinstance(recent, dict):
             recent[target_user] = now
-            # 清理过期登记，避免长期运行下无限增长
-            cutoff = now - self._TASK_TOKEN_TTL_SECONDS
-            stale = [u for u, ts in recent.items() if ts < cutoff]
-            for u in stale:
-                recent.pop(u, None)
+        prune = getattr(actuator, '_prune_task_registrations', None)
+        if callable(prune):
+            prune(now)
         args['task_token'] = token
 
-    def verify_result_source(self, claimed_user: str) -> bool:
+
+    def verify_result_source(self, claimed_user: str, args: Optional[dict] = None) -> bool:
         """执行器结果回传时的来源校验（仅 is_actuator 连接生效）。
 
-        严格模式：claimed_user 必须命中本执行器近期的下发记录，否则拒绝
-        （不转发、不落库）；兼容模式：未命中仅告警放行，避免误杀旧执行器
-        的合法结果（如重连后回传）。
+        两级校验：
+        1. args 带 task_token 且命中登记 → 一一对应强校验（登记非消费式：
+           同一任务的逐步结果/画面帧/汇总多条消息复用同一 token，到期统一
+           清理）。校验后从 args 剥离 token，避免随结果入库/广播外泄；
+        2. 无 token 或 token 未命中（旧版执行器）→ 校验 claimed_user 命中
+           近期下发记录。
+
+        严格模式未命中即拒绝（不转发、不落库）；兼容模式仅告警放行，避免
+        误杀旧执行器的合法结果（如重连后回传）。
+        返回 True 时 args 中的 task_token 已被剥离。
         """
         if not self.is_actuator:
             return True
+
+        token = (args or {}).get('task_token')
+        if token and isinstance(args, dict):
+            # 任何分支都不把 token 带回广播/落库数据，先剥离
+            args.pop('task_token', None)
+            entry = self.actuator_task_tokens.get(token)
+            if entry is not None:
+                expected_user, _ = entry
+                if expected_user == claimed_user:
+                    return True
+                logger.warning(
+                    f"task_token 与 claimed_user 不符: 执行器={self.user_id}, "
+                    f"expected={expected_user}, claimed={claimed_user}"
+                )
+                return False
+            # token 未命中登记：可能是伪造或已过期，继续走 user 记录校验兜底
+            logger.warning(
+                f"task_token 未命中登记: 执行器={self.user_id}"
+            )
+
         if not claimed_user:
             return not auth_strict_mode()
         if claimed_user in self.actuator_recent_users:
@@ -669,6 +770,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             f"claimed_user={claimed_user}"
         )
         return True
+
 
     async def _prepare_task_dispatch(self, args: dict):
         """Resolve effective_runtime + select actuator. Returns (args, actuator, error)."""
@@ -1628,7 +1730,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
 
     async def handle_step_result(self, args: dict, user: str):
         """处理步骤执行结果（来自执行器）"""
-        if not self.verify_result_source(user):
+        if not self.verify_result_source(user, args):
             return
         logger.info(f"收到步骤结果, 目标用户: {user}, 当前Web用户: {list(SocketUserManager._web_users.keys())}")
 
@@ -1670,7 +1772,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         """
         if not args:
             return
-        if not self.verify_result_source(user):
+        if not self.verify_result_source(user, args):
             return
         web_user = SocketUserManager.get_web_user(user)
         if not web_user:
@@ -1688,7 +1790,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
 
     async def handle_page_step_result(self, args: dict, user: str):
         """处理页面步骤执行结果（来自执行器）"""
-        if not self.verify_result_source(user):
+        if not self.verify_result_source(user, args):
             return
         self._release_actuator_slots(args, 1)
         logger.info(f"收到页面步骤结果, 执行用户: {user}")
@@ -1715,7 +1817,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
 
     async def handle_case_result(self, args: dict, user: str):
         """处理用例执行结果（来自执行器）"""
-        if not self.verify_result_source(user):
+        if not self.verify_result_source(user, args):
             return
         logger.info(f"收到用例结果, 执行用户: {user}")
 
@@ -1954,6 +2056,8 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         elif task.task_type == 'batch':
             func_name = UiSocketEnum.TEST_CASE_BATCH
 
+        dispatch_args = task.model_dump()
+        actuator.register_actuator_task(actuator, dispatch_args, user)
         await actuator.send_json(SocketDataModel(
             code=ResponseCode.SUCCESS,
             msg="execute",
@@ -1961,7 +2065,17 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             is_notice=NoticeType.ACTUATOR,
             data=QueueModel(
                 func_name=func_name,
-                func_args=task.model_dump()
+                func_args=dispatch_args
             )
         ))
         return True
+
+    def _prune_task_registrations(self, now: float) -> None:
+        """清理过期的 token/用户登记，防止长连接下内存无限增长。"""
+        cutoff = now - self._TASK_TOKEN_TTL_SECONDS
+        stale_tokens = [t for t, (_, ts) in self.actuator_task_tokens.items() if ts < cutoff]
+        for t in stale_tokens:
+            self.actuator_task_tokens.pop(t, None)
+        stale_users = [u for u, ts in self.actuator_recent_users.items() if ts < cutoff]
+        for u in stale_users:
+            self.actuator_recent_users.pop(u, None)

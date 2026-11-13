@@ -89,6 +89,8 @@ class UiWebSocketService {
     const host = import.meta.env.VITE_WS_HOST || window.location.host
     const url = new URL(`${protocol}//${host}/ws/ui/web/`)
     url.searchParams.set('lang', getCurrentServerLanguage())
+    const token = useAuthStore().accessToken
+    if (token) url.searchParams.set('token', token)
     return url.toString()
   }
 
@@ -101,7 +103,7 @@ class UiWebSocketService {
       }
 
       const url = this.getWsUrl()
-      console.log('[WebSocket] Connecting to:', url)
+      console.log('[WebSocket] Connecting')
 
       this.ws = new WebSocket(url)
 
@@ -116,7 +118,7 @@ class UiWebSocketService {
       this.ws.onclose = (event) => {
         console.log('[WebSocket] Disconnected:', event.code, event.reason)
         this.connected.value = false
-        this.attemptReconnect()
+        if (![4401, 4403].includes(event.code)) this.attemptReconnect()
       }
 
       this.ws.onerror = (event) => {

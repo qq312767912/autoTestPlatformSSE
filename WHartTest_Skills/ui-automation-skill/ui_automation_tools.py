@@ -45,6 +45,61 @@ def _headers() -> dict:
     }
 
 
+_ws_token_cache = {"token": "", "expires_at": 0.0}
+
+
+def _get_ws_token(force_refresh: bool = False) -> str:
+    """用 API Key 兑换 WS 连接用 JWT（进程内缓存，过期前 60 秒主动刷新）。"""
+    import time as _time
+
+    now = _time.time()
+    if (
+        not force_refresh
+        and _ws_token_cache["token"]
+        and now < _ws_token_cache["expires_at"] - 60
+    ):
+        return _ws_token_cache["token"]
+
+    api_key_value = _api_key()
+    if not api_key_value:
+        raise RuntimeError(
+            "未配置 WHARTTEST_API_KEY，无法兑换 WebSocket 连接凭据；"
+            "请在技能环境变量中设置后再执行"
+        )
+    resp = requests.post(
+        f"{_base_url()}/api/api-keys/exchange-token/",
+        headers={"X-API-Key": api_key_value},
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"兑换 WebSocket 连接凭据失败 HTTP {resp.status_code}: {resp.text[:200]}；"
+            "请检查 WHARTTEST_API_KEY 是否有效（未禁用/未过期）"
+        )
+    body = resp.json() or {}
+    # 兼容两层结构：平台 UnifiedResponseRenderer 包装后 token 在 body.data；
+    # 若后端未启用统一渲染器则退化为 body 本身
+    data = body.get("data") if isinstance(body.get("data"), dict) else body
+    token = data.get("access") or ""
+    if not token:
+        raise RuntimeError(
+            f"兑换 WebSocket 连接凭据失败：响应中无 access token（响应体: {str(body)[:200]}）"
+        )
+    _ws_token_cache["token"] = token
+    _ws_token_cache["expires_at"] = now + int(data.get("expires_in") or 300)
+    return token
+
+
+def _ws_url_with_token() -> str:
+    """构造带认证 token 的 /ws/ui/web/ 连接地址。"""
+    return (
+        _base_url().replace('http://', 'ws://').replace('https://', 'wss://')
+        + '/ws/ui/web/?token='
+        + _get_ws_token()
+    )
+
+
+
 # 兼容旧引用
 BASE_URL = _base_url()
 API_KEY = _api_key()
@@ -76,7 +131,7 @@ def get_current_user():
         resp.raise_for_status()
         data = resp.json()
         print(f"获取当前用户信息成功，原始数据: {data}")
-        
+
         # 检查数据格式，可能是嵌套的
         if isinstance(data, dict):
             # 如果返回的是标准API格式，提取data字段
@@ -87,7 +142,7 @@ def get_current_user():
             # 如果直接返回用户数据
             elif 'id' in data:
                 return data
-                
+
         print(f"获取当前用户信息失败: 返回数据格式无效 - {data}")
         return None
     except Exception as e:
@@ -98,7 +153,7 @@ def get_current_user():
                 print(f"错误响应: {error_data}")
             except:
                 print(f"错误响应文本: {e.response.text}")
-        
+
         # 如果me端点失败，尝试通过API Key获取用户信息
         print("尝试通过API Key获取用户信息...")
         return get_user_by_api_key()
@@ -112,9 +167,9 @@ def get_user_by_api_key():
         resp = requests.get(url, headers=_headers())
         resp.raise_for_status()
         data = resp.json()
-        
+
         print(f"获取API Key列表成功，原始数据: {data}")
-        
+
         if isinstance(data, list) and len(data) > 0:
             # 获取第一个API Key的用户信息
             first_key = data[0]
@@ -125,7 +180,7 @@ def get_user_by_api_key():
                 elif isinstance(user_data, int):
                     # 如果user字段只是用户ID，返回简化数据
                     return {'id': user_data, 'username': first_key.get('user_username', f'user_{user_data}')}
-                    
+
         print("通过API Key获取用户信息失败: 无法从API Key列表中提取用户信息")
         return None
     except Exception as e:
@@ -396,7 +451,7 @@ def set_step_details(step_id: int, steps: list):
 def get_testcases(project_id: int, module_id: int = None, level: str = None, limit: int = 50):
     """
     获取测试用例列表（精简版，只返回基本信息）
-    
+
     Args:
         project_id: 项目 ID
         module_id: 模块 ID（可选）
@@ -410,7 +465,7 @@ def get_testcases(project_id: int, module_id: int = None, level: str = None, lim
         params["level"] = level
     result = _request("GET", "testcases/", params=params)
     data = result.get("data", result)
-    
+
     # 处理返回数据，只保留关键字段
     if isinstance(data, list):
         simplified = []
@@ -678,29 +733,29 @@ except ImportError:
 def execute_testcase(testcase_id: int, env_config_id: int = None, actuator_id: str = None, wait_result: bool = True, timeout: int = 120):
     """
     执行测试用例
-    
+
     Args:
         testcase_id: 测试用例 ID
         env_config_id: 环境配置 ID（可选，不传使用默认配置）
         actuator_id: 执行器 ID（可选，不传自动选择可用执行器）
         wait_result: 是否等待执行结果（默认 True）
         timeout: 等待超时时间（秒，默认 120）
-    
+
     Returns:
         执行结果或任务状态
     """
     if not WEBSOCKET_AVAILABLE:
         return {"status": "error", "message": "执行功能需要 websocket-client 模块，请运行: pip install websocket-client"}
-    
+
     import threading
     import time
-    
+
     # WebSocket 地址
-    ws_url = _base_url().replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/ui/web/'
-    
+    ws_url = _ws_url_with_token()
+
     result = {"status": "pending", "message": "任务已发送"}
     execution_done = threading.Event()
-    
+
     def on_message(ws, message):
         nonlocal result
         try:
@@ -726,12 +781,12 @@ def execute_testcase(testcase_id: int, env_config_id: int = None, actuator_id: s
                     execution_done.set()
         except Exception:
             pass
-    
+
     def on_error(ws, error):
         nonlocal result
         result = {"status": "error", "message": str(error)}
         execution_done.set()
-    
+
     def on_open(ws):
         # 发送执行命令，包含执行人信息
         cmd = {
@@ -746,7 +801,7 @@ def execute_testcase(testcase_id: int, env_config_id: int = None, actuator_id: s
             cmd["data"]["func_args"]["env_config_id"] = env_config_id
         if actuator_id:
             cmd["data"]["func_args"]["actuator_id"] = actuator_id
-        
+
         # 从API Key获取用户信息（如果可用）
         try:
             # 尝试获取当前用户信息
@@ -761,9 +816,9 @@ def execute_testcase(testcase_id: int, env_config_id: int = None, actuator_id: s
             # 如果获取用户信息失败，继续执行但不包含执行人信息
             print(f"获取当前用户信息失败: {e}")
             pass
-        
+
         ws.send(json.dumps(cmd))
-    
+
     # 连接 WebSocket
     ws = websocket.WebSocketApp(
         ws_url,
@@ -771,12 +826,12 @@ def execute_testcase(testcase_id: int, env_config_id: int = None, actuator_id: s
         on_error=on_error,
         on_open=on_open,
     )
-    
+
     # 在后台线程运行 WebSocket
     ws_thread = threading.Thread(target=ws.run_forever)
     ws_thread.daemon = True
     ws_thread.start()
-    
+
     if wait_result:
         # 等待执行结果
         if execution_done.wait(timeout=timeout):
@@ -804,7 +859,7 @@ def execute_testcase(testcase_id: int, env_config_id: int = None, actuator_id: s
 def execute_page_steps(step_id: int, env_config_id: int = None, actuator_id: str = None):
     """
     执行页面步骤（调试用）
-    
+
     Args:
         step_id: 页面步骤 ID
         env_config_id: 环境配置 ID（可选）
@@ -812,12 +867,12 @@ def execute_page_steps(step_id: int, env_config_id: int = None, actuator_id: str
     """
     if not WEBSOCKET_AVAILABLE:
         return {"status": "error", "message": "执行功能需要 websocket-client 模块，请运行: pip install websocket-client"}
-    
+
     import time
-    
-    ws_url = _base_url().replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/ui/web/'
+
+    ws_url = _ws_url_with_token()
     result = {"status": "sent", "message": "执行命令已发送"}
-    
+
     def on_open(ws):
         cmd = {
             "data": {
@@ -834,7 +889,7 @@ def execute_page_steps(step_id: int, env_config_id: int = None, actuator_id: str
         ws.send(json.dumps(cmd))
         time.sleep(1)
         ws.close()
-    
+
     ws = websocket.WebSocketApp(ws_url, on_open=on_open)
     ws.run_forever()
     return result
@@ -845,7 +900,7 @@ def execute_page_steps(step_id: int, env_config_id: int = None, actuator_id: str
 def main():
     parser = argparse.ArgumentParser(description="WHartTest UI 自动化管理工具")
     parser.add_argument("--action", required=True, help="操作名称")
-    
+
     # 通用参数
     parser.add_argument("--project_id", type=int, help="项目 ID")
     parser.add_argument("--module_id", type=int, help="模块 ID")
@@ -854,15 +909,15 @@ def main():
     parser.add_argument("--step_id", type=int, help="页面步骤 ID")
     parser.add_argument("--testcase_id", type=int, help="测试用例 ID")
     parser.add_argument("--data_id", type=int, help="公共数据 ID")
-    
+
     # 模块参数
     parser.add_argument("--parent_id", type=int, help="父模块 ID")
-    
+
     # 页面/元素参数
     parser.add_argument("--name", help="名称")
     parser.add_argument("--url", help="页面 URL")
     parser.add_argument("--description", help="描述")
-    
+
     # 元素定位参数
     parser.add_argument("--locator_type", help="定位类型")
     parser.add_argument("--locator_value", help="定位值")
@@ -873,21 +928,21 @@ def main():
     parser.add_argument("--wait_time", type=int, default=0, help="等待时间（单位：秒）")
     parser.add_argument("--is_iframe", action="store_true", help="是否在 iframe 中")
     parser.add_argument("--iframe_locator", help="iframe 定位")
-    
+
     # 批量操作参数
     parser.add_argument("--elements", help="元素列表 (JSON)")
     parser.add_argument("--steps", help="步骤列表 (JSON)")
     parser.add_argument("--page_step_ids", help="页面步骤 ID 列表 (逗号分隔)")
-    
+
     # 用例参数
     parser.add_argument("--level", help="用例等级 (P0/P1/P2/P3)")
-    
+
     # 公共数据参数
     parser.add_argument("--key", help="数据键名")
     parser.add_argument("--value", help="数据值")
     parser.add_argument("--type", type=int, default=0, help="数据类型")
     parser.add_argument("--is_enabled", action="store_true", help="是否启用")
-    
+
     # 执行记录参数
     parser.add_argument("--record_id", type=int, help="执行记录 ID")
     parser.add_argument("--batch_id", type=int, help="批量执行记录 ID")
@@ -895,7 +950,7 @@ def main():
     parser.add_argument("--status", type=int, help="状态")
     parser.add_argument("--limit", type=int, default=20, help="限制返回数量")
     parser.add_argument("--refresh", action="store_true", help="强制刷新")
-    
+
     # 环境配置参数
     parser.add_argument("--base_url", help="基础 URL")
     parser.add_argument("--browser", help="浏览器类型 (chromium/firefox/webkit)")
@@ -904,15 +959,15 @@ def main():
     parser.add_argument("--viewport_height", type=int, default=720, help="视口高度")
     parser.add_argument("--timeout", type=int, default=30000, help="超时时间（毫秒）")
     parser.add_argument("--is_default", action="store_true", help="是否默认配置")
-    
+
     # 执行参数
     parser.add_argument("--actuator_id", help="执行器 ID")
     parser.add_argument("--wait_result", action="store_true", help="等待执行结果")
     parser.add_argument("--exec_timeout", type=int, default=120, help="执行等待超时（秒）")
-    
+
     args = parser.parse_args()
     action = args.action
-    
+
     # 动作路由
     actions = {
         # 模块
@@ -995,11 +1050,11 @@ def main():
         ),
         "execute_page_steps": lambda: execute_page_steps(args.step_id, args.config_id, args.actuator_id),
     }
-    
+
     if action not in actions:
         print(json.dumps({"status": "error", "message": f"未知操作: {action}"}, ensure_ascii=False))
         sys.exit(1)
-    
+
     result = actions[action]()
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

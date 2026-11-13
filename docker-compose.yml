@@ -108,6 +108,7 @@ services:
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
       # 其他配置
+      - UI_WS_ACTUATOR_TOKEN=${UI_WS_ACTUATOR_TOKEN:-}
       - MEDIA_ROOT=${MEDIA_ROOT:-/app/data/media}
       - LANGGRAPH_CHECKPOINT_SQLITE_PATH=${LANGGRAPH_CHECKPOINT_SQLITE_PATH:-/app/data/chat_history.sqlite}
       - DJANGO_DEBUG=${DJANGO_DEBUG:-False}
