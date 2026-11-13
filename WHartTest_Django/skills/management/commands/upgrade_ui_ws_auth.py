@@ -40,7 +40,13 @@ class Command(BaseCommand):
             replacements = {}
             for file in files:
                 text = file.read_text()
-                if "def _get_ws_token(" in text or "/ws/ui/web/" not in text:
+                legacy_key = 'return (os.environ.get("WHARTTEST_API_KEY") or API_KEY).strip()'
+                corrected_key = 'return os.environ.get("WHARTTEST_API_KEY", "PUT_YOUR_WHARTTEST_API_KEY_HERE").strip()'
+                if "def _get_ws_token(" in text:
+                    if legacy_key in text:
+                        replacements[file.relative_to(root)] = text.replace(legacy_key, corrected_key)
+                    continue
+                if "/ws/ui/web/" not in text:
                     continue
                 suffix = ".replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/ui/web/'"
                 forms = ["_base_url()" + suffix, "BASE_URL" + suffix]
@@ -52,7 +58,7 @@ class Command(BaseCommand):
                 if "def _base_url(" not in text:
                     prefix += '\ndef _base_url():\n    import os\n    return (os.environ.get("WHARTTEST_BACKEND_URL") or BASE_URL).rstrip("/")\n'
                 if "def _api_key(" not in text:
-                    prefix += '\ndef _api_key():\n    import os\n    return (os.environ.get("WHARTTEST_API_KEY") or API_KEY).strip()\n'
+                    prefix += '\ndef _api_key():\n    import os\n    return os.environ.get("WHARTTEST_API_KEY", "PUT_YOUR_WHARTTEST_API_KEY_HERE").strip()\n'
                 upgrade_helper = prefix + helper
                 text += upgrade_helper
                 # 函数查找发生在模块加载后；必须放在 CLI main 调用之前。
@@ -104,11 +110,17 @@ class Command(BaseCommand):
                         raise CommandError(f"Skill {skill.pk} 的创建者缺少有效 API Key，未切换绑定")
                     api_key = key.key
                 base_version = (baseline.version if baseline else "1.0.0").split("+")[0].split("-")[0]
+                candidate_version = base_version + "-ws-auth"
+                from skills.models import SkillVersion
+                sequence = 1
+                while SkillVersion.objects.filter(skill=skill, version=candidate_version).exists():
+                    sequence += 1
+                    candidate_version = base_version + f"-ws-auth.{sequence}"
                 with transaction.atomic():
                     locked = Skill.objects.select_for_update().get(pk=skill.pk)
                     if locked.active_version_id != skill.active_version_id or locked.skill_path != skill.skill_path:
                         raise CommandError("Skill 绑定已变化，停止升级")
-                    updated, version = SkillVersionService.create_candidate_from_dir(source_dir=staged, version_override=base_version + "-ws-auth", project=skill.project, actor=skill.creator, api_key=api_key, source_type="platform_upgrade", source_metadata={"reason": "v2.9.2 WS authentication", "baseline_version": str(baseline.pk) if baseline else None, "omitted_unreferenced_legacy_files": omitted})
+                    updated, version = SkillVersionService.create_candidate_from_dir(source_dir=staged, version_override=candidate_version, project=skill.project, actor=skill.creator, api_key=api_key, source_type="platform_upgrade", source_metadata={"reason": "v2.9.2 WS authentication", "baseline_version": str(baseline.pk) if baseline else None, "omitted_unreferenced_legacy_files": omitted})
                     if updated.pk != skill.pk:
                         raise CommandError("候选版本归属不匹配，停止升级")
                     locked.active_version = version
