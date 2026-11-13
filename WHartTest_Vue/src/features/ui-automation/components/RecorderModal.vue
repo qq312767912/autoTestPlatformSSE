@@ -496,7 +496,7 @@ const text = computed(() => (
         saveLoginState: 'Save Login State',
         authNameLabel: 'Login state name',
         authNamePlaceholder: 'Enter a name (leave empty to auto-generate)',
-        saveLoginStateSuccess: 'Login state saved (cookies={cookies}, localStorage={keys}, sessionStorage={sessionKeys}), executions will auto-inject it',
+                saveLoginStateSuccess: 'Login state saved (cookies={cookies}, localStorage={keys}), executions will auto-inject it',
         saveLoginStateFailed: 'Failed to save login state',
         recordHint: 'Operate in the browser view below. Hover an element then click Assert to record an assertion.',
         selectNavHint: 'Native dropdown opened: its list cannot be shown in the canvas. Use ↓/↑ keys then Enter to pick an option (recorded automatically).',
@@ -593,7 +593,7 @@ const text = computed(() => (
         saveLoginState: '保存登录态',
         authNameLabel: '登录态名称',
         authNamePlaceholder: '填写登录态名称（留空自动生成）',
-        saveLoginStateSuccess: '登录态已保存（cookies={cookies}，localStorage={keys}，sessionStorage={sessionKeys}），执行时会自动注入',
+                saveLoginStateSuccess: '登录态已保存（cookies={cookies}，localStorage={keys}），执行时会自动注入',
         saveLoginStateFailed: '保存登录态失败',
         recordHint: '在左侧浏览器画面中操作；悬停目标元素后点击「断言」可记录断言。',
         selectNavHint: '已展开原生下拉框：列表无法在画布中显示。请用键盘 ↓/↑ 选择选项后按 Enter 确认（将自动记录为下拉选择步骤）。',
@@ -1074,8 +1074,7 @@ async function submitSaveLoginState() {
     Message.success(
       text.value.saveLoginStateSuccess
         .replace('{cookies}', String(result.cookies))
-        .replace('{keys}', String(result.local_storage_keys))
-        .replace('{sessionKeys}', String(result.session_storage_keys)),
+        .replace('{keys}', String(result.local_storage_keys)),
     )
     emit('refresh')
   } catch (e: any) {
