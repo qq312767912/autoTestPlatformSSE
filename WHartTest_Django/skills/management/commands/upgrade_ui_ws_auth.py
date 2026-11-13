@@ -89,12 +89,20 @@ class Command(BaseCommand):
                 record["omitted_unreferenced_legacy_files"] = omitted
                 for relative, text in replacements.items():
                     (staged / relative).write_text(text)
+                api_key = None
+                from skills.platform_skills import is_internal_platform_skill
+                if is_internal_platform_skill(skill.name):
+                    from api_keys.models import APIKey
+                    key = next((key for key in APIKey.objects.filter(user_id=skill.creator_id, is_active=True).order_by("-created_at") if key.is_valid()), None)
+                    if key is None:
+                        raise CommandError(f"Skill {skill.pk} 的创建者缺少有效 API Key，未切换绑定")
+                    api_key = key.key
                 base_version = (baseline.version if baseline else "1.0.0").split("+")[0].split("-")[0]
                 with transaction.atomic():
                     locked = Skill.objects.select_for_update().get(pk=skill.pk)
                     if locked.active_version_id != skill.active_version_id or locked.skill_path != skill.skill_path:
                         raise CommandError("Skill 绑定已变化，停止升级")
-                    updated, version = SkillVersionService.create_candidate_from_dir(source_dir=staged, version_override=base_version + "-ws-auth", project=skill.project, actor=skill.creator, source_type="platform_upgrade", source_metadata={"reason": "v2.9.2 WS authentication", "baseline_version": str(baseline.pk) if baseline else None, "omitted_unreferenced_legacy_files": omitted})
+                    updated, version = SkillVersionService.create_candidate_from_dir(source_dir=staged, version_override=base_version + "-ws-auth", project=skill.project, actor=skill.creator, api_key=api_key, source_type="platform_upgrade", source_metadata={"reason": "v2.9.2 WS authentication", "baseline_version": str(baseline.pk) if baseline else None, "omitted_unreferenced_legacy_files": omitted})
                     if updated.pk != skill.pk:
                         raise CommandError("候选版本归属不匹配，停止升级")
                     locked.active_version = version
