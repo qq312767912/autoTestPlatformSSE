@@ -5,7 +5,7 @@ from pathlib import Path
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
-from skills.models import Skill
+from skills.models import Skill, SkillVersion
 
 
 class Command(BaseCommand):
@@ -32,12 +32,18 @@ class Command(BaseCommand):
             .values_list('skill_path', flat=True)
         )
 
+        # 版本包独立管理：不能把 versions 根目录当作旧式 Skill 目录删除。
+        version_paths = set(SkillVersion.objects.exclude(package_path="").values_list("package_path", flat=True))
+        existing_paths.update(version_paths)
+
         removed = 0
         for project_dir in skills_root.iterdir():
             if not project_dir.is_dir():
                 continue
             for skill_dir in project_dir.iterdir():
                 if not skill_dir.is_dir():
+                    continue
+                if skill_dir.name == "versions":
                     continue
                 relative = f'skills/{project_dir.name}/{skill_dir.name}'
                 if relative not in existing_paths:

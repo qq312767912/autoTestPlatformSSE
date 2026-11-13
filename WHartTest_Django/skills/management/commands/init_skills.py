@@ -133,7 +133,7 @@ class Command(BaseCommand):
                 parsed = Skill.parse_skill_md(skill_content)
                 skill_name = parsed['name']
 
-                existing = Skill.objects.filter(name=skill_name).first()
+                existing = Skill.objects.filter(project=project, name=skill_name).first()
 
                 if existing:
                     # 条件：Skill 已激活到不可变版本包；动作：整体跳过（连描述都不改）；
