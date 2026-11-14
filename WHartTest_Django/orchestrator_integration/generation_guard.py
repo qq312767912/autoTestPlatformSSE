@@ -113,3 +113,28 @@ class GenerationInterfaceCaseGuardMiddleware(AgentMiddleware):
     async def awrap_tool_call(self, request, handler):
         updated, error = self._prepare(request)
         return error if error is not None else await handler(updated)
+
+
+class GenerationUiCaseGuardMiddleware(GenerationInterfaceCaseGuardMiddleware):
+    """UI 生成保持项目范围，并阻止通过功能用例编辑工具跳过试跑绑定。"""
+    def _prepare(self, request):
+        call = request.tool_call or {}
+        args = call.get('args') or {}
+        if args.get('commands'):
+            return request, _error(request, 'UI 生成请逐条执行命令，以便校验任务范围和试跑结果。')
+        command = str(args.get('command') or '')
+        try:
+            tokens = shlex.split(command) if command else []
+        except ValueError:
+            return request, _error(request, '命令引用不完整')
+        action = _flag(tokens, '--action')[0] if command else call.get('name', '')
+        if action in {'edit_testcase', 'create_interface_case', 'update_interface_case', 'run_interface_case', 'run_testcase'}:
+            return request, _error(request, '当前是 UI 生成任务；功能用例绑定必须通过 bind_generated_ui_case 验证成功试跑记录。')
+        # Reuse project validation without the API save/action mapping.
+        for index, token in enumerate(tokens):
+            value = tokens[index + 1] if token == '--project_id' and index + 1 < len(tokens) else token.split('=', 1)[1] if token.startswith('--project_id=') else None
+            if value is not None and str(value) != self.project_id:
+                return request, _error(request, 'UI 生成任务禁止切换项目')
+        if args.get('project_id') is not None and str(args['project_id']) != self.project_id:
+            return request, _error(request, 'UI 生成任务禁止切换项目')
+        return request, None

@@ -4,7 +4,7 @@ from knowledge_evolution.hub_assessment_models import SkillAgentTaskBinding
 from .generation_guard import GenerationInterfaceCaseGuardMiddleware
 from .interface_case_instructions import INTERFACE_CASE_LIVE_VERIFICATION_INSTRUCTION
 
-GENERATION_MODES = frozenset({'interface_case', 'scenario'})
+GENERATION_MODES = frozenset({'interface_case', 'scenario', 'ui_case'})
 
 
 def resolve_generation_mode(*, session_id, actor, project_id, message=''):
@@ -26,6 +26,9 @@ def resolve_generation_mode(*, session_id, actor, project_id, message=''):
 
 
 def append_generation_instructions(prompt, mode):
+    if mode == "ui_case":
+        from .ui_generation_runtime import UI_GENERATION_INSTRUCTION
+        return (prompt or "") + "\n\n" + UI_GENERATION_INSTRUCTION
     if mode not in GENERATION_MODES:
         return prompt
     return (prompt or '') + '\n\n' + INTERFACE_CASE_LIVE_VERIFICATION_INSTRUCTION
@@ -33,6 +36,9 @@ def append_generation_instructions(prompt, mode):
 
 def generation_middleware(middleware, mode, project_id=None):
     result = list(middleware or [])
-    if mode in GENERATION_MODES:
+    if mode == "ui_case":
+        from .generation_guard import GenerationUiCaseGuardMiddleware
+        result.append(GenerationUiCaseGuardMiddleware(mode, project_id))
+    if mode in GENERATION_MODES - {"ui_case"}:
         result.append(GenerationInterfaceCaseGuardMiddleware(mode, project_id))
     return result

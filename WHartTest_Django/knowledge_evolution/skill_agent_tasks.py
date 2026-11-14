@@ -57,16 +57,23 @@ class SkillAgentTaskViewSet(viewsets.ViewSet):
         project = self.project(request)
         version = get_object_or_404(SkillVersion.objects.select_related('skill', 'release'), pk=request.data.get('source_version_id'))
         generation_mode = str(request.data.get('generation_mode') or '')
-        if generation_mode not in {'', 'interface_case', 'scenario'}:
+        if generation_mode not in {'', 'interface_case', 'scenario', 'ui_case'}:
             return Response({'detail': '不支持的生成模式'}, status=400)
         try:
+            context = {}
+            if generation_mode == 'ui_case':
+                from orchestrator_integration.ui_generation_runtime import validate_ui_context
+                context = validate_ui_context(project, request.user, request.data.get('generation_context'))
             verify_source(version)
             if not version.is_runnable:
                 raise ValidationError('此版本当前不可运行')
             with transaction.atomic():
                 session = ChatSession.objects.create(session_id=uuid.uuid4().hex, user=request.user, project=project,
                     title=f'Skill 任务 · {version.skill.name} @ {version.version}'[:200])
-                binding = SkillAgentTaskBinding.objects.create(session=session, source_version=version, source_sha256=version.package_sha256, generation_mode=generation_mode)
+                if generation_mode == 'ui_case' and context.get('auth_state_id'):
+                    session.auth_state_id = context['auth_state_id']
+                    session.save(update_fields=['auth_state'])
+                binding = SkillAgentTaskBinding.objects.create(session=session, source_version=version, source_sha256=version.package_sha256, generation_mode=generation_mode, generation_context=context)
             return Response(binding_view(binding), status=201)
         except ValidationError as exc:
             return Response({'detail': '；'.join(exc.messages)}, status=400)

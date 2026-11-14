@@ -34,6 +34,7 @@
         />
       </div>
       <div class="action-buttons">
+        <a-button v-if="canGenerateUiCases" :disabled="!projectId" @click="generationVisible=true">{{ tl('AI 生成 UI 用例') }}</a-button>
         <a-select
           v-model="selectedActuator"
           :placeholder="pageText.selectActuator"
@@ -202,6 +203,7 @@
 </a-form>
     </a-modal>
 
+    <GenerateUiCasesModal v-model:visible="generationVisible" />
     <BusinessCaseConversionModal v-if="projectId" v-model:visible="conversionVisible" :project-id="projectId" :modules="moduleOptions" :initial-module-id="props.selectedModuleId || filters.module" @saved="fetchTestCases" />
 
     <!-- 步骤管理抽屉 -->
@@ -224,6 +226,7 @@
 </template>
 
 <script setup lang="ts">
+import GenerateUiCasesModal from '../components/generate/GenerateUiCasesModal.vue'
 import BusinessCaseConversionModal from '../components/BusinessCaseConversionModal.vue'
 import { useAuthStore } from '@/store/authStore'
 import FileAttachmentPicker from '@/features/file-management/components/FileAttachmentPicker.vue'
@@ -245,6 +248,8 @@ const props = defineProps<{
 
 const authStore=useAuthStore()
 const conversionVisible=ref(false)
+const generationVisible=ref(false)
+const canGenerateUiCases=computed(()=>canConvertBusinessCases.value && authStore.hasPermission('testcases.change_testcase'))
 const canConvertBusinessCases=computed(()=>authStore.hasPermission('ui_automation.add_uitestcase') && authStore.hasPermission('testcases.view_testcase'))
 const projectStore = useProjectStore()
 const projectId = computed(() => projectStore.currentProject?.id)

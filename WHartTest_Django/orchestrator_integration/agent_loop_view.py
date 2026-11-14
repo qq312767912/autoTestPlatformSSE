@@ -1643,6 +1643,8 @@ class AgentLoopStreamAPIView(View):
                 ),
             )
             tools.extend(builtin_tools)
+            from .ui_generation_runtime import ui_generation_tools
+            tools.extend(ui_generation_tools(getattr(request, "_api_generation_mode", ""), session_id, request.user.id, project_id))
             logger.info(f"AgentLoopStreamAPI: Added {len(builtin_tools)} builtin tools")
 
             # 7. 获取或创建 ChatSession（使用 get_or_create 避免竞态条件）
@@ -2520,6 +2522,13 @@ class AgentLoopStreamAPIView(View):
                 )
 
         # 5.1 在加载 LLM/工具前完成登录态绑定；Cookie/token 不进入模型参数。
+        if getattr(request, "_api_generation_mode", "") == "ui_case":
+            from .ui_generation_runtime import get_binding
+            ui_binding = await sync_to_async(get_binding)(session_id, request.user.id, project_id)
+            expected_auth = ui_binding.generation_context.get("auth_state_id")
+            if "auth_state_id" in body_data and str(body_data.get("auth_state_id") or "") != str(expected_auth or ""):
+                return api_error_response("UI 生成任务登录态已锁定，请重新创建任务", 409)
+            body_data["auth_state_id"] = expected_auth
         try:
             binding = await sync_to_async(bind_chat_auth_state)(
                 user=request.user,
@@ -3016,6 +3025,8 @@ class AgentLoopResumeAPIView(View):
                 except Exception:
                     pass
 
+                from .ui_generation_runtime import ui_generation_tools
+                tools.extend(ui_generation_tools(resume_generation_mode, session_id, user.id, project_id))
                 tool_names = [t.name for t in tools] if tools else []
                 middleware = await sync_to_async(get_middleware_from_config)(
                     active_config,
