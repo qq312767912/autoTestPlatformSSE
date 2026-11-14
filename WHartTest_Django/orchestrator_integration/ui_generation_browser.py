@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import subprocess
+import shutil
 import tempfile
 import threading
 from pathlib import Path
@@ -25,7 +26,9 @@ def run_ui_browser(binding, command, arguments):
     key = 'ui-gen-' + digest
     env = os.environ.copy()
     env['AGENT_BROWSER_IDLE_TIMEOUT_MS'] = '900000'
-    env['AGENT_BROWSER_EXECUTABLE_PATH'] = os.environ.get('RECORDER_BROWSER_EXECUTABLE_PATH', '/usr/bin/chromium')
+    env['AGENT_BROWSER_EXECUTABLE_PATH'] = (os.environ.get('AGENT_BROWSER_EXECUTABLE_PATH') or os.environ.get('RECORDER_BROWSER_EXECUTABLE_PATH') or shutil.which('chromium') or shutil.which('chromium-browser') or '')
+    if not env['AGENT_BROWSER_EXECUTABLE_PATH']:
+        raise ValueError('未配置平台浏览器可执行文件')
     env['AGENT_BROWSER_MAX_OUTPUT'] = '24000'
     env.pop('AGENT_BROWSER_PROFILE', None)
     env.pop('AGENT_BROWSER_SESSION_NAME', None)
