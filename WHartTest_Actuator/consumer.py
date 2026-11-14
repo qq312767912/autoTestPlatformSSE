@@ -34,7 +34,7 @@ class TaskConsumer:
 
     def __init__(self, ws_client: WebSocketClient, api_base_url: str,
                  config: Any = None,
-                 api_username: str = 'admin', api_password: str = 'admin123',
+                 api_username: str = 'admin', api_password: str = '',
                  config_path: str = 'config.toml'):
         self.ws_client = ws_client
         self.api_base_url = api_base_url.rstrip('/')
@@ -127,24 +127,28 @@ class TaskConsumer:
         if self._api_token:
             return self._api_token
 
-        url = f"{self.api_base_url}/api/token/"
+        api_key = str(getattr(self.config, 'api_key', '') or '').strip()
+        url = f"{self.api_base_url}/api/api-keys/exchange-token/" if api_key else f"{self.api_base_url}/api/token/"
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(url, json={
-                    "username": self.api_username,
-                    "password": self.api_password
-                })
+                if api_key:
+                    response = await client.post(url, headers={"X-API-Key": api_key})
+                else:
+                    response = await client.post(url, json={
+                        "username": self.api_username,
+                        "password": self.api_password
+                    })
                 if response.status_code == 200:
                     data = response.json()
                     if data.get('status') == 'success' and data.get('data'):
-                        self._api_token = data['data'].get('access')
+                        self._api_token = data['data'].get('access') or data['data'].get('token')
                     else:
-                        self._api_token = data.get('access')
+                        self._api_token = data.get('access') or data.get('token')
                     logger.info("获取API Token成功")
                     return self._api_token
                 else:
                     detail = response.text[:500].replace('\n', ' ')
-                    logger.error(f"获取Token失败: {response.status_code}, body={detail}")
+                    logger.error(f"获取Token失败: {response.status_code}, body={detail.replace(api_key, '[REDACTED]') if api_key else detail}")
                     return None
         except Exception as e:
             logger.error(f"获取Token请求失败: {e}")

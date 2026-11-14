@@ -41,4 +41,7 @@ def generation_middleware(middleware, mode, project_id=None):
         result.append(GenerationUiCaseGuardMiddleware(mode, project_id))
     if mode in GENERATION_MODES - {"ui_case"}:
         result.append(GenerationInterfaceCaseGuardMiddleware(mode, project_id))
+    if mode in GENERATION_MODES:
+        from .generation_history_guard import GenerationHistoryPairingMiddleware
+        result.append(GenerationHistoryPairingMiddleware())
     return result

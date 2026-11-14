@@ -725,7 +725,8 @@ def _build_sanitized_messages(messages: List[Any]) -> tuple[List[Any], int]:
         for tc_id in pending_call_ids:
             result.append(
                 ToolMessage(
-                    content="[Tool execution was interrupted]",
+                    content="[Tool execution was interrupted; no result was verified. Retry the operation if needed.]",
+                    status="error",
                     tool_call_id=tc_id,
                     name=pending_call_names.get(tc_id, "unknown"),
                 )
@@ -774,6 +775,7 @@ def _build_sanitized_messages(messages: List[Any]) -> tuple[List[Any], int]:
                     result.append(
                         ToolMessage(
                             content="[Tool output removed: content was invalid or too large]",
+                            status="error",
                             tool_call_id=tc_id,
                             name=getattr(msg, "name", None)
                             or pending_call_names.get(tc_id, "unknown"),

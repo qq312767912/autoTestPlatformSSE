@@ -2492,6 +2492,22 @@ const closeSystemPromptModal = async () => {
   await checkPromptStatusAfterClose();
 };
 
+// 精确版本任务由服务端提供职责指令，无需先创建个人提示词。
+const shouldSuggestPromptSetup = async (): Promise<boolean> => {
+  const routeTask = typeof route.query.skill_task === 'string' ? route.query.skill_task : '';
+  const target = routeTask || sessionId.value || localStorage.getItem('langgraph_session_id');
+  const project = projectStore.currentProjectId;
+  if (!target || !project) return true;
+  try {
+    const binding = await getSkillAgentTask(Number(project), target);
+    const current = (typeof route.query.skill_task === 'string' ? route.query.skill_task : '') || sessionId.value || localStorage.getItem('langgraph_session_id');
+    return current === target && projectStore.currentProjectId === project && !binding;
+  } catch {
+    // 任务身份未确认时不弹出无关的配置引导，绑定读取失败由任务栏提示。
+    return false;
+  }
+};
+
 // 关闭弹窗后检查提示词状态
 const checkPromptStatusAfterClose = async () => {
   try {
@@ -2505,7 +2521,7 @@ const checkPromptStatusAfterClose = async () => {
       hasPrompts.value = prompts.length > 0;
 
       // 如果还是没有提示词，提示用户
-      if (!hasPrompts.value) {
+      if (!hasPrompts.value && await shouldSuggestPromptSetup()) {
         Message.warning(pageText.value.addPromptFirst);
       }
     }
@@ -2562,7 +2578,7 @@ const checkPromptStatus = async () => {
       console.log('📝 提示词状态检查完成:', { hasPrompts: hasPrompts.value, count: prompts.length });
 
       // 如果没有提示词，自动弹出管理弹窗
-      if (!hasPrompts.value) {
+      if (!hasPrompts.value && await shouldSuggestPromptSetup()) {
         console.log('⚠️ 没有提示词，自动弹出管理弹窗');
         isSystemPromptModalVisible.value = true;
       }

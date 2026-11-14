@@ -85,8 +85,8 @@ class InterfaceGuardTests(SimpleTestCase):
         self.assertEqual(append_generation_instructions('base', ''), 'base')
         for mode in ('interface_case', 'scenario'):
             self.assertIn('未试跑不得宣称', append_generation_instructions('base', mode))
-        self.assertEqual(len(generation_middleware([], 'interface_case')), 1)
-        self.assertEqual(len(generation_middleware([], 'scenario')), 1)
+        self.assertEqual(len(generation_middleware([], 'interface_case')), 2)
+        self.assertEqual(len(generation_middleware([], 'scenario')), 2)
 
 
 class ApiGenerationBindingTests(TestCase):
