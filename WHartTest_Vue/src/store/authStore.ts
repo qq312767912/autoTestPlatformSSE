@@ -17,6 +17,7 @@ interface User {
   first_name: string;
   last_name: string;
   is_staff: boolean;
+  is_superuser?: boolean;
   is_active: boolean;
   groups: any[];
 }
@@ -251,7 +252,7 @@ export const useAuthStore = defineStore('auth', {
       }
       
       // 管理员拥有所有权限
-      if (this.user.is_staff) {
+      if (this.user.is_superuser) {
         return true;
       }
       
@@ -302,8 +303,10 @@ export const useAuthStore = defineStore('auth', {
         return;
       }
       
+      const userId = this.user.id;
       try {
-        const response = await getUserPermissions(this.user.id);
+        const response = await getUserPermissions(userId);
+        if (this.user?.id !== userId || !this.isAuthenticated) return;
         if (response.success && response.data) {
           // 直接存储权限对象数组，不再转换为字符串
           this.setUserPermissions(response.data);
@@ -316,6 +319,7 @@ export const useAuthStore = defineStore('auth', {
         }
       } catch (error) {
         // 接口报错时，清空权限（安全策略）
+        if (this.user?.id !== userId || !this.isAuthenticated) return;
         this.setUserPermissions([]);
         console.error('获取用户权限失败:', error);
       }

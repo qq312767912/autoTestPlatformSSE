@@ -39,7 +39,7 @@
                     {{ activeEntityType === 'user' ? (entity as User).username : (entity as Organization).name }}
                   </div>
                   <div class="entity-meta">
-                    {{ activeEntityType === 'user' ? (entity as User).email : `ID: ${entity.id}` }}
+                    {{ activeEntityType === 'user' ? (entity as User).email : `编号：${entity.id}` }}
                   </div>
                 </div>
               </div>

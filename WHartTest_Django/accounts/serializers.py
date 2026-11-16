@@ -1,3 +1,4 @@
+from .permission_labels import chinese_label, permission_dependencies
 from django.contrib.auth.models import User, Group, Permission
 from django.contrib.contenttypes.models import ContentType
 from rest_framework import serializers
@@ -430,6 +431,7 @@ class UserDetailSerializer(serializers.ModelSerializer):
             "first_name",
             "last_name",
             "is_staff",
+            "is_superuser",
             "is_active",
             "groups",
         )  # 根据需要添加更多字段
@@ -536,6 +538,16 @@ class ContentTypeSerializer(serializers.ModelSerializer):
             "model_en",
             "model_verbose",
         )
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        fallback = f"业务对象（{instance.pk}）"
+        for field in ("model_cn", "model_verbose"):
+            data[field] = chinese_label(data.get(field), fallback)
+        data["app_label_cn"] = chinese_label(data.get("app_label_cn"), "系统管理")
+        if data.get("app_label_subcategory"):
+            data["app_label_subcategory"] = chinese_label(data["app_label_subcategory"], "其他功能")
+        return data
 
     def get_app_label_cn(self, obj):
         """
@@ -1250,6 +1262,16 @@ class PermissionSerializer(serializers.ModelSerializer):
         model = Permission
         fields = ("id", "name", "name_cn", "name_en", "codename", "content_type")
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        action = instance.codename.split("_", 1)[0]
+        verb = {"add": "添加", "change": "修改", "delete": "删除", "view": "查看"}.get(action)
+        if verb:
+            data["name_cn"] = verb + data["content_type"]["model_cn"]
+        else:
+            data["name_cn"] = chinese_label(data["name_cn"], f"业务操作权限（{instance.pk}）")
+        return data
+
     def get_name_cn(self, obj):
         """
         返回权限名称的中文翻译。
@@ -1392,14 +1414,14 @@ class UpdateUserPermissionsSerializer(serializers.Serializer):
         from django.contrib.auth.models import Permission
 
         if not value:  # 如果是空列表，直接返回
-            return value
+            return permission_dependencies(value)
 
         # 检查所有权限ID是否有效
         existing_count = Permission.objects.filter(id__in=value).count()
         # 条件：权限 ID 非法；动作：阻断更新；结果：避免 set() 后出现不可预期的部分更新。
         if existing_count != len(set(value)):
             raise serializers.ValidationError("一个或多个权限ID无效。")
-        return value
+        return permission_dependencies(value)
 
 
 class UpdateGroupPermissionsSerializer(serializers.Serializer):
@@ -1415,14 +1437,14 @@ class UpdateGroupPermissionsSerializer(serializers.Serializer):
         from django.contrib.auth.models import Permission
 
         if not value:  # 如果是空列表，直接返回
-            return value
+            return permission_dependencies(value)
 
         # 检查所有权限ID是否有效
         existing_count = Permission.objects.filter(id__in=value).count()
         # 条件：权限 ID 非法；动作：阻断更新；结果：避免用户组权限被写入不完整集合。
         if existing_count != len(set(value)):
             raise serializers.ValidationError("一个或多个权限ID无效。")
-        return value
+        return permission_dependencies(value)
 
 
 class MyTokenObtainPairSerializer(BaseTokenObtainPairSerializer):

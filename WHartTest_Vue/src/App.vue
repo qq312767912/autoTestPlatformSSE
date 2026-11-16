@@ -5,7 +5,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'; // 导入 onMounted 生命周期钩子，用于组件初次挂载后执行初始化逻辑。
+import { onMounted, onUnmounted } from 'vue'; // 导入 onMounted 生命周期钩子，用于组件初次挂载后执行初始化逻辑。
 import { ConfigProvider as AConfigProvider } from '@arco-design/web-vue';
 import { useAuthStore } from '@/store/authStore'; // 导入认证状态 store 的组合式函数，用于访问登录态能力。
 import { useAppI18n } from '@/composables/useAppI18n';
@@ -16,9 +16,23 @@ const { arcoLocale } = useAppI18n();
 
 useLegacyDomTranslation();
 
+// 管理员在另一窗口授权后，恢复焦点或最多30秒即可同步菜单与按钮。
+const refreshPermissions = () => {
+  if (authStore.isAuthenticated && !document.hidden) void authStore.loadUserPermissions();
+};
+let permissionsTimer: ReturnType<typeof setInterval> | undefined;
+onUnmounted(() => {
+  window.removeEventListener('focus', refreshPermissions);
+  document.removeEventListener('visibilitychange', refreshPermissions);
+  if (permissionsTimer) clearInterval(permissionsTimer);
+});
+
 // 在应用启动时检查认证状态
 onMounted(() => { // 在根组件挂载完成后执行一次初始化回调。
-  authStore.checkAuthStatus(); // 触发认证状态校验（如读取本地 token 并同步登录状态）。
+  authStore.checkAuthStatus();
+  window.addEventListener('focus', refreshPermissions);
+  document.addEventListener('visibilitychange', refreshPermissions);
+  permissionsTimer = setInterval(refreshPermissions, 30_000); // 触发认证状态校验（如读取本地 token 并同步登录状态）。
   console.log('App mounted, checking auth status'); // 输出调试日志，标记应用启动时已执行认证检查。
 });
 </script>

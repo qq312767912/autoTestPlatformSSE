@@ -149,13 +149,8 @@ class GitLabConnectionViewSet(viewsets.ModelViewSet):
     queryset = GitLabConnection.objects.annotate(repository_count=Count("repositories", distinct=True))
     serializer_class = GitLabConnectionSerializer
     permission_classes = [IsAuthenticated, HasModelPermission]
-    def _admin(self):
-        if not (self.request.user.is_superuser or self.request.user.is_staff):
-            raise PermissionDenied("仅平台管理员可维护 GitLab 连接")
-    def perform_create(self, serializer): self._admin(); serializer.save()
-    def perform_update(self, serializer): self._admin(); serializer.save()
+    # 模型权限由HasModelPermission按新增、修改、删除分别校验；显式授权不再受staff身份限制。
     def destroy(self, request, *args, **kwargs):
-        self._admin()
         connection = self.get_object()
         repository_count = connection.repositories.count()
         if repository_count:

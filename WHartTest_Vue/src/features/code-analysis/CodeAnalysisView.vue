@@ -7,7 +7,7 @@
         <p>对代码变更进行多维审查，识别风险、评估业务影响，并生成可执行的测试需求与回归建议。</p>
       </div>
       <div class="hero-actions">
-        <a-button v-if="isPlatformAdmin" @click="openLlmConfig"><template #icon><icon-settings /></template>审查模型配置</a-button>
+        <a-button v-if="canViewLlmConfig" @click="openLlmConfig"><template #icon><icon-settings /></template>审查模型配置</a-button>
         <a-button v-if="canViewRepositories || canViewConnections || canManageCredentials" @click="configVisible = true"><template #icon><icon-settings /></template>审查源配置</a-button>
         <a-button v-if="canAddTasks && canViewRepositories" type="primary" @click="openCreate"><template #icon><icon-plus /></template>新建分析</a-button>
       </div>
@@ -246,7 +246,7 @@
       <a-form layout="vertical"><a-form-item label="目标用例模块" required><a-select v-model="convertModuleId" placeholder="选择当前项目下的用例模块"><a-option v-for="module in testcaseModules" :key="module.id" :value="module.id">{{ module.name }}</a-option></a-select></a-form-item></a-form>
     </a-modal>
 
-    <a-modal v-model:visible="llmConfigVisible" title="代码审查专用 LLM" :ok-loading="llmConfigSaving" width="680px" @ok="saveLlmConfig">
+    <a-modal v-model:visible="llmConfigVisible" title="代码审查专用 LLM" :ok-loading="llmConfigSaving" :ok-button-props="{ disabled: llmConfigForm.id ? !canChangeLlmConfig : !canAddLlmConfig }" width="680px" @ok="saveLlmConfig">
       <a-alert type="info" style="margin-bottom:16px">此配置只用于代码审查、OpenCodeReview、迭代总结和风险测试点，不影响平台对话及其他 AI 功能。API Key 加密保存且不会回显。</a-alert>
       <a-form :model="llmConfigForm" layout="vertical">
         <a-form-item label="从已有 LLM 配置复制">
@@ -256,7 +256,7 @@
                 {{ item.config_name }}（{{ item.name }}）{{ item.is_active ? ' · 当前启用' : '' }}
               </a-option>
             </a-select>
-            <a-button type="primary" :disabled="!selectedPlatformLlmId" :loading="platformLlmCopying" @click="usePlatformLlmConfig">复制并使用</a-button>
+            <a-button type="primary" :disabled="!selectedPlatformLlmId || !canAddLlmConfig" :loading="platformLlmCopying" @click="usePlatformLlmConfig">复制并使用</a-button>
           </div>
           <template #extra>密钥由后端直接复制，不会发送到浏览器；复制后可在下方独立调整。</template>
         </a-form-item>
@@ -270,7 +270,7 @@
           <a-col :span="8"><a-form-item label="最大重试次数"><a-input-number v-model="llmConfigForm.max_retries" :min="0" :max="10" /></a-form-item></a-col>
           <a-col :span="6"><a-form-item label="启用"><a-switch v-model="llmConfigForm.is_active" /></a-form-item></a-col>
         </a-row>
-        <a-space><a-button :disabled="!llmConfigForm.id" :loading="llmConfigTesting" @click="testLlmConfig">测试连接</a-button><a-tag v-if="llmConfigForm.has_api_key" color="green">密钥已配置</a-tag></a-space>
+        <a-space><a-button :disabled="!llmConfigForm.id || !canAddLlmConfig" :loading="llmConfigTesting" @click="testLlmConfig">测试连接</a-button><a-tag v-if="llmConfigForm.has_api_key" color="green">密钥已配置</a-tag></a-space>
       </a-form>
     </a-modal>
 
@@ -378,6 +378,9 @@ import type { KnowledgeBase } from '@/features/knowledge/types/knowledge';
 const projectStore = useProjectStore();
 const authStore = useAuthStore();
 const isPlatformAdmin = computed(() => !!authStore.currentUser?.is_staff);
+const canViewLlmConfig = computed(() => authStore.hasPermission('code_analysis.view_codeanalysisllmconfig'));
+const canAddLlmConfig = computed(() => authStore.hasPermission('code_analysis.add_codeanalysisllmconfig'));
+const canChangeLlmConfig = computed(() => authStore.hasPermission('code_analysis.change_codeanalysisllmconfig'));
 const canAddTasks = computed(() => authStore.hasPermission('code_analysis.add_analysistask'));
 const canChangeTasks = computed(() => authStore.hasPermission('code_analysis.change_analysistask'));
 const canDeleteTasks = computed(() => authStore.hasPermission('code_analysis.delete_analysistask'));
@@ -638,8 +641,8 @@ async function loadBase(){
   const [loadedConnections,loadedRepositories,loadedDocuments,loadedKnowledgeBases]=await Promise.all([
     canViewConnections.value ? api.getConnections() : Promise.resolve([]),
     canViewRepositories.value ? api.getRepositories(id) : Promise.resolve([]),
-    api.getProjectDocuments(id),
-    KnowledgeService.getKnowledgeBases({project:id,is_active:true,page_size:100}),
+    authStore.hasPermission('requirements.view_requirementdocument') ? api.getProjectDocuments(id) : Promise.resolve([]),
+    authStore.hasPermission('knowledge.view_knowledgebase') ? KnowledgeService.getKnowledgeBases({project:id,is_active:true,page_size:100}) : Promise.resolve([]),
   ]);
   connections.value=loadedConnections;repositories.value=loadedRepositories;projectDocuments.value=loadedDocuments;
   knowledgeBases.value=Array.isArray(loadedKnowledgeBases)?loadedKnowledgeBases:(loadedKnowledgeBases.results||[]);

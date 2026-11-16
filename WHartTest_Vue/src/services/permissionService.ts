@@ -148,6 +148,22 @@ export const getPermissionList = async (params?: PaginationParams): Promise<Perm
   }
 };
 
+/** 权限树必须读取完整目录；兼容启用分页的部署，不能依赖单个超大page_size。 */
+export const getAllPermissions = async (): Promise<PermissionListResponse> => {
+  const permissions = new Map<number, Permission>();
+  for (let page = 1; ; page += 1) {
+    const response = await getPermissionList({ page, pageSize: 200 });
+    if (!response.success || !response.data) return response;
+    const previousCount = permissions.size;
+    response.data.forEach(permission => permissions.set(permission.id, permission));
+    const total = response.total ?? permissions.size;
+    if (permissions.size >= total) return { success: true, data: [...permissions.values()], total };
+    if (permissions.size === previousCount) {
+      return { success: false, error: '权限目录加载不完整，请刷新后重试' };
+    }
+  }
+};
+
 /**
  * 获取特定权限详情
  * @param permissionId 权限ID
@@ -213,7 +229,7 @@ export const getPermissionDetail = async (permissionId: number): Promise<{ succe
  * @param userId 用户ID
  * @returns 返回一个Promise，解析为包含用户权限列表的响应对象
  */
-export const getUserPermissions = async (userId: number): Promise<PermissionListResponse> => {
+export const getUserPermissions = async (userId: number, scope: 'effective' | 'direct' | 'inherited' = 'effective'): Promise<PermissionListResponse> => {
   const authStore = useAuthStore();
   const accessToken = authStore.getAccessToken;
 
@@ -226,6 +242,7 @@ export const getUserPermissions = async (userId: number): Promise<PermissionList
 
   try {
     const response = await axios.get(`${API_BASE_URL}/accounts/users/${userId}/permissions/`, {
+      params: { scope },
       headers: {
         'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json',

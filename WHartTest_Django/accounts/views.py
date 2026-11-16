@@ -626,41 +626,25 @@ class UserViewSet(viewsets.ModelViewSet):
         获取用户的全部权限（含直接权限与用户组继承权限）。
         """
         user = self.get_object()
-        permission_strings = (
-            user.get_all_permissions()
-        )  # 返回“应用名.权限代号”格式的权限字符串集合
-
-        # 条件：用户无任何权限；动作：返回空查询集；结果：统一后续分页与序列化分支处理。
-        if not permission_strings:
-            all_perms_qs = Permission.objects.none()
-        else:
-            # 条件：存在权限字符串；动作：折叠成“或”查询条件并映射为权限对象；结果：可统一走数据库查询与排序。
-            q_objects = Q()
-            for perm_string in permission_strings:
-                try:
-                    app_label, codename = perm_string.split(".")
-                    q_objects |= Q(content_type__app_label=app_label) & Q(
-                        codename=codename
-                    )
-                except ValueError:
-                    # 条件：权限字符串格式非法；动作：忽略当前条目；结果：单条脏数据不会影响整体权限查询。
-                    pass
-
-            # 条件：存在可用查询条件；动作：查询并排序；结果：返回可读性稳定的权限列表。
-            if q_objects:
-                all_perms_qs = Permission.objects.filter(q_objects).order_by(
-                    "content_type__app_label", "codename"
-                )
+        scope = request.query_params.get("scope", "effective")
+        if scope == "direct":
+            all_perms_qs = user.user_permissions.all()
+        elif scope == "inherited":
+            all_perms_qs = Permission.objects.filter(group__user=user).distinct()
+        elif scope == "effective":
+            if user.is_superuser:
+                all_perms_qs = Permission.objects.all()
             else:
-                # 条件：原始权限字符串非空但全部无法解析；动作：返回空查询集；结果：接口稳定返回空列表而不是报错。
-                all_perms_qs = Permission.objects.none()
+                all_perms_qs = Permission.objects.filter(
+                    Q(user=user) | Q(group__user=user)
+                ).distinct()
+        else:
+            return Response({"error": "权限范围无效"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 条件：分页器生效；动作：返回分页响应；结果：权限列表在大数据量下仍可稳定加载。
-        page = self.paginate_queryset(all_perms_qs)
-        if page is not None:
-            serializer = PermissionSerializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-
+        # 鉴权与授权编辑需要完整集合，不能被普通列表的分页配置截断。
+        all_perms_qs = all_perms_qs.select_related("content_type").order_by(
+            "content_type__app_label", "codename", "id"
+        )
         serializer = PermissionSerializer(all_perms_qs, many=True)
         return Response(serializer.data)
 

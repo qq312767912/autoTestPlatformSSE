@@ -23,6 +23,7 @@
           <a-button
             type="primary"
             :loading="saveLoading"
+            :disabled="!catalogReady || !entityPermissionsReady"
             @click="handleSavePermissions"
           >
             <template #icon><icon-save /></template>
@@ -31,6 +32,10 @@
         </a-space>
       </div>
     </div>
+
+    <div v-if="type === 'user'" class="permission-source-note">勾选项为用户直接授权；标记“组织继承”的权限已生效，需到对应组织调整。代码审查授权会同时补齐“查看项目”，但仍须加入目标项目。</div>
+
+    <div v-if="type === 'group'">代码审查授权会同时补齐“查看项目”，用户仍须加入目标项目。</div>
 
     <!-- 权限树 -->
     <div class="tree-container">
@@ -62,6 +67,7 @@
                 >
                   {{ text.existing }}
                 </a-tag>
+                <a-tag v-if="!nodeData.isGroup && nodeData.inherited" color="arcoblue" size="small">组织继承</a-tag>
               </div>
             </template>
           </a-tree>
@@ -76,6 +82,7 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
 import { IconSave } from '@arco-design/web-vue/es/icon';
+import { useAuthStore } from '@/store/authStore';
 import { useAppI18n } from '@/composables/useAppI18n';
 import {
   deduplicateById,
@@ -83,7 +90,7 @@ import {
   permissionIdToKey,
 } from './permissionTreeState';
 import {
-  getPermissionList,
+  getAllPermissions,
   getUserPermissions,
   getGroupPermissions,
   updateUserPermissions,
@@ -97,6 +104,7 @@ interface PermissionTreeNode {
   title: string;
   isGroup: boolean;
   hasPermission?: boolean;
+  inherited?: boolean;
   children?: PermissionTreeNode[];
   app_label?: string;
   model?: string;
@@ -160,11 +168,14 @@ const text = computed(() => (
 // 响应式数据
 const loading = ref(false);
 const saveLoading = ref(false);
+const catalogReady = ref(false);
+const entityPermissionsReady = ref(false);
 const searchKeyword = ref('');
 
 // 权限数据
 const allPermissions = ref<Permission[]>([]);
 const userPermissions = ref<Permission[]>([]);
+const inheritedPermissions = ref<Permission[]>([]);
 
 // 树形数据
 const permissionTreeData = computed(() => {
@@ -280,6 +291,7 @@ const buildPermissionTree = (permissions: Permission[], userPerms: Permission[])
               title: permission.name_cn || permission.name,
               isGroup: false,
               hasPermission: userPermIds.has(permission.id),
+              inherited: inheritedPermissions.value.some(item => item.id === permission.id),
               permission,
             })),
           })),
@@ -296,6 +308,7 @@ const buildPermissionTree = (permissions: Permission[], userPerms: Permission[])
               title: permission.name_cn || permission.name,
               isGroup: false,
               hasPermission: userPermIds.has(permission.id),
+              inherited: inheritedPermissions.value.some(item => item.id === permission.id),
               permission,
             })),
           });
@@ -316,9 +329,10 @@ const buildPermissionTree = (permissions: Permission[], userPerms: Permission[])
 const fetchAllPermissions = async () => {
   loading.value = true;
   try {
-    const response = await getPermissionList({ page: 1, pageSize: 1000 });
+    const response = await getAllPermissions();
     if (response.success && response.data) {
       allPermissions.value = deduplicateById(response.data);
+      catalogReady.value = true;
     } else {
       Message.error(response.error || text.value.fetchPermissionListFailed);
     }
@@ -334,13 +348,27 @@ const fetchAllPermissions = async () => {
 const fetchUserPermissions = async () => {
   if (!props.id) return;
   const requestVersion = ++permissionRequestVersion;
+  entityPermissionsReady.value = false;
+  userPermissions.value = [];
+  inheritedPermissions.value = [];
+  selectedPermissionIds.value = [];
   const entityType = props.type;
   const entityId = props.id;
 
   try {
     let response;
+    let inherited: Permission[] = [];
     if (entityType === 'user') {
-      response = await getUserPermissions(entityId);
+      const [directResponse, inheritedResponse] = await Promise.all([
+        getUserPermissions(entityId, 'direct'),
+        getUserPermissions(entityId, 'inherited'),
+      ]);
+      response = directResponse;
+      if (!inheritedResponse.success) {
+        Message.error(inheritedResponse.error || text.value.fetchPermissionsError);
+        return;
+      }
+      inherited = inheritedResponse.data || [];
     } else {
       response = await getGroupPermissions(entityId);
     }
@@ -348,8 +376,10 @@ const fetchUserPermissions = async () => {
     if (requestVersion !== permissionRequestVersion || entityType !== props.type || entityId !== props.id) return;
 
     if (response.success && response.data) {
+      inheritedPermissions.value = inherited;
       userPermissions.value = response.data;
       updateCheckedKeys();
+      entityPermissionsReady.value = true;
     } else {
       Message.error(response.error || text.value.fetchEntityPermissionsFailed(props.type === 'user' ? text.value.user : text.value.group));
     }
@@ -471,24 +501,29 @@ const hasMatchedDescendants = (nodes: PermissionTreeNode[], keyword: string): bo
 
 // 保存权限（完全替换）
 const handleSavePermissions = () => {
-  const entityType = props.type === 'user' ? text.value.user : text.value.group;
+  if (!catalogReady.value || !entityPermissionsReady.value) return;
+  const targetType = props.type;
+  const targetId = props.id;
+  const permissionIds = [...selectedPermissionIds.value];
+  const entityType = targetType === 'user' ? text.value.user : text.value.group;
 
   Modal.confirm({
     title: text.value.confirmSaveTitle,
-    content: text.value.confirmSaveContent(entityType, selectedPermissionIds.value.length),
+    content: text.value.confirmSaveContent(entityType, permissionIds.length),
     onOk: async () => {
       saveLoading.value = true;
       try {
         let response;
-        if (props.type === 'user') {
-          response = await updateUserPermissions(props.id, selectedPermissionIds.value);
+        if (targetType === 'user') {
+          response = await updateUserPermissions(targetId, permissionIds);
         } else {
-          response = await updateGroupPermissions(props.id, selectedPermissionIds.value);
+          response = await updateGroupPermissions(targetId, permissionIds);
         }
 
         if (response.success) {
           Message.success(response.message || text.value.saveSuccess);
           await fetchUserPermissions();
+          await useAuthStore().loadUserPermissions();
           emit('refresh');
         } else {
           Message.error(response.error || text.value.saveFailed);
