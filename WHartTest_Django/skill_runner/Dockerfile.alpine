@@ -1,0 +1,13 @@
+ARG PYTHON_IMAGE=python:3.11-alpine3.22
+FROM ${PYTHON_IMAGE}
+RUN sed -i 's|https://dl-cdn.alpinelinux.org/alpine|https://mirrors.aliyun.com/alpine|g' /etc/apk/repositories \
+    && apk add --no-cache nodejs npm ca-certificates \
+    && addgroup -g 10001 runner && adduser -D -u 10001 -G runner runner
+WORKDIR /opt/runner
+COPY skill_runner/requirements.txt /opt/runner/requirements.txt
+RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple -r requirements.txt
+COPY skill_runner /opt/runner/skill_runner
+COPY orchestrator_integration/builtin_tools/skill_exec_guard.py /opt/runner/orchestrator_integration/builtin_tools/skill_exec_guard.py
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 SKILL_RUNNER_HOST=0.0.0.0 SKILL_RUNNER_PORT=8923 SKILL_RUNNER_REAP_ALL=1 SKILL_RUNNER_WORKSPACE_ROOT=/tmp SKILL_RLIMIT_FSIZE_BYTES=67108864
+USER 10001:10001
+ENTRYPOINT ["python", "-m", "skill_runner.server"]

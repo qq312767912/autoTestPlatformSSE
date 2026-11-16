@@ -8,19 +8,17 @@ import tempfile
 import threading
 from pathlib import Path
 from .auth_state_binding import prepare_storage_state
+from .browser_arguments import validate_browser_arguments, browser_context_signature
 
 _lock = threading.Lock()
-_sessions = set()
+_sessions = {}
 ALLOWED = {'open', 'snapshot', 'click', 'dblclick', 'fill', 'type', 'press', 'hover', 'check', 'uncheck', 'select', 'scroll', 'get', 'eval', 'back', 'forward', 'reload', 'close'}
 
 
 def run_ui_browser(binding, command, arguments):
     if command not in ALLOWED or not isinstance(arguments, list) or any(not isinstance(x, str) for x in arguments):
         raise ValueError('不支持的浏览器操作')
-    if any(x.startswith('--') for x in arguments):
-        raise ValueError('操作参数不能包含浏览器启动选项')
-    if command == 'close' and arguments:
-        raise ValueError('只能关闭当前任务浏览器')
+    validate_browser_arguments(command, arguments)
     session_id = binding.session.session_id
     digest = hashlib.sha256(session_id.encode()).hexdigest()[:24]
     key = 'ui-gen-' + digest
@@ -53,7 +51,11 @@ def run_ui_browser(binding, command, arguments):
     else:
         session_storage = []
     # Keep initialization and commands serial; a second call cannot replace another task's context.
+    signature = browser_context_signature(auth_id, state, session_storage)
     with _lock:
+        if key in _sessions and _sessions[key] != signature:
+            subprocess.run(['agent-browser', '--session', key, 'close'], env=env, capture_output=True, timeout=15)
+            _sessions.pop(key, None)
         with tempfile.TemporaryDirectory(prefix='ui-generation-') as root:
             args = ['agent-browser', '--session', key, '--json']
             # Rehydrate state on each worker's first open; restart cannot silently discard auth.
@@ -74,6 +76,6 @@ def run_ui_browser(binding, command, arguments):
                 output = output.replace(secret, '[REDACTED]')
             if result.returncode:
                 raise ValueError(output[:24000])
-            if command == 'close': _sessions.discard(key)
-            else: _sessions.add(key)
+            if command == 'close': _sessions.pop(key, None)
+            else: _sessions[key] = signature
             return output[:24000]

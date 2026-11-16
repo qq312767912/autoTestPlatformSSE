@@ -279,6 +279,7 @@ def _collect_skill_artifacts(
     skill_dir: str,
     artifacts_dir: str,
     artifacts_before: dict[str, str],
+    strict_artifact_root: bool = False,
 ) -> list[dict[str, object]]:
     collected: list[dict[str, object]] = []
     seen_urls: set[str] = set()
@@ -287,6 +288,8 @@ def _collect_skill_artifacts(
         if not file_path or not _is_allowed_artifact_file(file_path):
             return
         source_path = os.path.abspath(file_path)
+        if strict_artifact_root and not Path(source_path).resolve().is_relative_to(Path(artifacts_dir).resolve()):
+            return
         # 源 Skill 的说明和参考资料属于输入，不是本次生成产物。
         if os.path.basename(source_path).lower() == 'skill.md' or any(part in source_path.replace(os.sep, '/') for part in ('/references/', '/schemas/', '/templates/')):
             return
@@ -339,12 +342,14 @@ def _finalize_skill_result(
     skill_dir: str,
     artifacts_dir: str,
     artifacts_before: dict[str, str],
+    strict_artifact_root: bool = False,
 ) -> str:
     artifacts = _collect_skill_artifacts(
         result_output,
         skill_dir=skill_dir,
         artifacts_dir=artifacts_dir,
         artifacts_before=artifacts_before,
+        strict_artifact_root=strict_artifact_root,
     )
     if not artifacts:
         return result_output
@@ -374,11 +379,11 @@ def _get_playwright_session_manager() -> PlaywrightSessionManager:
     return _playwright_session_manager
 
 
-def _resolve_skill_runtime_api_key(user_id: int) -> tuple[str, str]:
+def _resolve_skill_runtime_api_key(user_id: int, allow_configured: bool = True) -> tuple[str, str]:
     """解析 Skill 运行时使用的 API Key。
 
     优先级：
-    1. 非空的 settings/环境变量 WHARTTEST_API_KEY（运维覆盖）
+    1. 非空的 settings/环境变量 WHARTTEST_API_KEY（仅兼容进程内模式）
     2. 当前对话用户名下最新一条有效 API Key
     3. 空字符串（不注入，保留 skill 脚本内默认值）
 
@@ -390,7 +395,7 @@ def _resolve_skill_runtime_api_key(user_id: int) -> tuple[str, str]:
         or os.environ.get("WHARTTEST_API_KEY")
         or ""
     ).strip()
-    if configured:
+    if configured and allow_configured:
         return configured, "env_or_settings"
 
     if not user_id:
@@ -563,7 +568,11 @@ def get_skill_tools(
             env = os.environ.copy()
             # 1) 运维配置 / 2) 当前用户有效 API Key / 3) 不注入（保留脚本默认）
             backend_url = _resolve_skill_runtime_backend_url()
-            api_key, key_source = _resolve_skill_runtime_api_key(current_user_id)
+            from .skill_runner_client import runner_exec_mode
+            execution_mode = runner_exec_mode()
+            api_key, key_source = _resolve_skill_runtime_api_key(current_user_id, allow_configured=execution_mode != "runner")
+            if execution_mode == "runner" and not api_key:
+                return "错误：独立沙箱只使用当前用户的有效 API Key，请先为当前账号创建并启用 API Key。"
             if backend_url:
                 env["WHARTTEST_BACKEND_URL"] = backend_url
             if api_key:
@@ -604,6 +613,30 @@ def get_skill_tools(
             env["SKILL_OUTPUT_DIR"] = artifacts_dir
             env["ARTIFACT_DIR"] = artifacts_dir
             artifacts_before = _snapshot_artifact_files(artifacts_dir)
+
+            from .skill_runner_client import runner_exec_mode, submit_job, restore_artifacts, SkillRunnerUnavailable
+            if execution_mode == 'runner':
+                from skills.versions import SkillVersionService
+                if not selected_version or not selected_version.is_runnable or not SkillVersionService.verify_package_integrity(selected_version).get('ok'):
+                    return '错误：所选精确版本不可运行或包完整性校验失败，拒绝执行'
+                from .skill_exec_guard import parse_skill_command
+                invocation = parse_skill_command(command)
+                launcher = os.path.basename(invocation.argv[0])
+                if launcher in {'playwright-cli', 'browser-use', 'agent-browser', 'npx'} or (session_id and 'run.js' in command):
+                    return '错误：独立沙箱不保留跨命令浏览器进程；浏览器交互请使用 platform_browser 工具，或 UI 生成任务的 ui_generation_browser 工具。'
+                runtime_env = {'WHARTTEST_BACKEND_URL':getattr(settings, 'WHARTTEST_RUNNER_BACKEND_URL', '') or os.environ.get('WHARTTEST_RUNNER_BACKEND_URL', '') or backend_url}
+                if api_key: runtime_env['WHARTTEST_API_KEY'] = api_key
+                outcome = submit_job(skill_dir=skill_dir, command=command, timeout_seconds=120,
+                    runtime_env=runtime_env, user_id=current_user_id, project_id=current_project_id,
+                    chat_session_id=current_chat_session_id, test_case_id=current_test_case_id,
+                    skill_id=skill.pk, skill_name=skill.name, skill_version_id=str(selected_version.pk),
+                    source_sha256=selected_version.package_sha256)
+                restore_artifacts(outcome.artifacts, artifacts_dir)
+                output = (outcome.stdout + ('\n--- stderr ---\n' + outcome.stderr if outcome.stderr else '')).strip() or '(无输出)'
+                if api_key: output = output.replace(api_key, '[REDACTED]')
+                if outcome.returncode: output = f'命令执行失败 (退出码: {outcome.returncode})\n' + output
+                return _finalize_skill_result(output, skill_dir=artifacts_dir,
+                    artifacts_dir=artifacts_dir, artifacts_before=artifacts_before, strict_artifact_root=True)
 
             # Windows 兼容：将单引号包裹的参数转换为双引号（用于 cmd.exe）
             # 同时处理多行字符串，将换行符转换为单行

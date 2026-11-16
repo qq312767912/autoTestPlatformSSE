@@ -34,6 +34,10 @@ def get_builtin_tools(
         selected_skill_version_id=selected_skill_version_id,
     )
     tools.extend(skill_tools)
+    from .skill_runner_client import runner_exec_mode
+    if runner_exec_mode() == "runner":
+        from .platform_browser import get_platform_browser_tools
+        tools.extend(get_platform_browser_tools(user_id, project_id, chat_session_id))
     logger.info(f"[BuiltinTools] 加载 {len(skill_tools)} 个 Skill 工具")
 
     return tools

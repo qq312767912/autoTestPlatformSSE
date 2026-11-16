@@ -1,0 +1,39 @@
+# 叠加到基础Compose；运行前在.env设置独立SKILL_RUNNER_TOKEN，不挂载业务数据或Docker socket。
+services:
+  backend:
+    environment:
+      SKILL_EXEC_MODE: runner
+      SKILL_RUNNER_URL: http://skill-runner:8923
+      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?Set SKILL_RUNNER_TOKEN in the deployment environment}
+      WHARTTEST_RUNNER_BACKEND_URL: http://backend:8000
+    networks:
+      - wharttest-network
+      - skill-runner-net
+    depends_on:
+      skill-runner:
+        condition: service_healthy
+  skill-runner:
+    build:
+      context: ./WHartTest_Django
+      dockerfile: skill_runner/Dockerfile.alpine
+    image: wharttest-skill-runner:2.9.2-alpine
+    environment:
+      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?Set SKILL_RUNNER_TOKEN in the deployment environment}
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 2
+    networks: [skill-runner-net]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8923/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+networks:
+  skill-runner-net:
+    driver: bridge
