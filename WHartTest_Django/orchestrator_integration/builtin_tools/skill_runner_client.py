@@ -10,6 +10,8 @@ import base64
 import hashlib
 from pathlib import Path
 import logging
+import threading
+from functools import wraps
 import os
 import urllib.error
 import urllib.request
@@ -82,6 +84,22 @@ def _runner_endpoint() -> tuple[str, str]:
     return url, token
 
 
+_RUNNER_CALL_GATE = threading.BoundedSemaphore(1)
+
+
+def _serialized_job(function):
+    @wraps(function)
+    def invoke(*args, **kwargs):
+        if not _RUNNER_CALL_GATE.acquire(timeout=150):
+            raise SkillRunnerUnavailable('runner 等待队列繁忙，请稍后重试')
+        try:
+            return function(*args, **kwargs)
+        finally:
+            _RUNNER_CALL_GATE.release()
+    return invoke
+
+
+@_serialized_job
 def submit_job(
     *,
     skill_dir: str,

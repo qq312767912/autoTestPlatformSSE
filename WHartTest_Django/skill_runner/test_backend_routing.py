@@ -64,3 +64,22 @@ class BackendRoutingTests(unittest.TestCase):
   with patch.object(self.client,'submit_job') as submit:
    result=self.tool()(skill_name='chosen',command='python main.py')
   self.assertIn('不可运行',result);submit.assert_not_called()
+
+ def test_large_batch_is_rejected_before_submission(self):
+  with patch.object(self.client,'submit_job') as submit:
+   result=self.tool()(commands=[{'skill_name':'chosen','command':'python main.py'}]*51)
+  self.assertIn('50',json.loads(result)['error']);submit.assert_not_called()
+ def test_batch_concurrency_is_capped(self):
+  from concurrent.futures import ThreadPoolExecutor as RealExecutor
+  seen=[]
+  def executor(*args,**kwargs):seen.append(kwargs['max_workers']);return RealExecutor(*args,**kwargs)
+  outcome=self.client.RunnerJobOutcome(0,'done','',1,[],[])
+  with patch.object(self.client,'submit_job',return_value=outcome),patch('concurrent.futures.ThreadPoolExecutor',side_effect=executor):
+   result=self.tool()(commands=[{'skill_name':'chosen','command':'python main.py'}]*20,max_workers=100000)
+  self.assertEqual(seen,[16]);self.assertEqual(json.loads(result)['summary']['success'],20)
+ def test_failed_runner_batch_is_not_counted_as_success(self):
+  outcome=self.client.RunnerJobOutcome(1,'failure','',1,[],[])
+  with patch.object(self.client,'submit_job',return_value=outcome):
+   result=self.tool()(commands=[{'skill_name':'chosen','command':'python main.py'}])
+  self.assertEqual(json.loads(result)['summary']['success'],0)
+  self.assertEqual(json.loads(result)['summary']['error'],1)

@@ -108,6 +108,13 @@ class HttpTests(unittest.TestCase):
    with self.assertRaises(urllib.error.HTTPError) as ctx:self.request('test-key',{})
    self.assertEqual(ctx.exception.code,429)
   finally:self.server.job_gate.release()
+ def test_parallel_client_calls_are_serialized_without_busy_failures(self):
+  from concurrent.futures import ThreadPoolExecutor
+  with tempfile.TemporaryDirectory() as temp,patch.dict(os.environ,{'SKILL_RUNNER_URL':self.url,'SKILL_RUNNER_TOKEN':'test-key'}):
+   Path(temp,'SKILL.md').write_text('skill');Path(temp,'main.py').write_text('import time;time.sleep(.1);print("ok")')
+   with ThreadPoolExecutor(max_workers=3) as executor:
+    results=list(executor.map(lambda _:client.submit_job(skill_dir=temp,command='python main.py',timeout_seconds=5),range(3)))
+   self.assertEqual([r.returncode for r in results],[0,0,0])
  def test_missing_token_configuration_fails_closed(self):
   self.server.expected_token=''
   with self.assertRaises(urllib.error.HTTPError) as ctx:self.request('test-key',{})

@@ -854,6 +854,11 @@ def get_skill_tools(
 
         from django.db import close_old_connections
 
+        # 批量输入与线程数独立设限，不能由模型无限扩张。
+        if commands and len(commands) > 50:
+            return json.dumps({"error": "单次批量执行最多50条命令"}, ensure_ascii=False)
+        max_workers = max(1, min(int(max_workers), 16))
+
         # 批量执行模式
         if commands:
             logger.info(
@@ -880,12 +885,17 @@ def get_skill_tools(
                     result = _execute_single_skill_script(
                         cmd_skill_name, cmd_command, cmd_session_id
                     )
-                    return {
-                        "index": idx,
-                        "skill_name": cmd_skill_name,
-                        "command": cmd_command,
-                        "result": result,
-                    }
+                    entry = {"index": idx, "skill_name": cmd_skill_name, "command": cmd_command, "result": result}
+                    text = result
+                    try:
+                        blocks = json.loads(result)
+                        if isinstance(blocks, list):
+                            text = next((b.get('text', '') for b in blocks if isinstance(b, dict) and b.get('type') == 'text'), result)
+                    except (ValueError, TypeError):
+                        pass
+                    if str(text).startswith(('错误:', '错误：', '命令执行失败 (退出码:')):
+                        entry['error'] = '命令执行失败，详情见result'
+                    return entry
                 except Exception as e:
                     return {
                         "index": idx,
