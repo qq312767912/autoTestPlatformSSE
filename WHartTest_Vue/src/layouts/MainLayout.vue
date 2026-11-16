@@ -151,6 +151,8 @@
             <router-link to="/dashboard">{{ dashboardMenuLabel }}</router-link>
           </a-menu-item>
 
+          <div v-if="!collapsed && (hasProjectsPermission || hasRequirementsPermission)" class="nav-section-label" role="presentation">{{ projectSectionLabel }}</div>
+
           <a-menu-item key="projects" v-if="hasProjectsPermission">
             <template #icon><icon-storage /></template>
             <router-link to="/projects">{{ projectsMenuLabel }}</router-link>
@@ -161,7 +163,8 @@
             <a href="#" @click="checkProjectAndNavigate($event, '/requirements')">{{ requirementsMenuLabel }}</a>
           </a-menu-item>
 
-          <!-- 测试管理子菜单 -->
+          <div v-if="!collapsed && (hasTestManagementMenuItems || hasApiTestingPermission || hasUiAutomationPermission || hasTaskCenterPermission || hasCodeAnalysisPermission)" class="nav-section-label" role="presentation">{{ testingSectionLabel }}</div>
+
           <a-sub-menu key="test-management" v-if="hasTestManagementMenuItems">
             <template #icon><icon-experiment /></template>
             <template #title>
@@ -189,11 +192,6 @@
             </a-menu-item>
           </a-sub-menu>
 
-          <a-menu-item key="code-analysis" v-if="hasCodeAnalysisPermission">
-            <template #icon><icon-code-block /></template>
-            <a href="#" @click="checkProjectAndNavigate($event, '/code-analysis')">{{ codeAnalysisMenuLabel }}</a>
-          </a-menu-item>
-
           <a-menu-item key="api-testing" v-if="hasApiTestingPermission">
             <template #icon><icon-cloud /></template>
             <a href="#" @click="checkProjectAndNavigate($event, '/api-testing')">{{ apiTestingMenuLabel }}</a>
@@ -209,31 +207,25 @@
             <a href="#" @click="checkProjectAndNavigate($event, '/task-center')">{{ tasksMenuLabel }}</a>
           </a-menu-item>
 
-          <a-menu-item key="file-management" v-if="hasFileManagementPermission">
-            <template #icon><icon-file /></template>
-            <a href="#" @click="checkProjectAndNavigate($event, '/file-management')">{{ fileManagementMenuLabel }}</a>
+          <a-menu-item key="code-analysis" v-if="hasCodeAnalysisPermission">
+            <template #icon><icon-code-block /></template>
+            <a href="#" @click="checkProjectAndNavigate($event, '/code-analysis')">{{ codeAnalysisMenuLabel }}</a>
           </a-menu-item>
+
+          <div v-if="!collapsed && (hasLangGraphChatPermission || hasSkillsPermission)" class="nav-section-label" role="presentation">{{ aiSectionLabel }}</div>
 
           <a-menu-item key="langgraph-chat" v-if="hasLangGraphChatPermission">
             <template #icon><icon-message /></template>
             <a href="#" @click="checkProjectAndNavigate($event, '/langgraph-chat')">{{ chatMenuLabel }}</a>
           </a-menu-item>
 
-          <!-- 知识库管理子菜单 -->
-          <a-sub-menu key="knowledge-management" v-if="hasKnowledgeMenuItems">
-            <template #icon><icon-book /></template>
-            <template #title>{{ knowledgeMenuLabel }}</template>
-            <a-menu-item key="knowledge-list" v-if="hasKnowledgePermission">
-              <template #icon><icon-book /></template>
-              <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-management')">{{ knowledgeListLabel }}</a>
-            </a-menu-item>
-            <a-menu-item key="document-anonymization" v-if="hasAnonymizationPermission">
-              <template #icon><icon-safe /></template>
-              <a href="#" @click="checkProjectAndNavigate($event, '/document-anonymization')">{{ anonymizationMenuLabel }}</a>
-            </a-menu-item>
-          </a-sub-menu>
+          <a-menu-item key="skills" v-if="hasSkillsPermission">
+            <template #icon><icon-apps /></template>
+            <a href="#" @click="checkProjectAndNavigate($event, '/skills')">{{ skillsMenuLabel }}</a>
+          </a-menu-item>
 
-          <!-- 质量飞轮：智能体观测、数据闭环与知识图谱的统一入口 -->
+          <div v-if="!collapsed && hasQualityFlywheelMenuItems && (hasLangGraphChatPermission || hasSkillsPermission)" class="nav-section-divider" role="separator" />
+
           <a-sub-menu key="quality-flywheel" v-if="hasQualityFlywheelMenuItems">
             <template #icon><icon-loop /></template>
             <template #title>{{ knowledgeEvolutionMenuLabel }}</template>
@@ -251,7 +243,28 @@
             </a-menu-item>
           </a-sub-menu>
 
-          <!-- 系统管理子菜单 -->
+          <div v-if="!collapsed && (hasKnowledgeMenuItems || hasFileManagementPermission)" class="nav-section-label" role="presentation">{{ knowledgeSectionLabel }}</div>
+
+          <a-sub-menu key="knowledge-management" v-if="hasKnowledgeMenuItems">
+            <template #icon><icon-book /></template>
+            <template #title>{{ knowledgeMenuLabel }}</template>
+            <a-menu-item key="knowledge-list" v-if="hasKnowledgePermission">
+              <template #icon><icon-book /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-management')">{{ knowledgeListLabel }}</a>
+            </a-menu-item>
+            <a-menu-item key="document-anonymization" v-if="hasAnonymizationPermission">
+              <template #icon><icon-safe /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/document-anonymization')">{{ anonymizationMenuLabel }}</a>
+            </a-menu-item>
+          </a-sub-menu>
+
+          <a-menu-item key="file-management" v-if="hasFileManagementPermission">
+            <template #icon><icon-file /></template>
+            <a href="#" @click="checkProjectAndNavigate($event, '/file-management')">{{ fileManagementMenuLabel }}</a>
+          </a-menu-item>
+
+          <div v-if="!collapsed && hasSystemMenuItems && (hasKnowledgeMenuItems || hasFileManagementPermission)" class="nav-section-divider" role="separator" />
+
           <a-sub-menu key="settings" v-if="hasSystemMenuItems">
             <template #icon><icon-settings /></template>
             <template #title>
@@ -273,25 +286,21 @@
               <template #icon><icon-tool /></template>
               <a href="#" @click="checkProjectAndNavigate($event, '/llm-configs')">{{ modelsMenuLabel }}</a>
             </a-menu-item>
-            <a-menu-item key="api-keys" v-if="hasApiKeysPermission">
-              <template #icon><icon-safe /></template>
-              <a href="#" @click="checkProjectAndNavigate($event, '/api-keys')">{{ apiKeysMenuLabel }}</a>
-            </a-menu-item>
             <a-menu-item key="remote-mcp-configs" v-if="hasMcpConfigsPermission">
               <template #icon><icon-cloud /></template>
               <a href="#" @click="checkProjectAndNavigate($event, '/remote-mcp-configs')">{{ mcpMenuLabel }}</a>
             </a-menu-item>
-            <a-menu-item key="skills" v-if="hasSkillsPermission">
-              <template #icon><icon-apps /></template>
-              <a href="#" @click="checkProjectAndNavigate($event, '/skills')">{{ skillsMenuLabel }}</a>
-            </a-menu-item>
-            <a-menu-item key="operation-logs" v-if="hasOperationLogsPermission">
-              <template #icon><icon-history /></template>
-              <a href="#" @click="navigateWithoutProject($event, '/operation-logs')">{{ operationLogsMenuLabel }}</a>
+            <a-menu-item key="api-keys" v-if="hasApiKeysPermission">
+              <template #icon><icon-safe /></template>
+              <a href="#" @click="checkProjectAndNavigate($event, '/api-keys')">{{ apiKeysMenuLabel }}</a>
             </a-menu-item>
             <a-menu-item key="test-host-config" v-if="hasTestHostConfigPermission">
               <template #icon><icon-link /></template>
               <a href="#" @click="navigateWithoutProject($event, '/test-host-config')">{{ testHostConfigMenuLabel }}</a>
+            </a-menu-item>
+            <a-menu-item key="operation-logs" v-if="hasOperationLogsPermission">
+              <template #icon><icon-history /></template>
+              <a href="#" @click="navigateWithoutProject($event, '/operation-logs')">{{ operationLogsMenuLabel }}</a>
             </a-menu-item>
           </a-sub-menu>
         </a-menu>
@@ -417,6 +426,11 @@ const projectsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Projects' 
 const requirementsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Requirements' : tl('需求管理')));
 const codeAnalysisMenuLabel = computed(() => (locale.value === 'en-US' ? 'Code Review' : tl('代码审查')));
 const apiTestingMenuLabel = computed(() => (locale.value === 'en-US' ? 'API Testing' : tl('接口自动化')));
+const projectSectionLabel = computed(() => locale.value === 'en-US' ? 'Projects & Requirements' : '项目与需求');
+const testingSectionLabel = computed(() => locale.value === 'en-US' ? 'Testing & Execution' : '测试与执行');
+const aiSectionLabel = computed(() => locale.value === 'en-US' ? 'AI Tools' : 'AI 工具');
+const knowledgeSectionLabel = computed(() => locale.value === 'en-US' ? 'Knowledge & Files' : '知识与文件');
+
 const automationMenuLabel = computed(() => (locale.value === 'en-US' ? 'Automation' : tl('UI自动化')));
 const tasksMenuLabel = computed(() => (locale.value === 'en-US' ? 'Tasks' : tl('任务中心')));
 const fileManagementMenuLabel = computed(() => (locale.value === 'en-US' ? 'Files' : tl('文件管理')));
@@ -513,6 +527,7 @@ const activeMenu = computed(() => {
     if (view === 'graph') return 'quality-graph';
     return 'quality-agents';
   }
+  if (path.startsWith('/skills')) return 'skills';
   if (path.startsWith('/api-keys')) return 'api-keys';
   if (path.startsWith('/remote-mcp-configs')) return 'remote-mcp-configs';
   // 其他路由对应的菜单项
@@ -662,7 +677,6 @@ const hasSystemMenuItems = computed(() => {
          hasLlmConfigsPermission.value ||
          hasApiKeysPermission.value ||
          hasMcpConfigsPermission.value ||
-         hasSkillsPermission.value ||
          hasOperationLogsPermission.value ||
          hasTestHostConfigPermission.value;
 });
@@ -1211,6 +1225,19 @@ onMounted(async () => {
   flex: 1 1 auto;
   min-height: 0;
   max-height: none;
+}
+
+.nav-section-divider {
+  margin: 10px 12px 6px;
+  border-top: 1px solid var(--color-border-2);
+}
+
+.nav-section-label {
+  margin: 14px 12px 4px;
+  color: var(--color-text-3);
+  font-size: 11px;
+  line-height: 20px;
+  font-weight: 500;
 }
 
 :deep(.arco-menu-light) {
