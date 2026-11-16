@@ -604,6 +604,37 @@ class AnalysisTaskViewSet(viewsets.ModelViewSet):
             qs = qs.filter(project__members__user=self.request.user)
         project_id = self.request.query_params.get("project")
         return qs.filter(project_id=project_id) if project_id else qs
+    @action(detail=False, methods=["get"], url_path="internal-gold-samples")
+    def internal_gold_samples(self, request):
+        from .internal_gold import library
+        from rest_framework.exceptions import ValidationError
+        try:
+            project_id = int(request.query_params.get("project", ""))
+            page = int(request.query_params.get("page", 1))
+            if project_id <= 0 or page <= 0:
+                raise ValueError
+            case_id = request.query_params.get("case_id")
+            if case_id:
+                import uuid
+                case_id = uuid.UUID(case_id)
+        except (ValueError, TypeError):
+            raise ValidationError("请提供有效的项目、页码和样本编号")
+        return Response(library(actor=request.user, project_id=project_id, case_id=case_id, page=page))
+
+    @action(detail=True, methods=["get"], url_path="internal-gold-context")
+    def internal_gold_context(self, request, pk=None):
+        from .internal_gold import context
+        task = self.get_object()
+        if not _can_access(request.user, task.project_id):
+            raise PermissionDenied("请先加入该项目")
+        return Response(context(task))
+
+    @action(detail=True, methods=["post"], url_path="save-internal-gold")
+    @permission_required("code_analysis.change_analysistask")
+    def save_internal_gold(self, request, pk=None):
+        from .internal_gold import save_snapshot
+        return Response(save_snapshot(task=self.get_object(), actor=request.user, payload=request.data))
+
     def perform_create(self, serializer):
         project = serializer.validated_data["project"]
         if not _can_access(self.request.user, project.id): raise PermissionDenied()

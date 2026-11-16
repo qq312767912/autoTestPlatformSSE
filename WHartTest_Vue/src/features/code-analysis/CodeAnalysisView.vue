@@ -7,6 +7,7 @@
         <p>对代码变更进行多维审查，识别风险、评估业务影响，并生成可执行的测试需求与回归建议。</p>
       </div>
       <div class="hero-actions">
+        <a-button v-if="canViewInternalGold" :disabled="!projectStore.currentProjectId" @click="goldLibraryVisible = true">内部金标集</a-button>
         <a-button v-if="canViewLlmConfig" @click="openLlmConfig"><template #icon><icon-settings /></template>审查模型配置</a-button>
         <a-button v-if="canViewRepositories || canViewConnections || canManageCredentials" @click="configVisible = true"><template #icon><icon-settings /></template>审查源配置</a-button>
         <a-button v-if="canAddTasks && canViewRepositories" type="primary" @click="openCreate"><template #icon><icon-plus /></template>新建分析</a-button>
@@ -41,7 +42,7 @@
     <a-drawer :visible="!!selectedTask" :width="780" unmount-on-close @cancel="selectedTask = null">
       <template #title>{{ selectedTask?.title || '分析详情' }}</template>
       <div v-if="selectedTask" class="iteration-overview">
-        <div class="overview-title"><div><span>本次迭代分析</span><h2>{{ iterationConclusion(selectedTask) }}</h2></div><div style="display:flex;gap:8px;align-items:center"><a-button size="small" type="primary" @click="qualitySidebarVisible = true">质量反馈</a-button><a-tag :color="selectedTask.change_report?.summary?.high_risk_count ? 'red' : 'green'">{{ selectedTask.change_report?.summary?.high_risk_count ? '建议重点回归' : '常规回归' }}</a-tag></div></div>
+        <div class="overview-title"><div><span>本次迭代分析</span><h2>{{ iterationConclusion(selectedTask) }}</h2></div><div style="display:flex;gap:8px;align-items:center"><a-button v-if="canSaveInternalGold && ['completed','degraded','partial'].includes(selectedTask.status)" size="small" @click="goldMarkVisible = true">保存内部金标</a-button><a-button size="small" type="primary" @click="qualitySidebarVisible = true">质量反馈</a-button><a-tag :color="selectedTask.change_report?.summary?.high_risk_count ? 'red' : 'green'">{{ selectedTask.change_report?.summary?.high_risk_count ? '建议重点回归' : '常规回归' }}</a-tag></div></div>
         <div class="overview-numbers">
           <div><b>{{ selectedTask.change_report?.summary?.changed_files || 0 }}</b><span>变更文件</span></div>
           <div class="addition"><b>+{{ selectedTask.change_report?.summary?.additions || 0 }}</b><span>新增行</span></div>
@@ -233,6 +234,8 @@
       </a-tabs>
     </a-drawer>
 
+    <CodeReviewGoldModal v-model:visible="goldMarkVisible" :task-id="selectedTask?.id || ''" />
+    <InternalGoldLibrary v-model:visible="goldLibraryVisible" :project-id="projectStore.currentProjectId || 0" />
     <QualitySidebar
       v-model:visible="qualitySidebarVisible"
       :project-id="selectedTask?.project || projectStore.currentProjectId || 0"
@@ -372,12 +375,17 @@ import * as api from './service';
 import { downloadHtmlReport } from './reportExport';
 import { KnowledgeService } from '@/features/knowledge/services/knowledgeService';
 import KnowledgeDocumentScopeSelector from '@/features/knowledge/components/KnowledgeDocumentScopeSelector.vue';
+import CodeReviewGoldModal from './CodeReviewGoldModal.vue';
+import InternalGoldLibrary from './InternalGoldLibrary.vue';
 import QualitySidebar from '@/features/knowledge-evolution/components/QualitySidebar.vue';
 import type { KnowledgeBase } from '@/features/knowledge/types/knowledge';
 
 const projectStore = useProjectStore();
 const authStore = useAuthStore();
 const isPlatformAdmin = computed(() => !!authStore.currentUser?.is_staff);
+const goldMarkVisible = ref(false), goldLibraryVisible = ref(false);
+const canViewInternalGold = computed(() => authStore.hasPermission('knowledge_evolution.view_goldcase'));
+const canSaveInternalGold = computed(() => authStore.hasPermission('knowledge_evolution.add_goldcase') && authStore.hasPermission('code_analysis.change_analysistask'));
 const canViewLlmConfig = computed(() => authStore.hasPermission('code_analysis.view_codeanalysisllmconfig'));
 const canAddLlmConfig = computed(() => authStore.hasPermission('code_analysis.add_codeanalysisllmconfig'));
 const canChangeLlmConfig = computed(() => authStore.hasPermission('code_analysis.change_codeanalysisllmconfig'));
