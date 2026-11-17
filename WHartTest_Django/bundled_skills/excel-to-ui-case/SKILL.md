@@ -19,6 +19,10 @@ RFC 2119 applies to MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER` 
 - NEVER 通过修改预期使失败用例通过。
 </critical>
 
+## 平台执行工具
+
+本包自带 `ui_automation_tools.py`，通过 `execute_skill_script` 执行 `python ui_automation_tools.py --help` 查询操作。平台注入当前用户 API Key 与后端地址；NEVER 使用默认凭据。业务用例管理入口的输入为服务端 `get_ui_generation_context`，不要求重复上传 Excel。MUST 使用 `ui_generation_browser` 探索、所选环境与平台录制器试跑，并经 `bind_generated_ui_case` 核验。
+
 ## 输入与结果
 
 读取用户文件、目标项目、目标 UI 模块、转换范围。项目缺失时先查询可访问项目；存在多个候选时询问目标，不猜测。转换范围默认覆盖文件内全部有效用例，不因信息缺失丢弃记录。

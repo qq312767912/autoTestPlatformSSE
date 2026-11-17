@@ -10,16 +10,7 @@
       </template></a-table>
     </div>
     <a-form v-else :model="form" layout="vertical">
-      <a-form-item :label="tl('执行 Skill')" required>
-        <a-select v-model="skillId" :loading="loading" allow-search @change="loadVersions">
-          <a-option v-for="s in options.skills" :key="s.id" :value="s.id">{{ s.name }}</a-option>
-        </a-select>
-      </a-form-item>
-      <a-form-item :label="tl('精确版本')" required>
-        <a-select v-model="form.skillVersionId" :loading="versionLoading">
-          <a-option v-for="v in versions" :key="v.id" :value="v.id">{{ v.version }}</a-option>
-        </a-select>
-      </a-form-item>
+      <a-form-item label="执行 Skill"><a-input model-value="excel-to-ui-case（平台内置，自动锁定版本）" disabled /></a-form-item>
       <a-form-item :label="tl('功能用例')" required>
         <a-space><a-button @click="picker=true">{{ tl('选择功能用例') }}</a-button><span>{{ form.functional_case_ids.length }} / 100</span></a-space>
       </a-form-item>
@@ -70,5 +61,5 @@ async function loadVersions(){const id=++versionRequest;const project=openingPro
 async function loadAuth(){const id=++authRequest;const env=form.value.env_config_id;form.value.auth_state_id=0;authStates.value=[];if(!env)return;authLoading.value=true;try{const rows=await loadUiGenerationAuth(env);if(id===authRequest&&env===form.value.env_config_id)authStates.value=rows;}catch(e){if(id===authRequest)fail(e);}finally{if(id===authRequest)authLoading.value=false;}}
 watch(()=>props.visible,async visible=>{if(timer)clearTimeout(timer);if(!visible)return;const remembered=localStorage.getItem('ui-conversion-run:'+projectStore.currentProjectId);runSession.value=remembered||'';const id=++epoch;versionRequest++;authRequest++;form.value=empty();form.value.functional_case_ids=[...(props.initialCaseIds||[])];skillId.value=undefined;versions.value=[];authStates.value=[];options.value={modules:[],environments:[],skills:[]};openingProject=projectStore.currentProjectId; if(!openingProject)return;loading.value=true;try{const data=await loadUiGenerationOptions(openingProject);if(id===epoch){options.value=data;if(runSession.value)void refreshRun();}}catch(e){if(id===epoch)fail(e);}finally{if(id===epoch)loading.value=false;}});
 watch(()=>projectStore.currentProjectId,()=>{if(props.visible)close();});
-async function submit(){if(runSession.value){close();return;}if(busy.value||loading.value||versionLoading.value||authLoading.value)return;if(!openingProject||projectStore.currentProjectId!==openingProject)return fail(new Error(tl('项目已切换，请重新选择')));if(!form.value.skillVersionId||!form.value.module_id||!form.value.env_config_id||!form.value.functional_case_ids.length||form.value.functional_case_ids.length>100)return Message.warning(tl('请选择 Skill 精确版本、1至100条功能用例、模块和环境'));busy.value=true;try{const binding=await startUiGeneration(openingProject,{...form.value,auth_state_id:form.value.auth_state_id||null},message=>Notification.error({title:tl('生成任务失败'),content:message,duration:8000}));runSession.value=binding.session_id;localStorage.setItem('ui-conversion-run:'+openingProject,binding.session_id);run.value={status:'queued',items:[]};void refreshRun();Notification.info({title:tl('探索转换批次已启动'),content:tl('后台执行中，关闭页面不会取消'),duration:5000});}catch(e){fail(e);}finally{busy.value=false;}}
+async function submit(){if(runSession.value){close();return;}if(busy.value||loading.value||versionLoading.value||authLoading.value)return;if(!openingProject||projectStore.currentProjectId!==openingProject)return fail(new Error(tl('项目已切换，请重新选择')));if(!form.value.module_id||!form.value.env_config_id||!form.value.functional_case_ids.length||form.value.functional_case_ids.length>100)return Message.warning(tl('请选择1至100条业务用例、模块和环境'));busy.value=true;try{const binding=await startUiGeneration(openingProject,{...form.value,auth_state_id:form.value.auth_state_id||null},message=>Notification.error({title:tl('生成任务失败'),content:message,duration:8000}));runSession.value=binding.session_id;localStorage.setItem('ui-conversion-run:'+openingProject,binding.session_id);run.value={status:'queued',items:[]};void refreshRun();Notification.info({title:tl('探索转换批次已启动'),content:tl('后台执行中，关闭页面不会取消'),duration:5000});}catch(e){fail(e);}finally{busy.value=false;}}
 </script>

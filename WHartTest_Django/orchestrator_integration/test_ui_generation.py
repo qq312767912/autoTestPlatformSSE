@@ -14,6 +14,10 @@ from testcases.models import TestCase as FunctionalCase, TestCaseStep, TestCaseM
 class UiGenerationTests(ApiGenerationBindingTests):
     def setUp(self):
         super().setUp()
+        from unittest.mock import patch
+        resolver = patch('knowledge_evolution.skill_agent_tasks.builtin_ui_version', return_value=self.version)
+        resolver.start()
+        self.addCleanup(resolver.stop)
         self.user.is_superuser = True
         self.user.save()
         self.module = UiModule.objects.create(project=self.project, name='UI', creator=self.user)
@@ -190,3 +194,10 @@ class UiGenerationTests(ApiGenerationBindingTests):
         binding.refresh_from_db()
         self.assertEqual(binding.generation_run['status'],'cancelled')
         self.assertEqual(binding.generation_run['items'][0]['status'],'cancelled')
+
+    def test_ui_task_uses_builtin_without_client_skill_selection(self):
+        request=APIRequestFactory().post('/',{'project':self.project.pk,'generation_mode':'ui_case','generation_context':self.raw},format='json')
+        force_authenticate(request,self.user)
+        response=SkillAgentTaskViewSet.as_view({'post':'create'})(request)
+        self.assertEqual(response.status_code,201,response.data)
+        self.assertEqual(response.data['skill_version_id'],str(self.version.pk))

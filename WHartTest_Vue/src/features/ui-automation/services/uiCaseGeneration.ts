@@ -28,7 +28,7 @@ export async function loadUiGenerationOptions(project: number) {
   const [modules, environments, skills] = await Promise.all([
     moduleApi.tree(project),
     allRows(page => envConfigApi.list({ project, page, page_size: 100 } as any)),
-    SkillService.getSkills(project),
+    Promise.resolve({items: []}),
   ]);
   const tree: any = (modules.data as any)?.data ?? modules.data;
   if (!Array.isArray(tree)) throw new Error('读取模块失败');

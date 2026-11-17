@@ -37,6 +37,34 @@ def resolve_agent_task_version(*, session_id, project_id, actor, requested_versi
     return str(version.pk)
 
 
+def builtin_ui_version(project, actor):
+    from ui_automation.case_conversion import local_skill
+    from skills.versions import SkillVersionService
+    builtin = local_skill()
+    from pathlib import Path
+    import hashlib
+    digest = hashlib.sha256(builtin['sha256'].encode())
+    for path in sorted(Path(builtin['directory']).rglob('*')):
+        if path.is_file() and '__pycache__' not in path.parts and path.name != '.DS_Store':
+            digest.update(path.relative_to(builtin['directory']).as_posix().encode())
+            digest.update(path.read_bytes())
+    builtin['sha256'] = digest.hexdigest()
+    version = SkillVersion.objects.select_related('skill', 'release').filter(
+        skill__name='excel-to-ui-case', source_metadata__builtin_sha256=builtin['sha256'],
+    ).order_by('-created_at').first()
+    if version is None:
+        _, version = SkillVersionService.create_candidate_from_dir(
+            source_dir=builtin['directory'], project=project, actor=actor,
+            version_override='0.0.0-builtin.' + builtin['sha256'][:12],
+            source_metadata={'platform_builtin': 'excel-to-ui-case', 'builtin_sha256': builtin['sha256']},
+            change_reason='固化平台内置业务用例探索转换 Skill',
+        )
+    verify_source(version)
+    if not version.is_runnable:
+        raise ValidationError('平台内置转换 Skill 版本不可运行，请联系管理员')
+    return version
+
+
 class SkillAgentTaskViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
 
@@ -97,11 +125,11 @@ class SkillAgentTaskViewSet(viewsets.ViewSet):
 
     def create(self, request):
         project = self.project(request)
-        version = get_object_or_404(SkillVersion.objects.select_related('skill', 'release'), pk=request.data.get('source_version_id'))
         generation_mode = str(request.data.get('generation_mode') or '')
         if generation_mode not in {'', 'interface_case', 'scenario', 'ui_case'}:
             return Response({'detail': '不支持的生成模式'}, status=400)
         try:
+            version = builtin_ui_version(project, request.user) if generation_mode == 'ui_case' else get_object_or_404(SkillVersion.objects.select_related('skill', 'release'), pk=request.data.get('source_version_id'))
             context = {}
             if generation_mode == 'ui_case':
                 from orchestrator_integration.ui_generation_runtime import validate_ui_context

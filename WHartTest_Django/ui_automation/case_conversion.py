@@ -58,7 +58,7 @@ def local_skill():
             raise ValidationError(f'Skill 引用文件缺失：{relative}')
         parts.append((relative, path.read_text(encoding='utf-8')))
     body = '\n\n'.join(f'【{name}】\n{text}' for name, text in parts)
-    return {'name': DEFAULT_SKILL, 'sha256': hashlib.sha256(body.encode()).hexdigest(), 'content': body}
+    return {'directory': str(directory), 'name': DEFAULT_SKILL, 'sha256': hashlib.sha256(body.encode()).hexdigest(), 'content': body}
 
 
 def redact(text):
