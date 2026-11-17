@@ -170,11 +170,6 @@
               <icon-scissor />
             </template>
           </a-step>
-          <a-step :title="pageText.workflowImageAnalysis" :description="pageText.workflowImageAnalysisDesc">
-            <template #icon>
-              <icon-image />
-            </template>
-          </a-step>
           <a-step :title="pageText.workflowUserReview" :description="pageText.workflowUserReviewDesc">
             <template #icon>
               <icon-edit />
@@ -572,14 +567,14 @@ const pageText = computed(() => (
         workflowUserReview: 'User review',
         workflowUserReviewDesc: 'Confirm the split result when needed',
         workflowRequirementReview: 'Requirement review',
-        workflowRequirementReviewDesc: 'AI analyzes requirement quality',
+        workflowRequirementReviewDesc: 'Multimodal models review text and original images together',
         workflowCompleted: 'Completed',
         workflowCompletedDesc: 'View the review report',
         latestDocumentContent: 'Latest document content',
         modulesDetails: 'Module details',
         modulesManagement: 'Module management',
         confirmModuleSegmentation: 'Confirm segmentation',
-        openImageAnalysis: 'Image analysis',
+        openImageAnalysis: 'Image analysis (optional)',
         imageAnalysisDialogTitle: 'Requirement image analysis',
         addModule: 'Add module',
         totalModules: (count: number) => `${count} ${count === 1 ? 'module' : 'modules'} total`,
@@ -683,14 +678,14 @@ const pageText = computed(() => (
         workflowUserReview: '用户调整',
         workflowUserReviewDesc: '确认模块拆分结果（如需要）',
         workflowRequirementReview: '需求评审',
-        workflowRequirementReviewDesc: 'AI分析需求质量',
+        workflowRequirementReviewDesc: '多模态模型结合正文和原图评审',
         workflowCompleted: '评审完成',
         workflowCompletedDesc: '查看评审报告',
         latestDocumentContent: '最新文档内容',
         modulesDetails: '模块详情',
         modulesManagement: '模块管理',
         confirmModuleSegmentation: '确认模块划分',
-        openImageAnalysis: '图片识别',
+        openImageAnalysis: '图片识别（可选）',
         imageAnalysisDialogTitle: '需求图片识别与调整',
         addModule: '添加模块',
         totalModules: (count: number) => `共 ${count} 个模块`,
@@ -978,10 +973,10 @@ const getCurrentStep = (status: DocumentStatus) => {
   const stepMap: Partial<Record<DocumentStatus, number>> = {
     'processing': 2,
     'module_split': 3,
-    'user_reviewing': document.value?.image_analysis_status === 'confirmed' ? 4 : 3,
-    'ready_for_review': 5,
-    'reviewing': 5,
-    'review_completed': 6,
+    'user_reviewing': 3,
+    'ready_for_review': 4,
+    'reviewing': 4,
+    'review_completed': 5,
     'failed': 0
   };
 
