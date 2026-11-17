@@ -7,3 +7,5 @@
 前端类型检查和生产构建通过。在真实本地浏览器核对全部菜单及子菜单顺序、Skill Hub跳转/选中态、中英文、50px收起态、长菜单滚动。仅Skill权限账号仅出现首页、AI工具、Skill Hub，无空系统管理或其他分组；无新增浏览器运行错误。临时账号与项目已清理。
 
 本地部署仅重建frontend，backend/runner/数据库保持运行。活动配置为backups/local-runtime-nav-20261116/compose.runtime.json（含凭据，不提交），上一配置与镜像保留，可仅回滚frontend。证据、截图、构建日志和回滚元数据保存在api_test_dwp_temp/nav-update-20261116/。
+
+2026-11-17 按用户最新要求，将质量飞轮归入AI工具分组，移除分隔线，保留Agent总览、数据飞轮、知识图谱子菜单。只有质量飞轮权限时也显示AI工具标题。

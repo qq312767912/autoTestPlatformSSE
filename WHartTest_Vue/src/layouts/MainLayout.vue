@@ -212,7 +212,7 @@
             <a href="#" @click="checkProjectAndNavigate($event, '/code-analysis')">{{ codeAnalysisMenuLabel }}</a>
           </a-menu-item>
 
-          <div v-if="!collapsed && (hasLangGraphChatPermission || hasSkillsPermission)" class="nav-section-label" role="presentation">{{ aiSectionLabel }}</div>
+          <div v-if="!collapsed && (hasLangGraphChatPermission || hasSkillsPermission || hasQualityFlywheelMenuItems)" class="nav-section-label" role="presentation">{{ aiSectionLabel }}</div>
 
           <a-menu-item key="langgraph-chat" v-if="hasLangGraphChatPermission">
             <template #icon><icon-message /></template>
@@ -223,8 +223,6 @@
             <template #icon><icon-apps /></template>
             <a href="#" @click="checkProjectAndNavigate($event, '/skills')">{{ skillsMenuLabel }}</a>
           </a-menu-item>
-
-          <div v-if="!collapsed && hasQualityFlywheelMenuItems && (hasLangGraphChatPermission || hasSkillsPermission)" class="nav-section-divider" role="separator" />
 
           <a-sub-menu key="quality-flywheel" v-if="hasQualityFlywheelMenuItems">
             <template #icon><icon-loop /></template>
