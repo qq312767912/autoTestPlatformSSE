@@ -2521,22 +2521,6 @@ class RequirementReviewEngine:
             logger.error(f"获取LLM实例失败: {e}")
             raise
 
-    def _review_source_content(self, document, module=None):
-        """视觉模型直接使用原图；纯文本模型复用可选的已确认识别结果。"""
-        from .image_analysis import confirmed_document_content, confirmed_module_content
-
-        if not self._supports_vision():
-            return confirmed_module_content(module) if module else confirmed_document_content(document)
-        content = (module.content if module else document.content) or ""
-        images = (module.document_images if module else document.images).filter(is_enabled=True).order_by("order")
-        # PDF 等图片可能只有模块关联而没有正文占位符，补齐这些原图。
-        referenced = set(re.findall(r"docimg://([^)]+)", content))
-        for image in images:
-            if image.image_id not in referenced:
-                content += f"\n![图片](docimg://{image.image_id})\n"
-                referenced.add(image.image_id)
-        return content
-
     def _supports_vision(self) -> bool:
         """检查当前LLM是否支持视觉/多模态"""
         return self.llm_config.supports_vision if self.llm_config else False
@@ -2565,10 +2549,7 @@ class RequirementReviewEngine:
             # 处理图片
             image_id = match.group(1)
             try:
-                doc_image = document.images.filter(image_id=image_id, is_enabled=True).order_by("-created_at").first()
-                if doc_image is None:
-                    last_end = match.end()
-                    continue
+                doc_image = document.images.get(image_id=image_id)
                 with open(doc_image.image_file.path, "rb") as f:
                     img_base64 = base64.b64encode(f.read()).decode("utf-8")
 
@@ -2603,7 +2584,7 @@ class RequirementReviewEngine:
         return re.sub(r"!\[.*?\]\(docimg://[^)]+\)\s*", "", content)
 
     def _prepare_analysis_content(
-        self, content: str, document: RequirementDocument = None, include_original_images: bool = True
+        self, content: str, document: RequirementDocument = None, include_original_images: bool = False
     ) -> tuple:
         """
         准备分析内容，根据是否支持多模态返回不同格式
@@ -2614,7 +2595,7 @@ class RequirementReviewEngine:
             - is_multimodal: 是否使用多模态格式
             - image_warning: 如果有图片但不支持多模态，返回警告信息
         """
-        has_images = bool(document and document.images.filter(is_enabled=True).exists())
+        has_images = document and document.has_images if document else False
         supports_vision = self._supports_vision()
 
         if has_images and supports_vision and include_original_images:
@@ -2629,7 +2610,7 @@ class RequirementReviewEngine:
             logger.warning(warning)
             return text_only, False, warning
         else:
-            # 纯文本模型沿用已确认的图片识别结果。
+            # 默认使用已展开的结构化图片内容。原图仅在调用方明确要求时发送。
             return content, False, None
 
     def _get_user_prompt(self, prompt_type: str) -> str:
@@ -2643,7 +2624,7 @@ class RequirementReviewEngine:
         return None
 
     def analyze_document_directly(
-        self, content: str, analysis_options: dict = None, document: RequirementDocument = None
+        self, content: str, analysis_options: dict = None
     ) -> dict:
         """直接分析整个文档（不拆分模块）"""
         try:
@@ -2651,14 +2632,12 @@ class RequirementReviewEngine:
             if not direct_prompt:
                 raise ValueError("用户未配置直接分析提示词，请先在提示词管理中配置")
 
-            if document is not None:
-                content = self._review_source_content(document)
             formatted_prompt = format_prompt_template(
-                direct_prompt, content=content if document is not None else content[:8000]
+                direct_prompt, content=content[:8000]
             )
             messages = [
                 SystemMessage(content="你是一位专业的需求分析师，擅长需求文档评审。"),
-                HumanMessage(content=self._prepare_analysis_content(formatted_prompt, document)[0]),
+                HumanMessage(content=formatted_prompt),
             ]
 
             response = safe_llm_invoke(self.llm, messages)
@@ -3128,7 +3107,8 @@ class RequirementReviewEngine:
                         f"文档包含 {document.image_count} 张图片，但当前模型不支持多模态，图片将被忽略"
                     )
 
-            analysis_content = self._review_source_content(document)
+            from .image_analysis import confirmed_document_content
+            analysis_content = confirmed_document_content(document)
 
             # 使用线程池并发执行6个专项分析（每个都处理完整文档，充分利用上下文）
             from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -3418,7 +3398,8 @@ class RequirementReviewEngine:
             raise ValueError("用户未配置全局分析提示词，请先在提示词管理中配置")
 
         try:
-            combined_document_content = self._review_source_content(document)
+            from .image_analysis import confirmed_document_content
+            combined_document_content = confirmed_document_content(document)
             formatted_prompt = format_prompt_template(
                 global_prompt,
                 title=document.title,
@@ -3427,9 +3408,7 @@ class RequirementReviewEngine:
             )
             messages = [
                 SystemMessage(content="你是一位专业的需求分析师，擅长需求文档评审。"),
-                HumanMessage(content=self._prepare_analysis_content(
-                    formatted_prompt, document
-                )[0]),
+                HumanMessage(content=formatted_prompt),
             ]
 
             response = safe_llm_invoke(self.llm, messages)
@@ -3479,7 +3458,8 @@ class RequirementReviewEngine:
             raise ValueError("用户未配置模块分析提示词，请先在提示词管理中配置")
 
         try:
-            combined_module_content = self._review_source_content(module.document, module)
+            from .image_analysis import confirmed_module_content
+            combined_module_content = confirmed_module_content(module)
             formatted_prompt = format_prompt_template(
                 module_prompt,
                 module_id=str(module.id),
@@ -3491,9 +3471,7 @@ class RequirementReviewEngine:
             )
             messages = [
                 SystemMessage(content="你是一位专业的需求分析师，正在进行需求评审。"),
-                HumanMessage(content=self._prepare_analysis_content(
-                    formatted_prompt, module.document
-                )[0]),
+                HumanMessage(content=formatted_prompt),
             ]
 
             response = safe_llm_invoke(self.llm, messages)
@@ -3793,7 +3771,7 @@ class RequirementReviewService:
 
             # 对整个文档进行评审
             review_result = self.review_engine.analyze_document_directly(
-                document.content, analysis_options or {}, document=document
+                document.content, analysis_options or {}
             )
 
             # 更新评审报告
