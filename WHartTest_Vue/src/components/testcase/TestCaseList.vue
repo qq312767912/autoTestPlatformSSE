@@ -71,6 +71,7 @@
         </a-button>
       </div>
       <div class="action-buttons">
+        <slot name="toolbar-actions" />
         <a-badge :count="runningTasksCount" :dot="false" :max-count="99">
           <a-button type="outline" class="task-queue-btn" @click="emit('open-task-queue')">
             <template #icon>

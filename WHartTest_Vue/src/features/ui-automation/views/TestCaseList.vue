@@ -34,7 +34,7 @@
         />
       </div>
       <div class="action-buttons">
-        <a-button v-if="canGenerateUiCases" :disabled="!projectId" @click="generationVisible=true">{{ tl('AI 生成 UI 用例') }}</a-button>
+        <a-button v-if="canGenerateUiCases" :disabled="!projectId" @click="generationVisible=true">{{ tl('业务用例转 UI 用例') }}</a-button>
         <a-select
           v-model="selectedActuator"
           :placeholder="pageText.selectActuator"

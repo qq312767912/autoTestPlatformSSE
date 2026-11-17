@@ -12,6 +12,7 @@
 
       <!-- 右侧内容区域 - 根据视图模式动态切换 -->
       <div class="right-content-area">
+        <BusinessCaseConversionModal v-if="currentProjectId" v-model:visible="uiConversionVisible" :project-id="currentProjectId" :modules="uiConversionModules" />
 
 
         <!-- 列表视图 - 使用 v-show 保持组件状态（筛选条件等） -->
@@ -31,7 +32,11 @@
           @module-filter-change="handleModuleSelected"
           @request-optimization="handleRequestOptimization"
           ref="testCaseListRef"
-        />
+        >
+          <template #toolbar-actions>
+            <a-button v-if="canConvertToUi" type="outline" :disabled="!currentProjectId" @click="openUiConversion">业务用例转 UI 用例</a-button>
+          </template>
+        </TestCaseList>
 
         <!-- 思维导图视图 -->
         <TestCaseMindmap
@@ -131,6 +136,22 @@
 </template>
 
 <script setup lang="ts">
+import BusinessCaseConversionModal from '@/features/ui-automation/components/BusinessCaseConversionModal.vue';
+import { moduleApi as uiModuleApi } from '@/features/ui-automation/api';
+import { type UiModule } from '@/features/ui-automation/types';
+import { useAuthStore } from '@/store/authStore';
+const conversionAuth = useAuthStore();
+const canConvertToUi = computed(() => conversionAuth.hasPermission('ui_automation.add_uitestcase') && conversionAuth.hasPermission('testcases.view_testcase'));
+const uiConversionVisible = ref(false);
+const uiConversionModules = ref<UiModule[]>([]);
+async function openUiConversion() {
+  if (!currentProjectId.value) return;
+  const response = await uiModuleApi.tree(currentProjectId.value);
+  const flatten = (items: UiModule[]): UiModule[] => items.flatMap(item => [item, ...flatten((item.children || []) as UiModule[])]);
+  uiConversionModules.value = flatten(extractResponseData<UiModule[]>(response) || []);
+  uiConversionVisible.value = true;
+}
+
 import { h, ref, computed, watch, onMounted, inject } from 'vue';
 import { useRouter } from 'vue-router';
 import { useProjectStore } from '@/store/projectStore';
