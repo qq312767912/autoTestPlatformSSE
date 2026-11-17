@@ -47,8 +47,8 @@ async def consume(binding, message, parent_id=None):
     async def monitor_cancel():
         while True:
             await asyncio.sleep(2)
-            run = await sync_to_async(lambda: SkillAgentTaskBinding.objects.get(pk=parent_id).generation_run)()
-            if run.get('cancel_requested'):
+            run = await sync_to_async(update_run)(parent_id, heartbeat_at=timezone.now().isoformat())
+            if run.get('cancel_requested') or run.get('status') not in ('queued', 'running'):
                 from orchestrator_integration.stop_signal import set_stop_signal
                 set_stop_signal(binding.session.session_id)
                 return
@@ -62,7 +62,11 @@ async def consume(binding, message, parent_id=None):
             try: await monitor
             except asyncio.CancelledError: pass
         from mcp_tools.persistent_client import mcp_session_manager
-        await mcp_session_manager.cleanup_user_session(str(binding.session.user_id), str(binding.session.project_id), binding.session.session_id)
+        try:
+            await asyncio.wait_for(mcp_session_manager.cleanup_user_session(str(binding.session.user_id), str(binding.session.project_id), binding.session.session_id), timeout=15)
+        except (Exception, asyncio.CancelledError):
+            logger = logging.getLogger(__name__)
+            logger.warning('MCP cleanup interrupted; preserving batch outcome session=%s', binding.session.session_id)
 
 
 
@@ -73,7 +77,7 @@ def run_ui_conversion(pk):
         locked = SkillAgentTaskBinding.objects.select_for_update().get(pk=pk)
         if locked.generation_run.get('status') != 'queued':
             return
-        locked.generation_run = {**locked.generation_run, 'status': 'running', 'started_at': timezone.now().isoformat()}
+        locked.generation_run = {**locked.generation_run, 'status': 'running', 'started_at': timezone.now().isoformat(), 'heartbeat_at': timezone.now().isoformat()}
         locked.save(update_fields=['generation_run'])
     parent = SkillAgentTaskBinding.objects.select_related('session__user', 'source_version').get(pk=pk)
     results = [{'source_id': x['id'], 'name': x['name'], 'status': 'queued'} for x in parent.generation_context['functional_cases']]
@@ -105,6 +109,8 @@ def run_ui_conversion(pk):
                 item.update(status='success', result='updated' if source.get('ui_test_case_id') else 'created', **verified)
             else:
                 item.update(status='needs_attention', message='未取得真实试跑及绑定证据，请查看探索会话')
+        except asyncio.CancelledError:
+            item.update(status='failed', message='探索连接已中断，可重新发起')
         except Exception:
             item.update(status='failed', message='探索执行异常，请查看服务端日志与对应会话')
             logging.getLogger(__name__).exception('UI conversion failed source=%s', source['id'])
@@ -122,3 +128,19 @@ def run_ui_conversion(pk):
             if item['status'] == 'queued': item['status'] = 'cancelled'
     status = 'cancelled' if run.get('cancel_requested') else ('completed' if all(x['status']=='success' for x in results) else 'partial_failure')
     update_run(pk, status=status, finished_at=timezone.now().isoformat(), items=results)
+
+
+@transaction.atomic
+def reconcile_run(binding):
+    """A worker heartbeat expiring must not permanently block the source cases."""
+    from django.utils.dateparse import parse_datetime
+    from datetime import timedelta
+    binding = SkillAgentTaskBinding.objects.select_for_update().get(pk=binding.pk)
+    run = binding.generation_run
+    stamp = parse_datetime(run.get('heartbeat_at') or '')
+    if run.get('status') == 'running' and stamp and timezone.now() - stamp > timedelta(minutes=5):
+        items = [{**item, 'status': 'failed', 'message': '后台任务已失联，请重新发起'}
+                 if item.get('status') in ('queued', 'exploring') else item for item in run.get('items', [])]
+        binding.generation_run = update_run(binding.pk, status='partial_failure', items=items,
+            active_session_id=None, error='后台任务已失联，已保留现有资产与证据，可以重新发起', finished_at=timezone.now().isoformat())
+    return binding

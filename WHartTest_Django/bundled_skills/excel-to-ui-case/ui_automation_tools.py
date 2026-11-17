@@ -899,7 +899,6 @@ def execute_page_steps(step_id: int, env_config_id: int = None, actuator_id: str
 
 def main():
     parser = argparse.ArgumentParser(description="WHartTest UI 自动化管理工具")
-    parser.add_argument("--action", required=True, help="操作名称")
 
     # 通用参数
     parser.add_argument("--project_id", type=int, help="项目 ID")
@@ -964,9 +963,6 @@ def main():
     parser.add_argument("--actuator_id", help="执行器 ID")
     parser.add_argument("--wait_result", action="store_true", help="等待执行结果")
     parser.add_argument("--exec_timeout", type=int, default=120, help="执行等待超时（秒）")
-
-    args = parser.parse_args()
-    action = args.action
 
     # 动作路由
     actions = {
@@ -1050,6 +1046,11 @@ def main():
         ),
         "execute_page_steps": lambda: execute_page_steps(args.step_id, args.config_id, args.actuator_id),
     }
+
+    aliases = {'list_modules': 'get_ui_modules', 'list_testcases': 'get_testcases', 'get_testcase_detail': 'get_testcase'}
+    parser.add_argument('--action', required=True, choices=sorted(set(actions) | set(aliases)), help='操作名称；查询模块使用 get_ui_modules，查询用例使用 get_testcases')
+    args = parser.parse_args()
+    action = aliases.get(args.action, args.action)
 
     if action not in actions:
         print(json.dumps({"status": "error", "message": f"未知操作: {action}"}, ensure_ascii=False))

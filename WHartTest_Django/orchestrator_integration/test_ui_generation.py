@@ -201,3 +201,41 @@ class UiGenerationTests(ApiGenerationBindingTests):
         response=SkillAgentTaskViewSet.as_view({'post':'create'})(request)
         self.assertEqual(response.status_code,201,response.data)
         self.assertEqual(response.data['skill_version_id'],str(self.version.pk))
+
+    def test_old_cli_list_aliases_are_normalized_without_mutating_arguments(self):
+        guard=generation_middleware([], 'ui_case', self.project.pk)[0]
+        for alias, canonical in [('list_modules','get_ui_modules'),('list_testcases','get_testcases')]:
+            request=ToolRequest({'id':'x','name':'execute_skill_script','args':{'command':f'python ui_automation_tools.py --action={alias} --project_id {self.project.pk}'}})
+            result=guard.wrap_tool_call(request,lambda r:r)
+            self.assertIn('--action='+canonical,result.tool_call['args']['command'])
+            self.assertIn('--project_id '+str(self.project.pk),result.tool_call['args']['command'])
+
+    def test_cli_help_lists_real_actions_and_read_aliases_work(self):
+        import runpy, sys, io
+        from pathlib import Path
+        from django.conf import settings
+        from contextlib import redirect_stdout
+        from unittest.mock import patch, Mock
+        from ui_automation.case_conversion import local_skill
+        script=Path(local_skill()['directory'])/'ui_automation_tools.py'
+        for action, endpoint in [('list_modules','modules/tree/'),('list_testcases','testcases/')]:
+            response=Mock();response.json.return_value={'data':[]}
+            with patch.object(sys,'argv',[str(script),'--action',action,'--project_id',str(self.project.pk)]), patch('requests.request',return_value=response) as request, redirect_stdout(io.StringIO()):
+                runpy.run_path(str(script),run_name='__main__')
+            self.assertTrue(request.call_args.args[1].endswith(endpoint))
+        out=io.StringIO()
+        with patch.object(sys,'argv',[str(script),'--help']),redirect_stdout(out):
+            with self.assertRaises(SystemExit): runpy.run_path(str(script),run_name='__main__')
+        self.assertIn('get_ui_modules',out.getvalue())
+        self.assertIn('get_testcases',out.getvalue())
+
+    def test_expired_worker_heartbeat_releases_batch_scope(self):
+        from datetime import timedelta
+        from knowledge_evolution.ui_generation_jobs import reconcile_run
+        binding=self.binding()
+        binding.generation_run={'status':'running','heartbeat_at':(timezone.now()-timedelta(minutes=10)).isoformat(),'items':[{'source_id':self.case.pk,'status':'exploring'}]}
+        binding.save(update_fields=['generation_run'])
+        reconcile_run(binding)
+        binding.refresh_from_db()
+        self.assertEqual(binding.generation_run['status'],'partial_failure')
+        self.assertEqual(binding.generation_run['items'][0]['status'],'failed')

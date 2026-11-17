@@ -80,6 +80,9 @@ class SkillAgentTaskViewSet(viewsets.ViewSet):
             session__project=project, session__user=request.user,
             session__session_id=request.query_params.get('session_id', ''),
         ).first()
+        if binding:
+            from .ui_generation_jobs import reconcile_run
+            binding = reconcile_run(binding)
         return Response({'binding': binding_view(binding) if binding else None})
 
     @action(detail=False, methods=['post'])
@@ -97,14 +100,20 @@ class SkillAgentTaskViewSet(viewsets.ViewSet):
                 ids = [x['id'] for x in binding.generation_context['functional_cases']]
                 list(TestCase.objects.select_for_update().filter(pk__in=ids).order_by('pk'))
                 for other in SkillAgentTaskBinding.objects.filter(session__project=project, generation_run__status__in=['queued','running']).exclude(pk=binding.pk):
+                    from .ui_generation_jobs import reconcile_run
+                    other = reconcile_run(other)
+                    if other.generation_run.get('status') not in ('queued', 'running'):
+                        continue
                     if set(ids) & {x['id'] for x in other.generation_context.get('functional_cases', [])}:
-                        return Response({'detail': '所选业务用例已有探索任务，请等待完成'}, status=409)
+                        return Response({'detail': '所选业务用例已有探索批次，请查看该批次进度或取消后重试', 'existing_session_id': other.session.session_id}, status=409)
                 from .ui_generation_jobs import run_ui_conversion
                 binding.generation_run = {'status': 'queued', 'items': [], 'cancel_requested': False}
                 binding.save(update_fields=['generation_run'])
                 def dispatch():
                     try:
-                        run_ui_conversion.delay(binding.pk)
+                        task = run_ui_conversion.delay(binding.pk)
+                        from .ui_generation_jobs import update_run
+                        update_run(binding.pk, task_id=str(task.id))
                     except Exception:
                         from .ui_generation_jobs import update_run
                         update_run(binding.pk, status='failed', error='后台任务派发失败，请重新发起')

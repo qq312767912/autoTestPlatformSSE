@@ -130,6 +130,15 @@ class GenerationUiCaseGuardMiddleware(GenerationInterfaceCaseGuardMiddleware):
         except ValueError:
             return request, _error(request, '命令引用不完整')
         action = _flag(tokens, '--action')[0] if command else call.get('name', '')
+        # Compatibility for immutable older builtin packages whose CLI help omitted action names.
+        aliases = {'list_modules': 'get_ui_modules', 'list_testcases': 'get_testcases', 'get_testcase_detail': 'get_testcase'}
+        if command and action in aliases:
+            _, index, equals = _flag(tokens, '--action')
+            action = aliases[action]
+            tokens[index] = '--action=' + action if equals else action
+            args = dict(args)
+            args['command'] = shlex.join(tokens)
+            request = request.override(tool_call={**call, 'args': args})
         if action in {'edit_testcase', 'create_interface_case', 'update_interface_case', 'run_interface_case', 'run_testcase'}:
             return request, _error(request, '当前是 UI 生成任务；功能用例绑定必须通过 bind_generated_ui_case 验证成功试跑记录。')
         if action == 'execute_testcase' and self.session_id:
