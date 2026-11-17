@@ -226,3 +226,26 @@ class WsTokenConfigCheckTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LoggingRotationTest(unittest.TestCase):
+    def test_file_logging_is_bounded_without_stderr_duplicate(self):
+        from main import setup_logging
+        from logging.handlers import RotatingFileHandler
+        with tempfile.TemporaryDirectory() as directory:
+            with patch('logging.basicConfig') as configure:
+                setup_logging('INFO', str(Path(directory) / 'actuator.log'))
+            handlers = configure.call_args.kwargs['handlers']
+            self.assertEqual(len(handlers), 1)
+            handler = handlers[0]
+            try:
+                self.assertIsInstance(handler, RotatingFileHandler)
+                self.assertEqual(handler.maxBytes, 10 * 1024 * 1024)
+                self.assertEqual(handler.backupCount, 5)
+                handler.maxBytes = 100
+                for i in range(20):
+                    handler.emit(logging.LogRecord('test', logging.INFO, '', 0, 'x' * 70, (), None))
+                self.assertLessEqual(len(list(Path(directory).iterdir())), 6)
+                self.assertTrue(Path(str(handler.baseFilename) + '.1').exists())
+            finally:
+                handler.close()

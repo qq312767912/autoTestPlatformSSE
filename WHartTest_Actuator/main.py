@@ -18,6 +18,7 @@ UI自动化执行器 - 主入口
 import argparse
 import asyncio
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import signal
 import sys
@@ -425,12 +426,12 @@ def check_ws_token_config(config: Config, config_path: Path) -> None:
 
 def setup_logging(level: str = 'INFO', log_file: str | None = None):
     """配置日志"""
-    handlers = [logging.StreamHandler()]
+    handlers = [] if log_file else [logging.StreamHandler()]
 
     if log_file:
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(log_file, encoding='utf-8'))
+        handlers.append(RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding='utf-8'))
 
     logging.basicConfig(
         level=getattr(logging, level.upper()),
