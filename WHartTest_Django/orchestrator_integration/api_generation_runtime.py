@@ -41,7 +41,8 @@ def generation_middleware(middleware, mode, project_id=None):
         result.append(GenerationUiCaseGuardMiddleware(mode, project_id))
     if mode in GENERATION_MODES - {"ui_case"}:
         result.append(GenerationInterfaceCaseGuardMiddleware(mode, project_id))
-    if mode in GENERATION_MODES:
-        from .generation_history_guard import GenerationHistoryPairingMiddleware
+    # 普通聊天与恢复会话也可能包含中断的工具调用；在最终模型输入上统一配对。
+    from .generation_history_guard import GenerationHistoryPairingMiddleware
+    if not any(isinstance(item, GenerationHistoryPairingMiddleware) for item in result):
         result.append(GenerationHistoryPairingMiddleware())
     return result

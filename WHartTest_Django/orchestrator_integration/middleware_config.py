@@ -1119,6 +1119,8 @@ def get_standard_middleware(
     else:
         logger.info("HITL 未启用，跳过 HumanInTheLoopMiddleware")
 
+    from .generation_history_guard import GenerationHistoryPairingMiddleware
+    middleware.append(GenerationHistoryPairingMiddleware())
     return middleware
 
 
@@ -1517,6 +1519,8 @@ async def get_standard_middleware_async(
         middleware.append(hitl_mw)
         logger.debug("已添加 HumanInTheLoopMiddleware（异步版本）")
 
+    from .generation_history_guard import GenerationHistoryPairingMiddleware
+    middleware.append(GenerationHistoryPairingMiddleware())
     return middleware
 
 

@@ -747,11 +747,11 @@ def _build_sanitized_messages(messages: List[Any]) -> tuple[List[Any], int]:
 
     for msg in messages:
         # 带 tool_calls 的 AIMessage
-        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+        if isinstance(msg, AIMessage) and (getattr(msg, "tool_calls", None) or getattr(msg, "invalid_tool_calls", None)):
             _flush_pending()
             result.append(msg)
 
-            for tc in msg.tool_calls:
+            for tc in [*(msg.tool_calls or []), *(getattr(msg, "invalid_tool_calls", None) or [])]:
                 tc_id = (
                     tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
                 )
