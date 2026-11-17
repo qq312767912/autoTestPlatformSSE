@@ -133,3 +133,85 @@ class RequirementImageWorkflowTests(TestCase):
         self.assertIn("查询条件\n[用户已确认的需求图片 img_005]", module_content)
         self.assertIn("OCR兜底", document_content)
         self.assertIn("docimg://img_005", self.module.content)
+
+    def _direct_review_engine(self, vision=True):
+        from types import SimpleNamespace
+        from .services import RequirementReviewEngine
+        engine = RequirementReviewEngine.__new__(RequirementReviewEngine)
+        engine.llm_config = SimpleNamespace(supports_vision=vision, name="test-model")
+        return engine
+
+    def test_direct_multimodal_review_sends_unconfirmed_original_in_place(self):
+        engine = self._direct_review_engine()
+        self.document.content = "前文\n![截图](docimg://raw)\n后文"
+        DocumentImage.objects.create(
+            document=self.document, module=self.module, image_id="raw",
+            image_file=SimpleUploadedFile("raw.png", b"original-image", content_type="image/png"),
+            content_type="image/png", review_status="pending",
+        )
+        content = engine._review_source_content(self.document)
+        parts, multimodal, warning = engine._prepare_analysis_content(content, self.document)
+        self.assertTrue(multimodal)
+        self.assertIsNone(warning)
+        self.assertEqual([part['type'] for part in parts], ['text', 'image_url', 'text'])
+        self.assertEqual(parts[1]['image_url']['url'], 'data:image/png;base64,b3JpZ2luYWwtaW1hZ2U=')
+
+    def test_module_direct_review_only_includes_own_enabled_images(self):
+        engine = self._direct_review_engine()
+        for key, module, enabled in [('own', self.module, True), ('disabled', self.module, False), ('other', None, True)]:
+            DocumentImage.objects.create(
+                document=self.document, module=module, image_id=key, is_enabled=enabled,
+                image_file=SimpleUploadedFile(key + '.png', b'raw'), content_type='image/png',
+            )
+        content = engine._review_source_content(self.document, self.module)
+        parts, multimodal, _ = engine._prepare_analysis_content(content, self.document)
+        self.assertIn('docimg://own', content)
+        self.assertNotIn('docimg://disabled', content)
+        self.assertNotIn('docimg://other', content)
+        self.assertTrue(multimodal)
+        self.assertEqual(sum(part['type'] == 'image_url' for part in parts), 1)
+
+    def test_text_model_keeps_confirmed_results_without_images(self):
+        engine = self._direct_review_engine(vision=False)
+        DocumentImage.objects.create(
+            document=self.document, module=self.module, image_id='confirmed',
+            image_file=SimpleUploadedFile('confirmed.png', b'raw'),
+            analysis_result={'content_summary': '已确认的页面内容'}, review_status='confirmed',
+        )
+        content = engine._review_source_content(self.document, self.module)
+        parts, multimodal, warning = engine._prepare_analysis_content(content, self.document)
+        self.assertFalse(multimodal)
+        self.assertIn('已确认的页面内容', parts)
+        self.assertIsInstance(parts, str)
+
+    def test_module_review_request_contains_original_image_without_vision_mcp(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        engine = self._direct_review_engine()
+        engine.llm = Mock()
+        engine._get_user_prompt = Mock(return_value='分析模块：{module_content}')
+        DocumentImage.objects.create(
+            document=self.document, module=self.module, image_id='module-raw',
+            image_file=SimpleUploadedFile('module.png', b'raw'), content_type='image/png',
+        )
+        with patch('requirements.services.safe_llm_invoke', return_value=SimpleNamespace(content='{"issues": []}')) as invoke:
+            result = engine._analyze_single_module(self.module, {})
+        self.assertEqual(result['module_id'], str(self.module.id))
+        message = invoke.call_args.args[1][1]
+        self.assertTrue(any(part['type'] == 'image_url' for part in message.content))
+        self.assertTrue(any('导入企业数据' in part.get('text', '') for part in message.content))
+
+    def test_unsplit_review_also_sends_original_images(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        engine = self._direct_review_engine()
+        engine.llm = Mock()
+        engine._get_user_prompt = Mock(return_value='评审：{content}')
+        self.document.content = '需求正文'
+        DocumentImage.objects.create(
+            document=self.document, image_id='direct',
+            image_file=SimpleUploadedFile('direct.png', b'raw'), content_type='image/png',
+        )
+        with patch('requirements.services.safe_llm_invoke', return_value=SimpleNamespace(content='{}')) as invoke:
+            engine.analyze_document_directly(self.document.content, document=self.document)
+        self.assertTrue(any(p['type'] == 'image_url' for p in invoke.call_args.args[1][1].content))
