@@ -143,7 +143,7 @@ const pageText = computed(() => isEnglish.value ? {
   selectedHint: '{count} selected',
   confirm: 'OK',
   allModules: 'All Modules',
-  boundDisabledHint: 'Bound cases cannot be selected',
+  boundDisabledHint: 'Linked UI cases will be maintained',
 } : {
   modalTitle: '选择功能用例',
   moduleSearchPlaceholder: '搜索模块',
@@ -159,7 +159,7 @@ const pageText = computed(() => isEnglish.value ? {
   selectedHint: '已选 {count} 条',
   confirm: '确定',
   allModules: '全部模块',
-  boundDisabledHint: '已绑定的用例不可选择',
+  boundDisabledHint: '已关联 UI 用例将优先复用维护',
 });
 
 const TEST_TYPE_LABELS: Record<string, string> = {
@@ -250,11 +250,10 @@ const page = ref(1);
 const pageSize = ref(10);
 /** 已选用例 ID（跨模块/跨页保留，v-model 绑定表格勾选） */
 const selectedRowKeys = ref<Array<string | number>>([]);
-/** 已绑定 UI 用例的功能用例不可选 */
+/** 已有关联的业务用例也可选，由任务维护原 UI 用例。 */
 const rowSelection = computed(() => ({
   type: 'checkbox' as const,
   showCheckedAll: true,
-  // Arco 支持通过 disabled 回调禁用行勾选（老版本不支持时由 row-class 视觉提示兜底）
 }));
 
 const selectedIds = computed(() => selectedRowKeys.value.filter((k): k is number => typeof k === 'number'));
@@ -314,7 +313,7 @@ const handlePageSizeChange = (s: number) => {
   loadCases();
 };
 
-const rowClass = (record: TestCase) => (record.ui_test_case ? 'case-row-disabled' : '');
+const rowClass = (_record: TestCase) => '';
 
 const handleConfirm = () => {
   const ids = selectedIds.value;
@@ -322,11 +321,8 @@ const handleConfirm = () => {
     Message.warning(isEnglish.value ? 'Select at least one case.' : '请至少选择一条用例。');
     return;
   }
-  // 已绑定 UI 用例的行不允许入选（数据兜底）
-  const validIds = ids.filter((id) => {
-    const tc = cases.value.find((c) => c.id === id);
-    return !tc || !tc.ui_test_case;
-  });
+  // 保留已有 UI 关联的选中项。
+  const validIds = ids;
   if (!validIds.length) {
     Message.warning(pageText.value.boundDisabledHint);
     return;

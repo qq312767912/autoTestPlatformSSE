@@ -34,11 +34,11 @@ def append_generation_instructions(prompt, mode):
     return (prompt or '') + '\n\n' + INTERFACE_CASE_LIVE_VERIFICATION_INSTRUCTION
 
 
-def generation_middleware(middleware, mode, project_id=None):
+def generation_middleware(middleware, mode, project_id=None, session_id=None):
     result = list(middleware or [])
     if mode == "ui_case":
         from .generation_guard import GenerationUiCaseGuardMiddleware
-        result.append(GenerationUiCaseGuardMiddleware(mode, project_id))
+        result.append(GenerationUiCaseGuardMiddleware(mode, project_id, session_id))
     if mode in GENERATION_MODES - {"ui_case"}:
         result.append(GenerationInterfaceCaseGuardMiddleware(mode, project_id))
     # 普通聊天与恢复会话也可能包含中断的工具调用；在最终模型输入上统一配对。

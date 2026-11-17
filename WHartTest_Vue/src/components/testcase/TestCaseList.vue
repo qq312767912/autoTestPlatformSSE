@@ -72,15 +72,6 @@
       </div>
       <div class="action-buttons">
         <slot name="toolbar-actions" />
-        <a-badge :count="runningTasksCount" :dot="false" :max-count="99">
-          <a-button type="outline" class="task-queue-btn" @click="emit('open-task-queue')">
-            <template #icon>
-              <icon-sync v-if="runningTasksCount > 0" spin />
-              <icon-list v-else />
-            </template>
-            {{ pageText.taskQueue }}
-          </a-button>
-        </a-badge>
         <a-button type="primary" @click="handleGenerateTestCases">{{ pageText.generateCases }}</a-button>
         <a-button type="primary" @click="handleAddTestCase">{{ pageText.addCase }}</a-button>
       </div>
@@ -185,7 +176,6 @@
         <a-space :size="4">
           <a-button type="primary" size="mini" @click.stop="handleViewTestCase(record)">{{ pageText.view }}</a-button>
           <a-button type="primary" size="mini" @click.stop="handleEditTestCase(record)">{{ pageText.edit }}</a-button>
-          <a-button type="outline" size="mini" @click.stop="handleExecuteTestCase(record)">{{ pageText.execute }}</a-button>
           <a-button type="outline" size="mini" @click.stop="handleCopyTestCase(record)">{{ pageText.copy }}</a-button>
           <a-button type="primary" status="danger" size="mini" @click.stop="handleDeleteTestCase(record)">{{ pageText.delete }}</a-button>
         </a-space>
@@ -1016,6 +1006,7 @@ watch(selectedModuleId, (newVal) => {
 // 暴露给父组件的方法
 defineExpose({
   refreshTestCases: fetchTestCases,
+  getSelectedCaseIds: () => [...selectedTestCaseIds.value],
   // 获取当前筛选后的用例ID列表（用于编辑页面导航）
   getTestCaseIds: getNavigationTestCaseIds,
 });

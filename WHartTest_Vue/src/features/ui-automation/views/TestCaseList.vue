@@ -34,7 +34,6 @@
         />
       </div>
       <div class="action-buttons">
-        <a-button v-if="canGenerateUiCases" :disabled="!projectId" @click="generationVisible=true">{{ tl('业务用例转 UI 用例') }}</a-button>
         <a-select
           v-model="selectedActuator"
           :placeholder="pageText.selectActuator"
@@ -87,7 +86,6 @@
             {{ batchDeleteLabel }}
           </a-button>
         </a-popconfirm>
-        <a-button v-if="canConvertBusinessCases" :disabled="!projectId" @click="conversionVisible=true">业务用例转 UI 用例</a-button>
         <a-button type="primary" @click="showAddModal">
           <template #icon><icon-plus /></template>
           {{ pageText.addCase }}

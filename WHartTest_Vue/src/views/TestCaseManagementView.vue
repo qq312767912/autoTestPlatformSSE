@@ -12,7 +12,7 @@
 
       <!-- 右侧内容区域 - 根据视图模式动态切换 -->
       <div class="right-content-area">
-        <BusinessCaseConversionModal v-if="currentProjectId" v-model:visible="uiConversionVisible" :project-id="currentProjectId" :modules="uiConversionModules" />
+        <GenerateUiCasesModal v-model:visible="uiConversionVisible" :initial-case-ids="uiConversionCaseIds" />
 
 
         <!-- 列表视图 - 使用 v-show 保持组件状态（筛选条件等） -->
@@ -136,19 +136,14 @@
 </template>
 
 <script setup lang="ts">
-import BusinessCaseConversionModal from '@/features/ui-automation/components/BusinessCaseConversionModal.vue';
-import { moduleApi as uiModuleApi } from '@/features/ui-automation/api';
-import { type UiModule } from '@/features/ui-automation/types';
+import GenerateUiCasesModal from '@/features/ui-automation/components/generate/GenerateUiCasesModal.vue';
 import { useAuthStore } from '@/store/authStore';
 const conversionAuth = useAuthStore();
-const canConvertToUi = computed(() => conversionAuth.hasPermission('ui_automation.add_uitestcase') && conversionAuth.hasPermission('testcases.view_testcase'));
+const canConvertToUi = computed(() => conversionAuth.hasPermission('ui_automation.add_uitestcase') && conversionAuth.hasPermission('ui_automation.change_uitestcase') && conversionAuth.hasPermission('testcases.view_testcase') && conversionAuth.hasPermission('testcases.change_testcase'));
 const uiConversionVisible = ref(false);
-const uiConversionModules = ref<UiModule[]>([]);
-async function openUiConversion() {
-  if (!currentProjectId.value) return;
-  const response = await uiModuleApi.tree(currentProjectId.value);
-  const flatten = (items: UiModule[]): UiModule[] => items.flatMap(item => [item, ...flatten((item.children || []) as UiModule[])]);
-  uiConversionModules.value = flatten(extractResponseData<UiModule[]>(response) || []);
+const uiConversionCaseIds = ref<number[]>([]);
+function openUiConversion() {
+  uiConversionCaseIds.value = testCaseListRef.value?.getSelectedCaseIds?.() || [];
   uiConversionVisible.value = true;
 }
 

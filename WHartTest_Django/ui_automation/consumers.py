@@ -1371,6 +1371,12 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                     'executor_name': exec_name,
                     'executor_id': exec_id,
                     'trigger_type': 'manual',
+                    'environment': {
+                        'env_config_id': env_config.pk if env_config else None,
+                        'base_url': env_config.base_url if env_config else '',
+                        'actuator_id': RECORDER_BROWSER_ID,
+                        'auth_state_id': first_auth_id,
+                    },
                     # Playwright trace.zip 的平台存储相对路径（与执行器路径一致）
                     'trace_path': trace_local_path,
                 }

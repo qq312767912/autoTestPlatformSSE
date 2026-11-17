@@ -16,9 +16,9 @@ UI_GENERATION_INSTRUCTION = """
 </critical>
 <workflow>
 1. MUST 按服务端环境与目标模块执行，登录态由平台注入，NEVER 输出 Cookie、Token 或密码。没有登录态时如需鉴权，停止并请用户先采集登录态。
-2. MUST 逐条处理功能用例，以真实浏览器 DOM 为依据，MUST 使用 ui_generation_browser 工具探索（open→snapshot→click/fill/get/eval），不切换其他浏览器 Skill。先按页面 URL、元素语义、定位器依次查询复用已有资产，无法复用才创建。NEVER 编造元素或使用绝对 XPath。
+2. MUST 逐条处理功能用例，以真实浏览器 DOM 为依据，MUST 使用 ui_generation_browser 工具探索（open→snapshot→click/fill/get/eval），不切换其他浏览器 Skill。已有 ui_test_case_id 时 MUST 维护原 UI 用例，NEVER 另建替代或改绑；没有绑定时先按页面 URL、元素语义、定位器查询复用资产，无法复用才创建。NEVER 编造元素或使用绝对 XPath。
 3. MUST 将功能步骤及预期展开为真实页面原子操作和明确断言，保存页面、元素、页面步骤与 UI 用例；NEVER 仅创建空用例或将手工步骤粘贴当作自动化完成。
-4. MUST 使用所选环境 execute_testcase 并等待真实结果，失败最多修复5次，NEVER 删除或弱化断言来通过。定位漂移可补充备用定位并报告人工确认项。
+4. MUST 使用所选环境 execute_testcase（--config_id=env_config_id，--actuator_id recorder-browser）并等待真实结果，失败最多修复1次，NEVER 删除或弱化断言来通过。定位漂移可补充备用定位并报告人工确认项。
 5. 试跑通过后 MUST 调用 bind_generated_ui_case(functional_case_id, ui_test_case_id)。该工具检查服务端执行记录，失败或未执行不得绑定。NEVER 改用功能用例编辑接口写绑定。
 6. MUST 汇总保存、试跑通过、失败、绑定、复用、新增数量与待确认项，区分已完成和未验证。
 </workflow>
@@ -38,8 +38,12 @@ def validate_ui_context(project, actor, raw):
         module = UiModule.objects.get(pk=raw['module_id'], project=project)
         env = UiEnvironmentConfig.objects.get(pk=raw['env_config_id'], project=project)
         cases = list(TestCase.objects.filter(pk__in=ids, project=project).prefetch_related('steps'))
-        if len(cases) != len(ids) or any(case.ui_test_case_id for case in cases):
+        if len(cases) != len(ids):
             raise ValueError()
+        if any(case.ui_test_case_id and not UiTestCase.objects.filter(pk=case.ui_test_case_id, project=project).exists() for case in cases):
+            raise ValueError()
+        if any(case.ui_test_case_id for case in cases) and not actor.has_perm('ui_automation.change_uitestcase'):
+            raise ValidationError('缺少维护已有 UI 用例权限')
         if not env.base_url:
             raise ValueError()
         auth_id = raw.get('auth_state_id')
@@ -49,11 +53,15 @@ def validate_ui_context(project, actor, raw):
             prepare_storage_state(state.state_json)
             auth_id = state.pk
     except (KeyError, TypeError, ValueError, UiModule.DoesNotExist, UiEnvironmentConfig.DoesNotExist, UiAuthState.DoesNotExist):
-        raise ValidationError('范围无效、跨项目、已绑定，或环境／登录态不可用')
+        raise ValidationError('范围无效、跨项目，或环境／登录态不可用')
+    if raw.get('actuator_id', 'recorder-browser') != 'recorder-browser':
+        raise ValidationError('探索转换当前仅支持平台录制器浏览器')
     by_id = {case.pk: case for case in cases}
-    return {'module_id': module.pk, 'env_config_id': env.pk, 'base_url': env.base_url,
+    return {'business_notes': str(raw.get('business_notes') or '')[:2000], 'actuator_id': 'recorder-browser', 'module_id': module.pk, 'env_config_id': env.pk, 'base_url': env.base_url,
             'auth_state_id': auth_id or None,
             'functional_cases': [{'id': pk, 'name': by_id[pk].name, 'precondition': by_id[pk].precondition,
+                'ui_test_case_id': by_id[pk].ui_test_case_id,
+                'baseline_assertions': assertion_snapshot(by_id[pk].ui_test_case_id) if by_id[pk].ui_test_case_id else [],
                 'updated_at': by_id[pk].updated_at.isoformat(),
                 'steps': list(by_id[pk].steps.values('step_number', 'description', 'expected_result'))} for pk in ids]}
 
@@ -70,22 +78,29 @@ def get_binding(session_id, user_id, project_id):
 def bind_generated_case(session_id, user_id, project_id, functional_case_id, ui_test_case_id):
     from django.contrib.auth import get_user_model
     actor = get_user_model().objects.get(pk=user_id)
-    if not actor.has_perm('testcases.change_testcase'):
+    if not actor.has_perms(['testcases.change_testcase', 'ui_automation.change_uitestcase']):
         raise ValidationError('缺少功能用例绑定权限')
     binding = get_binding(session_id, user_id, project_id)
     snapshots = {case['id']: case for case in binding.generation_context['functional_cases']}
     if functional_case_id not in snapshots:
         raise ValidationError('功能用例不在当前任务范围')
     case = TestCase.objects.select_for_update().get(pk=functional_case_id, project_id=project_id)
-    if case.ui_test_case_id:
-        if case.ui_test_case_id == ui_test_case_id:
-            return {'bound': True, 'functional_case_id': case.pk, 'ui_test_case_id': ui_test_case_id}
-        raise ValidationError('功能用例已绑定其他 UI 用例')
     snapshot = snapshots[case.pk]
+    already_verified = (binding.generation_run.get('verified') or {}).get('ui_test_case_id') == ui_test_case_id and case.ui_test_case_id == ui_test_case_id
+    if case.ui_test_case_id != snapshot.get('ui_test_case_id') and not already_verified:
+        raise ValidationError('功能用例关联已变化，请重新创建任务')
+    if case.ui_test_case_id and case.ui_test_case_id != ui_test_case_id:
+        raise ValidationError('已有绑定只能维护原 UI 用例')
     steps = list(case.steps.values('step_number', 'description', 'expected_result'))
-    if case.updated_at.isoformat() != snapshot['updated_at'] or steps != snapshot['steps']:
+    if case.name != snapshot['name'] or case.precondition != snapshot['precondition']:
+        raise ValidationError('功能用例业务内容已变化，请重新创建任务')
+    if (case.updated_at.isoformat() != snapshot['updated_at'] and not already_verified) or steps != snapshot['steps']:
         raise ValidationError('功能用例已变化，请重新创建生成任务')
-    ui = UiTestCase.objects.get(pk=ui_test_case_id, project_id=project_id, module_id=binding.generation_context['module_id'])
+    ui = UiTestCase.objects.get(pk=ui_test_case_id, project_id=project_id)
+    if TestCase.objects.filter(ui_test_case_id=ui.pk).exclude(pk=case.pk).exists():
+        raise ValidationError('目标 UI 用例已关联其他业务用例，请维护各自来源资产')
+    if not case.ui_test_case_id and ui.module_id != binding.generation_context['module_id']:
+        raise ValidationError('新增 UI 用例必须属于目标模块')
     case_steps = list(ui.case_steps.select_related('page_step__page').prefetch_related('page_step__step_details__element'))
     if not case_steps or any(not step.page_step.step_details.exists() for step in case_steps):
         raise ValidationError('空 UI 用例或空页面步骤不得绑定')
@@ -103,13 +118,25 @@ def bind_generated_case(session_id, user_id, project_id, functional_case_id, ui_
     record = ui.execution_records.order_by('-created_at', '-pk').first()
     if not record or record.status != 2 or not record.start_time or record.start_time < max(touched):
         raise ValidationError('缺少本次任务开始后、最新定义的成功试跑记录')
+    if record.executor_id != user_id:
+        raise ValidationError('成功试跑执行人不属于当前任务')
+    if not UiEnvironmentConfig.objects.filter(pk=binding.generation_context['env_config_id'], project_id=project_id, base_url=binding.generation_context['base_url']).exists():
+        raise ValidationError('执行环境配置已变化，请重新确认环境')
     environment = record.environment or {}
     if str(environment.get('env_config_id')) != str(binding.generation_context['env_config_id']):
         raise ValidationError('成功试跑环境与生成任务不一致')
+    if snapshot.get('baseline_assertions') and snapshot['baseline_assertions'] != assertion_snapshot(ui.pk):
+        raise ValidationError('已有 UI 业务断言不得被自动改写')
+    locked_assertions = (binding.generation_run.get('trial_assertions') or {}).get(str(ui.pk))
+    if locked_assertions is not None and locked_assertions != assertion_snapshot(ui.pk):
+        raise ValidationError('业务断言在试跑后被修改，禁止绑定')
     case.ui_test_case = ui
     case.execution_mode = 'hybrid'
     case.save(update_fields=['ui_test_case', 'execution_mode', 'updated_at'])
-    return {'bound': True, 'functional_case_id': case.pk, 'ui_test_case_id': ui.pk, 'execution_record_id': record.pk}
+    result = {'bound': True, 'functional_case_id': case.pk, 'ui_test_case_id': ui.pk, 'execution_record_id': record.pk}
+    binding.generation_run = {**binding.generation_run, 'verified': result}
+    binding.save(update_fields=['generation_run'])
+    return result
 
 
 def ui_generation_tools(mode, session_id, user_id, project_id):
@@ -140,3 +167,32 @@ def ui_generation_tools(mode, session_id, user_id, project_id):
         except Exception as exc:
             return json.dumps({'error':str(exc)}, ensure_ascii=False)
     return [get_ui_generation_context, bind_generated_ui_case, ui_generation_browser]
+
+
+def assertion_snapshot(ui_id):
+    from ui_automation.models import UiPageStepsDetailed
+    return list(UiPageStepsDetailed.objects.filter(page_step__case_usages__test_case_id=ui_id, step_type=1)
+                .order_by('pk').values('element_id', 'ope_key', 'ope_value'))
+
+
+@transaction.atomic
+def lock_trial_assertions(session_id, project_id, ui_id, env_id):
+    binding = SkillAgentTaskBinding.objects.select_for_update().get(session__session_id=session_id, session__project_id=project_id, generation_mode='ui_case')
+    if str(env_id) != str(binding.generation_context['env_config_id']):
+        raise ValidationError('试跑环境与任务不一致')
+    if not UiTestCase.objects.filter(pk=ui_id, project_id=project_id).exists():
+        raise ValidationError('UI 用例不属于当前项目')
+    assertions = assertion_snapshot(ui_id)
+    for source in binding.generation_context['functional_cases']:
+        if str(source.get('ui_test_case_id')) == str(ui_id) and source.get('baseline_assertions') and source['baseline_assertions'] != assertions:
+            raise ValidationError('已有 UI 用例的业务断言已变化，请人工复核')
+    if not assertions:
+        raise ValidationError('试跑前必须保存明确业务断言')
+    run = dict(binding.generation_run)
+    locks = dict(run.get('trial_assertions') or {})
+    if str(ui_id) in locks and locks[str(ui_id)] != assertions:
+        raise ValidationError('试跑后业务断言发生变化，禁止自动弱化或替换断言，请人工复核')
+    locks[str(ui_id)] = assertions
+    run['trial_assertions'] = locks
+    binding.generation_run = run
+    binding.save(update_fields=['generation_run'])

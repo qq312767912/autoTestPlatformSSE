@@ -64,7 +64,7 @@ class UiGenerationTests(ApiGenerationBindingTests):
     def test_binding_requires_latest_success_and_matching_environment(self):
         binding, ui = self.prepare_ui()
         with self.assertRaises(ValidationError): self.bind(binding, ui)
-        record = UiExecutionRecord.objects.create(test_case=ui, executor=self.user, status=3, start_time=timezone.now(), environment={'env_config_id':self.env.pk})
+        record = UiExecutionRecord.objects.create(executor=self.user, test_case=ui, status=3, start_time=timezone.now(), environment={'env_config_id':self.env.pk})
         with self.assertRaises(ValidationError): self.bind(binding, ui)
         record.status=2; record.environment={'env_config_id':9999}; record.save()
         with self.assertRaises(ValidationError): self.bind(binding, ui)
@@ -75,7 +75,7 @@ class UiGenerationTests(ApiGenerationBindingTests):
 
     def test_changed_functional_steps_and_stale_execution_rejected(self):
         binding, ui = self.prepare_ui()
-        record=UiExecutionRecord.objects.create(test_case=ui, status=2, start_time=binding.created_at, environment={'env_config_id':self.env.pk})
+        record=UiExecutionRecord.objects.create(executor=self.user, test_case=ui, status=2, start_time=binding.created_at, environment={'env_config_id':self.env.pk})
         with self.assertRaises(ValidationError): self.bind(binding, ui)
         record.start_time=timezone.now();record.save()
         self.case.steps.update(description='改过的步骤')
@@ -91,3 +91,102 @@ class UiGenerationTests(ApiGenerationBindingTests):
         request=ToolRequest({'id':'x','name':'execute_skill_script','args':{'command':'python tools.py --action create_testcase'}})
         self.assertEqual(guard.wrap_tool_call(request,handler),'ok')
         self.assertIn('bind_generated_ui_case',append_generation_instructions('', 'ui_case'))
+
+    def test_existing_binding_is_preserved_and_still_requires_fresh_evidence(self):
+        binding, ui = self.prepare_ui()
+        self.case.ui_test_case = ui
+        self.case.save()
+        current = self.binding()
+        self.assertEqual(current.generation_context['functional_cases'][0]['ui_test_case_id'], ui.pk)
+        with self.assertRaises(ValidationError): self.bind(current, ui)
+        UiExecutionRecord.objects.create(test_case=ui, executor=self.user, status=2, start_time=timezone.now(), environment={'env_config_id':self.env.pk})
+        self.assertTrue(self.bind(current, ui)['bound'])
+
+    def test_existing_binding_cannot_silently_switch_target(self):
+        binding, ui = self.prepare_ui()
+        self.case.ui_test_case = ui
+        self.case.save()
+        current = self.binding()
+        other = UiTestCase.objects.create(project=self.project,module=self.module,name='wrong',creator=self.user)
+        with self.assertRaises(ValidationError): self.bind(current, other)
+
+    def test_batch_start_is_idempotent_and_queues_only_after_commit(self):
+        from unittest.mock import patch
+        binding = self.binding()
+        def start():
+            request=APIRequestFactory().post('/',{'project':self.project.pk,'session_id':binding.session.session_id},format='json')
+            force_authenticate(request,self.user)
+            return SkillAgentTaskViewSet.as_view({'post':'start_conversion'})(request)
+        with patch('knowledge_evolution.ui_generation_jobs.run_ui_conversion.delay') as enqueue:
+            with self.captureOnCommitCallbacks(execute=True):
+                self.assertEqual(start().status_code,202)
+            with self.captureOnCommitCallbacks(execute=True):
+                self.assertEqual(start().status_code,202)
+            enqueue.assert_called_once_with(binding.pk)
+
+    def test_batch_worker_does_not_accept_model_claim_as_verification(self):
+        from unittest.mock import patch, AsyncMock
+        from knowledge_evolution.ui_generation_jobs import run_ui_conversion
+        binding=self.binding()
+        binding.generation_run={'status':'queued'}
+        binding.save(update_fields=['generation_run'])
+        with patch('knowledge_evolution.ui_generation_jobs.consume',new_callable=AsyncMock):
+            run_ui_conversion(binding.pk)
+        binding.refresh_from_db()
+        self.assertEqual(binding.generation_run['status'],'partial_failure')
+        self.assertEqual(binding.generation_run['items'][0]['status'],'needs_attention')
+
+    def test_trial_execution_uses_locked_platform_recorder(self):
+        guard=generation_middleware([], 'ui_case', self.project.pk)[0]
+        request=ToolRequest({'id':'x','name':'execute_skill_script','args':{'command':f'python tools.py --action execute_testcase --testcase_id 1 --config_id {self.env.pk}'}})
+        result=guard.wrap_tool_call(request,lambda r:r)
+        self.assertIn('--actuator_id recorder-browser',result.tool_call['args']['command'])
+
+    def test_trial_assertions_cannot_be_weakened_between_retries(self):
+        from .ui_generation_runtime import lock_trial_assertions
+        binding, ui=self.prepare_ui()
+        lock_trial_assertions(binding.session.session_id,self.project.pk,ui.pk,self.env.pk)
+        detail=ui.case_steps.first().page_step.step_details.first()
+        detail.ope_value={'expected':''};detail.save()
+        with self.assertRaises(ValidationError):
+            lock_trial_assertions(binding.session.session_id,self.project.pk,ui.pk,self.env.pk)
+
+    def test_cancelled_batch_does_not_start_exploration(self):
+        from unittest.mock import patch, AsyncMock
+        from knowledge_evolution.ui_generation_jobs import run_ui_conversion
+        binding=self.binding()
+        binding.generation_run={'status':'queued','cancel_requested':True}
+        binding.save(update_fields=['generation_run'])
+        with patch('knowledge_evolution.ui_generation_jobs.consume',new_callable=AsyncMock) as consume:
+            run_ui_conversion(binding.pk)
+        consume.assert_not_called()
+        binding.refresh_from_db()
+        self.assertEqual(binding.generation_run['status'],'cancelled')
+        self.assertEqual(binding.generation_run['items'][0]['status'],'cancelled')
+
+    def test_dispatch_failure_does_not_leave_batch_queued_forever(self):
+        from unittest.mock import patch
+        binding=self.binding()
+        request=APIRequestFactory().post('/',{'project':self.project.pk,'session_id':binding.session.session_id},format='json')
+        force_authenticate(request,self.user)
+        with patch('knowledge_evolution.ui_generation_jobs.run_ui_conversion.delay',side_effect=RuntimeError('broker down')):
+            with self.captureOnCommitCallbacks(execute=True):
+                response=SkillAgentTaskViewSet.as_view({'post':'start_conversion'})(request)
+        self.assertEqual(response.status_code,202)
+        binding.refresh_from_db()
+        self.assertEqual(binding.generation_run['status'],'failed')
+
+    def test_cancellation_during_exploration_marks_active_item_cancelled(self):
+        from unittest.mock import patch
+        from asgiref.sync import sync_to_async
+        from knowledge_evolution.ui_generation_jobs import run_ui_conversion, update_run
+        binding=self.binding()
+        binding.generation_run={'status':'queued'}
+        binding.save(update_fields=['generation_run'])
+        async def cancel_in_flight(child, message, parent_id=None):
+            await sync_to_async(update_run)(parent_id,cancel_requested=True)
+        with patch('knowledge_evolution.ui_generation_jobs.consume',side_effect=cancel_in_flight):
+            run_ui_conversion(binding.pk)
+        binding.refresh_from_db()
+        self.assertEqual(binding.generation_run['status'],'cancelled')
+        self.assertEqual(binding.generation_run['items'][0]['status'],'cancelled')

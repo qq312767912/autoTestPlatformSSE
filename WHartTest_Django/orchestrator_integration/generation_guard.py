@@ -35,8 +35,9 @@ def _flag(tokens, name):
 
 
 class GenerationInterfaceCaseGuardMiddleware(AgentMiddleware):
-    def __init__(self, mode='interface_case', project_id=None):
+    def __init__(self, mode='interface_case', project_id=None, session_id=None):
         super().__init__()
+        self.session_id = session_id
         self.mode = mode
         self.project_id = str(project_id) if project_id is not None else None
         self._drift_counts = {'tool': 0, 'param': 0}
@@ -111,7 +112,8 @@ class GenerationInterfaceCaseGuardMiddleware(AgentMiddleware):
         return error if error is not None else handler(updated)
 
     async def awrap_tool_call(self, request, handler):
-        updated, error = self._prepare(request)
+        from asgiref.sync import sync_to_async
+        updated, error = await sync_to_async(self._prepare)(request)
         return error if error is not None else await handler(updated)
 
 
@@ -130,6 +132,25 @@ class GenerationUiCaseGuardMiddleware(GenerationInterfaceCaseGuardMiddleware):
         action = _flag(tokens, '--action')[0] if command else call.get('name', '')
         if action in {'edit_testcase', 'create_interface_case', 'update_interface_case', 'run_interface_case', 'run_testcase'}:
             return request, _error(request, '当前是 UI 生成任务；功能用例绑定必须通过 bind_generated_ui_case 验证成功试跑记录。')
+        if action == 'execute_testcase' and self.session_id:
+            try:
+                from .ui_generation_runtime import lock_trial_assertions
+                ui_id = _flag(tokens, '--testcase_id')[0] if command else args.get('testcase_id')
+                env_id = _flag(tokens, '--config_id')[0] if command else args.get('config_id')
+                lock_trial_assertions(self.session_id, self.project_id, ui_id, env_id)
+            except Exception:
+                return request, _error(request, '试跑范围或断言锁定校验失败：请核对环境、用例归属，并保留首次试跑的业务断言。')
+        if action == 'execute_testcase':
+            if command:
+                actuator, _, _ = _flag(tokens, '--actuator_id')
+                if actuator and actuator != 'recorder-browser':
+                    return request, _error(request, '探索转换试跑必须使用平台录制器浏览器 recorder-browser。')
+                if not actuator:
+                    args = dict(args)
+                    args['command'] = shlex.join(tokens + ['--actuator_id', 'recorder-browser'])
+                    request = request.override(tool_call={**call, 'args': args})
+            elif args.get('actuator_id') not in (None, 'recorder-browser'):
+                return request, _error(request, '探索转换试跑执行器不匹配。')
         # Reuse project validation without the API save/action mapping.
         for index, token in enumerate(tokens):
             value = tokens[index + 1] if token == '--project_id' and index + 1 < len(tokens) else token.split('=', 1)[1] if token.startswith('--project_id=') else None

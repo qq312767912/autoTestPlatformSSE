@@ -3,6 +3,7 @@ import uuid
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from rest_framework import viewsets
+from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.generics import get_object_or_404
@@ -17,7 +18,7 @@ def binding_view(binding):
     version = binding.source_version
     return {'generation_mode': binding.generation_mode, 'session_id': binding.session.session_id, 'project_id': binding.session.project_id,
             'skill_version_id': str(version.pk), 'skill_name': version.skill.name,
-            'version': version.version, 'package_sha256': binding.source_sha256}
+            'version': version.version, 'package_sha256': binding.source_sha256, 'run': binding.generation_run}
 
 
 def resolve_agent_task_version(*, session_id, project_id, actor, requested_version_id=''):
@@ -52,6 +53,47 @@ class SkillAgentTaskViewSet(viewsets.ViewSet):
             session__session_id=request.query_params.get('session_id', ''),
         ).first()
         return Response({'binding': binding_view(binding) if binding else None})
+
+    @action(detail=False, methods=['post'])
+    def start_conversion(self, request):
+        project = self.project(request)
+        with transaction.atomic():
+            binding = get_object_or_404(SkillAgentTaskBinding.objects.select_for_update(),
+                session__session_id=request.data.get('session_id'), session__project=project,
+                session__user=request.user, generation_mode='ui_case')
+            verify_source(binding.source_version)
+            if not request.user.has_perms(['ui_automation.add_uitestcase', 'ui_automation.change_uitestcase', 'testcases.change_testcase']):
+                return Response({'detail': '缺少探索转换权限'}, status=403)
+            if not binding.generation_run:
+                from testcases.models import TestCase
+                ids = [x['id'] for x in binding.generation_context['functional_cases']]
+                list(TestCase.objects.select_for_update().filter(pk__in=ids).order_by('pk'))
+                for other in SkillAgentTaskBinding.objects.filter(session__project=project, generation_run__status__in=['queued','running']).exclude(pk=binding.pk):
+                    if set(ids) & {x['id'] for x in other.generation_context.get('functional_cases', [])}:
+                        return Response({'detail': '所选业务用例已有探索任务，请等待完成'}, status=409)
+                from .ui_generation_jobs import run_ui_conversion
+                binding.generation_run = {'status': 'queued', 'items': [], 'cancel_requested': False}
+                binding.save(update_fields=['generation_run'])
+                def dispatch():
+                    try:
+                        run_ui_conversion.delay(binding.pk)
+                    except Exception:
+                        from .ui_generation_jobs import update_run
+                        update_run(binding.pk, status='failed', error='后台任务派发失败，请重新发起')
+                transaction.on_commit(dispatch)
+        return Response(binding_view(binding), status=202)
+
+    @action(detail=False, methods=['post'])
+    def cancel_conversion(self, request):
+        project = self.project(request)
+        from .ui_generation_jobs import update_run
+        binding = get_object_or_404(SkillAgentTaskBinding, session__session_id=request.data.get('session_id'),
+            session__project=project, session__user=request.user, generation_mode='ui_case')
+        run = update_run(binding.pk, cancel_requested=True)
+        if run.get('active_session_id'):
+            from orchestrator_integration.stop_signal import set_stop_signal
+            set_stop_signal(run['active_session_id'])
+        return Response({'cancel_requested': True})
 
     def create(self, request):
         project = self.project(request)

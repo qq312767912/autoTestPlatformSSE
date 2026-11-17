@@ -929,6 +929,9 @@ class RecorderBrowserExecTests(TestCase):
         self.assertEqual(case_broadcasts[0]['data']['args']['passed_steps'], 1)
         record = UiExecutionRecord.objects.get(test_case=self.case)
         self.assertEqual(record.status, 2)
+        self.assertEqual(record.environment['env_config_id'], self.env.pk)
+        self.assertEqual(record.environment['base_url'], self.env.base_url)
+        self.assertEqual(record.environment['actuator_id'], 'recorder-browser')
         self.assertEqual(record.executor_name if hasattr(record, 'executor_name') else 'recorder-browser', 'recorder-browser')
 
     def test_case_auth_upward_inherit_skips_context_switch(self):

@@ -1,7 +1,7 @@
 import { moduleApi, envConfigApi, authStateApi } from '../api';
 import { SkillService } from '@/features/skills/services/skillService';
 import { SkillHubService, createSkillAgentTask } from '@/features/skills/services/skillHubService';
-import { sendChatMessageStream } from '@/features/langgraph/services/chatService';
+import request from '@/utils/request';
 
 export interface UiGenerationFormData {
   functional_case_ids: number[];
@@ -46,8 +46,7 @@ export function buildUiMessage(notes: string) {
 }
 export async function startUiGeneration(project: number, form: UiGenerationFormData, onError: (message: string) => void) {
   const { skillVersionId, businessNotes, ...context } = form;
-  const binding = await createSkillAgentTask(project, skillVersionId, 'ui_case', context);
-  localStorage.setItem('langgraph_session_id', binding.session_id);
-  void sendChatMessageStream({ project_id: String(project), session_id: binding.session_id, skill_version_id: skillVersionId, message: buildUiMessage(businessNotes), auth_state_id: form.auth_state_id }, sessionId => localStorage.setItem('langgraph_session_id', sessionId), undefined, onError);
+  const binding = await createSkillAgentTask(project, skillVersionId, 'ui_case', {...context, business_notes: businessNotes});
+  await request.post('/knowledge-evolution/skill-agent-tasks/start_conversion/', {project, session_id: binding.session_id});
   return binding;
 }

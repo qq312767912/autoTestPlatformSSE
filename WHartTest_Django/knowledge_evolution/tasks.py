@@ -98,3 +98,6 @@ def hub_assessment_job(session_id, action, payload, actor_id, job_id):
         SkillAssessmentSession.objects.filter(pk=session_id, job_id=job_id, state='queued').update(state='failed', error='任务无法启动，请检查模型、版本或项目权限', job_id='')
         logger.exception('Hub 测评后台任务失败：%s', session_id)
         raise
+
+# Celery autodiscovery registers the server-owned UI exploration worker.
+from .ui_generation_jobs import run_ui_conversion
