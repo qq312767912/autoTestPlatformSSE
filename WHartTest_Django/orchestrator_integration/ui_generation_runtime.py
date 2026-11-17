@@ -81,12 +81,16 @@ def bind_generated_case(session_id, user_id, project_id, functional_case_id, ui_
     if not actor.has_perms(['testcases.change_testcase', 'ui_automation.change_uitestcase']):
         raise ValidationError('缺少功能用例绑定权限')
     binding = get_binding(session_id, user_id, project_id)
+    binding = SkillAgentTaskBinding.objects.select_for_update().get(pk=binding.pk)
     snapshots = {case['id']: case for case in binding.generation_context['functional_cases']}
+    active_source = binding.generation_run.get('active_source_id')
+    if active_source is not None and functional_case_id != active_source:
+        raise ValidationError('当前只允许处理本轮业务用例')
     if functional_case_id not in snapshots:
         raise ValidationError('功能用例不在当前任务范围')
     case = TestCase.objects.select_for_update().get(pk=functional_case_id, project_id=project_id)
     snapshot = snapshots[case.pk]
-    already_verified = (binding.generation_run.get('verified') or {}).get('ui_test_case_id') == ui_test_case_id and case.ui_test_case_id == ui_test_case_id
+    already_verified = ((binding.generation_run.get('verified_cases') or {}).get(str(functional_case_id)) or binding.generation_run.get('verified') or {}).get('ui_test_case_id') == ui_test_case_id and case.ui_test_case_id == ui_test_case_id
     if case.ui_test_case_id != snapshot.get('ui_test_case_id') and not already_verified:
         raise ValidationError('功能用例关联已变化，请重新创建任务')
     if case.ui_test_case_id and case.ui_test_case_id != ui_test_case_id:
@@ -134,7 +138,8 @@ def bind_generated_case(session_id, user_id, project_id, functional_case_id, ui_
     case.execution_mode = 'hybrid'
     case.save(update_fields=['ui_test_case', 'execution_mode', 'updated_at'])
     result = {'bound': True, 'functional_case_id': case.pk, 'ui_test_case_id': ui.pk, 'execution_record_id': record.pk}
-    binding.generation_run = {**binding.generation_run, 'verified': result}
+    receipts = {**binding.generation_run.get('verified_cases', {}), str(case.pk): result}
+    binding.generation_run = {**binding.generation_run, 'verified': result, 'verified_cases': receipts}
     binding.save(update_fields=['generation_run'])
     return result
 
@@ -147,7 +152,12 @@ def ui_generation_tools(mode, session_id, user_id, project_id):
     async def get_ui_generation_context() -> str:
         """读取当前UI生成任务的服务端范围、环境和功能用例步骤；开始生成前调用。"""
         binding = await sync_to_async(get_binding)(session_id, user_id, project_id)
-        return json.dumps(binding.generation_context, ensure_ascii=False)
+        context = dict(binding.generation_context)
+        active = binding.generation_run.get('active_source_id')
+        if active is not None:
+            context['functional_cases'] = [x for x in context['functional_cases'] if x['id'] == active]
+            context['active_source_id'] = active
+        return json.dumps(context, ensure_ascii=False)
 
     @tool
     async def bind_generated_ui_case(functional_case_id: int, ui_test_case_id: int) -> str:

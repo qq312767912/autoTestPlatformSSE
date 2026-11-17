@@ -3,13 +3,14 @@
     <a-alert style="margin-bottom:16px">{{ tl('按所选环境逐条 AI 探索，已有 UI 用例优先维护，无关联时新建；真实试跑成功后才标记完成。关闭弹窗不停止后台任务。') }}</a-alert>
     <div v-if="runSession" style="margin-bottom:16px">
       <a-alert v-if="run?.error" type="error">{{ run.error }}</a-alert>
-      <a-space><a-tag>{{ statusText(run?.status || 'queued') }}</a-tag><a-button @click="refreshRun">刷新进度</a-button><a-dropdown v-if="['queued','running'].includes(run?.status) && !run?.cancel_requested" @select="confirmCancelRun">
+      <a-space><a-tag>{{ statusText(run?.status || 'queued') }}</a-tag><a-button @click="refreshRun">刷新进度</a-button><a-button v-if="run?.shared_conversation" @click="router.push({name:'LangGraphChat',query:{skill_task:runSession,project:String(openingProject)}})">批次会话</a-button><a-dropdown v-if="['queued','running'].includes(run?.status) && !run?.cancel_requested" @select="confirmCancelRun">
         <a-button type="text">更多操作</a-button>
         <template #content><a-doption value="cancel" style="color:var(--color-danger-6)">取消批次…</a-doption></template>
       </a-dropdown><a-button @click="newBatch()">配置新批次</a-button></a-space>
       <a-table :data="run?.items || []" :pagination="false" row-key="source_id"><template #columns>
         <a-table-column title="业务用例" data-index="name" /><a-table-column title="状态"><template #cell="{record}">{{ statusText(record.status) }}</template></a-table-column><a-table-column title="结果"><template #cell="{record}">{{ record.result === 'updated' ? '复用维护' : record.result === 'created' ? '新建或复用' : '—' }}</template></a-table-column><a-table-column title="说明" data-index="message" />
-        <a-table-column title="证据"><template #cell="{record}"><a-link @click="router.push({name:'LangGraphChat',query:{skill_task:record.session_id,project:String(openingProject)}})">探索会话</a-link></template></a-table-column>
+        <a-table-column v-if="!run?.shared_conversation" title="证据"><template #cell="{record}"><a-link @click="router.push({name:'LangGraphChat',query:{skill_task:record.session_id || runSession,project:String(openingProject)}})">探索会话</a-link></template></a-table-column>
+        <a-table-column v-if="run?.shared_conversation" title="执行记录" data-index="execution_record_id" />
       </template></a-table>
     </div>
     <a-form v-else :model="form" layout="vertical">

@@ -2314,6 +2314,14 @@ class AgentLoopStreamAPIView(View):
         request._flywheel_attempt_id = str(body_data.get("attempt_id") or "")
         session_id = body_data.get("session_id")
         project_id = body_data.get("project_id")
+        if session_id and not getattr(request, '_ui_conversion_worker', False):
+            from knowledge_evolution.hub_assessment_models import SkillAgentTaskBinding
+            busy_conversion = await sync_to_async(lambda: SkillAgentTaskBinding.objects.filter(
+                session__session_id=session_id, session__user_id=request.user.pk,
+                generation_mode='ui_case', generation_run__status__in=['queued', 'running'],
+            ).exists())()
+            if busy_conversion:
+                return api_error_response('当前批次正在后台执行，请查看会话进度；完成或取消后再发送消息。', 409)
         knowledge_base_ids = _normalize_knowledge_base_ids(
             body_data.get("knowledge_base_ids"), body_data.get("knowledge_base_id")
         )

@@ -148,7 +148,7 @@ class SkillAgentTaskViewSet(viewsets.ViewSet):
                 raise ValidationError('此版本当前不可运行')
             with transaction.atomic():
                 session = ChatSession.objects.create(session_id=uuid.uuid4().hex, user=request.user, project=project,
-                    title=f'Skill 任务 · {version.skill.name} @ {version.version}'[:200])
+                    title=(f'业务用例转 UI · {len(context.get("functional_cases", []))} 条' if generation_mode == 'ui_case' else f'Skill 任务 · {version.skill.name} @ {version.version}')[:200])
                 if generation_mode == 'ui_case' and context.get('auth_state_id'):
                     session.auth_state_id = context['auth_state_id']
                     session.save(update_fields=['auth_state'])

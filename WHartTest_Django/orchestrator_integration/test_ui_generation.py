@@ -239,3 +239,39 @@ class UiGenerationTests(ApiGenerationBindingTests):
         binding.refresh_from_db()
         self.assertEqual(binding.generation_run['status'],'partial_failure')
         self.assertEqual(binding.generation_run['items'][0]['status'],'failed')
+
+    def test_batch_reuses_one_conversation_for_all_sources(self):
+        from unittest.mock import patch, AsyncMock
+        from langgraph_integration.models import ChatSession
+        from knowledge_evolution.ui_generation_jobs import run_ui_conversion
+        second=FunctionalCase.objects.create(project=self.project,module=self.case.module,name='second source',creator=self.user,precondition='')
+        TestCaseStep.objects.create(test_case=second,step_number=1,description='查看',expected_result='可见')
+        self.raw['functional_case_ids']=[self.case.pk,second.pk]
+        binding=self.binding();binding.generation_run={'status':'queued'};binding.save(update_fields=['generation_run'])
+        before=ChatSession.objects.count()
+        with patch('knowledge_evolution.ui_generation_jobs.consume',new_callable=AsyncMock) as consume:
+            run_ui_conversion(binding.pk)
+        self.assertEqual(consume.call_count,2)
+        self.assertEqual({call.args[0].session_id for call in consume.call_args_list},{binding.session_id})
+        self.assertEqual(ChatSession.objects.count(),before)
+        binding.refresh_from_db()
+        self.assertEqual({item['session_id'] for item in binding.generation_run['items']},{binding.session.session_id})
+
+    def test_shared_conversation_rejects_other_source_binding(self):
+        second=FunctionalCase.objects.create(project=self.project,module=self.case.module,name='second source',creator=self.user,precondition='')
+        self.raw['functional_case_ids']=[self.case.pk,second.pk]
+        binding=self.binding();binding.generation_run={'status':'running','active_source_id':self.case.pk};binding.save(update_fields=['generation_run'])
+        with self.assertRaisesMessage(ValidationError,'当前只允许处理本轮业务用例'):
+            bind_generated_case(binding.session.session_id,self.user.pk,self.project.pk,second.pk,1)
+
+    def test_running_batch_conversation_rejects_manual_execution(self):
+        import json
+        from unittest.mock import AsyncMock
+        from asgiref.sync import async_to_sync
+        from django.test import RequestFactory
+        from .agent_loop_view import AgentLoopStreamAPIView
+        binding=self.binding();binding.generation_run={'status':'running'};binding.save(update_fields=['generation_run'])
+        request=RequestFactory().post('/',json.dumps({'project_id':self.project.pk,'session_id':binding.session.session_id,'message':'继续'}),content_type='application/json')
+        view=AgentLoopStreamAPIView();view.authenticate_request=AsyncMock(return_value=self.user)
+        response=async_to_sync(view.post)(request)
+        self.assertEqual(response.status_code,409)

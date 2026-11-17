@@ -2,7 +2,6 @@
 import json
 import asyncio
 import logging
-import uuid
 from asgiref.sync import async_to_sync, sync_to_async
 from celery import shared_task
 from django.db import transaction
@@ -41,6 +40,7 @@ async def consume(binding, message, parent_id=None):
         'skill_version_id': str(binding.source_version_id), 'auth_state_id': binding.session.auth_state_id,
         'message': message, 'stream': True,
     }), content_type='application/json', HTTP_AUTHORIZATION='Bearer ' + token)
+    request._ui_conversion_worker = True
     response = await AgentLoopStreamAPIView().post(request)
     if response.status_code != 200 or not getattr(response, 'streaming', False):
         raise RuntimeError('探索任务未能启动，请检查任务配置与模型状态')
@@ -72,32 +72,26 @@ async def consume(binding, message, parent_id=None):
 
 @shared_task(name='knowledge_evolution.run_ui_conversion')
 def run_ui_conversion(pk):
-    from langgraph_integration.models import ChatSession
     with transaction.atomic():
         locked = SkillAgentTaskBinding.objects.select_for_update().get(pk=pk)
         if locked.generation_run.get('status') != 'queued':
             return
-        locked.generation_run = {**locked.generation_run, 'status': 'running', 'started_at': timezone.now().isoformat(), 'heartbeat_at': timezone.now().isoformat()}
+        locked.generation_run = {**locked.generation_run, 'status': 'running', 'shared_conversation': True, 'started_at': timezone.now().isoformat(), 'heartbeat_at': timezone.now().isoformat()}
         locked.save(update_fields=['generation_run'])
     parent = SkillAgentTaskBinding.objects.select_related('session__user', 'source_version').get(pk=pk)
-    results = [{'source_id': x['id'], 'name': x['name'], 'status': 'queued'} for x in parent.generation_context['functional_cases']]
+    results = [{'source_id': x['id'], 'name': x['name'], 'status': 'queued', 'session_id': parent.session.session_id} for x in parent.generation_context['functional_cases']]
     update_run(pk, status='running', started_at=timezone.now().isoformat())
     for index, source in enumerate(parent.generation_context['functional_cases']):
         parent.refresh_from_db(fields=['generation_run'])
         if parent.generation_run.get('cancel_requested'):
             break
-        session = ChatSession.objects.create(session_id=uuid.uuid4().hex, user=parent.session.user,
-            project_id=parent.session.project_id, auth_state_id=parent.session.auth_state_id,
-            title=f"UI 探索转换 · {source['name']}"[:200])
-        child = SkillAgentTaskBinding.objects.create(session=session, source_version=parent.source_version,
-            source_sha256=parent.source_sha256, generation_mode='ui_case',
-            generation_context={**parent.generation_context, 'functional_cases': [source]})
-        child = SkillAgentTaskBinding.objects.select_related('session__user', 'source_version').get(pk=child.pk)
+        session = parent.session
+        child = parent
         item = {'source_id': source['id'], 'name': source['name'], 'session_id': session.session_id, 'status': 'exploring'}
         results[index] = item
-        update_run(pk, items=results, active_session_id=session.session_id)
+        update_run(pk, items=results, active_session_id=session.session_id, active_source_id=source['id'], verified=None)
         try:
-            async_to_sync(consume)(child, '<!-- wharttest:generation_mode=ui_case -->\n读取 get_ui_generation_context，按已锁定 Skill 探索、复用维护或新建 UI 用例，保留业务断言。成功试跑后必须调用 bind_generated_ui_case；无法验证则说明原因，不得声称完成。\n业务补充：' + str(parent.generation_context.get('business_notes') or ''), parent_id=pk)
+            async_to_sync(consume)(child, f"<!-- wharttest:generation_mode=ui_case -->\n当前仅处理业务用例 {source['id']}：{source['name']}。\n读取 get_ui_generation_context，按已锁定 Skill 探索、复用维护或新建 UI 用例，保留业务断言。成功试跑后必须调用 bind_generated_ui_case；无法验证则说明原因，不得声称完成。\n业务补充：" + str(parent.generation_context.get('business_notes') or ''), parent_id=pk)
             child.refresh_from_db(fields=['generation_run'])
             verified = child.generation_run.get('verified')
             parent.refresh_from_db(fields=['generation_run'])
@@ -122,7 +116,7 @@ def run_ui_conversion(pk):
                 try: run_ui_browser(child, 'close', [])
                 except Exception: logging.getLogger(__name__).warning('UI browser cleanup failed session=%s', session.session_id)
         update_run(pk, items=results)
-    run = update_run(pk, active_session_id=None)
+    run = update_run(pk, active_session_id=None, active_source_id=None)
     if run.get('cancel_requested'):
         for item in results:
             if item['status'] == 'queued': item['status'] = 'cancelled'
