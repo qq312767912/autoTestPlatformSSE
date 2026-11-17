@@ -214,16 +214,6 @@
 
           <div v-if="!collapsed && (hasLangGraphChatPermission || hasSkillsPermission || hasQualityFlywheelMenuItems)" class="nav-section-label" role="presentation">{{ aiSectionLabel }}</div>
 
-          <a-menu-item key="langgraph-chat" v-if="hasLangGraphChatPermission">
-            <template #icon><icon-message /></template>
-            <a href="#" @click="checkProjectAndNavigate($event, '/langgraph-chat')">{{ chatMenuLabel }}</a>
-          </a-menu-item>
-
-          <a-menu-item key="skills" v-if="hasSkillsPermission">
-            <template #icon><icon-apps /></template>
-            <a href="#" @click="checkProjectAndNavigate($event, '/skills')">{{ skillsMenuLabel }}</a>
-          </a-menu-item>
-
           <a-sub-menu key="quality-flywheel" v-if="hasQualityFlywheelMenuItems">
             <template #icon><icon-loop /></template>
             <template #title>{{ knowledgeEvolutionMenuLabel }}</template>
@@ -240,6 +230,18 @@
               <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-evolution?view=graph')">{{ knowledgeGraphMenuLabel }}</a>
             </a-menu-item>
           </a-sub-menu>
+
+          <a-menu-item key="langgraph-chat" v-if="hasLangGraphChatPermission">
+            <template #icon><icon-message /></template>
+            <a href="#" @click="checkProjectAndNavigate($event, '/langgraph-chat')">{{ chatMenuLabel }}</a>
+          </a-menu-item>
+
+          <a-menu-item key="skills" v-if="hasSkillsPermission">
+            <template #icon><icon-apps /></template>
+            <a href="#" @click="checkProjectAndNavigate($event, '/skills')">{{ skillsMenuLabel }}</a>
+          </a-menu-item>
+
+
 
           <div v-if="!collapsed && (hasKnowledgeMenuItems || hasFileManagementPermission)" class="nav-section-label" role="presentation">{{ knowledgeSectionLabel }}</div>
 

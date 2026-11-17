@@ -9,3 +9,5 @@
 本地部署仅重建frontend，backend/runner/数据库保持运行。活动配置为backups/local-runtime-nav-20261116/compose.runtime.json（含凭据，不提交），上一配置与镜像保留，可仅回滚frontend。证据、截图、构建日志和回滚元数据保存在api_test_dwp_temp/nav-update-20261116/。
 
 2026-11-17 按用户最新要求，将质量飞轮归入AI工具分组，移除分隔线，保留Agent总览、数据飞轮、知识图谱子菜单。只有质量飞轮权限时也显示AI工具标题。
+
+2026-11-17 按用户最新排序：AI工具下依次为质量飞轮、LLM对话、Skill Hub，质量飞轮原子菜单保持不变。
