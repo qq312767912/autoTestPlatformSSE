@@ -16,7 +16,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
-from django.db.models.deletion import ProtectedError
+from django.db.models.deletion import ProtectedError, RestrictedError
 from django.db.models import Count
 from django.db import transaction
 from copy import deepcopy
@@ -113,9 +113,9 @@ class UiModuleViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         try:
             self.perform_destroy(instance)
-        except ProtectedError:
+        except (ProtectedError, RestrictedError):
             return Response(
-                {'error': '存在关联，无法删除。请先解除关联'},
+                {'error': '模块或其子模块仍有关联页面、页面步骤或用例，请先移动或删除这些关联数据后再删除模块。'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
