@@ -120,9 +120,8 @@
           @click="handleSkillCard(skill)"
         >
           <div class="skill-header">
-            <!-- 展示名优先：上传/导入时由平台生成、人工确认；没设过就回退逻辑名。
-                 逻辑名（skill.name）是归并键与版本包身份，不在这里展示替换。 -->
-            <div class="skill-name" :title="skill.display_name || skill.name">{{ skill.display_name || skill.name }}</div>
+            <!-- 原始名称始终可见，中文展示名仅作补充。 -->
+            <div class="skill-name" :title="skill.display_name && skill.display_name !== skill.name ? `${skill.name}（${skill.display_name}）` : skill.name">{{ skill.display_name && skill.display_name !== skill.name ? `${skill.name}（${skill.display_name}）` : skill.name }}</div>
             <!-- 启停是治理动作（后端 = 超管或任一项目测试负责人）。没这个角色的人
                  不给可点的开关 —— 点了必然 403，比"看不到"更让人困惑。 -->
             <a-tooltip :content="text.manageOnly" :disabled="canManage">
@@ -543,7 +542,7 @@ const text = computed(() => (
         manageOnly: 'Only a platform admin or a project test lead can enable/disable or delete a Skill.',
         category: 'Category', categoryPlaceholder: 'Select a stage, or type a name to add your own',
         categoryRequired: 'Select a stage', customStageTip: 'No matching stage? Type a name and it becomes a reusable custom stage (e.g. "Performance").',
-        nameLabel: 'Skill name (platform-generated)',
+        nameLabel: 'Chinese display name (supplements original name)',
         namePlaceholder: 'Generated after you pick a file — leave empty to keep the packaged name',
         nameMultiHint: (count: number) =>
           `Contains ${count} Skills; each keeps the name declared in its own SKILL.md.`,
@@ -584,8 +583,8 @@ const text = computed(() => (
         manageOnly: '只有平台管理员或项目测试负责人可以启停 / 删除 Skill。',
         category: '所属分类', categoryPlaceholder: '选择阶段，或直接输入以新增', categoryRequired: '请先选择所属分类',
         customStageTip: '没有合适的阶段？直接输入名称即可新建自定义阶段（如「性能测试」），之后可复用。',
-        nameLabel: 'Skill 名称（平台生成）',
-        namePlaceholder: '选择文件后自动生成；留空则沿用包内名称',
+        nameLabel: '中文名称（自动生成，补充原名）',
+        namePlaceholder: '原始名称保持不变；此处填写补充中文名',
         nameMultiHint: (count: number) =>
           `该包含 ${count} 个 Skill，名称按各自 SKILL.md 保留，此处不做统一改名。`,
         importFromGit: '从 Git 导入',
@@ -994,9 +993,9 @@ const doUpload = async (apiKey?: string) => {
       props.projectId, selectedFile.value, uploadCategory.value,
       uploadDescription.value.trim(), apiKey, uploadName.value.trim(), overrides,
     )
-    uploadedResults.value = skills.map(item => ({name: item.display_name || item.name, version: item.uploaded_version?.version || '未知', duplicate: Boolean(item.duplicate)}))
+    uploadedResults.value = skills.map(item => ({name: item.display_name && item.display_name !== item.name ? `${item.name}（${item.display_name}）` : item.name, version: item.uploaded_version?.version || '未知', duplicate: Boolean(item.duplicate)}))
     const count = skills.length
-    const names = skills.map(s => s.display_name || s.name).join(', ')
+    const names = skills.map(s => s.display_name && s.display_name !== s.name ? `${s.name}（${s.display_name}）` : s.name).join(', ')
     Message.success(text.value.uploadSuccess(count, names))
     showUploadModal.value = false
     selectedFile.value = null
@@ -1005,7 +1004,7 @@ const doUpload = async (apiKey?: string) => {
     uploadName.value = ''
     uploadSkillCount.value = 0
     await fetchSkills()
-    searchKeyword.value = skills.length === 1 ? (skills[0].display_name || skills[0].name) : ''
+    searchKeyword.value = skills.length === 1 ? skills[0].name : ''
     sourceFilter.value = undefined
     stageFilter.value = undefined
     const uploaded = skills[0]
@@ -1154,7 +1153,7 @@ const doGitImport = async (apiKey?: string) => {
       gitName.value.trim(),
     )
     const count = skills.length
-    const names = skills.map(s => s.display_name || s.name).join(', ')
+    const names = skills.map(s => s.display_name && s.display_name !== s.name ? `${s.name}（${s.display_name}）` : s.name).join(', ')
     Message.success(text.value.importSuccess(count, names))
     showGitImportModal.value = false
     gitUrl.value = ''

@@ -300,6 +300,7 @@ export interface CapabilityReleaseSummary {
 
 /** 左栏目录项：一个 Skill 及其版本概览。 */
 export interface SkillCatalogEntry {
+  display_name?: string
   id: number
   name: string
   description: string

@@ -219,7 +219,7 @@
         <a-empty v-if="!catalogLoading && !catalogError && !pickerMaterials.length" :description="materialKeyword?'没有匹配的 Skill':'Hub 暂无可加入的业务 Skill，可先在 Skill Hub 导入'" />
         <a-list v-else>
           <a-list-item v-for="item in pickerMaterials" :key="item.id">
-            <a-list-item-meta :title="item.display_name || item.name" :description="item.description" />
+            <a-list-item-meta :title="item.display_name && item.display_name !== item.name ? `${item.name}（${item.display_name}）` : item.name" :description="item.description" />
             <template #actions>
               <a-tag v-if="!excludedSkillIds.includes(item.id)">已在工坊</a-tag>
               <a-button v-if="excludedSkillIds.includes(item.id)" size="mini" type="primary" :disabled="materialBusy" @click="restoreMaterial(item)">加入工坊</a-button>
@@ -418,6 +418,7 @@ const entries = computed<SkillCatalogEntry[]>(() => {
     return {
       id: skill.id,
       name: skill.name,
+      display_name: skill.display_name,
       description: skill.description,
       is_active: skill.is_active,
       creator_name: skill.creator_name,
@@ -439,7 +440,7 @@ const filteredEntries = computed(() => {
   return entries.value.filter((entry) => {
     if (stageFilter.value && entry.stage !== stageFilter.value) return false
     if (!kw) return true
-    return `${entry.name} ${entry.description}`.toLowerCase().includes(kw)
+    return `${entry.name} ${entry.display_name || ""} ${entry.description}`.toLowerCase().includes(kw)
   })
 })
 

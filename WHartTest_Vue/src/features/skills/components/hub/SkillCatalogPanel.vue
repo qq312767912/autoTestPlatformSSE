@@ -67,7 +67,7 @@
               @click="emit('select', item.id)"
             >
               <div class="catalog__item-head">
-                <span class="catalog__item-name" :title="item.name">{{ item.name }}</span>
+                <span class="catalog__item-name" :title="item.name">{{ item.name }}<template v-if="item.display_name && item.display_name !== item.name">（{{ item.display_name }}）</template></span>
                 <span v-if="!item.is_active" class="catalog__flag catalog__flag--muted">已停用</span>
               </div>
               <div class="catalog__item-desc">{{ item.description || '无描述' }}</div>
