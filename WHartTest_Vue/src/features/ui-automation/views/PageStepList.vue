@@ -24,6 +24,7 @@
         />
       </div>
       <div class="action-buttons">
+        <a-button v-if="canBatchDelete" status="danger" :disabled="loading || !selectedAssetIds.length" :loading="batchDeleting" @click="confirmBatchDelete">批量删除<span v-if="selectedAssetIds.length">（{{ selectedAssetIds.length }}）</span></a-button>
         <a-button @click="openRecorder">
           <template #icon><icon-record /></template>
           {{ pageText.recordStep }}
@@ -36,6 +37,9 @@
     </div>
 
     <a-table
+      row-key="id"
+      v-model:selected-keys="selectedAssetIds"
+      :row-selection="canBatchDelete ? {type:'checkbox',showCheckedAll:true} : undefined"
       :key="`page-step-table-${locale}`"
       :columns="columns"
       :data="pageStepData"
@@ -149,6 +153,7 @@
 </template>
 
 <script setup lang="ts">
+import { useAssetBatchDelete } from '../composables/useAssetBatchDelete'
 import FileAttachmentPicker from '@/features/file-management/components/FileAttachmentPicker.vue'
 import { ref, reactive, computed, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
@@ -538,6 +543,8 @@ watch(() => props.selectedModuleId, (newVal) => {
   pagination.current = 1
   fetchPageSteps()
 })
+
+const {selectedAssetIds, batchDeleting, canBatchDelete, confirmBatchDelete} = useAssetBatchDelete({project:projectId, rows:pageStepData, permission:'ui_automation.delete_uipagesteps', label:'页面步骤', remove:pageStepsApi.batchDelete, reload:async()=>{pagination.current=1;await fetchPageSteps()}})
 
 // 监听项目变化，重新加载数据
 watch(projectId, () => {

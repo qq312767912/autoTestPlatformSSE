@@ -23,6 +23,7 @@
         />
       </div>
       <div class="action-buttons">
+        <a-button v-if="canBatchDelete" status="danger" :disabled="loading || !selectedAssetIds.length" :loading="batchDeleting" @click="confirmBatchDelete">批量删除<span v-if="selectedAssetIds.length">（{{ selectedAssetIds.length }}）</span></a-button>
         <a-button type="primary" @click="showAddModal">
           <template #icon><icon-plus /></template>
           新增页面
@@ -31,6 +32,9 @@
     </div>
 
     <a-table
+      row-key="id"
+      v-model:selected-keys="selectedAssetIds"
+      :row-selection="canBatchDelete ? {type:'checkbox',showCheckedAll:true} : undefined"
       :columns="columns"
       :data="pageData"
       :pagination="pagination"
@@ -124,6 +128,7 @@
 </template>
 
 <script setup lang="ts">
+import { useAssetBatchDelete } from '../composables/useAssetBatchDelete'
 import { ref, reactive, computed, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { IconPlus, IconEdit, IconDelete, IconEye, IconCopy } from '@arco-design/web-vue/es/icon'
@@ -351,6 +356,8 @@ watch(() => props.selectedModuleId, (newVal) => {
   pagination.current = 1
   fetchPages()
 })
+
+const {selectedAssetIds, batchDeleting, canBatchDelete, confirmBatchDelete} = useAssetBatchDelete({project:projectId, rows:pageData, permission:'ui_automation.delete_uipage', label:'页面', remove:pageApi.batchDelete, reload:async()=>{pagination.current=1;await fetchPages()}})
 
 // 监听项目变化，重新加载数据
 watch(projectId, () => {

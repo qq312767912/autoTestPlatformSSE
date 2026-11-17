@@ -56,6 +56,7 @@ export const moduleApi = {
 
 // ==================== 页面管理 ====================
 export const pageApi = {
+  batchDelete: (project: number, ids: number[]) => request.post(`${BASE_URL}/pages/batch-delete/`, {project, ids}),
   list: (params?: { project?: number; module?: number; search?: string }) =>
     request.get<PaginatedResponse<UiPage>>(`${BASE_URL}/pages/`, { params }),
 
@@ -92,6 +93,7 @@ export const elementApi = {
 
 // ==================== 页面步骤管理 ====================
 export const pageStepsApi = {
+  batchDelete: (project: number, ids: number[]) => request.post(`${BASE_URL}/page-steps/batch-delete/`, {project, ids}),
   list: (params?: { project?: number; page?: number; module?: number; search?: string }) =>
     request.get<PaginatedResponse<UiPageSteps>>(`${BASE_URL}/page-steps/`, { params }),
 

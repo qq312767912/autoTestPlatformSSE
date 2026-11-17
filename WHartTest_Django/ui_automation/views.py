@@ -292,6 +292,11 @@ class UiPageViewSet(viewsets.ModelViewSet):
             return UiPageDetailSerializer
         return UiPageSerializer
 
+    @action(detail=False, methods=['post'], url_path='batch-delete')
+    def batch_delete(self, request):
+        from .bulk_delete import delete_selected_assets
+        return delete_selected_assets(self, request)
+
     def perform_create(self, serializer):
         serializer.save(creator=self.request.user)
 
@@ -444,6 +449,11 @@ class UiPageStepsViewSet(viewsets.ModelViewSet):
         if self.action == 'execute_data':
             return UiPageStepsExecuteSerializer
         return UiPageStepsSerializer
+
+    @action(detail=False, methods=['post'], url_path='batch-delete')
+    def batch_delete(self, request):
+        from .bulk_delete import delete_selected_assets
+        return delete_selected_assets(self, request)
 
     def perform_create(self, serializer):
         serializer.save(creator=self.request.user)
