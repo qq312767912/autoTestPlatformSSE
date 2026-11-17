@@ -68,7 +68,7 @@ def validate_ui_context(project, actor, raw):
 
 def get_binding(session_id, user_id, project_id):
     binding = SkillAgentTaskBinding.objects.select_related('session').get(
-        session__session_id=session_id, session__user_id=user_id, session__project_id=project_id, generation_mode='ui_case')
+        session__session_id=session_id, session__user_id=user_id, session__project_id=project_id, generation_mode__in=['ui_case', 'ui_healing'])
     if binding.session.auth_state_id != binding.generation_context.get('auth_state_id'):
         raise ValidationError('任务登录态绑定已变化，请重新创建生成任务')
     return binding
@@ -145,6 +145,9 @@ def bind_generated_case(session_id, user_id, project_id, functional_case_id, ui_
 
 
 def ui_generation_tools(mode, session_id, user_id, project_id):
+    if mode == 'ui_healing':
+        from ui_automation.healing_tools import healing_tools
+        return healing_tools(session_id, user_id, project_id)
     if mode != 'ui_case':
         return []
 

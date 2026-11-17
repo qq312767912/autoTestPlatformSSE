@@ -73,6 +73,8 @@
           <template #icon><icon-thunderbolt /></template>
           {{ batchExecuteLabel }}
         </a-button>
+        <a-button v-if="authStore.hasPermission('ui_automation.change_uitestcase')" type="primary" :disabled="selectedRowKeys.length === 0" @click="healingVisible = true">批量执行并自愈</a-button>
+        <a-button v-if="hasHealingBatch" @click="healingVisible = true">自愈批次进度</a-button>
         <a-popconfirm
           :content="pageText.batchDeleteConfirm"
           @ok="batchDeleteTestCases"
@@ -93,6 +95,7 @@
       </div>
     </div>
 
+    <UiBatchHealingModal v-if="projectId" v-model:visible="healingVisible" :project="projectId" :ids="selectedRowKeys" :environments="envConfigs" :initial-env="selectedEnvConfig" @finished="fetchTestCases" />
     <a-table
       :key="`testcase-table-${locale}`"
       :columns="columns"
@@ -224,6 +227,8 @@
 </template>
 
 <script setup lang="ts">
+import UiBatchHealingModal from '../components/UiBatchHealingModal.vue'
+
 import GenerateUiCasesModal from '../components/generate/GenerateUiCasesModal.vue'
 import BusinessCaseConversionModal from '../components/BusinessCaseConversionModal.vue'
 import { useAuthStore } from '@/store/authStore'
@@ -397,6 +402,8 @@ const pageText = computed(() => (
       }
 ))
 
+const healingVisible = ref(false)
+const hasHealingBatch = computed(() => { healingVisible.value; return !!localStorage.getItem(`ui-healing-run:${projectId.value}`) })
 const loading = ref(false)
 const submitting = ref(false)
 const executingIds = ref<number[]>([]) // 正在执行的用例ID列表

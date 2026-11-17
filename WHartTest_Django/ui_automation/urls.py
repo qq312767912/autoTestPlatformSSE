@@ -13,7 +13,10 @@ from .views import (
     trigger_batch_execution, UiRecorderSessionViewSet
 )
 
+from .healing import UiHealingBatchViewSet
+
 router = DefaultRouter()
+router.register('healing-batches', UiHealingBatchViewSet, basename='ui-healing-batches')
 router.register('modules', UiModuleViewSet, basename='ui-modules')
 router.register('pages', UiPageViewSet, basename='ui-pages')
 router.register('elements', UiElementViewSet, basename='ui-elements')

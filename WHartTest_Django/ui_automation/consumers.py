@@ -179,6 +179,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         super().__init__(*args, **kwargs)
         self.user_id: Optional[str] = None
         self.is_actuator: bool = False
+        self._background_execution = False
         self.group_name: str = 'ui_automation'
         self.actuator_info: dict = {}  # 执行器信息
         self.language: str = 'zh-Hans'
@@ -284,7 +285,9 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 self.user_id = user.username
             else:
                 self.user_id = f"web_{id(self)}"
-            SocketUserManager.add_web_user(self.user_id, self)
+            self._background_execution = self._get_query_params().get('background') == ['1']
+            if not self._background_execution:
+                SocketUserManager.add_web_user(self.user_id, self)
 
         await self.channel_layer.group_add(self.group_name, self.channel_name)
         await self.accept()
@@ -1023,6 +1026,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             payload = {
                 'case_id': args.get('case_id'),
                 'execution_request_id': args.get('execution_request_id'),
+                'environment': {'env_config_id': args.get('env_config_id'), 'actuator_id': RECORDER_BROWSER_ID, 'execution_request_id': args.get('execution_request_id')},
                 'status': 'failed',
                 'message': message,
                 'steps': steps or [],
@@ -1039,7 +1043,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 await self.save_execution_result(dict(payload))
             except Exception as exc:
                 logger.warning('[recorder-exec] 失败执行记录落库失败: %s', exc)
-        web_user = SocketUserManager.get_web_user(user)
+        web_user = self if self._background_execution else SocketUserManager.get_web_user(user)
         if web_user:
             await web_user.send_json(SocketDataModel(
                 code=ResponseCode.SUCCESS,
@@ -1051,13 +1055,15 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
 
     async def _recorder_exec_frame_relay(self, session, user: str):
         """执行期间把浏览器画面帧直推发起用户（与录制画布同一事件）。"""
+        if self._background_execution:
+            return
         while True:
             await asyncio.sleep(0.02)
             try:
                 frame = session.take_latest_frame()
                 if not frame:
                     continue
-                web_user = SocketUserManager.get_web_user(user)
+                web_user = self if self._background_execution else SocketUserManager.get_web_user(user)
                 if web_user:
                     await web_user.send_json(SocketDataModel(
                         code=ResponseCode.SUCCESS,
@@ -1201,7 +1207,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 except Exception as exc:
                     logger.warning('[recorder-exec] 开启 trace 失败（不影响执行）: %s', exc)
             # 回执生效运行时（headless=false 观看模式）→ 前端据此自动打开执行画布
-            web_user = SocketUserManager.get_web_user(user)
+            web_user = self if self._background_execution else SocketUserManager.get_web_user(user)
             if web_user:
                 await web_user.send_json(SocketDataModel(
                     code=ResponseCode.SUCCESS,
@@ -1346,7 +1352,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                     await self.update_page_step_status(
                         groups[0].id, 2 if status == 'success' else 3, result_args,
                     )
-                web_user = SocketUserManager.get_web_user(user)
+                web_user = self if self._background_execution else SocketUserManager.get_web_user(user)
                 if web_user:
                     await web_user.send_json(SocketDataModel(
                         code=ResponseCode.SUCCESS,
@@ -1376,6 +1382,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                         'base_url': env_config.base_url if env_config else '',
                         'actuator_id': RECORDER_BROWSER_ID,
                         'auth_state_id': first_auth_id,
+                        'execution_request_id': args.get('execution_request_id'),
                     },
                     # Playwright trace.zip 的平台存储相对路径（与执行器路径一致）
                     'trace_path': trace_local_path,

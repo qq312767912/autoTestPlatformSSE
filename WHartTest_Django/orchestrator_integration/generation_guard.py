@@ -168,3 +168,47 @@ class GenerationUiCaseGuardMiddleware(GenerationInterfaceCaseGuardMiddleware):
         if args.get('project_id') is not None and str(args['project_id']) != self.project_id:
             return request, _error(request, 'UI 生成任务禁止切换项目')
         return request, None
+
+
+class UiHealingGuardMiddleware(GenerationUiCaseGuardMiddleware):
+    def _prepare(self, request):
+        call = request.tool_call or {}
+        args = call.get('args') or {}
+        try:
+            tokens = shlex.split(str(args.get('command') or ''))
+        except ValueError:
+            return request, _error(request, '命令引用不完整')
+        action = _flag(tokens, '--action')[0] if tokens else call.get('name', '')
+        if action.startswith(('delete_', 'create_testcase', 'copy_testcase')) or action in {'execute_testcase', 'batch_execute_testcases', 'bind_generated_ui_case', 'edit_testcase', 'set_case_steps', 'update_testcase', 'update_env_config', 'create_env_config'}:
+            return request, _error(request, '自愈仅维护已有用例，禁止删除、新建替代或自行执行；平台统一重跑验证。')
+        if action in {'update_element', 'create_element', 'set_step_details', 'update_page_step'}:
+            try:
+                self._validate_edit(action, tokens, args)
+            except Exception:
+                return request, _error(request, '自愈修改超出当前用例范围，或变更了原业务断言；请保留原断言及步骤引用。')
+        return super()._prepare(request)
+
+    def _validate_edit(self, action, tokens, args):
+        from knowledge_evolution.hub_assessment_models import SkillAgentTaskBinding
+        from ui_automation.models import UiPageSteps, UiPageStepsDetailed, UiElement
+        binding = SkillAgentTaskBinding.objects.get(session__session_id=self.session_id, generation_mode='ui_healing')
+        active = binding.generation_run['active_source_id']
+        groups = UiPageSteps.objects.filter(case_usages__test_case_id=active)
+        def value(name):
+            return _flag(tokens, '--' + name)[0] if tokens else args.get(name)
+        if action == 'update_element':
+            if not UiElement.objects.filter(pk=value('element_id'), page_id__in=groups.values('page_id')).exists():
+                raise ValueError('element scope')
+        elif action == 'create_element':
+            if not groups.filter(page_id=value('page_id')).exists():
+                raise ValueError('page scope')
+        else:
+            step_id = value('step_id')
+            if not groups.filter(pk=step_id).exists():
+                raise ValueError('step scope')
+            if action == 'set_step_details':
+                steps = json.loads(value('steps')) if tokens else args.get('steps')
+                if not isinstance(steps, list): raise ValueError('steps')
+                original = list(UiPageStepsDetailed.objects.filter(page_step_id=step_id, step_type=1).order_by('step_sort', 'pk').values('element_id', 'ope_key', 'ope_value'))
+                proposed = [{'element_id': x.get('element', x.get('element_id')), 'ope_key': x.get('ope_key'), 'ope_value': x.get('ope_value')} for x in steps if int(x.get('step_type', 0)) == 1]
+                if original != proposed: raise ValueError('assertion change')

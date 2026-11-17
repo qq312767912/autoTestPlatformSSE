@@ -2318,7 +2318,7 @@ class AgentLoopStreamAPIView(View):
             from knowledge_evolution.hub_assessment_models import SkillAgentTaskBinding
             busy_conversion = await sync_to_async(lambda: SkillAgentTaskBinding.objects.filter(
                 session__session_id=session_id, session__user_id=request.user.pk,
-                generation_mode='ui_case', generation_run__status__in=['queued', 'running'],
+                generation_mode__in=['ui_case', 'ui_healing'], generation_run__status__in=['queued', 'running'],
             ).exists())()
             if busy_conversion:
                 return api_error_response('当前批次正在后台执行，请查看会话进度；完成或取消后再发送消息。', 409)
@@ -2532,7 +2532,7 @@ class AgentLoopStreamAPIView(View):
                 )
 
         # 5.1 在加载 LLM/工具前完成登录态绑定；Cookie/token 不进入模型参数。
-        if getattr(request, "_api_generation_mode", "") == "ui_case":
+        if getattr(request, "_api_generation_mode", "") in {"ui_case", "ui_healing"}:
             from .ui_generation_runtime import get_binding
             ui_binding = await sync_to_async(get_binding)(session_id, request.user.id, project_id)
             expected_auth = ui_binding.generation_context.get("auth_state_id")

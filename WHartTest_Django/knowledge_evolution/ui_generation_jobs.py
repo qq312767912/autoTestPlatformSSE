@@ -134,7 +134,7 @@ def reconcile_run(binding):
     stamp = parse_datetime(run.get('heartbeat_at') or '')
     if run.get('status') == 'running' and stamp and timezone.now() - stamp > timedelta(minutes=5):
         items = [{**item, 'status': 'failed', 'message': '后台任务已失联，请重新发起'}
-                 if item.get('status') in ('queued', 'exploring') else item for item in run.get('items', [])]
+                 if item.get('status') in ('queued', 'exploring', 'running', 'healing', 'verifying') else item for item in run.get('items', [])]
         binding.generation_run = update_run(binding.pk, status='partial_failure', items=items,
             active_session_id=None, error='后台任务已失联，已保留现有资产与证据，可以重新发起', finished_at=timezone.now().isoformat())
     return binding
