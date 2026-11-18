@@ -74,13 +74,11 @@
             <a-doption :disabled="!hasHealingBatch" @click="healingVisible=true">自动修复执行进度</a-doption>
           </template>
         </a-dropdown>
-        <a-dropdown trigger="click">
-          <a-button>更多 <icon-down /></a-button>
-          <template #content>
-            <a-doption v-if="authStore.hasPermission('ui_automation.change_uitestcase')" :disabled="!selectedRowKeys.length" @click="scriptBatchMode='configure';scriptBatchVisible=true">设置所选用例的默认角色</a-doption>
-            <a-doption :disabled="!selectedRowKeys.length" @click="confirmBatchDelete"><span style="color:var(--color-danger-6)">删除所选用例</span></a-doption>
-          </template>
-        </a-dropdown>
+        <a-button v-if="authStore.hasPermission('ui_automation.change_uitestcase')" :disabled="!selectedRowKeys.length" @click="scriptBatchMode='configure';scriptBatchVisible=true">配置角色</a-button>
+        <a-button status="danger" :disabled="!selectedRowKeys.length" @click="confirmBatchDelete">
+          <template #icon><icon-delete /></template>
+          删除所选
+        </a-button>
         <a-button type="primary" @click="showAddModal">
           <template #icon><icon-plus /></template>
           {{ pageText.addCase }}
