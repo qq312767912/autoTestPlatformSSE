@@ -716,8 +716,11 @@ CELERY_TASK_SERIALIZER = "json"  # 任务消息序列化格式。
 CELERY_RESULT_SERIALIZER = "json"  # 任务结果序列化格式。
 CELERY_ACCEPT_CONTENT = ["json"]  # Worker 允许接收的消息内容类型。
 
-# Celery任务路由 - task_center 使用独立队列，避免被其他 worker 误消费
+# 耗时业务独立队列；必须同时部署 supervisord.conf 中的专用 worker。
 CELERY_TASK_ROUTES = {
+    'knowledge.process_document': {'queue': 'knowledge'},
+    'code_analysis.tasks.*': {'queue': 'code_analysis'},
+    'testcases.review_tasks.*': {'queue': 'testcase_review'},
     'task_center.tasks.*': {'queue': 'task_center'},
 }
 
