@@ -124,7 +124,7 @@ def build_plan(upload):
         if not cid or cid in case_ids or not name or len(name)>100:
             fail('AutomationTestCase',row,'用例ID重复/为空，或名称为空/超过100字');continue
         case_ids.add(cid)
-        cases.append({'source_id':cid,'name':name,'description':text(row.get('description')),'steps':[]})
+        cases.append({'source_id':cid,'name':name,'description':text(row.get('description')),'source_group_id':identifier(row.get('automationGroupLevelFirst')),'steps':[]})
     names=[case['name'] for case in cases]
     if len(names)!=len(set(names)):errors.append({'sheet':'AutomationTestCase','row':0,'message':'Excel 内有同名用例，请先重命名'})
     by_case={case['source_id']:case for case in cases}

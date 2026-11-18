@@ -509,3 +509,41 @@ class ExcelInterfaceDestinationTests(TestCase):
         self.assertEqual(ApiInterfaceCase.objects.count(),2)
         scene.refresh_from_db()
         self.assertNotIn('superseded_by_interface_case',scene.config['excel_migration'])
+
+class ExcelModuleAssignmentTests(TestCase):
+    def setUp(self):
+        self.user=get_user_model().objects.create_superuser(username='excel-module',password='test')
+        self.project=Project.objects.create(name='excel-module',creator=self.user)
+
+    def test_original_group_and_module_rename_are_preserved(self):
+        from .excel_interface_import import persist_interface_plan
+        from .models import ApiInterfaceCase
+        from api_modules.models import ApiModule
+        from api_interfaces.models import ApiInterface
+        data=tables();data['AutomationTestCase'][0]['automationGroupLevelFirst']=369
+        p=plan(data)
+        persist_interface_plan(p,self.project,self.user)
+        module=ApiModule.objects.get()
+        self.assertEqual(module.name,'旧平台分组 369')
+        self.assertEqual(ApiInterface.objects.filter(module=module).count(),2)
+        module.name='人工重命名';module.save()
+        case=ApiInterfaceCase.objects.get()
+        interface=case.steps.first().origin_interface
+        interface.module=None;interface.save()
+        again=persist_interface_plan(p,self.project,self.user,update_existing=True)
+        interface.refresh_from_db()
+        self.assertEqual(interface.module_id,module.pk)
+        self.assertEqual(ApiModule.objects.count(),1)
+        self.assertEqual(again['assigned_interface_modules'],1)
+
+    def test_manual_assignments_are_not_overwritten(self):
+        from .excel_interface_import import persist_interface_plan
+        from .models import ApiInterfaceCase
+        from api_modules.models import ApiModule
+        p=plan();persist_interface_plan(p,self.project,self.user)
+        custom=ApiModule.objects.create(project=self.project,name='用户模块')
+        step=ApiInterfaceCase.objects.get().steps.first()
+        interface=step.origin_interface;interface.module=custom;interface.save()
+        persist_interface_plan(p,self.project,self.user,update_existing=True)
+        interface.refresh_from_db()
+        self.assertEqual(interface.module_id,custom.pk)

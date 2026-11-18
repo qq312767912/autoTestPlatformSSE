@@ -46,7 +46,8 @@ def persist_interface_plan(plan,project,user,group_id=None,update_existing=False
         resources=persist_plan({**plan,'cases':[]},project,user,group_id,False)
         from .models import ApiTestCaseGroup
         group=ApiTestCaseGroup.objects.get(pk=group_id,project=project) if group_id else None
-        native_ids=[];interface_ids=[];created=0;updated=0;created_interfaces=0;retired_scenes=0;retired_splits=0;created_steps=0
+        fresh_interfaces=set()
+        native_ids=[];interface_ids=[];created=0;updated=0;created_interfaces=0;retired_scenes=0;retired_splits=0;created_steps=0;assigned_modules=0
         for item in plan['cases']:
             existing=ApiInterfaceCase.objects.filter(project=project,config__excel_migration__sha256=plan['sha256'],
                 config__excel_migration__source_id=item['source_id'],config__excel_migration__kind='interface_case').first()
@@ -57,7 +58,13 @@ def persist_interface_plan(plan,project,user,group_id=None,update_existing=False
                 config__excel_migration__source_api_id__in=[s['source_id'] for s in item['steps']]))
             split_by_id={str(s.config[META]['source_api_id']):s for s in splits}
             if existing:
+                from .excel_modules import assign_import_module
+                interfaces=[step.origin_interface for step in existing.steps.all() if step.origin_interface_id]
+                module_id,assigned=assign_import_module(project,user,item,interfaces,existing.config.get(META,{}).get('module_id'))
+                assigned_modules+=assigned
                 old=copy.deepcopy(existing.config)
+                if module_id:old[META]['module_id']=module_id
+                old[META]['source_group_id']=item.get('source_group_id','')
                 old['variables']=merge_variables(item['config']['variables'],old.get('variables'))
                 old[META]={**old.get(META,{}),'archive_id':resources['archive_id'],'environment_ids':resources['environment_ids']}
                 existing.config=old;existing.save(update_fields=['config','updated_at'])
@@ -86,12 +93,15 @@ def persist_interface_plan(plan,project,user,group_id=None,update_existing=False
                         ('setup_hooks',[]),('teardown_hooks',[]),('extract_meta',{})]}
                     interface=ApiInterface.objects.create(project=project,created_by=user,name=scene_step.name if scene_step else source['name'],
                         type='http',method=data['method'],url=data['url'],variables=item['config']['variables'],**fields)
-                    created_interfaces+=1
+                    created_interfaces+=1;fresh_interfaces.add(interface.pk)
                 interface_ids.append(interface.pk)
                 prepared.append((source,scene_step,interface,data))
             if not prepared:raise ValidationError('接口用例没有请求步骤')
+            from .excel_modules import assign_import_module
+            module_id,assigned=assign_import_module(project,user,item,[interface for _,_,interface,_ in prepared],fresh_ids=fresh_interfaces)
+            assigned_modules+=assigned
             meta={**copy.deepcopy(item['config'][META]),'kind':'interface_case','archive_id':resources['archive_id'],
-                  'environment_ids':resources['environment_ids'],'source_scenario_ids':[legacy.pk] if legacy else [],
+                  'environment_ids':resources['environment_ids'],'module_id':module_id,'source_group_id':item.get('source_group_id',''),'source_scenario_ids':[legacy.pk] if legacy else [],
                   'source_split_case_ids':[s.pk for s in splits]}
             base=copy.deepcopy(legacy.config if legacy else item['config'])
             base[META]={**base.get(META,{}),**meta}
@@ -126,4 +136,4 @@ def persist_interface_plan(plan,project,user,group_id=None,update_existing=False
                     split.save(update_fields=['config','updated_at']);retired_splits+=1
         return {**resources,'destination':'interface_cases','created_cases':0,'updated_cases':updated,'ids':native_ids,
                 'created_interface_cases':created,'created_interfaces':created_interfaces,'created_steps':created_steps,
-                'interface_ids':list(dict.fromkeys(interface_ids)),'converted_scenarios':retired_scenes,'consolidated_split_cases':retired_splits}
+                'interface_ids':list(dict.fromkeys(interface_ids)),'assigned_interface_modules':assigned_modules,'converted_scenarios':retired_scenes,'consolidated_split_cases':retired_splits}
