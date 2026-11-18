@@ -1,0 +1,206 @@
+import copy
+import io
+import zipfile
+from types import SimpleNamespace
+from unittest.mock import patch
+from xml.sax.saxutils import escape
+from django.test import TestCase, SimpleTestCase
+from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Permission
+from django.core.files.uploadedfile import SimpleUploadedFile
+from rest_framework.test import APIRequestFactory, force_authenticate
+from rest_framework.exceptions import ValidationError
+from projects.models import Project, ProjectMember
+from .models import ApiTestCase, ApiTestCaseGroup
+from .excel_import import build_plan, read_tables, persist_plan, prepare_migration_variables, json_path
+from .views import ApiTestCaseViewSet
+
+def tables():
+    return {
+        'AutomationTestCase':[{'id':1,'caseName':'scene A','_row':2}],
+        'AutomationCaseApi':[
+            {'id':12,'automationTestCase':1,'name':'second','order':2,'requestType':'GET','apiAddress':'/second','httpType':'HTTP','host':9,'requestParameterType':'form-data','examineType':"['datasource_check']", '_row':2},
+            {'id':11,'automationTestCase':1,'name':'first','order':1,'requestType':'POST','apiAddress':'/first','httpType':'HTTP','host':9,'requestParameterType':'form-data','httpCode':200,'_row':3}],
+        'GlobalHost':[{'id':9,'ip':'example.com','_row':2}],
+        'AutomationHead':[{'id':1,'automationCaseApi':11,'name':'X-Token','value':'{{token-name}}','_row':2}],
+        'AutomationParameter':[{'id':2,'automationCaseApi':12,'name':'key','value':'<relation[db][sheet]>[key]','_row':2}],
+        'AutomationJsonAssertData':[{'id':3,'automationCaseApi':12,'jsonAssertPath':'$.code','jsonAssertValue':'ACK','_row':2}],
+        'AutomationTestResult':[{'header':'OLD-SECRET-HISTORY'}],
+    }
+
+def plan(data=None):
+    with patch('api_testcases.excel_import.read_tables',return_value=(data or tables(),'digest')):
+        return build_plan(SimpleUploadedFile('old.xlsx',b'file'))
+
+# OOXML fixtures are assembled as minimal XML rather than authored workbooks.
+def workbook(sheets):
+    output=io.BytesIO()
+    ns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+    with zipfile.ZipFile(output,'w') as archive:
+        archive.writestr('[Content_Types].xml','<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>')
+        archive.writestr('xl/workbook.xml','<workbook xmlns="'+ns+'" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'+''.join('<sheet name="'+name+'" sheetId="'+str(i)+'" r:id="rId'+str(i)+'"/>' for i,name in enumerate(sheets,1))+'</sheets></workbook>')
+        archive.writestr('xl/_rels/workbook.xml.rels','<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'+''.join('<Relationship Id="rId'+str(i)+'" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet'+str(i)+'.xml"/>' for i in range(1,len(sheets)+1))+'</Relationships>')
+        for i,rows in enumerate(sheets.values(),1):
+            body=''
+            for rownum,row in enumerate(rows,1):
+                cells=''
+                for col,value in enumerate(row):
+                    address=chr(65+col)+str(rownum)
+                    if str(value).startswith('='):
+                        cells+='<c r="'+address+'"><f>'+escape(str(value)[1:])+'</f></c>'
+                    else:
+                        cells+='<c r="'+address+'" t="inlineStr"><is><t>'+escape(str(value))+'</t></is></c>'
+                body+='<row r="'+str(rownum)+'">'+cells+'</row>'
+            archive.writestr('xl/worksheets/sheet'+str(i)+'.xml','<worksheet xmlns="'+ns+'"><sheetData>'+body+'</sheetData></worksheet>')
+    return SimpleUploadedFile('fixture.xlsx',output.getvalue())
+
+class ExcelMappingTests(SimpleTestCase):
+    def test_read_xlsx_and_invalid_files(self):
+        result,_=read_tables(workbook({'Sheet':[['id','name'],[1,'接口']]}))
+        self.assertEqual(result['Sheet'][0]['name'],'接口')
+        for upload in [SimpleUploadedFile('x.csv',b'a,b'),SimpleUploadedFile('x.xlsx',b'not zip')]:
+            with self.assertRaises(ValidationError):read_tables(upload)
+
+    def test_formula_rejected(self):
+        with self.assertRaisesMessage(ValidationError,'公式'):
+            read_tables(workbook({'Sheet':[['id'],['=1+1']]}))
+
+    def test_xls_reader(self):
+        sheet=SimpleNamespace(name='Sheet',nrows=2,ncols=2,row_values=lambda i:[['id','name'],[1,'old XLS']][i])
+        book=SimpleNamespace(sheets=lambda:[sheet],release_resources=lambda:None)
+        with patch('xlrd.open_workbook',return_value=book):
+            result,_=read_tables(SimpleUploadedFile('fixture.xls',b'legacy'))
+        self.assertEqual(result['Sheet'][0]['name'],'old XLS')
+
+    def test_order_parameters_assertions_and_history_exclusion(self):
+        result=plan()
+        self.assertFalse(result['errors'])
+        self.assertEqual(result['case_count'],1)
+        first,second=result['cases'][0]['steps']
+        self.assertEqual(first['source_id'],'11')
+        self.assertEqual(first['interface_data']['headers']['X-Token'],'${token_name}')
+        self.assertEqual(first['interface_data']['body']['type'],'form-data')
+        self.assertEqual(second['interface_data']['validators'],[{'eq':['body.code','ACK']}])
+        self.assertTrue(second['interface_data']['params']['key'].startswith('${legacy_'))
+        self.assertNotIn('OLD-SECRET-HISTORY',str(result))
+        self.assertEqual(result['ignored_history_rows'],1)
+
+    def test_invalid_references_duplicates_and_unsupported_assets(self):
+        for mutate in [
+            lambda t:t['AutomationCaseApi'][0].update(automationTestCase=999),
+            lambda t:t['AutomationCaseApi'][0].update(id=11),
+            lambda t:t['AutomationCaseApi'][0].update(order=1),
+            lambda t:t['AutomationCaseApi'][0].update(isBinaryApi=True),
+            lambda t:t.update(AutomationPythonScript=[{'script':'not run','_row':2}]),
+            lambda t:t.update(AutomationRequestPrecondition=[{'active':True,'pythonScript':'raise Exception()','_row':2}]),
+            lambda t:t['AutomationJsonAssertData'][0].update(jsonAssertPath='$..code'),
+            lambda t:t['AutomationHead'].append({'automationCaseApi':999,'name':'x'}),
+        ]:
+            data=tables();mutate(data)
+            self.assertTrue(plan(data)['errors'])
+
+    def test_raw_json_and_url_path(self):
+        data=tables()
+        data['AutomationCaseApi'][1]['requestParameterType']='raw'
+        data['AutomationParameterRaw']=[{'automationCaseApi':11,'raw':'{"name":"{{account}}"}','_row':2}]
+        result=plan(data)
+        self.assertFalse(result['errors'])
+        self.assertEqual(result['cases'][0]['steps'][0]['interface_data']['body']['content'],{'name':'${account}'})
+        self.assertEqual(json_path("$['data'][0].code"),'body.data[0].code')
+
+    def test_missing_external_values_block_and_aliases_work(self):
+        result=plan()
+        case=result['cases'][0]
+        fake=SimpleNamespace(config=case['config'],steps=SimpleNamespace(all=lambda:[SimpleNamespace(interface_data=s['interface_data']) for s in case['steps']]))
+        with self.assertRaisesMessage(ValueError,'缺少变量'):prepare_migration_variables(fake,{})
+        values={name:'value' for name in result['cases'][0]['config']['excel_migration']['variable_sources']}
+        values.pop('token_name')
+        values['token-name']='my-token'
+        self.assertEqual(prepare_migration_variables(fake,values)['token_name'],'my-token')
+        # Explicit null/empty values can be intentional negative-test data.
+        self.assertEqual(prepare_migration_variables(fake,{name:None for name in result['cases'][0]['config']['excel_migration']['variable_sources']})['token_name'],None)
+        # Users can replace references with concrete values without editing migration metadata.
+        fake.steps=SimpleNamespace(all=lambda:[SimpleNamespace(interface_data={'url':'/done'})])
+        self.assertEqual(prepare_migration_variables(fake,{}),{})
+
+class ExcelPersistenceTests(TestCase):
+    def setUp(self):
+        self.user=get_user_model().objects.create_superuser(username='excel',password='test')
+        self.project=Project.objects.create(name='excel',creator=self.user)
+        self.view=ApiTestCaseViewSet.as_view({'post':'import_excel'})
+    def call(self,extra=None,user=None):
+        request=APIRequestFactory().post('/',{'file':SimpleUploadedFile('old.xlsx',b'file'),**(extra or {})},format='multipart')
+        force_authenticate(request,user or self.user)
+        with patch('api_testcases.excel_import.read_tables',return_value=(tables(),'digest')):
+            return self.view(request,project_pk=self.project.pk)
+
+    def test_preview_is_readonly_confirm_persists_steps(self):
+        response=self.call()
+        self.assertEqual(response.status_code,200,response.data)
+        self.assertFalse(ApiTestCase.objects.exists())
+        self.assertNotIn('headers',response.data['cases'][0]['steps'][0])
+        response=self.call({'confirm':'true','sha256':'digest'})
+        self.assertEqual(response.status_code,201,response.data)
+        case=ApiTestCase.objects.get()
+        self.assertEqual(list(case.steps.values_list('name',flat=True)),['first','second'])
+        self.assertEqual(case.project,self.project)
+        self.assertEqual(case.created_by,self.user)
+
+    def test_repeat_name_and_changed_file_are_not_written(self):
+        self.assertEqual(self.call({'confirm':'true','sha256':'bad'}).status_code,400)
+        self.assertFalse(ApiTestCase.objects.exists())
+        self.assertEqual(self.call({'confirm':'true','sha256':'digest'}).status_code,201)
+        self.assertEqual(self.call({'confirm':'true','sha256':'digest'}).status_code,400)
+        self.assertEqual(ApiTestCase.objects.count(),1)
+
+    def test_cross_project_group_rejected(self):
+        other=Project.objects.create(name='other',creator=self.user)
+        group=ApiTestCaseGroup.objects.create(project=other,name='other')
+        response=self.call({'confirm':'true','sha256':'digest','group_id':group.pk})
+        self.assertEqual(response.status_code,400)
+        self.assertFalse(ApiTestCase.objects.exists())
+
+    def test_add_permission_and_project_membership_required(self):
+        user=get_user_model().objects.create_user(username='reader')
+        ProjectMember.objects.create(project=self.project,user=user,role='member')
+        user.user_permissions.add(Permission.objects.get(codename='view_apitestcase'))
+        self.assertEqual(self.call(user=user).status_code,403)
+        user.user_permissions.add(Permission.objects.get(codename='add_apitestcase'))
+        user=get_user_model().objects.get(pk=user.pk)
+        ProjectMember.objects.filter(user=user).delete()
+        self.assertEqual(self.call(user=user).status_code,403)
+
+    def test_atomic_conflict(self):
+        data=tables()
+        data['AutomationTestCase'].append({'id':2,'caseName':'scene B','_row':3})
+        data['AutomationCaseApi'].append({**data['AutomationCaseApi'][1],'id':13,'automationTestCase':2})
+        p=plan(data)
+        ApiTestCase.objects.create(project=self.project,name='scene B')
+        with self.assertRaises(ValidationError):persist_plan(p,self.project,self.user)
+        self.assertFalse(ApiTestCase.objects.filter(name='scene A').exists())
+
+    def test_editable_snapshot_and_migration_guard_survive_update(self):
+        from .serializers import ApiTestCaseSerializer
+        persist_plan(plan(),self.project,self.user)
+        case=ApiTestCase.objects.get()
+        result=ApiTestCaseSerializer(case).data
+        self.assertEqual(result['steps'][0]['interface_info']['id'],0)
+        self.assertEqual(result['steps'][0]['interface_info']['method'],'POST')
+        serializer=ApiTestCaseSerializer(case,data={'config':{'variables':{}}},partial=True)
+        self.assertTrue(serializer.is_valid(),serializer.errors)
+        serializer.save()
+        case.refresh_from_db()
+        self.assertIn('excel_migration',case.config)
+        with self.assertRaisesMessage(ValueError,'缺少变量'):prepare_migration_variables(case,{})
+
+    def test_runner_blocks_missing_values_before_network(self):
+        from .runner import TestCaseRunner
+        persist_plan(plan(),self.project,self.user)
+        from .services import TestExecutionService
+        case=ApiTestCase.objects.get()
+        case.config=TestExecutionService._prepare_config(case.config,{})
+        self.assertIn('excel_migration',case.config)
+        runner=TestCaseRunner(case)
+        with patch.object(runner,'test_start') as start:
+            with self.assertRaisesMessage(ValueError,'缺少变量'):runner.run_testcase()
+            start.assert_not_called()

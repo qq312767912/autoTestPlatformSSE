@@ -176,7 +176,8 @@ class TestExecutionService:
             "verify": TestExecutionService._resolve_verify(config, environment),
             "variables": {**env_variables, **case_variables},
             "export": config.get('export', []),
-            "parameters": case_parameters
+            "parameters": case_parameters,
+            **({"excel_migration": config["excel_migration"]} if config.get("excel_migration") else {})
         }
 
     @staticmethod

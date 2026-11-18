@@ -570,6 +570,11 @@ class TestCaseRunner(HttpRunner):
         elif isinstance(self.variables, dict):
             self.config.variables(**case_variables)
 
+        if (self.testcase.config or {}).get('excel_migration'):
+            from .excel_import import prepare_migration_variables
+            case_variables = prepare_migration_variables(self.testcase,case_variables)
+            self.config.variables(**case_variables)
+
         # Apply global request headers
         try:
             from api_environments.models import ApiGlobalRequestHeader

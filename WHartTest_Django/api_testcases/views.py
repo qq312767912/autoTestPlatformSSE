@@ -195,6 +195,25 @@ class ApiTestCaseViewSet(BaseModelViewSet):
         project = get_object_or_404(Project, pk=self.kwargs.get('project_pk'))
         serializer.save(created_by=self.request.user, project=project)
 
+    @action(detail=False, methods=['post'], url_path='import-excel')
+    @permission_required('api_testcases.add_apitestcase')
+    def import_excel(self, request, **kwargs):
+        from projects.models import Project
+        from .excel_import import build_plan, persist_plan
+        project = get_object_or_404(Project, pk=self.kwargs.get('project_pk'))
+        upload = request.FILES.get('file')
+        if not upload:
+            raise ValidationError('请选择 Excel 文件')
+        plan = build_plan(upload)
+        duplicates = list(ApiTestCase.objects.filter(project=project, name__in=[c['name'] for c in plan['cases']]).values_list('name',flat=True))
+        if str(request.data.get('confirm', '')).lower() == 'true':
+            if request.data.get('sha256') != plan['sha256']:
+                raise ValidationError('文件与预览不一致，请重新预览')
+            return Response({**persist_plan(plan,project,request.user,request.data.get('group_id')), 'warnings':plan['warnings']},status=201)
+        # Preview returns structure and migration issues, never old report tokens or request payloads.
+        return Response({key:plan[key] for key in ['format','sha256','warnings','errors','case_count','step_count','required_variables','ignored_history_rows']} |
+            {'duplicates':duplicates,'cases':[{'name':c['name'],'source_id':c['source_id'],'steps':[{'name':s['name'],'method':s['interface_data']['method'],'url':s['interface_data']['url'],'order':i+1,'assertions':len(s['interface_data']['validators'])} for i,s in enumerate(c['steps'])]} for c in plan['cases']]})
+
     @staticmethod
     def _build_single_step_order_map(testcase, target_step, new_order):
         all_steps = list(testcase.steps.all().order_by('order'))

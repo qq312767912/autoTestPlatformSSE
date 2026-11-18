@@ -120,6 +120,10 @@ class ApiTestCaseStepSerializer(serializers.ModelSerializer):
                     'name': obj.origin_interface.project.name
                 }
             }
+        if (obj.config or {}).get('excel_source_id'):
+            data = obj.interface_data or {}
+            return {'id':0,'name':obj.name,'method':data.get('method','GET'),'url':data.get('url',''),
+                    'module':{'id':0,'name':'Excel 导入'},'project':{'id':obj.testcase.project_id,'name':''}}
         return None
 
     def _build_interface_data(self, interface):
@@ -450,6 +454,13 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         steps_info = validated_data.pop('steps_info', None)
         update_mode = validated_data.pop('update_mode', 'auto')
+
+        migration = (instance.config or {}).get('excel_migration') if isinstance(instance.config,dict) else None
+        if migration and 'config' in validated_data:
+            config = validated_data['config']
+            if not isinstance(config,dict):
+                raise serializers.ValidationError({'config':'导入用例配置必须为对象'})
+            validated_data['config'] = {**config,'excel_migration':migration}
 
         instance = super().update(instance, validated_data)
 

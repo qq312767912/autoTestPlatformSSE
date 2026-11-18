@@ -61,6 +61,7 @@ const fetchModules = async () => {
 const showReport = ref(false)
 const reportLoading = ref(false)
 const latestReport = ref<any>(null)
+const migrationVariables=ref<{name:string;source:string}[]>([])
 
 // 初始化表单数据
 const formData = reactive<CreateTestCaseData>({
@@ -161,6 +162,7 @@ const fetchTestCaseDetail = async () => {
       }
 
       const testCase = res.data as any
+      migrationVariables.value=Object.entries(testCase.config?.excel_migration?.variable_sources||{}).map(([name,source])=>({name,source:String(source)}))
       console.log('获取到的用例详情:', testCase)
 
       formData.name = testCase.name || ''
@@ -495,6 +497,11 @@ const handleShowReport = async (tcId: number) => {
 
 <template>
   <div class="testcase-form-page h-full flex flex-col gap-4 p-4 overflow-hidden" :class="isDarkTheme ? 'testcase-form-page--dark' : 'testcase-form-page--light'">
+    <details v-if="migrationVariables.length" class="form-card p-3 flex-shrink-0">
+      <summary style="cursor:pointer">Excel 迁移变量说明（{{migrationVariables.length}} 项）</summary>
+      <p>请在用例变量或执行环境中配置下列值。替换对应步骤中的占位符后，该变量不再必填。</p>
+      <div style="max-height:160px;overflow:auto"><div v-for="item in migrationVariables" :key="item.name"><code>{{item.name}}</code> ← {{item.source}}</div></div>
+    </details>
     <!-- 顶部：基础信息 -->
     <div class="flex-shrink-0 form-card p-4">
       <test-case-header
