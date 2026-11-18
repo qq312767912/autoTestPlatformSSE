@@ -1043,7 +1043,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 await self.save_execution_result(dict(payload))
             except Exception as exc:
                 logger.warning('[recorder-exec] 失败执行记录落库失败: %s', exc)
-        web_user = self if self._background_execution else SocketUserManager.get_web_user(user)
+        web_user = self  # 录制器执行绑定发起连接，不能随同账号其他连接切换
         if web_user:
             await web_user.send_json(SocketDataModel(
                 code=ResponseCode.SUCCESS,
@@ -1063,7 +1063,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 frame = session.take_latest_frame()
                 if not frame:
                     continue
-                web_user = self if self._background_execution else SocketUserManager.get_web_user(user)
+                web_user = self  # 录制器执行绑定发起连接，不能随同账号其他连接切换
                 if web_user:
                     await web_user.send_json(SocketDataModel(
                         code=ResponseCode.SUCCESS,
@@ -1207,7 +1207,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 except Exception as exc:
                     logger.warning('[recorder-exec] 开启 trace 失败（不影响执行）: %s', exc)
             # 回执生效运行时（headless=false 观看模式）→ 前端据此自动打开执行画布
-            web_user = self if self._background_execution else SocketUserManager.get_web_user(user)
+            web_user = self  # 录制器执行绑定发起连接，不能随同账号其他连接切换
             if web_user:
                 await web_user.send_json(SocketDataModel(
                     code=ResponseCode.SUCCESS,
@@ -1352,7 +1352,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                     await self.update_page_step_status(
                         groups[0].id, 2 if status == 'success' else 3, result_args,
                     )
-                web_user = self if self._background_execution else SocketUserManager.get_web_user(user)
+                web_user = self  # 录制器执行绑定发起连接，不能随同账号其他连接切换
                 if web_user:
                     await web_user.send_json(SocketDataModel(
                         code=ResponseCode.SUCCESS,

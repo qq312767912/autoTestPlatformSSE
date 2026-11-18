@@ -94,7 +94,7 @@ def _ws_url_with_token() -> str:
     """构造带认证 token 的 /ws/ui/web/ 连接地址。"""
     return (
         _base_url().replace('http://', 'ws://').replace('https://', 'wss://')
-        + '/ws/ui/web/?token='
+        + '/ws/ui/web/?background=1&token='
         + _get_ws_token()
     )
 
