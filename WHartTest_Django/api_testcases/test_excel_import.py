@@ -82,8 +82,9 @@ class ExcelMappingTests(SimpleTestCase):
         self.assertEqual(first['interface_data']['body']['type'],'form-data')
         self.assertEqual(second['interface_data']['validators'],[{'eq':['body.code','ACK']}])
         self.assertTrue(second['interface_data']['params']['key'].startswith('${legacy_'))
-        self.assertNotIn('OLD-SECRET-HISTORY',str(result))
-        self.assertEqual(result['ignored_history_rows'],1)
+        self.assertIn('OLD-SECRET-HISTORY',str(result['source_tables']))
+        self.assertEqual(result['ignored_history_rows'],0)
+        self.assertEqual(result['data_row_count'],1)
 
     def test_invalid_references_duplicates_and_unsupported_assets(self):
         for mutate in [
@@ -204,3 +205,113 @@ class ExcelPersistenceTests(TestCase):
         with patch.object(runner,'test_start') as start:
             with self.assertRaisesMessage(ValueError,'缺少变量'):runner.run_testcase()
             start.assert_not_called()
+
+
+class ExcelFullDataTests(TestCase):
+    def setUp(self):
+        self.user=get_user_model().objects.create_superuser(username='full-excel',password='test')
+        self.project=Project.objects.create(name='full-excel',creator=self.user)
+
+    def historical_plan(self):
+        data=tables()
+        data['GlobalHost'][0]['name']='原内网环境'
+        data['AutomationTestResult']=[
+            {'automationCaseApi':11,'header':"{'X-Token':'old-token'}",'parameter':'{}','testTime':'2025-01-01','_row':2},
+            {'automationCaseApi':12,'parameter':"{'key':'recorded-input'}",'examineType':"['datasource_check']",
+             'examineData':{'datasource_check':[('$.code', {'jsonAssertValue':'ACK','jsonPathResult':'WRONG-ACTUAL'})]},
+             'responseData':"{'code':'WRONG-ACTUAL'}",'testTime':'2025-01-02','_row':3}]
+        return plan(data)
+
+    def test_recovery_environment_archive_and_expected_are_preserved(self):
+        from api_environments.models import ApiEnvironment, ApiEnvironmentVariable
+        from .models import ApiExcelImportArchive
+        from .excel_data import unseal
+        p=self.historical_plan()
+        self.assertFalse(p['required_variables'])
+        self.assertEqual(p['recovered_variable_count'],2)
+        result=persist_plan(p,self.project,self.user)
+        self.assertEqual(result['created_environments'],1)
+        self.assertEqual(result['created_variables'],2)
+        env=ApiEnvironment.objects.get()
+        self.assertEqual(env.name,'原内网环境')
+        self.assertEqual(env.base_url,'http://example.com')
+        self.assertTrue(ApiEnvironmentVariable.objects.get(name='token_name').is_sensitive)
+        case=ApiTestCase.objects.get()
+        self.assertIn('recorded-input',case.config['variables'].values())
+        archive=ApiExcelImportArchive.objects.get()
+        self.assertNotIn('old-token',archive.encrypted_payload)
+        self.assertEqual(unseal(archive.encrypted_payload)['AutomationTestResult'][0]['header'],"{'X-Token':'old-token'}")
+        self.assertEqual(case.config['excel_migration']['archive_id'],archive.pk)
+
+    def test_expected_recovery_uses_expected_configuration_not_response(self):
+        data=tables()
+        data['AutomationJsonAssertData'][0]['jsonAssertValue']='<relation[db][checks]>[code]'
+        data['AutomationTestResult']=[{'automationCaseApi':12,'parameter':"{'key':'input'}",
+            'examineData':{'datasource_check':[('$.code', {'jsonAssertValue':'ACK','jsonPathResult':'BAD'})]},
+            'responseData':"{'code':'BAD'}",'testTime':'2025','_row':2}]
+        p=plan(data)
+        values=p['cases'][0]['config']['variables']
+        self.assertIn('ACK',values.values())
+        self.assertNotIn('BAD',values.values())
+        self.assertEqual(len(p['required_variables']),1)  # token genuinely absent
+        data['AutomationTestResult'][0].pop('examineData')
+        self.assertNotIn('BAD',plan(data)['cases'][0]['config']['variables'].values())
+
+    def test_latest_input_and_user_edits_survive_backfill(self):
+        from api_environments.models import ApiEnvironmentVariable
+        from .models import ApiExcelImportArchive
+        p=self.historical_plan()
+        persist_plan(p,self.project,self.user)
+        case=ApiTestCase.objects.get()
+        case.config['variables']['token_name']='user-token'
+        case.save()
+        step=case.steps.first();step.interface_data['url']='/user-edit';step.save()
+        envvar=ApiEnvironmentVariable.objects.get(name='token_name');envvar.value='"user-env-token"';envvar.save()
+        result=persist_plan(p,self.project,self.user,update_existing=True)
+        self.assertEqual(result['updated_cases'],1)
+        self.assertEqual(result['created_cases'],0)
+        case.refresh_from_db();step.refresh_from_db();envvar.refresh_from_db()
+        self.assertEqual(case.config['variables']['token_name'],'user-token')
+        self.assertEqual(step.interface_data['url'],'/user-edit')
+        self.assertEqual(envvar.get_typed_value(),'user-env-token')
+        self.assertEqual(ApiExcelImportArchive.objects.count(),1)
+
+    def test_source_api_project_scope_and_pagination(self):
+        from .views import ApiTestCaseViewSet
+        persist_plan(self.historical_plan(),self.project,self.user)
+        case=ApiTestCase.objects.get()
+        request=APIRequestFactory().get('/',{'sheet':'AutomationTestResult'})
+        force_authenticate(request,self.user)
+        response=ApiTestCaseViewSet.as_view({'get':'excel_source'})(request,project_pk=self.project.pk,pk=case.pk)
+        self.assertEqual(response.status_code,200,response.data)
+        self.assertEqual(response.data['total'],2)
+        other=Project.objects.create(name='other-source',creator=self.user)
+        request=APIRequestFactory().get('/')
+        force_authenticate(request,self.user)
+        response=ApiTestCaseViewSet.as_view({'get':'excel_source'})(request,project_pk=other.pk,pk=case.pk)
+        self.assertEqual(response.status_code,404)
+
+    def test_environment_name_conflict_does_not_overwrite(self):
+        from api_environments.models import ApiEnvironment
+        ApiEnvironment.objects.create(project=self.project,name='原内网环境',base_url='https://user.example')
+        result=persist_plan(self.historical_plan(),self.project,self.user)
+        self.assertEqual(result['created_environments'],1)
+        self.assertTrue(ApiEnvironment.objects.filter(name='原内网环境',base_url='https://user.example').exists())
+
+    def test_latest_recorded_input_is_selected(self):
+        data=tables()
+        data['AutomationTestResult']=[
+            {'automationCaseApi':11,'header':"{'X-Token':'older'}",'testTime':'2024-01-01'},
+            {'automationCaseApi':11,'header':"{'X-Token':'latest'}",'testTime':'2026-01-01'}]
+        self.assertEqual(plan(data)['cases'][0]['config']['variables']['token_name'],'latest')
+
+    def test_full_import_needs_environment_permissions(self):
+        user=get_user_model().objects.create_user(username='case-only-import')
+        ProjectMember.objects.create(project=self.project,user=user,role='member')
+        user.user_permissions.add(Permission.objects.get(codename='add_apitestcase'))
+        request=APIRequestFactory().post('/',{'file':SimpleUploadedFile('old.xlsx',b'file'),'confirm':'true','sha256':'digest'},format='multipart')
+        force_authenticate(request,user)
+        with patch('api_testcases.excel_import.read_tables',return_value=(tables(),'digest')):
+            response=ApiTestCaseViewSet.as_view({'post':'import_excel'})(request,project_pk=self.project.pk)
+        self.assertEqual(response.status_code,403)
+        self.assertFalse(ApiTestCase.objects.exists())

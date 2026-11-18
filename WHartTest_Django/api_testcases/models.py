@@ -411,3 +411,17 @@ class ApiInterfaceCaseReportDetail(models.Model):
         report_name = self.report.name if self.report else "Unknown"
         step_name = self.step.name if self.step else "Unknown"
         return f"{report_name}-{step_name}"
+
+
+class ApiExcelImportArchive(models.Model):
+    """完整保留旧平台导出，含历史数据；正文加密，不作为当前运行报告。"""
+    project = models.ForeignKey('projects.Project', on_delete=models.CASCADE, related_name='api_excel_imports')
+    sha256 = models.CharField(max_length=64)
+    file_name = models.CharField(max_length=255)
+    encrypted_payload = models.TextField()
+    summary = models.JSONField(default=dict)
+    created_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [('project', 'sha256')]

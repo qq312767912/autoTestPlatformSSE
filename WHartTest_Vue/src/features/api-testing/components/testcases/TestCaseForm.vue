@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import ExcelSourceModal from './ExcelSourceModal.vue'
+
 import { ref, reactive, computed, onMounted } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { testcaseService } from '../../services/testcaseService'
@@ -61,6 +63,8 @@ const fetchModules = async () => {
 const showReport = ref(false)
 const reportLoading = ref(false)
 const latestReport = ref<any>(null)
+const excelSourceVisible=ref(false)
+const hasExcelArchive=ref(false)
 const migrationVariables=ref<{name:string;source:string}[]>([])
 
 // 初始化表单数据
@@ -162,6 +166,7 @@ const fetchTestCaseDetail = async () => {
       }
 
       const testCase = res.data as any
+      hasExcelArchive.value=!!testCase.config?.excel_migration?.archive_id
       migrationVariables.value=Object.entries(testCase.config?.excel_migration?.variable_sources||{}).map(([name,source])=>({name,source:String(source)}))
       console.log('获取到的用例详情:', testCase)
 
@@ -497,9 +502,11 @@ const handleShowReport = async (tcId: number) => {
 
 <template>
   <div class="testcase-form-page h-full flex flex-col gap-4 p-4 overflow-hidden" :class="isDarkTheme ? 'testcase-form-page--dark' : 'testcase-form-page--light'">
+    <ExcelSourceModal v-if="testCaseId" v-model:visible="excelSourceVisible" :project="projectId" :case-id="testCaseId" />
+    <div v-if="hasExcelArchive" class="form-card p-3 flex-shrink-0"><a-button @click="excelSourceVisible=true">查看导入源数据</a-button><span style="margin-left:12px">环境与历史输入已导入；可核对全部工作表的数据及预期来源。</span></div>
     <details v-if="migrationVariables.length" class="form-card p-3 flex-shrink-0">
       <summary style="cursor:pointer">Excel 迁移变量说明（{{migrationVariables.length}} 项）</summary>
-      <p>请在用例变量或执行环境中配置下列值。替换对应步骤中的占位符后，该变量不再必填。</p>
+      <p>已恢复的值保存在用例变量及导入环境中；尚未恢复的值需补齐。下方保留每个迁移变量的来源。</p>
       <div style="max-height:160px;overflow:auto"><div v-for="item in migrationVariables" :key="item.name"><code>{{item.name}}</code> ← {{item.source}}</div></div>
     </details>
     <!-- 顶部：基础信息 -->

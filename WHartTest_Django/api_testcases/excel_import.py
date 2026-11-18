@@ -95,6 +95,7 @@ def build_plan(upload):
             if external: safe='legacy_'+hashlib.sha256(original.encode()).hexdigest()[:12]
             if safe in required and required[safe]!=original:
                 safe+='_'+hashlib.sha256(original.encode()).hexdigest()[:8]
+            if len(safe)>100:safe=safe[:80]+'_'+hashlib.sha256(original.encode()).hexdigest()[:12]
             required[safe]=original
             if not external:aliases[safe]=original
             warn(sheet,row,('外部数据源缺少实际值，需配置变量 ' if external else '需配置环境变量 ')+safe+'（'+original+'）')
@@ -186,7 +187,7 @@ def build_plan(upload):
         if not validators:fail('AutomationCaseApi',row,'没有可迁移断言，请先补充明确断言')
         try:order=int(float(row.get('order') or 0))
         except (ValueError,TypeError):order=0;fail('AutomationCaseApi',row,'步骤顺序格式无效')
-        case['steps'].append({'source_id':aid,'name':name,'source_order':order,'source_base_url':base,
+        case['steps'].append({'source_id':aid,'name':name,'source_order':order,'source_base_url':base,'source_host_id':identifier(row.get('host')),
             'interface_data':{'type':'http','method':method,'url':convert(url,'AutomationCaseApi',row),'headers':headers,'params':query,'body':body,'validators':validators,'extract':{}}})
     for sheet,by_api in related.items():
         for aid,rows in by_api.items():
@@ -205,15 +206,19 @@ def build_plan(upload):
         source=json.dumps([s['interface_data'] for s in case['steps']],ensure_ascii=False)
         case_required={name:value for name,value in required.items() if '${'+name+'}' in source}
         case['config']={'base_url':base,'variables':{},'excel_migration':{'sha256':digest,'source_id':case['source_id'],'variable_sources':case_required,'variable_aliases':{name:value for name,value in aliases.items() if name in case_required}}}
-    return {'format':'legacy-api-excel','sha256':digest,'cases':cases,'warnings':warnings,'errors':errors,
+    plan = {'file_name':text(upload.name),'format':'legacy-api-excel','sha256':digest,'cases':cases,'warnings':warnings,'errors':errors,
             'case_count':len(cases),'step_count':sum(len(c['steps']) for c in cases),
             'required_variables':[{'name':key,'source':value} for key,value in required.items()],
             'ignored_history_rows':sum(len(tables.get(name,[])) for name in HISTORY)}
+    from .excel_data import enrich_plan
+    return enrich_plan(plan,tables,parse_value,json_path)
 
-def persist_plan(plan,project,user,group_id=None):
+def persist_plan(plan,project,user,group_id=None,update_existing=False):
+    from api_environments.models import ApiEnvironment, ApiEnvironmentVariable
+    from .models import ApiExcelImportArchive
+    from .excel_data import seal
     if plan['errors']:raise ValidationError({'errors':plan['errors']})
     with transaction.atomic():
-        # Serialize imports within a project; never overwrite an existing asset.
         type(project).objects.select_for_update().get(pk=project.pk)
         group=None
         if group_id:
@@ -221,15 +226,59 @@ def persist_plan(plan,project,user,group_id=None):
             except (ApiTestCaseGroup.DoesNotExist,ValueError,TypeError):raise ValidationError('目标分组不属于当前项目')
         names=[c['name'] for c in plan['cases']]
         if len(names)!=len(set(names)):raise ValidationError('Excel 内有同名用例，请先重命名')
-        duplicates=list(ApiTestCase.objects.filter(project=project,name__in=names).values_list('name',flat=True))
+        existing={c.name:c for c in ApiTestCase.objects.filter(project=project,name__in=names)}
+        duplicates=[item['name'] for item in plan['cases'] if item['name'] in existing and not (update_existing and
+            (existing[item['name']].config or {}).get('excel_migration',{}).get('sha256')==plan['sha256'] and
+            (existing[item['name']].config or {}).get('excel_migration',{}).get('source_id')==item['source_id'])]
         if duplicates:raise ValidationError({'message':'已有同名用例，未导入任何记录','duplicates':duplicates})
-        ids=[]
+        archive,_=ApiExcelImportArchive.objects.get_or_create(project=project,sha256=plan['sha256'],
+            defaults={'file_name':plan.get('file_name','export.xlsx')[:255],'created_by':user,
+                      'encrypted_payload':seal(plan.get('source_tables',{})),
+                      'summary':{'sheet_counts':plan.get('sheet_counts',{}),'data_row_count':plan.get('data_row_count',0)}})
+        env_ids={};created_envs=0;created_vars=0
+        for item in plan.get('environments',[]):
+            name=item['name'];base=item['base_url']
+            env=ApiEnvironment.objects.filter(project=project,name=name,base_url=base).first()
+            if not env and ApiEnvironment.objects.filter(project=project,name=name).exists():
+                name=name[:65]+' · Excel '+plan['sha256'][:8]+'-'+item['source_id']
+                env=ApiEnvironment.objects.filter(project=project,name=name,base_url=base).first()
+            if not env:
+                if ApiEnvironment.objects.filter(project=project,name=name).exists():raise ValidationError('导入环境名称冲突，请先调整已有环境名称')
+                env=ApiEnvironment.objects.create(project=project,name=name,base_url=base,description=item['description'],is_active=item['is_active'],created_by=user)
+                created_envs+=1
+            env_ids[item['source_id']]=env.pk
+            for name,value in item['variables'].items():
+                _,created=ApiEnvironmentVariable.objects.get_or_create(environment=env,name=name,
+                    defaults={'type':'json','value':json.dumps(value,ensure_ascii=False),'is_sensitive':any(x in name.lower() for x in ['token','password','secret','auth']),
+                              'description':'旧平台Excel历史输入/预期配置，来源见导入数据'})
+                created_vars+=int(created)
+        ids=[];updated=0;steps_created=0
         for item in plan['cases']:
-            case=ApiTestCase.objects.create(project=project,created_by=user,group=group,name=item['name'],description=item['description'],config=item['config'])
-            ApiTestCaseStep.objects.bulk_create([ApiTestCaseStep(testcase=case,name=step['name'],order=i+1,interface_data=step['interface_data'],
-                config={'excel_source_id':step['source_id']}) for i,step in enumerate(item['steps'])])
+            config=copy_config(item['config'])
+            config['excel_migration']['archive_id']=archive.pk
+            config['excel_migration']['environment_ids']=list(dict.fromkeys(env_ids[s['source_host_id']] for s in item['steps'] if s.get('source_host_id') in env_ids))
+            if item['name'] in existing:
+                case=existing[item['name']]
+                old=case.config or {}
+                old_variables=parse_value(old.get('variables') or {})
+                if not isinstance(old_variables,dict):raise ValidationError('已有用例变量格式无效，请先修正后补全')
+                config={**config,**old,'variables':{**config['variables'],**old_variables},
+                        'excel_migration':{**old.get('excel_migration',{}),**config['excel_migration']}}
+                case.config=config;case.save(update_fields=['config','updated_at'])
+                updated+=1
+            else:
+                case=ApiTestCase.objects.create(project=project,created_by=user,group=group,name=item['name'],description=item['description'],config=config)
+                ApiTestCaseStep.objects.bulk_create([ApiTestCaseStep(testcase=case,name=step['name'],order=i+1,interface_data=step['interface_data'],
+                    config={'excel_source_id':step['source_id']}) for i,step in enumerate(item['steps'])])
+                steps_created+=len(item['steps'])
             ids.append(case.pk)
-    return {'created_cases':len(ids),'created_steps':plan['step_count'],'ids':ids}
+    return {'created_cases':len(ids)-updated,'updated_cases':updated,'created_steps':steps_created,'ids':ids,
+            'created_environments':created_envs,'environment_ids':list(env_ids.values()),'created_variables':created_vars,
+            'imported_data_rows':plan.get('data_row_count',0),'archive_id':archive.pk}
+
+
+def copy_config(config):
+    return json.loads(json.dumps(config,ensure_ascii=False,default=str))
 
 
 def prepare_migration_variables(testcase, variables):

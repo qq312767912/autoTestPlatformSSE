@@ -9,6 +9,12 @@ import { wrapListResponse, wrapOneResponse } from './responseHelpers';
 const base = (projectId: number) => `/projects/${projectId}/api-testcases`;
 
 export const testcaseService = {
+  excelSource: async (projectId:number,id:number,params?:Record<string,any>) => {
+    const result=await request<any>({url:`${base(projectId)}/${id}/excel-source/`,method:'GET',params});
+    if(!result.success||!result.data)throw new Error(result.message||'源数据加载失败');
+    return result.data;
+  },
+
   importExcel: async (projectId: number, data: FormData) => {
     const result = await request({ url: `${base(projectId)}/import-excel/`, method: 'POST', data });
     if (!result.success || !result.data) throw new Error(result.message || result.error || 'Excel 导入失败');

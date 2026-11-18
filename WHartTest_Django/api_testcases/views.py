@@ -205,14 +205,40 @@ class ApiTestCaseViewSet(BaseModelViewSet):
         if not upload:
             raise ValidationError('请选择 Excel 文件')
         plan = build_plan(upload)
-        duplicates = list(ApiTestCase.objects.filter(project=project, name__in=[c['name'] for c in plan['cases']]).values_list('name',flat=True))
+        existing = list(ApiTestCase.objects.filter(project=project, name__in=[c['name'] for c in plan['cases']]))
+        source_ids={c['name']:c['source_id'] for c in plan['cases']}
+        updatable=[c.name for c in existing if (c.config or {}).get('excel_migration',{}).get('sha256')==plan['sha256'] and
+                   (c.config or {}).get('excel_migration',{}).get('source_id')==source_ids[c.name]]
+        duplicates=[c.name for c in existing if c.name not in updatable]
         if str(request.data.get('confirm', '')).lower() == 'true':
             if request.data.get('sha256') != plan['sha256']:
                 raise ValidationError('文件与预览不一致，请重新预览')
-            return Response({**persist_plan(plan,project,request.user,request.data.get('group_id')), 'warnings':plan['warnings']},status=201)
+            if plan.get('environments') and not all(request.user.has_perm(p) for p in ['api_environments.add_apienvironment','api_environments.add_apienvironmentvariable']):
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied('完整导入需要新增接口环境和环境变量权限')
+            return Response({**persist_plan(plan,project,request.user,request.data.get('group_id'),str(request.data.get('update_existing','')).lower()=='true'), 'warnings':plan['warnings']},status=201)
         # Preview returns structure and migration issues, never old report tokens or request payloads.
-        return Response({key:plan[key] for key in ['format','sha256','warnings','errors','case_count','step_count','required_variables','ignored_history_rows']} |
-            {'duplicates':duplicates,'cases':[{'name':c['name'],'source_id':c['source_id'],'steps':[{'name':s['name'],'method':s['interface_data']['method'],'url':s['interface_data']['url'],'order':i+1,'assertions':len(s['interface_data']['validators'])} for i,s in enumerate(c['steps'])]} for c in plan['cases']]})
+        return Response({key:plan[key] for key in ['format','sha256','warnings','errors','case_count','step_count','required_variables','ignored_history_rows','environment_count','recovered_variable_count','data_row_count','sheet_counts']} |
+            {'duplicates':duplicates,'updatable':updatable,'cases':[{'name':c['name'],'source_id':c['source_id'],'steps':[{'name':s['name'],'method':s['interface_data']['method'],'url':s['interface_data']['url'],'order':i+1,'assertions':len(s['interface_data']['validators'])} for i,s in enumerate(c['steps'])]} for c in plan['cases']]})
+
+    @action(detail=True, methods=['get'], url_path='excel-source')
+    @permission_required('api_testcases.view_apitestcase')
+    def excel_source(self, request, pk=None, **kwargs):
+        from .models import ApiExcelImportArchive
+        from .excel_data import unseal
+        case = self.get_object()
+        archive_id = (case.config or {}).get('excel_migration',{}).get('archive_id')
+        archive = get_object_or_404(ApiExcelImportArchive,pk=archive_id,project=case.project)
+        tables = unseal(archive.encrypted_payload)
+        sheet = request.query_params.get('sheet')
+        summary = {'file_name':archive.file_name, **archive.summary}
+        if not sheet:return Response(summary)
+        if sheet not in tables:raise ValidationError('工作表不存在')
+        try:page=max(1,int(request.query_params.get('page','1')))
+        except ValueError:raise ValidationError('页码无效')
+        rows = tables[sheet]
+        return Response({**summary,'sheet':sheet,'total':len(rows),'page':page,'page_size':20,
+                         'rows':rows[(page-1)*20:page*20]})
 
     @staticmethod
     def _build_single_step_order_map(testcase, target_step, new_order):
