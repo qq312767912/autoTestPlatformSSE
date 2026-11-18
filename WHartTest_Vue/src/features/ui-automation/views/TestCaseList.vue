@@ -73,6 +73,8 @@
           <template #icon><icon-thunderbolt /></template>
           {{ batchExecuteLabel }}
         </a-button>
+        <a-button v-if="authStore.hasPermission('ui_automation.change_uitestcase')" :disabled="selectedRowKeys.length===0" @click="scriptBatchMode='configure';scriptBatchVisible=true">批量配置角色</a-button>
+        <a-button @click="scriptBatchMode='execute';scriptBatchVisible=true">脚本批次进度</a-button>
         <a-button v-if="authStore.hasPermission('ui_automation.change_uitestcase')" type="primary" :disabled="selectedRowKeys.length === 0" @click="healingVisible = true">批量执行并自愈</a-button>
         <a-button v-if="hasHealingBatch" @click="healingVisible = true">自愈批次进度</a-button>
         <a-popconfirm
@@ -205,6 +207,7 @@
 </a-form>
     </a-modal>
 
+    <UiScriptBatchModal v-if="projectId" v-model:visible="scriptBatchVisible" :project="projectId" :ids="selectedRowKeys" :environments="envConfigs" :initial-env="selectedEnvConfig" :actuator-id="selectedActuator || 'recorder-browser'" :mode="scriptBatchMode" @finished="fetchTestCases" />
     <GenerateUiCasesModal v-model:visible="generationVisible" />
     <BusinessCaseConversionModal v-if="projectId" v-model:visible="conversionVisible" :project-id="projectId" :modules="moduleOptions" :initial-module-id="props.selectedModuleId || filters.module" @saved="fetchTestCases" />
 
@@ -245,6 +248,7 @@ import type { UiTestCase, UiTestCaseForm, UiModule, CaseLevel, ExecutionStatus, 
 import { STATUS_LABELS, extractListData, extractPaginationData, extractResponseData } from '../types'
 import { uiWebSocket, UiSocketEnum, type CaseResultModel } from '../services/websocket'
 import CaseStepList from './CaseStepList.vue'
+import UiScriptBatchModal from '../components/UiScriptBatchModal.vue'
 import RoleMatrixEditor from '../components/RoleMatrixEditor.vue'
 
 const props = defineProps<{
@@ -427,6 +431,8 @@ const allActuators = computed(() => [
 ])
 const selectedRowKeys = ref<number[]>([]) // 批量选中的用例ID
 const modalVisible = ref(false)
+const scriptBatchVisible=ref(false)
+const scriptBatchMode=ref<'execute'|'configure'>('execute')
 // 单用例执行画面（直播帧弹窗）：是否弹出由执行器无头开关决定——
 // 后端回执 effective_runtime.headless === false（观看模式）时才弹；批量执行不弹
 const execScreenVisible = ref(false)
@@ -791,69 +797,10 @@ const runTestCase = async (record: UiTestCase) => {
 
 /** 批量执行选中的用例 */
 const runBatchTestCases = async () => {
-  if(testcaseData.value.some(item=>selectedRowKeys.value.includes(item.id) && item.step_count === 0)){Message.warning('选中项包含未构建步骤的草稿，请先完善或取消选择');return}
-  if (selectedRowKeys.value.length === 0) {
-    Message.warning(pageText.value.selectCasesToRun)
-    return
-  }
-  // 批量执行一律后台执行，不弹执行画面
-  pendingScreenCaseId.value = null
-
-  // 先获取执行器列表
-  await fetchActuators()
-
-  // 检查是否有可用执行器
-  if (!allActuators.value.some(a => a.is_open)) {
-    Message.warning(pageText.value.noActuatorAvailable)
-    return
-  }
-
-  // 先补齐默认环境，再按生效策略与所需 slot 数选执行器
+  if (!selectedRowKeys.value.length) {Message.warning(pageText.value.selectCasesToRun);return}
   ensureDefaultEnvSelected()
-
-  if (!selectedActuator.value) {
-    const needSlots = selectedRowKeys.value.length || 1
-    const availableId = selectAvailableActuator(needSlots)
-    if (availableId) {
-      selectedActuator.value = availableId
-    } else {
-      Message.warning(pageText.value.noCompatibleActuator || pageText.value.selectOnlineActuator)
-      return
-    }
-  }
-
-  // 批量执行需要真实执行器（并发多浏览器），录制器浏览器不支持
-  if (selectedActuator.value === RECORDER_BROWSER_ID) {
-    Message.warning(pageText.value.batchNeedsActuator)
-    return
-  }
-
-  // 连接 WebSocket
-  try {
-    await uiWebSocket.connect()
-  } catch {
-    Message.error(pageText.value.websocketConnectFailed)
-    return
-  }
-
-  // 发送批量执行命令
-  executingIds.value.push(...selectedRowKeys.value)
-  const success = uiWebSocket.runTestCases(selectedRowKeys.value, selectedEnvConfig.value, selectedActuator.value)
-  if (success) {
-    Message.info(pageText.value.startedBatchRun(selectedRowKeys.value.length))
-    // 更新选中用例状态为"执行中"
-    for (const caseId of selectedRowKeys.value) {
-      const idx = testcaseData.value.findIndex(tc => tc.id === caseId)
-      if (idx !== -1) {
-        testcaseData.value[idx].status = 1
-      }
-    }
-    // 清空选择
-    selectedRowKeys.value = []
-  } else {
-    Message.error(pageText.value.batchRunCommandFailed)
-    executingIds.value = executingIds.value.filter(id => !selectedRowKeys.value.includes(id))
-  }
+  scriptBatchMode.value='execute'
+  scriptBatchVisible.value=true
 }
 
 /** 批量删除选中的用例 */

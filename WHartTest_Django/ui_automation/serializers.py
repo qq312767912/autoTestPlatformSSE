@@ -479,7 +479,7 @@ class UiBatchExecutionRecordSerializer(serializers.ModelSerializer):
     class Meta:
         model = UiBatchExecutionRecord
         fields = '__all__'
-        read_only_fields = ['created_at']
+        read_only_fields = ['run_config','run_items','cancel_requested','heartbeat_at','created_at']
 
     def get_success_rate(self, obj):
         if obj.total_cases == 0:

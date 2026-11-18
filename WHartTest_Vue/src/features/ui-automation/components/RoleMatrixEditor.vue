@@ -1,7 +1,7 @@
 <template>
-  <a-form-item label="执行角色">
+  <a-form-item label="执行角色（可选择多个）">
     <a-space direction="vertical" fill>
-      <span>不配置时按原流程执行；配置后逐角色独立运行，全部通过才算通过。登录态来自当前执行环境。</span>
+      <span>同一份脚本依次遍历这组角色，全部通过才算通过。登录态来自当前执行环境。</span>
       <a-space v-for="(row,index) in modelValue" :key="index" wrap>
         <a-input v-model="row.name" placeholder="角色名称" :max-length="80" />
         <a-checkbox v-model="row.guest" @change="row.auth_state_id=null">游客</a-checkbox>

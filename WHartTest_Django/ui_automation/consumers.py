@@ -1609,85 +1609,24 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         ))
 
     async def handle_execute_batch(self, args: dict, user: str):
-        """处理批量执行请求"""
-        case_ids = args.get("case_ids", [])
-        if not case_ids:
-            await self.send_json(SocketDataModel(
-                code=ResponseCode.ERROR,
-                msg=self._localize("没有选择要执行的用例"),
-                data=QueueModel(
-                    func_name=UiSocketEnum.TEST_CASE_BATCH,
-                    func_args={"case_ids": [], "error": self._localize("没有选择要执行的用例")},
-                ),
-            ))
-            return
-
-        args, actuator, err = await self._prepare_task_dispatch(args)
-        if err:
-            await self.send_json(SocketDataModel(
-                code=ResponseCode.ERROR,
-                msg=self._localize(err),
-                data=QueueModel(
-                    func_name=UiSocketEnum.TEST_CASE_BATCH,
-                    func_args={"case_ids": case_ids, "error": err},
-                ),
-            ))
-            return
-
-        ok, err = self._reserve_actuator_slots(args, len(case_ids))
-        if not ok:
-            await self.send_json(SocketDataModel(
-                code=ResponseCode.ERROR,
-                msg=err or self._localize("执行器空闲 slot 不足"),
-                data=QueueModel(
-                    func_name=UiSocketEnum.TEST_CASE_BATCH,
-                    func_args={"case_ids": case_ids, "error": err or ""},
-                ),
-            ))
-            return
-        batch_id = await self.create_batch_record(case_ids)
-        if not batch_id:
-            self._release_actuator_slots(args, len(case_ids))
-            await self.send_json(SocketDataModel(
-                code=ResponseCode.ERROR,
-                msg=self._localize("创建批量执行记录失败")
-            ))
-            return
-        args["batch_id"] = batch_id
-        # 批量执行不展示执行画面：强制无头
-        self._force_batch_headless(args)
-        self.register_actuator_task(actuator, args, user or self.user_id)
-
+        """批量请求进入持久队列，不按用例总数预占浏览器槽位。"""
+        from types import SimpleNamespace
+        from .models import UiTestCase
+        from .script_batches import UiScriptBatchViewSet
+        from rest_framework.exceptions import APIException
         try:
-            for case_id in case_ids:
-                await self.update_testcase_status(case_id, 1)
-
-            await actuator.send_json(SocketDataModel(
-                code=ResponseCode.SUCCESS,
-                msg="execute_batch",
-                user=self.user_id,
-                is_notice=NoticeType.ACTUATOR,
-                data=QueueModel(
-                    func_name=UiSocketEnum.TEST_CASE_BATCH,
-                    func_args=args
-                )
-            ))
-        except Exception:
-            self._release_actuator_slots(args, len(case_ids))
-            raise
-
-        await self.send_json(SocketDataModel(
-            code=ResponseCode.SUCCESS,
-            msg=self._localize("批量任务已发送给执行器"),
-            data=QueueModel(
-                func_name="batch_created",
-                func_args={
-                    "batch_id": batch_id,
-                    "total_cases": len(case_ids),
-                    "effective_runtime": self._public_effective(args.get("effective_runtime")),
-                }
-            )
-        ))
+            ids = args.get('case_ids') or []
+            first = await sync_to_async(lambda: UiTestCase.objects.filter(pk=ids[0]).first() if ids else None)()
+            if first is None:
+                raise ValueError('没有选择有效用例')
+            response = await sync_to_async(UiScriptBatchViewSet().create)(SimpleNamespace(user=self.scope['user'],data={
+                'project':first.project_id,'ids':ids,'env_config_id':args.get('env_config_id'),
+                'actuator_id':args.get('actuator_id') or RECORDER_BROWSER_ID,
+                'role_matrix':args.get('execution_role_matrix'),
+            }))
+            await self.send_json(SocketDataModel(code=ResponseCode.SUCCESS,msg='批量任务已排队',data=QueueModel(func_name='batch_created',func_args={'batch_id':response.data['id'],'total_cases':len(ids),'queued':True})))
+        except (APIException, ValueError, TypeError) as exc:
+            await self.send_json(SocketDataModel(code=ResponseCode.ERROR,msg=str(exc),data=QueueModel(func_name=UiSocketEnum.TEST_CASE_BATCH,func_args={'case_ids':args.get('case_ids',[]),'error':str(exc)})))
 
     async def handle_stop_execution(self, args: dict, user: str):
         """处理停止执行请求"""
@@ -1956,6 +1895,9 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             environment_snapshot = args.get('environment') or args.get('effective_runtime')
             if not (environment_snapshot and isinstance(environment_snapshot, dict)):
                 environment_snapshot = None
+
+            if args.get('execution_request_id'):
+                environment_snapshot = {**(environment_snapshot or {}), 'execution_request_id':str(args['execution_request_id'])}
 
             record = UiExecutionRecord.objects.create(
                 test_case_id=case_id,

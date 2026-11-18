@@ -11,6 +11,7 @@ class TaskQueueIsolationTests(SimpleTestCase):
         app = Celery('routing-test', broker='memory://')
         app.conf.task_routes = settings.CELERY_TASK_ROUTES
         expected = {
+            'ui_automation.run_ui_script_batch': 'ui_execution',
             'knowledge.process_document': 'knowledge',
             'code_analysis.tasks.run_code_analysis': 'code_analysis',
             'code_analysis.tasks.retry_code_analysis_ocr': 'code_analysis',

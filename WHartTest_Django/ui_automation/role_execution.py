@@ -38,14 +38,14 @@ def validate_matrix(rows, project_id):
     return normalized
 
 
-def execution_roles(case_id, env_id, user=None):
+def execution_roles(case_id, env_id, user=None, override=None):
     case = UiTestCase.objects.get(pk=case_id)
-    if user is not None and case.role_matrix:
+    if user is not None:
         from knowledge_evolution.views import _ensure_project_member
         _ensure_project_member(user, case.project_id)
         if not user.has_perm('ui_automation.view_uitestcase'):
             raise PermissionDenied('缺少UI用例查看权限')
-    roles = validate_matrix(case.role_matrix, case.project_id)
+    roles = validate_matrix(case.role_matrix if override is None else override, case.project_id)
     if roles and not UiEnvironmentConfig.objects.filter(pk=env_id,project_id=case.project_id).exists():
         raise ValidationError('角色执行需要选择当前项目的执行环境')
     for role in roles:
@@ -60,7 +60,7 @@ def execution_roles(case_id, env_id, user=None):
 
 async def run_roles(consumer, args, user):
     try:
-        case, roles = await sync_to_async(execution_roles)(args['case_id'], args.get('env_config_id'), consumer.scope.get('user'))
+        case, roles = await sync_to_async(execution_roles)(args['case_id'], args.get('env_config_id'), consumer.scope.get('user'), args.get('execution_role_matrix'))
     except (ValidationError, PermissionDenied, UiTestCase.DoesNotExist) as exc:
         await consumer._recorder_exec_error('case', args, user, str(exc))
         return
@@ -91,7 +91,7 @@ async def run_roles(consumer, args, user):
         success = complete and passed==len(roles)
         for role in roles[len(results):]:
             results.append({'role':role['name'],'record_id':None,'status':'not_run','message':'执行已停止，未覆盖此角色'})
-        summary = {'case_id':case.pk, 'execution_request_id':args.get('execution_request_id'), 'status':'success' if success else 'failed', 'message':f'角色执行：通过 {passed}/{len(roles)}', 'role_results':results, 'batch_id':batch.pk, 'role_complete':complete}
+        summary = {'case_id':case.pk, 'role_matrix_snapshot':roles, 'execution_request_id':args.get('execution_request_id'), 'status':'success' if success else 'failed', 'message':f'角色执行：通过 {passed}/{len(roles)}', 'role_results':results, 'batch_id':batch.pk, 'role_complete':complete}
         for row in results:
             row['description'] = '角色：' + row['role']
         aggregate = await sync_to_async(UiExecutionRecord.objects.create)(test_case=case, executor=consumer.scope.get('user'), status=2 if success else 3, start_time=started, end_time=timezone.now(), step_results=results, error_message=None if success else summary['message'], duration=(timezone.now()-started).total_seconds(), environment={'role_name':'全部角色汇总','env_config_id':args.get('env_config_id'),'actuator_id':'recorder-browser','execution_request_id':args.get('execution_request_id'),'role_suite_batch_id':batch.pk,'role_complete':complete}, log=summary['message'])

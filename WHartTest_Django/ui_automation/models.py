@@ -347,6 +347,10 @@ class UiBatchExecutionRecord(models.Model):
     ]
     TRIGGER_TYPE_CHOICES = [('manual', _('手动执行')), ('scheduled', _('定时执行')), ('api', _('API 触发'))]
 
+    run_config = models.JSONField(_('调度配置'), default=dict, blank=True)
+    run_items = models.JSONField(_('调度进度'), default=list, blank=True)
+    cancel_requested = models.BooleanField(default=False)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
     name = models.CharField(_('批次名称'), max_length=255)
     total_cases = models.IntegerField(_('用例总数'), default=0)
     passed_cases = models.IntegerField(_('成功数'), default=0)
