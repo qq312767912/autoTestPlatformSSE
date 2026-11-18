@@ -24,10 +24,10 @@ const priorityColors = {
 const columns = computed<TableColumnData[]>(() => [
   { title: 'ID', dataIndex: 'id', width: 64, align: 'center' },
   { title: tl('名称'), dataIndex: 'name', ellipsis: true, tooltip: true, align: 'center', slotName: 'name' },
-  { title: tl('主接口'), dataIndex: 'interface_info.name', ellipsis: true, tooltip: true, align: 'center', slotName: 'interface' },
+  { title: tl('归属接口'), dataIndex: 'interface_info.name', ellipsis: true, tooltip: true, align: 'center', slotName: 'interface' },
   { title: tl('描述'), dataIndex: 'description', ellipsis: true, tooltip: true, align: 'center' },
   { title: tl('优先级'), dataIndex: 'priority', width: 76, align: 'center', slotName: 'priority' },
-  { title: tl('前置条件'), dataIndex: 'precondition_count', width: 88, align: 'center', slotName: 'preconditions' },
+  { title: tl('请求步骤'), dataIndex: 'precondition_count', width: 88, align: 'center', slotName: 'preconditions' },
   { title: tl('分组'), dataIndex: 'group_info.name', ellipsis: true, tooltip: true, align: 'center' },
   { title: tl('标签'), dataIndex: 'tags', slotName: 'tags', align: 'center' },
   { title: tl('更新时间'), dataIndex: 'updated_at', sortable: { sortDirections: ['ascend', 'descend'] }, width: 150, slotName: 'updated_at', align: 'center' },
@@ -136,7 +136,7 @@ defineExpose({ clearSelection, selectedRowKeys })
 
       <template #preconditions="{ record }">
         <a-tag :color="record.precondition_count ? 'arcoblue' : 'gray'">
-          {{ record.precondition_count || 0 }}
+          {{ record.steps?.length || (record.precondition_count || 0) + 1 }}
         </a-tag>
       </template>
 

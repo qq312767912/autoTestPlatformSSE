@@ -26,6 +26,7 @@ import { interfaceCaseService } from '../../services/interfaceCaseService'
 import type { ApiModule, ApiInterface } from '../../services/interfaceService'
 import type { ApiInterfaceCase } from '../../types/interfaceCase'
 import TestCaseSearch from '../testcases/TestCaseSearch.vue'
+import ExcelImportModal from '../testcases/ExcelImportModal.vue'
 import TestCaseFilter from '../testcases/TestCaseFilter.vue'
 import ModuleTree from '../interfaces/ModuleTree.vue'
 import ModuleForm from '../interfaces/ModuleForm.vue'
@@ -54,6 +55,7 @@ const router = useRouter()
 const { isEnglish, tl } = useAppI18n()
 
 const loading = ref(false)
+const excelImportVisible=ref(false)
 const treeLoading = ref(false)
 const formLoading = ref(false)
 const modules = ref<ApiModule[]>([])
@@ -729,6 +731,7 @@ onMounted(() => {
 </script>
 
 <template>
+  <ExcelImportModal v-if="projectStore.currentProjectId" v-model:visible="excelImportVisible" :project="projectStore.currentProjectId" @imported="fetchInterfaceCases(1);loadTreeData()" />
   <div class="api-management interface-cases-panel h-full flex p-2 gap-2" :class="isDarkTheme ? 'api-management--dark api-testcases--dark' : 'api-management--light api-testcases--light'">
     <div class="w-80 flex flex-col">
       <div class="flex-1 bg-gray-800 rounded-lg shadow-lg overflow-hidden flex flex-col">
@@ -888,6 +891,7 @@ onMounted(() => {
             <a-button type="primary" class="custom-add-button" @click="showGenerateModal = true">
               {{ tl('生成接口用例') }}
             </a-button>
+            <a-button class="custom-reset-button" @click="excelImportVisible=true">Excel 导入</a-button>
             <a-button type="primary" class="custom-add-button" @click="handleCreate">
               {{ tl('新增接口用例') }}
             </a-button>

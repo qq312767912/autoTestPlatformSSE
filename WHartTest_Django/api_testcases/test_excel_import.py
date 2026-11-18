@@ -142,7 +142,9 @@ class ExcelPersistenceTests(TestCase):
         self.assertNotIn('headers',response.data['cases'][0]['steps'][0])
         response=self.call({'confirm':'true','sha256':'digest'})
         self.assertEqual(response.status_code,201,response.data)
-        case=ApiTestCase.objects.get()
+        from .models import ApiInterfaceCase
+        case=ApiInterfaceCase.objects.get()
+        self.assertFalse(ApiTestCase.objects.exists())
         self.assertEqual(list(case.steps.values_list('name',flat=True)),['first','second'])
         self.assertEqual(case.project,self.project)
         self.assertEqual(case.created_by,self.user)
@@ -152,7 +154,9 @@ class ExcelPersistenceTests(TestCase):
         self.assertFalse(ApiTestCase.objects.exists())
         self.assertEqual(self.call({'confirm':'true','sha256':'digest'}).status_code,201)
         self.assertEqual(self.call({'confirm':'true','sha256':'digest'}).status_code,400)
-        self.assertEqual(ApiTestCase.objects.count(),1)
+        from .models import ApiInterfaceCase
+        self.assertEqual(ApiInterfaceCase.objects.count(),1)
+        self.assertFalse(ApiTestCase.objects.exists())
 
     def test_cross_project_group_rejected(self):
         other=Project.objects.create(name='other',creator=self.user)
@@ -393,3 +397,115 @@ class ExcelNativeAssetTests(TestCase):
         self.assertEqual(result['created_interface_cases'],0)
         native.refresh_from_db()
         self.assertEqual(native.config['variables'],{'user':'value'})
+
+class ExcelInterfaceDestinationTests(TestCase):
+    def setUp(self):
+        self.user=get_user_model().objects.create_superuser(username='interface-destination',password='test')
+        self.project=Project.objects.create(name='destination',creator=self.user)
+
+    def test_new_import_preserves_case_boundary_without_scenarios(self):
+        from .excel_interface_import import persist_interface_plan
+        from .models import ApiInterfaceCase
+        from api_interfaces.models import ApiInterface
+        result=persist_interface_plan(plan(),self.project,self.user)
+        self.assertEqual(result['created_interface_cases'],1)
+        self.assertEqual(ApiTestCase.objects.count(),0)
+        self.assertEqual(ApiInterface.objects.count(),2)
+        native=ApiInterfaceCase.objects.get()
+        self.assertEqual(native.name,'scene A')
+        self.assertEqual(list(native.steps.values_list('name',flat=True)),['first','second'])
+        self.assertEqual(list(native.steps.values_list('role',flat=True)),['precondition','main'])
+        self.assertEqual(native.interface_id,native.steps.last().origin_interface_id)
+
+    def test_conversion_retires_old_records_preserves_data_and_stops_old_execution(self):
+        from .excel_interface_import import persist_interface_plan
+        from .models import ApiInterfaceCase
+        from .services import TestExecutionService
+        p=plan()
+        persist_plan(p,self.project,self.user)
+        old_scene=ApiTestCase.objects.get()
+        before=list(old_scene.steps.values_list('interface_data',flat=True))
+        old_scene.description='user description';old_scene.save()
+        result=persist_interface_plan(p,self.project,self.user,update_existing=True)
+        self.assertEqual(result['converted_scenarios'],1)
+        self.assertEqual(result['consolidated_split_cases'],2)
+        grouped=ApiInterfaceCase.objects.get(pk=result['ids'][0])
+        self.assertEqual(grouped.description,'user description')
+        self.assertEqual(list(grouped.steps.values_list('interface_data',flat=True)),before)
+        self.assertEqual(ApiTestCase.objects.count(),1)  # historical source retained
+        old_scene.refresh_from_db()
+        with self.assertRaisesMessage(ValueError,'已合并到接口用例'):TestExecutionService._prepare_config(old_scene.config)
+        request=APIRequestFactory().get('/')
+        force_authenticate(request,self.user)
+        view=ApiTestCaseViewSet.as_view({'get':'list'})
+        response=view(request,project_pk=self.project.pk)
+        self.assertEqual(response.data['count'],0)
+        request=APIRequestFactory().get('/')
+        force_authenticate(request,self.user)
+        from .views import ApiInterfaceCaseViewSet
+        response=ApiInterfaceCaseViewSet.as_view({'get':'list'})(request,project_pk=self.project.pk)
+        self.assertEqual(response.data['count'],1)
+        again=persist_interface_plan(p,self.project,self.user,update_existing=True)
+        self.assertEqual(again['created_interface_cases'],0)
+        self.assertEqual(again['created_interfaces'],0)
+
+    def test_grouped_edits_are_authoritative_on_reimport(self):
+        from .excel_interface_import import persist_interface_plan
+        from .models import ApiInterfaceCase
+        p=plan();persist_interface_plan(p,self.project,self.user)
+        case=ApiInterfaceCase.objects.get()
+        step=case.steps.first();step.interface_data['url']='/custom';step.save()
+        case.config['variables']['token_name']='user-token';case.save()
+        persist_interface_plan(p,self.project,self.user,update_existing=True)
+        step.refresh_from_db();case.refresh_from_db()
+        self.assertEqual(step.interface_data['url'],'/custom')
+        self.assertEqual(case.config['variables']['token_name'],'user-token')
+
+    def test_first_request_interface_filter_finds_group(self):
+        from .excel_interface_import import persist_interface_plan
+        from .models import ApiInterfaceCase
+        from .views import ApiInterfaceCaseViewSet
+        persist_interface_plan(plan(),self.project,self.user)
+        case=ApiInterfaceCase.objects.get()
+        first=case.steps.first().origin_interface_id
+        self.assertNotEqual(first,case.interface_id)
+        request=APIRequestFactory().get('/',{'interface_id':first})
+        force_authenticate(request,self.user)
+        response=ApiInterfaceCaseViewSet.as_view({'get':'list'})(request,project_pk=self.project.pk)
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.data['count'],1)
+
+    def test_legacy_url_also_imports_only_interface_cases(self):
+        from .models import ApiInterfaceCase
+        request=APIRequestFactory().post('/',{'file':SimpleUploadedFile('old.xlsx',b'file'),'confirm':'true','sha256':'digest'},format='multipart')
+        force_authenticate(request,self.user)
+        with patch('api_testcases.excel_import.read_tables',return_value=(tables(),'digest')):
+            response=ApiTestCaseViewSet.as_view({'post':'import_excel'})(request,project_pk=self.project.pk)
+        self.assertEqual(response.status_code,201,response.data)
+        self.assertFalse(ApiTestCase.objects.exists())
+        self.assertEqual(ApiInterfaceCase.objects.count(),1)
+
+    def test_conversion_preserves_edited_split_request(self):
+        from .excel_interface_import import persist_interface_plan
+        from .models import ApiInterfaceCase
+        p=plan();persist_plan(p,self.project,self.user)
+        split=ApiInterfaceCase.objects.get(config__excel_migration__source_api_id='11')
+        step=split.steps.get();step.interface_data['url']='/split-user-edit';step.save()
+        result=persist_interface_plan(p,self.project,self.user,update_existing=True)
+        grouped=ApiInterfaceCase.objects.get(pk=result['ids'][0])
+        self.assertEqual(grouped.steps.first().interface_data['url'],'/split-user-edit')
+        self.assertEqual(ApiTestCase.objects.get().steps.first().interface_data['url'],'/first')
+
+    def test_conflicting_edits_fail_atomically(self):
+        from .excel_interface_import import persist_interface_plan
+        from .models import ApiInterfaceCase
+        p=plan();persist_plan(p,self.project,self.user)
+        scene=ApiTestCase.objects.get()
+        a=scene.steps.first();a.interface_data['url']='/scene-edit';a.save()
+        split=ApiInterfaceCase.objects.get(config__excel_migration__source_api_id='11')
+        b=split.steps.get();b.interface_data['url']='/other-edit';b.save()
+        with self.assertRaisesMessage(ValidationError,'均有不同修改'):
+            persist_interface_plan(p,self.project,self.user,update_existing=True)
+        self.assertEqual(ApiInterfaceCase.objects.count(),2)
+        scene.refresh_from_db()
+        self.assertNotIn('superseded_by_interface_case',scene.config['excel_migration'])

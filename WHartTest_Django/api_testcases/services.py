@@ -129,6 +129,8 @@ class TestExecutionService:
     def _prepare_config(config: Dict, environment: Optional[Dict] = None) -> Dict:
         if not isinstance(config, dict):
             config = {}
+        target=config.get('excel_migration',{}).get('superseded_by_interface_case')
+        if target:raise ValueError('该旧版导入记录已合并到接口用例 #'+str(target)+'，请从接口用例执行')
         if not isinstance(environment, dict):
             environment = {}
 

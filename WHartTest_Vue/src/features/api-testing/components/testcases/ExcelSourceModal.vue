@@ -13,12 +13,12 @@
 <script setup lang="ts">
 import {computed,ref,watch} from 'vue'
 import {testcaseService} from '../../services/testcaseService'
-const props=defineProps<{visible:boolean;project:number;caseId:number}>()
+const props=defineProps<{visible:boolean;project:number;caseId:number;kind?:'scenario'|'interface'}>()
 const emit=defineEmits<{(e:'update:visible',v:boolean):void}>()
 const counts=ref<Record<string,number>>({}),sheet=ref(''),rows=ref<Record<string,unknown>[]>([]),page=ref(1),total=ref(0),busy=ref(false),error=ref('')
 const columns=computed(()=>Object.keys(rows.value[0]||{}).filter(x=>x!=='_row').map(key=>({title:key,dataIndex:key,width:190,slotName:'cell'})))
 function format(value:unknown){return typeof value==='object'?JSON.stringify(value,null,2):String(value??'')}
 let epoch=0
-async function load(target=1){const current=epoch;page.value=target;busy.value=true;error.value='';try{const data=await testcaseService.excelSource(props.project,props.caseId,{sheet:sheet.value,page:target});if(current!==epoch)return;rows.value=data.rows||[];total.value=data.total||0}catch(e){if(current===epoch)error.value=e instanceof Error?e.message:'源数据加载失败'}finally{if(current===epoch)busy.value=false}}
-watch(()=>[props.visible,props.caseId,props.project],async()=>{const current=++epoch;if(!props.visible)return;rows.value=[];counts.value={};error.value='';busy.value=true;try{const data=await testcaseService.excelSource(props.project,props.caseId);if(current!==epoch)return;counts.value=data.sheet_counts;sheet.value=Object.keys(counts.value).find(name=>name==='AutomationParameter')||Object.keys(counts.value)[0]||'';await load(1)}catch(e){if(current===epoch){error.value=e instanceof Error?e.message:'源数据加载失败';busy.value=false}}})
+async function load(target=1){const current=epoch;page.value=target;busy.value=true;error.value='';try{const data=await testcaseService.excelSource(props.project,props.caseId,{sheet:sheet.value,page:target},props.kind);if(current!==epoch)return;rows.value=data.rows||[];total.value=data.total||0}catch(e){if(current===epoch)error.value=e instanceof Error?e.message:'源数据加载失败'}finally{if(current===epoch)busy.value=false}}
+watch(()=>[props.visible,props.caseId,props.project],async()=>{const current=++epoch;if(!props.visible)return;rows.value=[];counts.value={};error.value='';busy.value=true;try{const data=await testcaseService.excelSource(props.project,props.caseId,undefined,props.kind);if(current!==epoch)return;counts.value=data.sheet_counts;sheet.value=Object.keys(counts.value).find(name=>name==='AutomationParameter')||Object.keys(counts.value)[0]||'';await load(1)}catch(e){if(current===epoch){error.value=e instanceof Error?e.message:'源数据加载失败';busy.value=false}}})
 </script>

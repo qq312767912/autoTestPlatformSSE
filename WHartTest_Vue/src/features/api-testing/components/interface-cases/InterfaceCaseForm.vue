@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ExcelSourceModal from '../testcases/ExcelSourceModal.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
@@ -71,10 +72,13 @@ const formData = reactive({
 })
 
 const readonly = computed(() => false)
+const excelSourceVisible=ref(false)
+const importedMultiRequest=ref(false)
+const hasExcelSource=ref(false)
 const mainStep = computed(() => steps.value.find(step => step.role === 'main') || null)
 const preconditionSteps = computed(() => steps.value.filter(step => step.role === 'precondition'))
-const preconditionCountText = computed(() => tl(`${preconditionSteps.value.length}个前置条件`))
-const mainStepBadge = computed(() => isEnglish.value ? 'Main' : '主')
+const preconditionCountText = computed(() => importedMultiRequest.value?tl(`${steps.value.length}个请求步骤`):tl(`${preconditionSteps.value.length}个前置条件`))
+const mainStepBadge = computed(() => importedMultiRequest.value?'末步':isEnglish.value ? 'Main' : '主')
 const activeStepRenderKey = computed(() => {
   if (!activeStep.value) return 'empty-interface-case-step'
   if (activeStep.value.client_key) return activeStep.value.client_key
@@ -326,6 +330,8 @@ const fetchDetail = async () => {
       throw new Error(res.error || tl('获取接口用例详情失败'))
     }
     const data = res.data as any
+    importedMultiRequest.value=data.config?.excel_migration?.kind==='interface_case'
+    hasExcelSource.value=!!data.config?.excel_migration?.archive_id
     formData.name = data.name || ''
     formData.description = data.description || ''
     formData.priority = data.priority || 'P2'
@@ -584,7 +590,9 @@ onMounted(async () => {
 </script>
 
 <template>
+  <ExcelSourceModal v-if="currentInterfaceCaseId && projectStore.currentProjectId" v-model:visible="excelSourceVisible" :project="projectStore.currentProjectId" :case-id="currentInterfaceCaseId" kind="interface" />
   <div class="interface-case-form h-full flex flex-col gap-4 p-4 overflow-hidden" :class="isDarkTheme ? 'interface-case-form--dark' : 'interface-case-form--light'">
+    <a-alert v-if="importedMultiRequest" style="margin-bottom:12px">保留旧平台用例内全部请求和断言，按原顺序执行；最后一个请求作为归属接口。<a-button v-if="hasExcelSource" type="text" @click="excelSourceVisible=true">查看导入源数据</a-button></a-alert>
     <div class="form-card p-4 flex-shrink-0">
       <div class="form-header">
         <div class="form-header-main">
@@ -597,7 +605,7 @@ onMounted(async () => {
 
           <a-select
             :model-value="formData.interface_id"
-            :placeholder="tl('主接口')"
+            :placeholder="importedMultiRequest?tl('归属接口（末步）'):tl('主接口')"
             class="main-interface-select"
             allow-search
             :fallback-option="false"

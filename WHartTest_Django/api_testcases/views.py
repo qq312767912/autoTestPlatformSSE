@@ -60,7 +60,10 @@ class ApiTestCaseFilter(django_filters.FilterSet):
 class ApiInterfaceCaseFilter(django_filters.FilterSet):
     name = django_filters.CharFilter(lookup_expr='icontains')
     description = django_filters.CharFilter(lookup_expr='icontains')
-    interface_id = django_filters.NumberFilter(field_name='interface_id')
+    interface_id = django_filters.NumberFilter(method='filter_interface')
+    def filter_interface(self,queryset,name,value):
+        return queryset.filter(models.Q(interface_id=value)|models.Q(steps__origin_interface_id=value)).distinct()
+
     tags = django_filters.ModelMultipleChoiceFilter(
         field_name='tags',
         queryset=ApiTestCaseTag.objects.all(),
@@ -188,7 +191,9 @@ class ApiTestCaseViewSet(BaseModelViewSet):
 
     def get_queryset(self):
         project_pk = self.kwargs.get('project_pk')
-        return ApiTestCase.objects.filter(project_id=project_pk)
+        queryset=ApiTestCase.objects.filter(project_id=project_pk)
+        if self.action=='list':queryset=queryset.exclude(config__excel_migration__superseded_by_interface_case__isnull=False)
+        return queryset
 
     def perform_create(self, serializer):
         from projects.models import Project
@@ -196,33 +201,11 @@ class ApiTestCaseViewSet(BaseModelViewSet):
         serializer.save(created_by=self.request.user, project=project)
 
     @action(detail=False, methods=['post'], url_path='import-excel')
-    @permission_required('api_testcases.add_apitestcase')
+    @permission_required('api_testcases.add_apiinterfacecase')
     def import_excel(self, request, **kwargs):
-        from projects.models import Project
-        from .excel_import import build_plan, persist_plan
-        project = get_object_or_404(Project, pk=self.kwargs.get('project_pk'))
-        upload = request.FILES.get('file')
-        if not upload:
-            raise ValidationError('请选择 Excel 文件')
-        plan = build_plan(upload)
-        existing = list(ApiTestCase.objects.filter(project=project, name__in=[c['name'] for c in plan['cases']]))
-        source_ids={c['name']:c['source_id'] for c in plan['cases']}
-        updatable=[c.name for c in existing if (c.config or {}).get('excel_migration',{}).get('sha256')==plan['sha256'] and
-                   (c.config or {}).get('excel_migration',{}).get('source_id')==source_ids[c.name]]
-        duplicates=[c.name for c in existing if c.name not in updatable]
-        if str(request.data.get('confirm', '')).lower() == 'true':
-            if request.data.get('sha256') != plan['sha256']:
-                raise ValidationError('文件与预览不一致，请重新预览')
-            if not all(request.user.has_perm(p) for p in ['api_interfaces.add_apiinterface','api_testcases.add_apiinterfacecase']):
-                from rest_framework.exceptions import PermissionDenied
-                raise PermissionDenied('完整导入需要新增接口和接口用例权限')
-            if plan.get('environments') and not all(request.user.has_perm(p) for p in ['api_environments.add_apienvironment','api_environments.add_apienvironmentvariable']):
-                from rest_framework.exceptions import PermissionDenied
-                raise PermissionDenied('完整导入需要新增接口环境和环境变量权限')
-            return Response({**persist_plan(plan,project,request.user,request.data.get('group_id'),str(request.data.get('update_existing','')).lower()=='true'), 'warnings':plan['warnings']},status=201)
-        # Preview returns structure and migration issues, never old report tokens or request payloads.
-        return Response({key:plan[key] for key in ['format','sha256','warnings','errors','case_count','step_count','required_variables','ignored_history_rows','environment_count','recovered_variable_count','data_row_count','sheet_counts']} |
-            {'duplicates':duplicates,'updatable':updatable,'cases':[{'name':c['name'],'source_id':c['source_id'],'steps':[{'name':s['name'],'method':s['interface_data']['method'],'url':s['interface_data']['url'],'order':i+1,'assertions':len(s['interface_data']['validators'])} for i,s in enumerate(c['steps'])]} for c in plan['cases']]})
+        # Compatibility URL for previously opened clients; destination is always interface cases.
+        from .excel_import_api import import_interface_excel
+        return import_interface_excel(self,request)
 
     @action(detail=True, methods=['get'], url_path='excel-source')
     @permission_required('api_testcases.view_apitestcase')
@@ -734,7 +717,7 @@ class ApiInterfaceCaseViewSet(BaseModelViewSet):
 
         interface_id = self.request.query_params.get('interface_id')
         if interface_id:
-            queryset = queryset.filter(interface_id=interface_id)
+            queryset = queryset.filter(models.Q(interface_id=interface_id)|models.Q(steps__origin_interface_id=interface_id)).distinct()
 
         module_id = self.request.query_params.get('module_id')
         if module_id:
@@ -744,7 +727,19 @@ class ApiInterfaceCaseViewSet(BaseModelViewSet):
         if no_module and no_module.lower() in ('true', '1', 'yes'):
             queryset = queryset.filter(interface__module__isnull=True)
 
+        if self.action=='list':queryset=queryset.exclude(config__excel_migration__superseded_by_interface_case__isnull=False)
         return queryset
+
+    @action(detail=False, methods=['post'], url_path='import-excel')
+    @permission_required('api_testcases.add_apiinterfacecase')
+    def import_excel(self, request, **kwargs):
+        from .excel_import_api import import_interface_excel
+        return import_interface_excel(self,request)
+
+    @action(detail=True, methods=['get'], url_path='excel-source')
+    @permission_required('api_testcases.view_apiinterfacecase')
+    def excel_source(self, request, pk=None, **kwargs):
+        return ApiTestCaseViewSet.excel_source(self,request,pk,**kwargs)
 
     def perform_create(self, serializer):
         from projects.models import Project

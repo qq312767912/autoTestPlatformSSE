@@ -8,7 +8,6 @@ import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
 import { useEnvironmentStore } from '../../stores/environmentStore'
 import TestCaseSearch from './TestCaseSearch.vue'
-import ExcelImportModal from './ExcelImportModal.vue'
 import TestCaseFilter from './TestCaseFilter.vue'
 import TestCaseTable from './TestCaseTable.vue'
 import ReferencedInterfacesDialog from './ReferencedInterfacesDialog.vue'
@@ -25,7 +24,6 @@ const themeStore = useThemeStore()
 const router = useRouter()
 const { isEnglish, tl } = useAppI18n()
 const loading = ref(false)
-const excelImportVisible=ref(false)
 const testcases = ref<ApiTestCase[]>([])
 const isDarkTheme = computed(() => themeStore.isBlack)
 const testCaseTableRef = ref<InstanceType<typeof TestCaseTable>>()
@@ -318,7 +316,6 @@ fetchTestCases()
 </script>
 
 <template>
-  <ExcelImportModal v-if="projectStore.currentProjectId" v-model:visible="excelImportVisible" :project="projectStore.currentProjectId" @imported="fetchTestCases(1)" />
   <div class="api-testcases-panel h-full flex flex-col gap-4 p-4" :class="isDarkTheme ? 'api-testcases--dark' : 'api-testcases--light'">
     <!-- 搜索区域 -->
     <div class="panel-shell rounded-lg px-6 py-5 space-y-4">
@@ -354,7 +351,6 @@ fetchTestCases()
           <a-button type="primary" class="custom-add-button" @click="showGenerateModal = true">
             {{ tl('生成场景用例') }}
           </a-button>
-          <a-button class="custom-reset-button" @click="excelImportVisible=true">Excel 导入</a-button>
           <a-button type="primary" class="custom-add-button" @click="handleCreate">
             {{ tl('新增用例') }}
           </a-button>
