@@ -780,6 +780,10 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         from . import actuator_registry
 
         args = dict(args or {})
+        from .models import UiTestCase
+        ids = args.get('case_ids') or ([args['case_id']] if args.get('case_id') else [])
+        if ids and await sync_to_async(lambda: UiTestCase.objects.filter(pk__in=ids).exclude(role_matrix=[]).exists())():
+            return args, None, '角色参数化用例请使用录制器浏览器单条执行，不能通过旧执行器或普通批量链路跳过角色矩阵'
         run_options = args.get("run_options") or {}
         preferred = args.get("actuator_id") or None
         env_config_id = args.get("env_config_id")
@@ -1026,7 +1030,8 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             payload = {
                 'case_id': args.get('case_id'),
                 'execution_request_id': args.get('execution_request_id'),
-                'environment': {'env_config_id': args.get('env_config_id'), 'actuator_id': RECORDER_BROWSER_ID, 'execution_request_id': args.get('execution_request_id')},
+                'batch_id': args.get('role_batch_id'),
+                'environment': {'env_config_id': args.get('env_config_id'), 'actuator_id': RECORDER_BROWSER_ID, 'execution_request_id': args.get('execution_request_id'), 'role_name': args.get('role_name'), 'role_batch_id': args.get('role_batch_id')},
                 'status': 'failed',
                 'message': message,
                 'steps': steps or [],
@@ -1050,7 +1055,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 msg='exec_result',
                 user=user,
                 is_notice=NoticeType.WEB,
-                data=QueueModel(func_name=self._recorder_exec_result_name(kind), func_args=payload),
+                data=QueueModel(func_name='u_role_result' if args.get('role_batch_id') else self._recorder_exec_result_name(kind), func_args=payload),
             ))
 
     async def _recorder_exec_frame_relay(self, session, user: str):
@@ -1135,11 +1140,13 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
 
         # 仅注入显式绑定的登录态（取首个步骤的绑定）；未绑定 → 无痕启动
         storage_state = None
-        first_auth_id = getattr(groups[0], 'auth_state_id', None) if groups else None
+        first_auth_id = args.get('role_auth_state_id') if args.get('role_batch_id') else (getattr(groups[0], 'auth_state_id', None) if groups else None)
         if first_auth_id:
             bound = await sync_to_async(_auth_state_by_id)(first_auth_id)
             if bound is not None:
                 storage_state = bound.state_json
+            elif args.get('role_batch_id'):
+                raise ValueError('角色登录态已失效或被禁用，不能以游客身份继续')
 
         try:
             skill_dir = _resolve_recorder_skill_dir()
@@ -1230,11 +1237,11 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             group_index = 0
             # 组间登录态切换与执行器同语义："向上匹配"——未绑定步骤沿用上一个
             # 已绑定步骤的登录态（不清理），仅生效登录态变化时才切换上下文
-            pending_auth = getattr(groups[0], 'auth_state_id', None) if groups else None
+            pending_auth = first_auth_id
             current_auth = pending_auth  # start 时按首个生效登录态注入
             for page_step in groups:
                 group_index += 1
-                if getattr(page_step, 'auth_state_id', None):
+                if not args.get('role_batch_id') and getattr(page_step, 'auth_state_id', None):
                     pending_auth = getattr(page_step, 'auth_state_id', None) or None
                 if pending_auth != current_auth:
                     group_storage = None
@@ -1266,6 +1273,9 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                         'step_type': 0,
                         'element': None,
                     }] + steps
+                if group_index == 1 and args.get('role_identity_selector'):
+                    steps.insert(1 if base_url else 0, {'ope_key':'assert_text','ope_value':{'expected':args['role_identity_text']},'element':{'locator_type':'css','locator_value':args['role_identity_selector']},'description':'校验角色身份：'+args.get('role_name','')})
+                    group_step_count += 1
                 total_steps += group_step_count
                 resp = await asyncio.to_thread(
                     session.request, 'run_steps', {'steps': steps}, 180,
@@ -1383,7 +1393,10 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                         'actuator_id': RECORDER_BROWSER_ID,
                         'auth_state_id': first_auth_id,
                         'execution_request_id': args.get('execution_request_id'),
+                        'role_name': args.get('role_name'),
+                        'role_batch_id': args.get('role_batch_id'),
                     },
+                    'batch_id': args.get('role_batch_id'),
                     # Playwright trace.zip 的平台存储相对路径（与执行器路径一致）
                     'trace_path': trace_local_path,
                 }
@@ -1393,7 +1406,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                     {
                         'type': 'broadcast_result',
                         'data': {
-                            'func_name': UiSocketEnum.CASE_RESULT,
+                            'func_name': 'u_role_result' if args.get('role_batch_id') else UiSocketEnum.CASE_RESULT,
                             'args': self._sanitize_result_args(result_args),
                             'user': user,
                         },
@@ -1430,7 +1443,8 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 failed_steps=failed_steps or (len(all_step_results) if kind != 'page_steps' else 0),
             )
         finally:
-            self._recorder_exec_task = None
+            if not args.get('role_batch_id'):
+                self._recorder_exec_task = None
             self._recorder_exec_session = None
             if frame_task is not None:
                 frame_task.cancel()
@@ -1447,6 +1461,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                     pass
 
     async def handle_execute_page_steps(self, args: dict, user: str):
+        args = {k:v for k,v in args.items() if k not in ('role_batch_id','role_auth_state_id','role_name','role_identity_selector','role_identity_text')}
         """处理执行页面步骤请求"""
         if args.get('actuator_id') == RECORDER_BROWSER_ID:
             # 前端消息不带 user 字段：用连接注册键定位回执/帧的目标。
@@ -1518,12 +1533,17 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             ),
         ))
 
+    async def _execute_case_with_roles(self, args, user):
+        from .role_execution import run_roles
+        args = {k:v for k,v in args.items() if k not in ('role_batch_id','role_auth_state_id','role_name','role_identity_selector','role_identity_text')}
+        await run_roles(self, args, user)
+
     async def handle_execute_test_case(self, args: dict, user: str):
         """处理执行测试用例请求"""
         if args.get('actuator_id') == RECORDER_BROWSER_ID:
             # 前端消息不带 user 字段：用连接注册键定位回执/帧的目标。
             # 独立任务执行：接收循环保持空闲，前端关闭画布的停止请求才能被及时处理
-            self._recorder_exec_task = asyncio.ensure_future(self._execute_via_recorder('case', args, user or self.user_id))
+            self._recorder_exec_task = asyncio.ensure_future(self._execute_case_with_roles(args, user or self.user_id))
             await self._send_test_case_ack(args)
             return
         args, actuator, err = await self._prepare_task_dispatch(args)
@@ -1671,6 +1691,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
 
     async def handle_stop_execution(self, args: dict, user: str):
         """处理停止执行请求"""
+        self._role_stop_requested = True
         # 录制器浏览器执行：前端关闭执行画布时直接中断（取消任务 + 关闭会话）
         task = getattr(self, '_recorder_exec_task', None)
         if task is not None and not task.done():

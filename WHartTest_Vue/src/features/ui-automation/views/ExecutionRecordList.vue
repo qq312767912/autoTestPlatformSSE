@@ -311,6 +311,7 @@ const getStatusLabel = (status?: number) => {
 const columns = computed(() => [
   { title: 'ID', dataIndex: 'id', width: 70, align: 'center' as const },
   { title: pageText.value.caseNameColumn, dataIndex: 'test_case_name', ellipsis: true, tooltip: true, width: 180, align: 'center' as const },
+  { title: '执行角色', dataIndex: 'role_name', width: 140, align: 'center' as const },
   { title: pageText.value.executorColumn, dataIndex: 'executor_name', width: 100, align: 'center' as const },
   { title: pageText.value.statusColumn, slotName: 'status', width: 90, align: 'center' as const },
   { title: pageText.value.triggerType, slotName: 'trigger_type', width: 100, align: 'center' as const },

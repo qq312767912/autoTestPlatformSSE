@@ -348,6 +348,19 @@ class UiTestCaseSerializer(serializers.ModelSerializer):
         fields.pop('conversion_metadata', None)
         return fields
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        if not self.instance and not attrs.get('role_matrix'):
+            from .role_execution import required_roles
+            names = required_roles(attrs.get('description') or '')
+            if names:
+                attrs['role_matrix'] = [{'name':name,'guest':name=='游客','auth_state_id':None} for name in names]
+        if 'role_matrix' in attrs:
+            from .role_execution import validate_matrix
+            project = attrs.get('project') or getattr(self.instance, 'project', None)
+            attrs['role_matrix'] = validate_matrix(attrs['role_matrix'], project.pk if project else None)
+        return attrs
+
     def get_step_count(self, obj):
         return obj.case_steps.count()
 
@@ -381,10 +394,12 @@ class UiExecutionRecordListSerializer(serializers.ModelSerializer):
     test_case_name = serializers.CharField(source='test_case.name', read_only=True)
     executor_name = serializers.CharField(source='executor.username', read_only=True)
 
+    role_name = serializers.CharField(source='environment.role_name', default='', read_only=True)
+
     class Meta:
         model = UiExecutionRecord
         fields = [
-            'id', 'batch', 'test_case', 'test_case_name', 'executor', 'executor_name',
+            'id', 'role_name', 'batch', 'test_case', 'test_case_name', 'executor', 'executor_name',
             'status', 'trigger_type', 'start_time', 'end_time', 'duration', 'created_at'
         ]
         read_only_fields = ['created_at']
@@ -395,10 +410,12 @@ class UiExecutionRecordBatchDetailSerializer(serializers.ModelSerializer):
     test_case_name = serializers.CharField(source='test_case.name', read_only=True)
     executor_name = serializers.CharField(source='executor.username', read_only=True)
 
+    role_name = serializers.CharField(source='environment.role_name', default='', read_only=True)
+
     class Meta:
         model = UiExecutionRecord
         fields = [
-            'id', 'batch', 'test_case', 'test_case_name', 'executor', 'executor_name',
+            'id', 'role_name', 'batch', 'test_case', 'test_case_name', 'executor', 'executor_name',
             'status', 'trigger_type', 'start_time', 'end_time', 'duration',
             'step_results', 'screenshots', 'error_message', 'trace_path', 'created_at'
         ]

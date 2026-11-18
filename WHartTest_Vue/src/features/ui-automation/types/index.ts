@@ -136,6 +136,8 @@ export interface UiPageStepsDetailed {
 export type CaseLevel = 'P0' | 'P1' | 'P2' | 'P3'
 
 /** 测试用例 */
+export interface UiRoleConfig {name:string;guest:boolean;auth_state_id:number|null;identity_selector?:string;identity_text?:string}
+
 export interface UiTestCase extends TimeStampFields {
   id: number
   project: number
@@ -148,6 +150,7 @@ export interface UiTestCase extends TimeStampFields {
   front_custom: unknown[]
   front_sql: unknown[]
   posterior_sql: unknown[]
+  role_matrix?: UiRoleConfig[]
   parametrize: unknown[]
   case_flow?: string
   result_data?: Record<string, unknown>

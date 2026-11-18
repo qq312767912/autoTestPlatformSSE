@@ -6,6 +6,8 @@
     width="min(1500px, calc(100vw - 24px))"
     @cancel="emit('update:visible', false)"
   >
+    <div v-if="roleProgress">{{ roleProgress }}</div>
+    <div v-for="row in roleResults" :key="row.role">{{row.role}}：{{row.status==='success'?'通过':row.status==='not_run'?'未执行':'失败'}} · 执行记录 {{row.record_id || '未生成'}} {{row.message || ''}}</div>
     <!-- 执行画面（只读）：与录制器画布同构的帧展示，无输入转发 -->
     <div class="exec-screen-live">
       <div ref="canvasWrapRef" class="exec-screen-canvas-wrap">
@@ -80,6 +82,8 @@ const canvasWrapRef = ref<HTMLElement | null>(null)
 const canvasSize = reactive({ width: 0, height: 0 })
 const hasFrame = ref(false)
 const finished = ref(false)
+const roleProgress=ref('')
+const roleResults=ref<{role:string;status:string;record_id:number|null;message?:string}[]>([])
 const noFrameHint = ref(false)
 const startedExec = ref(false)  // 本次弹窗是否开启过执行（避免挂载时的初始 false 误发停止）
 const wsConnected = computed(() => uiWebSocket.connected.value)
@@ -155,6 +159,7 @@ function onResult(data: any) {
   const args = data?.data?.func_args || {}
   const id = props.mode === 'case' ? args.case_id : args.page_step_id
   if (props.taskId && id === props.taskId) {
+    roleResults.value = args.role_results || []
     finished.value = true
   }
 }
@@ -167,6 +172,8 @@ watch(
       noFrameTimer = null
     }
     if (visible) {
+      roleProgress.value = ''
+      roleResults.value = []
       finished.value = false
       hasFrame.value = false
       noFrameHint.value = false
@@ -186,6 +193,7 @@ watch(
   },
 )
 
+let offRole: (() => void) | null = null
 let offFrame: (() => void) | null = null
 let offRecorderFrame: (() => void) | null = null
 let offCase: (() => void) | null = null
@@ -193,6 +201,7 @@ let offStep: (() => void) | null = null
 let resizeObserver: ResizeObserver | null = null
 
 onMounted(() => {
+  offRole=uiWebSocket.on('u_role_progress', data=>{const args=data?.data?.func_args;if(props.visible && args?.case_id===props.taskId)roleProgress.value=`当前角色：${args.role}（${args.index}/${args.total}）`})
   offFrame = uiWebSocket.on(UiSocketEnum.EXEC_FRAME, onExecFrame as any)
   offRecorderFrame = uiWebSocket.on(UiSocketEnum.RECORDER_FRAME, onRecorderFrame as any)
   offCase = uiWebSocket.on(UiSocketEnum.CASE_RESULT, onResult as any)
@@ -203,6 +212,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  offRole?.()
   offFrame?.()
   offRecorderFrame?.()
   offCase?.()

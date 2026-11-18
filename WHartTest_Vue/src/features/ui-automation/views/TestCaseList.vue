@@ -194,6 +194,7 @@
           <a-textarea v-model="formData.description" :placeholder="pageText.enterCaseDescription" :auto-size="{ minRows: 2, maxRows: 4 }" />
         </a-form-item>
 
+          <RoleMatrixEditor v-model="formData.role_matrix!" :env-id="selectedEnvConfig" />
           <a-form-item label="附件">
             <FileAttachmentPicker
               v-model="formData.file_ids"
@@ -244,6 +245,7 @@ import type { UiTestCase, UiTestCaseForm, UiModule, CaseLevel, ExecutionStatus, 
 import { STATUS_LABELS, extractListData, extractPaginationData, extractResponseData } from '../types'
 import { uiWebSocket, UiSocketEnum, type CaseResultModel } from '../services/websocket'
 import CaseStepList from './CaseStepList.vue'
+import RoleMatrixEditor from '../components/RoleMatrixEditor.vue'
 
 const props = defineProps<{
   selectedModuleId?: number
@@ -453,6 +455,7 @@ const formData = reactive<UiTestCaseForm>({
   front_custom: [],
   front_sql: [],
   posterior_sql: [],
+  role_matrix: [],
   parametrize: [],
   case_flow: '',
 })
@@ -587,7 +590,8 @@ const resetForm = () => {
     front_custom: [],
     front_sql: [],
     posterior_sql: [],
-    parametrize: [],
+    role_matrix: [],
+  parametrize: [],
     case_flow: '',
   })
   formRef.value?.clearValidate()
@@ -621,6 +625,7 @@ const editTestCase = async (record: UiTestCase) => {
         front_sql: detail.front_sql,
         posterior_sql: detail.posterior_sql,
         parametrize: detail.parametrize,
+        role_matrix: structuredClone(detail.role_matrix || []),
         case_flow: detail.case_flow || '',
       })
     }
@@ -636,6 +641,7 @@ const editTestCase = async (record: UiTestCase) => {
       front_sql: record.front_sql,
       posterior_sql: record.posterior_sql,
       parametrize: record.parametrize,
+      role_matrix: structuredClone(record.role_matrix || []),
       case_flow: record.case_flow || '',
     })
   }

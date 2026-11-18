@@ -742,6 +742,7 @@ class UiTestCaseViewSet(viewsets.ModelViewSet):
                 front_sql=deepcopy(source.front_sql or []),
                 posterior_sql=deepcopy(source.posterior_sql or []),
                 parametrize=deepcopy(source.parametrize or []),
+                role_matrix=deepcopy(source.role_matrix or []),
                 case_flow=source.case_flow,
                 file_ids=deepcopy(source.file_ids or []),
                 result_data=None,

@@ -119,6 +119,14 @@ def bind_generated_case(session_id, user_id, project_id, functional_case_id, ui_
                 touched.append(detail.element.updated_at)
     if not has_assertion:
         raise ValidationError('缺少明确断言的 UI 用例不得绑定')
+    from ui_automation.role_execution import required_roles
+    required = required_roles('\n'.join(str(step.get('action') or '') for step in snapshot.get('steps', [])))
+    if set(required) - {row['name'] for row in ui.role_matrix}:
+        raise ValidationError('源用例要求遍历角色，请先在UI用例中配置全部执行角色：' + '、'.join(required))
+    if ui.role_matrix:
+        summary = ui.result_data or {}
+        if not summary.get('role_complete') or summary.get('status') != 'success' or len(summary.get('role_results', [])) != len(ui.role_matrix):
+            raise ValidationError('要求的角色尚未全部试跑通过，不得绑定')
     record = ui.execution_records.order_by('-created_at', '-pk').first()
     if not record or record.status != 2 or not record.start_time or record.start_time < max(touched):
         raise ValidationError('缺少本次任务开始后、最新定义的成功试跑记录')

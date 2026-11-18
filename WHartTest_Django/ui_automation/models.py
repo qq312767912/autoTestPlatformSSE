@@ -279,6 +279,7 @@ class UiTestCase(models.Model):
     front_custom = models.JSONField(_('前置自定义参数'), default=list, blank=True)
     front_sql = models.JSONField(_('前置SQL'), default=list, blank=True)
     posterior_sql = models.JSONField(_('后置SQL'), default=list, blank=True)
+    role_matrix = models.JSONField(_('执行角色'), default=list, blank=True)
     parametrize = models.JSONField(_('参数化数据'), default=list, blank=True)
     case_flow = models.TextField(_('用例流程'), blank=True, null=True)
     file_ids = models.JSONField(_('附件 file_id 列表'), default=list, blank=True)
