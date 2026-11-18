@@ -253,6 +253,7 @@ def persist_plan(plan,project,user,group_id=None,update_existing=False):
                               'description':'旧平台Excel历史输入/预期配置，来源见导入数据'})
                 created_vars+=int(created)
         ids=[];updated=0;steps_created=0
+        asset_counts={'created_interfaces':0,'created_interface_cases':0,'linked_steps':0}
         for item in plan['cases']:
             config=copy_config(item['config'])
             config['excel_migration']['archive_id']=archive.pk
@@ -271,9 +272,12 @@ def persist_plan(plan,project,user,group_id=None,update_existing=False):
                 ApiTestCaseStep.objects.bulk_create([ApiTestCaseStep(testcase=case,name=step['name'],order=i+1,interface_data=step['interface_data'],
                     config={'excel_source_id':step['source_id']}) for i,step in enumerate(item['steps'])])
                 steps_created+=len(item['steps'])
+            from .excel_assets import ensure_assets
+            counts=ensure_assets(case,user)
+            for key,value in counts.items():asset_counts[key]+=value
             ids.append(case.pk)
     return {'created_cases':len(ids)-updated,'updated_cases':updated,'created_steps':steps_created,'ids':ids,
-            'created_environments':created_envs,'environment_ids':list(env_ids.values()),'created_variables':created_vars,
+            **asset_counts,'created_environments':created_envs,'environment_ids':list(env_ids.values()),'created_variables':created_vars,
             'imported_data_rows':plan.get('data_row_count',0),'archive_id':archive.pk}
 
 

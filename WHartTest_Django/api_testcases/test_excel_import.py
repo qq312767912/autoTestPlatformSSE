@@ -185,7 +185,7 @@ class ExcelPersistenceTests(TestCase):
         persist_plan(plan(),self.project,self.user)
         case=ApiTestCase.objects.get()
         result=ApiTestCaseSerializer(case).data
-        self.assertEqual(result['steps'][0]['interface_info']['id'],0)
+        self.assertGreater(result['steps'][0]['interface_info']['id'],0)
         self.assertEqual(result['steps'][0]['interface_info']['method'],'POST')
         serializer=ApiTestCaseSerializer(case,data={'config':{'variables':{}}},partial=True)
         self.assertTrue(serializer.is_valid(),serializer.errors)
@@ -308,10 +308,88 @@ class ExcelFullDataTests(TestCase):
     def test_full_import_needs_environment_permissions(self):
         user=get_user_model().objects.create_user(username='case-only-import')
         ProjectMember.objects.create(project=self.project,user=user,role='member')
-        user.user_permissions.add(Permission.objects.get(codename='add_apitestcase'))
+        user.user_permissions.add(Permission.objects.get(codename='add_apitestcase'),
+            Permission.objects.get(codename='add_apiinterface'),Permission.objects.get(codename='add_apiinterfacecase'))
         request=APIRequestFactory().post('/',{'file':SimpleUploadedFile('old.xlsx',b'file'),'confirm':'true','sha256':'digest'},format='multipart')
         force_authenticate(request,user)
         with patch('api_testcases.excel_import.read_tables',return_value=(tables(),'digest')):
             response=ApiTestCaseViewSet.as_view({'post':'import_excel'})(request,project_pk=self.project.pk)
         self.assertEqual(response.status_code,403)
         self.assertFalse(ApiTestCase.objects.exists())
+
+class ExcelNativeAssetTests(TestCase):
+    def setUp(self):
+        self.user=get_user_model().objects.create_superuser(username='native-excel',password='test')
+        self.project=Project.objects.create(name='native-excel',creator=self.user)
+
+    def test_three_asset_layers_and_idempotence(self):
+        from api_interfaces.models import ApiInterface
+        from .models import ApiInterfaceCase
+        p=plan()
+        result=persist_plan(p,self.project,self.user)
+        self.assertEqual(result['created_interfaces'],2)
+        self.assertEqual(result['created_interface_cases'],2)
+        case=ApiTestCase.objects.get()
+        for step in case.steps.all():
+            self.assertIsNotNone(step.origin_interface_id)
+            mapping=case.config['excel_migration']['assets'][str(step.config['excel_source_id'])]
+            self.assertEqual(mapping['interface_id'],step.origin_interface_id)
+            native=ApiInterfaceCase.objects.get(pk=mapping['interface_case_id'])
+            self.assertEqual(native.interface_id,step.origin_interface_id)
+            self.assertEqual(native.steps.count(),1)
+            self.assertEqual(native.steps.get().role,'main')
+            self.assertEqual(native.steps.get().interface_data,step.interface_data)
+        again=persist_plan(p,self.project,self.user,update_existing=True)
+        self.assertEqual(again['created_interfaces'],0)
+        self.assertEqual(again['created_interface_cases'],0)
+        self.assertEqual(ApiInterface.objects.count(),2)
+        self.assertEqual(ApiInterfaceCase.objects.count(),2)
+
+    def test_backfill_uses_current_snapshot_and_keeps_native_edits(self):
+        from .models import ApiInterfaceCase
+        from .excel_assets import ensure_assets
+        p=plan()
+        # Simulate an earlier import with no native assets.
+        with patch('api_testcases.excel_assets.ensure_assets',return_value={}):
+            persist_plan(p,self.project,self.user)
+        case=ApiTestCase.objects.get()
+        step=case.steps.first()
+        step.interface_data['url']='/edited-by-user'
+        step.save()
+        ensure_assets(case,self.user)
+        step.refresh_from_db()
+        self.assertEqual(step.origin_interface.url,'/edited-by-user')
+        native=ApiInterfaceCase.objects.get(interface=step.origin_interface)
+        native.name='user renamed';native.save()
+        main=native.steps.get();main.interface_data['url']='/native-edit';main.save()
+        persist_plan(p,self.project,self.user,update_existing=True)
+        native.refresh_from_db();main.refresh_from_db();step.refresh_from_db()
+        self.assertEqual(native.name,'user renamed')
+        self.assertEqual(main.interface_data['url'],'/native-edit')
+        self.assertEqual(step.interface_data['url'],'/edited-by-user')
+
+    def test_name_collision_preserves_unrelated_case(self):
+        from api_interfaces.models import ApiInterface
+        from .models import ApiInterfaceCase
+        interface=ApiInterface.objects.create(project=self.project,name='original',method='GET',url='/original')
+        original=ApiInterfaceCase.objects.create(project=self.project,interface=interface,name='first')
+        persist_plan(plan(),self.project,self.user)
+        original.refresh_from_db()
+        self.assertEqual(original.interface.url,'/original')
+        self.assertEqual(original.name,'first')
+        self.assertEqual(ApiInterfaceCase.objects.count(),3)
+
+    def test_native_case_edit_preserves_lineage(self):
+        from .models import ApiInterfaceCase
+        from .serializers import ApiInterfaceCaseSerializer
+        persist_plan(plan(),self.project,self.user)
+        native=ApiInterfaceCase.objects.first()
+        source_id=native.config['excel_migration']['source_api_id']
+        serializer=ApiInterfaceCaseSerializer(native,data={'config':{'variables':{'user':'value'}}},partial=True)
+        self.assertTrue(serializer.is_valid(),serializer.errors)
+        serializer.save();native.refresh_from_db()
+        self.assertEqual(native.config['excel_migration']['source_api_id'],source_id)
+        result=persist_plan(plan(),self.project,self.user,update_existing=True)
+        self.assertEqual(result['created_interface_cases'],0)
+        native.refresh_from_db()
+        self.assertEqual(native.config['variables'],{'user':'value'})

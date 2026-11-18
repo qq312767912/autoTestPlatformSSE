@@ -755,6 +755,13 @@ class ApiInterfaceCaseSerializer(serializers.ModelSerializer):
         if interface_id:
             validated_data['interface'] = self._get_interface(interface_id)
 
+        migration = (instance.config or {}).get('excel_migration') if isinstance(instance.config,dict) else None
+        if migration and 'config' in validated_data:
+            config = validated_data['config']
+            if not isinstance(config,dict):
+                raise serializers.ValidationError({'config':'导入用例配置必须为对象'})
+            validated_data['config'] = {**config,'excel_migration':migration}
+
         instance = super().update(instance, validated_data)
 
         if steps_info is not None or interface_id:

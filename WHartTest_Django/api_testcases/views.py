@@ -213,6 +213,9 @@ class ApiTestCaseViewSet(BaseModelViewSet):
         if str(request.data.get('confirm', '')).lower() == 'true':
             if request.data.get('sha256') != plan['sha256']:
                 raise ValidationError('文件与预览不一致，请重新预览')
+            if not all(request.user.has_perm(p) for p in ['api_interfaces.add_apiinterface','api_testcases.add_apiinterfacecase']):
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied('完整导入需要新增接口和接口用例权限')
             if plan.get('environments') and not all(request.user.has_perm(p) for p in ['api_environments.add_apienvironment','api_environments.add_apienvironmentvariable']):
                 from rest_framework.exceptions import PermissionDenied
                 raise PermissionDenied('完整导入需要新增接口环境和环境变量权限')

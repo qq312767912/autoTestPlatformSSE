@@ -1,6 +1,6 @@
 <template>
   <a-modal :visible="visible" title="从 Excel 导入接口场景用例" :width="900" :footer="false" @cancel="emit('update:visible',false)">
-    <p>兼容旧平台多工作表导出（.xlsx / .xls），导入用例、环境、请求数据、预期配置及全部工作表源数据。导入后不会自动执行。</p>
+    <p>兼容旧平台多工作表导出（.xlsx / .xls），同时建立接口定义、单接口用例及场景步骤关联，导入环境、数据及全部工作表源数据。导入后不会自动执行。</p>
     <input :key="String(project)+String(visible)" type="file" accept=".xlsx,.xls" :disabled="busy" @change="choose" />
     <a-select v-model="group" allow-clear placeholder="目标分组（可选）" style="width:260px;margin:12px 0 12px 16px">
       <a-option v-for="item in groups" :key="item.id" :value="item.id">{{item.name}}</a-option>
@@ -8,7 +8,7 @@
     <a-button :disabled="!file" :loading="busy" @click="preview">解析并预览</a-button>
     <a-alert v-if="error" type="error" style="margin:12px 0">{{error}}</a-alert>
     <template v-if="plan">
-      <a-alert style="margin:16px 0">识别 {{plan.case_count}} 条用例、{{plan.step_count}} 个接口步骤、{{plan.environment_count}} 个环境；已恢复 {{plan.recovered_variable_count}} 个变量值，保留 {{plan.data_row_count}} 条历史数据。</a-alert>
+      <a-alert style="margin:16px 0">识别 {{plan.case_count}} 条用例、{{plan.step_count}} 个接口步骤（同时补齐接口定义与接口用例）、{{plan.environment_count}} 个环境；已恢复 {{plan.recovered_variable_count}} 个变量值，保留 {{plan.data_row_count}} 条历史数据。</a-alert>
       <a-alert v-if="plan.duplicates.length" type="error">已有同名用例：{{plan.duplicates.join('、')}}。请修改文件内名称后重新预览。</a-alert>
       <a-checkbox v-if="plan.updatable.length" v-model="updateExisting" style="margin:12px 0">补全此前从此文件导入的 {{plan.updatable.length}} 条用例（保留已编辑步骤和变量）</a-checkbox>
       <p>环境同名且地址相同则复用，不覆盖已有环境变量。历史请求值可能过期；断言只恢复记录中明确的预期，不使用实际响应生成预期。</p>
@@ -51,6 +51,6 @@ function choose(event:Event){version++;file.value=(event.target as HTMLInputElem
 function failure(e:unknown){const v=e as {message?:string;error?:string;errors?:unknown};error.value=v.message||v.error||'导入失败，请检查文件后重试'}
 function payload(){const data=new FormData();data.append('file',file.value!);if(group.value)data.append('group_id',String(group.value));return data}
 async function preview(){if(!file.value||busy.value)return;const current=++version;busy.value=true;plan.value=undefined;error.value='';try{const result=await testcaseService.importExcel(props.project,payload());if(current===version)plan.value=result as unknown as Plan}catch(e){if(current===version)failure(e)}finally{if(current===version)busy.value=false}}
-async function confirm(){if(!plan.value||!file.value||busy.value)return;busy.value=true;error.value='';try{const data=payload();data.append('confirm','true');data.append('update_existing',String(updateExisting.value));data.append('sha256',plan.value.sha256);const result=await testcaseService.importExcel(props.project,data) as {created_cases:number;updated_cases:number;created_environments:number;created_variables:number;imported_data_rows:number};Message.success(`导入完成：新增 ${result.created_cases} 条用例，补全 ${result.updated_cases} 条，创建 ${result.created_environments} 个环境、${result.created_variables} 个变量，保留 ${result.imported_data_rows} 条历史数据`);emit('imported');emit('update:visible',false);file.value=undefined;plan.value=undefined}catch(e){failure(e)}finally{busy.value=false}}
+async function confirm(){if(!plan.value||!file.value||busy.value)return;busy.value=true;error.value='';try{const data=payload();data.append('confirm','true');data.append('update_existing',String(updateExisting.value));data.append('sha256',plan.value.sha256);const result=await testcaseService.importExcel(props.project,data) as {created_interfaces:number;created_interface_cases:number;created_cases:number;updated_cases:number;created_environments:number;created_variables:number;imported_data_rows:number};Message.success(`导入完成：新增 ${result.created_interfaces} 个接口、${result.created_interface_cases} 条接口用例；新增 ${result.created_cases} 条用例，补全 ${result.updated_cases} 条，创建 ${result.created_environments} 个环境、${result.created_variables} 个变量，保留 ${result.imported_data_rows} 条历史数据`);emit('imported');emit('update:visible',false);file.value=undefined;plan.value=undefined}catch(e){failure(e)}finally{busy.value=false}}
 watch(()=>[props.visible,props.project],async()=>{version++;busy.value=false;if(!props.visible)return;file.value=undefined;plan.value=undefined;group.value=undefined;error.value='';try{groups.value=toArray(await testcaseGroupService.list(props.project))}catch{groups.value=[]}})
 </script>
