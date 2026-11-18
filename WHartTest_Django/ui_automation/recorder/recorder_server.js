@@ -2581,9 +2581,9 @@ async function cmdRunSteps(params) {
         resultEntry.duration = (Date.now() - stepStart) / 1000;
         if (err) {
           failedStep = i;
-          errorMsg = err;
+          errorMsg = stepInfo.sensitive ? '账号登录失败，请检查登录配置及账号信息' : err;
           resultEntry.status = 'failed';
-          resultEntry.message = String(err).slice(0, 300);
+          resultEntry.message = String(errorMsg).slice(0, 300);
           stepResults.push(resultEntry);
           break;
         }
@@ -2594,7 +2594,7 @@ async function cmdRunSteps(params) {
         await state.page.waitForTimeout(200);
       } catch (e) {
         failedStep = i;
-        errorMsg = '第 ' + (i + 1) + ' 步执行失败: ' + (e && e.message ? e.message : String(e));
+        errorMsg = stepInfo.sensitive ? '账号登录失败，请检查登录配置及账号信息' : '第 ' + (i + 1) + ' 步执行失败: ' + (e && e.message ? e.message : String(e));
         resultEntry.status = 'failed';
         resultEntry.message = errorMsg.slice(0, 300);
         resultEntry.duration = (Date.now() - stepStart) / 1000;
@@ -2602,7 +2602,7 @@ async function cmdRunSteps(params) {
         break;
       } finally {
         // 失败步骤补一张现场截图（成功步骤不截，控制负载）
-        if (resultEntry.status === 'failed') {
+        if (resultEntry.status === 'failed' && !stepInfo.sensitive) {
           try {
             const shot = await state.page.screenshot({ type: 'jpeg', quality: 60 });
             resultEntry.screenshot = 'data:image/jpeg;base64,' + shot.toString('base64');

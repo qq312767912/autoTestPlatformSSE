@@ -34,7 +34,9 @@ def validate_matrix(rows, project_id):
         if guest and auth_id: raise ValidationError('游客不能绑定登录态')
         if auth_id and not UiAuthState.objects.filter(pk=auth_id, env_config__project_id=project_id).exists():
             raise ValidationError('登录态不存在或不属于当前项目')
-        normalized.append({'name': name, 'guest': guest, 'auth_state_id': auth_id or None, **({k:str(row.get(k) or '').strip() for k in ['identity_selector','identity_text']} if row.get('identity_selector') or row.get('identity_text') else {})})
+        from .role_login import normalize_login
+        login = {} if guest else normalize_login(row, project_id)
+        normalized.append({**login, 'name': name, 'guest': guest, 'auth_state_id': None if login else (auth_id or None), **({k:str(row.get(k) or '').strip() for k in ['identity_selector','identity_text']} if not login and (row.get('identity_selector') or row.get('identity_text')) else {})})
     return normalized
 
 
@@ -50,6 +52,10 @@ def execution_roles(case_id, env_id, user=None, override=None):
         raise ValidationError('角色执行需要选择当前项目的执行环境')
     for role in roles:
         if role['guest']: continue
+        if role.get('account'):
+            from .role_login import validate_login
+            validate_login(role,case.project_id)
+            continue
         auth = UiAuthState.objects.filter(pk=role['auth_state_id'], env_config_id=env_id, is_active=True).first()
         if not auth or not auth.state_json:
             raise ValidationError('角色「%s」缺少当前环境可用登录态，请配置后执行' % role['name'])
@@ -78,6 +84,9 @@ async def run_roles(consumer, args, user):
             await consumer.send_json(SocketDataModel(code=ResponseCode.SUCCESS,msg='role_progress',user=user,is_notice=NoticeType.WEB,data=QueueModel(func_name='u_role_progress',func_args={'case_id':case.pk,'role':role['name'],'index':index+1,'total':len(roles)})))
             request_id = uuid.uuid4().hex
             current = {**args, 'role_batch_id':batch.pk, 'role_name':role['name'], 'role_auth_state_id':role['auth_state_id'], 'role_identity_selector':role.get('identity_selector'), 'role_identity_text':role.get('identity_text'), 'execution_request_id':request_id}
+            if role.get('account'):
+                from .role_login import login_steps
+                current['role_login_steps'] = login_steps(role,case.project_id)
             try:
                 await consumer._execute_via_recorder('case', current, user)
             except Exception as exc:

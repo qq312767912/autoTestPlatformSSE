@@ -136,7 +136,7 @@ export interface UiPageStepsDetailed {
 export type CaseLevel = 'P0' | 'P1' | 'P2' | 'P3'
 
 /** 测试用例 */
-export interface UiRoleConfig {name:string;guest:boolean;auth_state_id:number|null;identity_selector?:string;identity_text?:string}
+export interface UiRoleConfig {name:string;guest:boolean;auth_state_id:number|null;identity_selector?:string;identity_text?:string;account?:string;password?:string;password_ref?:string;captcha?:string;login?:{url:string;account_selector:string;password_selector:string;captcha_selector:string;submit_selector:string;success_selector:string}}
 
 export interface UiTestCase extends TimeStampFields {
   id: number

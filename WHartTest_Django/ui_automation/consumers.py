@@ -1207,6 +1207,11 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             # 同步 request 移出事件循环（to_thread），执行期间帧转发/中断仍可响应
             await asyncio.to_thread(session.request, 'start', start_params, 90)
             logger.info('[recorder-exec] start 请求完成，开始逐组执行')
+            # 凭据登录在 trace 与画面转发启动前完成，避免密码进入执行产物。
+            if args.get('role_login_steps'):
+                login_resp = await asyncio.to_thread(session.request, 'run_steps', {'steps': args['role_login_steps']}, 180)
+                if not login_resp.get('ok') or (login_resp.get('state') or {}).get('failed'):
+                    raise RecorderSessionError('角色账号登录失败，请检查账号、验证码及登录方式')
             # case 模式采集 Playwright trace：执行前开启，结束后 stop 落盘 zip
             if kind != 'page_steps':
                 try:
@@ -1461,7 +1466,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                     pass
 
     async def handle_execute_page_steps(self, args: dict, user: str):
-        args = {k:v for k,v in args.items() if k not in ('role_batch_id','role_auth_state_id','role_name','role_identity_selector','role_identity_text')}
+        args = {k:v for k,v in args.items() if k not in ('role_batch_id','role_auth_state_id','role_name','role_identity_selector','role_identity_text','role_login_steps')}
         """处理执行页面步骤请求"""
         if args.get('actuator_id') == RECORDER_BROWSER_ID:
             # 前端消息不带 user 字段：用连接注册键定位回执/帧的目标。
@@ -1535,7 +1540,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
 
     async def _execute_case_with_roles(self, args, user):
         from .role_execution import run_roles
-        args = {k:v for k,v in args.items() if k not in ('role_batch_id','role_auth_state_id','role_name','role_identity_selector','role_identity_text')}
+        args = {k:v for k,v in args.items() if k not in ('role_batch_id','role_auth_state_id','role_name','role_identity_selector','role_identity_text','role_login_steps')}
         await run_roles(self, args, user)
 
     async def handle_execute_test_case(self, args: dict, user: str):
