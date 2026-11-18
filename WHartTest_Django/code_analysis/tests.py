@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
@@ -799,6 +800,26 @@ class DiffRuleTests(TestCase):
 
 
 class LocalGitClientTests(SimpleTestCase):
+    def test_gitlab_diff_uses_repository_when_api_omits_text(self):
+        from .services import _complete_gitlab_diffs
+        with tempfile.TemporaryDirectory() as directory:
+            def git(*args):
+                return subprocess.run(["git", "-C", directory, *args], check=True, capture_output=True, text=True).stdout.strip()
+            git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test")
+            Path(directory, "Demo.java").write_text("old\n" * 12)
+            git("add", "."); git("commit", "-m", "base")
+            base = git("rev-parse", "HEAD")
+            Path(directory, "Demo.java").write_text("new\n")
+            git("commit", "-am", "head")
+            head = git("rev-parse", "HEAD")
+            @contextmanager
+            def repository(_task):
+                yield Path(directory), base, head
+            with patch("code_analysis.services._managed_gitlab_repository", side_effect=repository):
+                diffs = _complete_gitlab_diffs(object(), [{"new_path": "Demo.java", "diff": ""}])
+            self.assertEqual(len(diffs), 1)
+            self.assertEqual(_diff_line_stats(diffs[0]["diff"]), (1, 12))
+
     def test_local_git_compares_two_branch_names(self):
         with tempfile.TemporaryDirectory() as directory:
             def git(*args):
@@ -1330,6 +1351,7 @@ class AnalysisLifecycleTests(TransactionTestCase):
         }]
         with (
             patch("code_analysis.services.GitLabClient.compare", return_value=diff_payload),
+            patch("code_analysis.services._complete_gitlab_diffs", side_effect=lambda _task, diffs: diffs),
             patch("code_analysis.services.GitLabClient.merge_base", return_value=""),
             patch("code_analysis.review_mcp.CodeReviewMCP.run_static_checks", autospec=True, side_effect=lambda mcp, diffs: (setattr(mcp, "static_coverage", {"percent": 100, "status": "completed"}), ([], []))[1]),
             patch("code_analysis.services._analysis_stage", side_effect=lambda _task_id, _name, function, *args: function(*args)),
@@ -1734,6 +1756,7 @@ class AnalysisLifecycleTests(TransactionTestCase):
                 pending={**candidate,"verification_status":"verification_failed","verification_reason":"JSON解析失败","target_commit_verified":False}
                 with (
                     patch("code_analysis.services.GitLabClient.compare",return_value=diff),
+                    patch("code_analysis.services._complete_gitlab_diffs",side_effect=lambda _task, diffs: diffs),
                     patch("code_analysis.services.GitLabClient.merge_base",return_value=""),
                     patch("code_analysis.review_mcp.CodeReviewMCP.run_static_checks",autospec=True,side_effect=static),
                     patch("code_analysis.services._run_ai_batches",return_value=([candidate],[],[],1,100,"AI完成")),

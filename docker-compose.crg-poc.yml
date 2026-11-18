@@ -21,7 +21,6 @@ services:
       - ./WHartTest_Django/testcases/tasks.py:/app/testcases/tasks.py:ro
       - ./WHartTest_Django/wharttest_django/settings.py:/app/wharttest_django/settings.py:ro
       - ./WHartTest_Django/wharttest_django/urls.py:/app/wharttest_django/urls.py:ro
-      - ${CRG_JAVA_REPOSITORY_PATH:-/Users/chenxin42/Desktop/code/压测工具/baidu-rpc}:/workspace/external/baidu-rpc:ro
     environment:
       - CODE_REVIEW_GRAPH_URL=http://crg-service:8080
       - CODE_REVIEW_GRAPH_TOKEN=${CRG_INTERNAL_TOKEN:-change-this-crg-token}

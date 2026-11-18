@@ -7,7 +7,7 @@
         <p>对代码变更进行多维审查，识别风险、评估业务影响，并生成可执行的测试需求与回归建议。</p>
       </div>
       <div class="hero-actions">
-        <a-button v-if="canViewInternalGold" :disabled="!projectStore.currentProjectId" @click="goldLibraryVisible = true">内部金标集</a-button>
+        <a-button v-if="canViewInternalGold" :disabled="!projectStore.currentProjectId" @click="openGoldLibrary">内部金标集</a-button>
         <a-button v-if="canViewLlmConfig" @click="openLlmConfig"><template #icon><icon-settings /></template>审查模型配置</a-button>
         <a-button v-if="canViewRepositories || canViewConnections || canManageCredentials" @click="configVisible = true"><template #icon><icon-settings /></template>审查源配置</a-button>
         <a-button v-if="canAddTasks && canViewRepositories" type="primary" @click="openCreate"><template #icon><icon-plus /></template>新建分析</a-button>
@@ -234,8 +234,8 @@
       </a-tabs>
     </a-drawer>
 
-    <CodeReviewGoldModal v-model:visible="goldMarkVisible" :task-id="selectedTask?.id || ''" />
-    <InternalGoldLibrary v-model:visible="goldLibraryVisible" :project-id="projectStore.currentProjectId || 0" />
+    <CodeReviewGoldModal v-model:visible="goldMarkVisible" :task-id="selectedTask?.id || ''" @saved="onGoldSaved" />
+    <InternalGoldLibrary v-model:visible="goldLibraryVisible" :project-id="goldLibraryProjectId || projectStore.currentProjectId || 0" />
     <QualitySidebar
       v-model:visible="qualitySidebarVisible"
       :project-id="selectedTask?.project || projectStore.currentProjectId || 0"
@@ -384,6 +384,9 @@ const projectStore = useProjectStore();
 const authStore = useAuthStore();
 const isPlatformAdmin = computed(() => !!authStore.currentUser?.is_staff);
 const goldMarkVisible = ref(false), goldLibraryVisible = ref(false);
+const goldLibraryProjectId = ref(0);
+function openGoldLibrary() { goldLibraryProjectId.value = projectStore.currentProjectId || 0; goldLibraryVisible.value = true; }
+function onGoldSaved(result: { project_id: number }) { goldLibraryProjectId.value = result.project_id || selectedTask.value?.project || projectStore.currentProjectId || 0; goldLibraryVisible.value = true; }
 const canViewInternalGold = computed(() => authStore.hasPermission('knowledge_evolution.view_goldcase'));
 const canSaveInternalGold = computed(() => authStore.hasPermission('knowledge_evolution.add_goldcase') && authStore.hasPermission('code_analysis.change_analysistask'));
 const canViewLlmConfig = computed(() => authStore.hasPermission('code_analysis.view_codeanalysisllmconfig'));

@@ -478,7 +478,7 @@
 
         <div v-else-if="workspace === 'evaluation'" class="split-view">
           <aside class="panel suite-panel"><div class="section-head"><div><span>评测资产</span><h2>评测集</h2></div><a-button type="primary" size="small" @click="showSuiteModal=true"><template #icon><icon-plus/></template>新建</a-button></div><button v-for="suite in suites" :key="suite.id" type="button" class="suite" :class="{active:selectedSuiteId===suite.id}" @click="selectSuite(suite)"><div><b>{{ suite.name }}</b><small>{{ suiteTypeLabels[suite.suite_type] }} · {{ suite.case_count }} 个样本</small></div><icon-right/></button><a-empty v-if="!suites.length&&!suitesLoading" description="暂无评测集"/></aside>
-          <section class="panel eval-panel"><div class="section-head toolbar"><div><span>运行与结果</span><h2>{{ selectedSuite?.name || '请选择评测集' }}</h2></div><a-button type="primary" :disabled="!selectedSuiteId" @click="createRun"><template #icon><icon-play-arrow/></template>运行评测</a-button></div>
+          <section class="panel eval-panel"><div class="section-head toolbar"><div><span>运行与结果</span><h2>{{ selectedSuite?.name || '请选择评测集' }}</h2></div><div class="actions"><a-button v-if="selectedRun && selectedSuite?.task_type === 'code_review'" @click="openSelectedCodeReviewReport">查看代码审查详细报告</a-button><a-button type="primary" :disabled="!selectedSuiteId" @click="createRun"><template #icon><icon-play-arrow/></template>运行评测</a-button></div></div>
             <div class="run-list"><button v-for="run in runs" :key="run.id" type="button" :class="{active:selectedRunId===run.id}" @click="selectRun(run)"><div><b>{{ run.name||'评测运行' }}</b><small>{{ formatDate(run.created_at) }}</small></div><span><i>一级 {{ fmt(run.l0_score) }}</i><i>二级 {{ fmt(run.l1_score) }}</i><i>三级 {{ fmt(run.l2_score) }}</i><i>四级 {{ fmt(run.l3_score) }}</i></span><a-tag :color="statusColor(run.status)">{{ statusText(run.status) }}</a-tag></button></div>
             <div v-if="selectedRun" class="result-summary"><div><span>样本总数</span><b>{{ results.length }}</b></div><div><span>失败样本</span><b>{{ failedResults.length }}</b></div><div><span>失败率</span><b>{{ failureRate }}%</b></div><div><span>Token</span><b>{{ totalTokens }}</b></div></div>
             <a-empty v-if="!runs.length" description="选择评测集后发起首次运行"/>
@@ -1152,6 +1152,11 @@ async function switchDataTab(tab:QuickMode){quickMode.value=tab;await router.rep
 async function clearWorkshopSource(){taskWorkshopTarget.value={};await switchDataTab('skills')}
 async function closeWorkshopAssessment(){const query={...route.query};delete query.assessment_id;await router.replace({path:'/knowledge-evolution',query})}
 async function openCodeReviewEvaluation(){showCodeReviewBenchmark.value=true;await router.replace({path:'/knowledge-evolution',query:{view:'data',tab:'console',section:'single',capability:'code_review'}})}
+async function openSelectedCodeReviewReport(){
+  const benchmark=selectedSuite.value?.name.includes('AACR-Bench')?'aacr_bench':selectedSuite.value?.name.includes('SWR-Bench')?'swr_bench':'swe_care';
+  showCodeReviewBenchmark.value=true;
+  await router.replace({path:'/knowledge-evolution',query:{view:'data',tab:'console',section:'single',capability:'code_review',benchmark,run:selectedRunId.value}});
+}
 async function closeCodeReviewEvaluation(){showCodeReviewBenchmark.value=false;await openData('single')}
 /** 横幅抬头（h1 + 描述）。
  *  ⚠️ 数据飞轮下**按页签分别展示**，不是三个页签共用一句「数据飞轮」——

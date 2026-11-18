@@ -217,6 +217,34 @@ def _git_changed_lines(root, base_ref, head_ref):
     return total
 
 
+def _complete_gitlab_diffs(task, api_diffs):
+    """以任务独占 Git 仓库读取完整差异；compare API 的 patch 可能被截断。"""
+    if not isinstance(api_diffs, list):
+        raise ValueError("GitLab 比较接口未返回文件清单")
+    with _managed_gitlab_repository(task) as (root, base_ref, head_ref):
+        env = os.environ.copy()
+        rows = _run_git(["git", "diff", "--name-status", "--find-renames", base_ref, head_ref], cwd=root, env=env)
+        diffs = []
+        for row in rows.splitlines():
+            parts = row.split("\t")
+            if len(parts) < 2:
+                continue
+            status = parts[0]
+            old_path = parts[-2] if len(parts) > 2 else parts[1]
+            new_path = parts[-1]
+            path = old_path if status.startswith("D") else new_path
+            paths = [old_path, new_path] if status.startswith("R") else [path]
+            patch = _run_git(["git", "diff", "--no-ext-diff", "--find-renames", base_ref, head_ref, "--", *paths], cwd=root, env=env)
+            if not patch.strip():
+                raise ValueError(f"Git 仓库未返回文件差异，已阻止不完整审查：{path}")
+            diffs.append({"old_path": old_path, "new_path": new_path,
+                          "new_file": status.startswith("A"), "deleted_file": status.startswith("D"),
+                          "diff": patch})
+        if not diffs and api_diffs:
+            raise ValueError("任务仓库未能还原 GitLab 比较结果，已阻止不完整审查")
+        return diffs
+
+
 def _is_low_value_file(path):
     """识别锁文件、构建产物等不适合消耗 Agent 审查时间的文件。"""
     normalized = (path or "").replace("\\", "/")
@@ -2714,7 +2742,7 @@ def run_analysis(task: AnalysisTask, force_refresh=False):
                 if compare_base and compare_base == task.head_sha:
                     raise ValueError("目标 Commit 是基准 Commit 的祖先，基准与目标疑似颠倒，请交换后重试")
                 payload = client.compare(_task_repo(task).gitlab_project_id, task.base_sha, task.head_sha)
-                diffs = payload.get("diffs", [])
+                diffs = _complete_gitlab_diffs(task, payload.get("diffs"))
                 if compare_base:
                     task.base_sha = compare_base
 

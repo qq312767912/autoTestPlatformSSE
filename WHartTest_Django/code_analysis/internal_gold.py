@@ -133,7 +133,7 @@ def save_snapshot(*, task, actor, payload):
 
 
 def result(case, *, reused):
-    return {"case_id": str(case.pk), "dataset_id": str(case.version.dataset_id), "version_id": str(case.version_id), "state": case.state, "source_hash": case.source_hash, "reused": reused, "message": "内部金标样本已保存，人工初标已记录，待独立复核"}
+    return {"case_id": str(case.pk), "project_id": case.version.dataset.project_id, "dataset_id": str(case.version.dataset_id), "version_id": str(case.version_id), "state": case.state, "source_hash": case.source_hash, "reused": reused, "message": "内部金标样本已保存，人工初标已记录，待独立复核"}
 
 
 def library(*, actor, project_id, case_id=None, page=1):

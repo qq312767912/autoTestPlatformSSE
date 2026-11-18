@@ -86,7 +86,7 @@ export async function downloadReport(id: string, type: 'change'|'test') {
 export interface GoldFinding { index: number; key: string; title: string; file: string; severity: string; evidence: string }
 export interface GoldMark { index: number; label: 'confirmed' | 'false_positive' | 'uncertain'; comment: string }
 export interface InternalGoldContext { snapshot_hash: string; findings: GoldFinding[]; dataset_names: string[] }
-export interface InternalGoldResult { case_id: string; dataset_id: string; version_id: string; state: string; source_hash: string; reused: boolean; message: string }
+export interface InternalGoldResult { case_id: string; project_id: number; dataset_id: string; version_id: string; state: string; source_hash: string; reused: boolean; message: string }
 export interface InternalGoldSummary { id: string; title: string; dataset_name: string; version: string; state: string; created_at: string; source_hash: string; source_task_id: string }
 export interface InternalGoldSample extends InternalGoldSummary { input_snapshot: { title?: string; raw_diff?: string; change_report?: Record<string, unknown>; test_report?: Record<string, unknown>; [key: string]: unknown }; expected_output: { annotations: GoldMark[] }; evidence: unknown[]; privacy_level: string; allow_optimization: boolean }
 export async function getInternalGoldContext(id: string): Promise<InternalGoldContext> {
