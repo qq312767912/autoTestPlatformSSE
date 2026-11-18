@@ -1,10 +1,10 @@
 <template>
-  <a-modal :visible="visible" :title="mode==='configure'?'批量配置执行角色':'批量脚本执行'" :width="900" :footer="false" @cancel="emit('update:visible',false)">
+  <a-modal :visible="visible" :title="mode==='configure'?'设置所选用例的默认角色':'普通执行 · 角色与进度'" :width="900" :footer="false" @cancel="emit('update:visible',false)">
     <a-alert>同一份用例脚本按所选角色分别运行。批次按可用执行槽位排队，录制器浏览器串行执行；关闭窗口不停止后台任务。</a-alert>
     <a-alert v-if="error" type="error" style="margin-top:12px">{{error}}</a-alert>
     <a-form v-if="!batch" layout="vertical" style="margin-top:16px">
       <a-form-item label="执行环境"><a-select v-model="env"><a-option v-for="item in environments" :key="item.id" :value="item.id">{{item.name}}</a-option></a-select></a-form-item>
-      <a-checkbox v-if="mode==='execute'" v-model="shared">本批次统一使用下方角色（不修改用例默认配置）</a-checkbox>
+      <a-checkbox v-if="mode==='execute'" v-model="shared">为这次执行统一选择角色（可选多个，不修改默认配置）</a-checkbox>
       <p v-if="mode==='execute'&&!shared">按每条用例已有配置执行；没有角色配置的用例按原步骤运行一次。</p>
       <RoleMatrixEditor v-if="shared || mode==='configure'" v-model="roles" :env-id="env" />
       <p v-if="mode==='configure'">会将所选 {{ids.length}} 条用例的默认角色配置替换为这组角色；每条用例仍可遍历多个角色，不复制脚本。</p>

@@ -63,39 +63,42 @@
             {{ formatEnvLabel(env) }}
           </a-option>
         </a-select>
-        <a-button
-          type="primary"
-          status="success"
-          :disabled="selectedRowKeys.length === 0 || executingIds.length > 0"
-          :loading="executingIds.length > 0"
-          @click="runBatchTestCases"
-        >
-          <template #icon><icon-thunderbolt /></template>
-          {{ batchExecuteLabel }}
+        <a-button type="primary" :disabled="selectedRowKeys.length === 0" @click="executionChoiceVisible=true">
+          <template #icon><icon-play-arrow /></template>
+          执行所选{{ selectedRowKeys.length ? `（${selectedRowKeys.length}）` : '' }}
         </a-button>
-        <a-button v-if="authStore.hasPermission('ui_automation.change_uitestcase')" :disabled="selectedRowKeys.length===0" @click="scriptBatchMode='configure';scriptBatchVisible=true">批量配置角色</a-button>
-        <a-button @click="scriptBatchMode='execute';scriptBatchVisible=true">脚本批次进度</a-button>
-        <a-button v-if="authStore.hasPermission('ui_automation.change_uitestcase')" type="primary" :disabled="selectedRowKeys.length === 0" @click="healingVisible = true">批量执行并自愈</a-button>
-        <a-button v-if="hasHealingBatch" @click="healingVisible = true">自愈批次进度</a-button>
-        <a-popconfirm
-          :content="pageText.batchDeleteConfirm"
-          @ok="batchDeleteTestCases"
-        >
-          <a-button
-            type="primary"
-            status="danger"
-            :disabled="selectedRowKeys.length === 0"
-          >
-            <template #icon><icon-delete /></template>
-            {{ batchDeleteLabel }}
-          </a-button>
-        </a-popconfirm>
+        <a-dropdown trigger="click">
+          <a-button>执行进度 <icon-down /></a-button>
+          <template #content>
+            <a-doption @click="scriptBatchMode='execute';scriptBatchVisible=true">普通执行进度</a-doption>
+            <a-doption :disabled="!hasHealingBatch" @click="healingVisible=true">自动修复执行进度</a-doption>
+          </template>
+        </a-dropdown>
+        <a-dropdown trigger="click">
+          <a-button>更多 <icon-down /></a-button>
+          <template #content>
+            <a-doption v-if="authStore.hasPermission('ui_automation.change_uitestcase')" :disabled="!selectedRowKeys.length" @click="scriptBatchMode='configure';scriptBatchVisible=true">设置所选用例的默认角色</a-doption>
+            <a-doption :disabled="!selectedRowKeys.length" @click="confirmBatchDelete"><span style="color:var(--color-danger-6)">删除所选用例</span></a-doption>
+          </template>
+        </a-dropdown>
         <a-button type="primary" @click="showAddModal">
           <template #icon><icon-plus /></template>
           {{ pageText.addCase }}
         </a-button>
       </div>
     </div>
+
+    <a-modal v-model:visible="executionChoiceVisible" title="执行所选用例" :width="560" :footer="false">
+      <p class="execution-intro">已选择 {{selectedRowKeys.length}} 条用例，请选择执行方式。</p>
+      <button class="execution-option" @click="executionChoiceVisible=false;runBatchTestCases()">
+        <strong>普通执行 <span>推荐</span></strong>
+        <small>按脚本排队运行，查看通过与失败结果；下一步可统一选择多个角色。</small>
+      </button>
+      <button v-if="authStore.hasPermission('ui_automation.change_uitestcase')" class="execution-option" @click="executionChoiceVisible=false;healingVisible=true">
+        <strong>执行并自动修复</strong>
+        <small>失败后由 AI 尝试修复并重跑；修复会保存到原有用例和步骤。</small>
+      </button>
+    </a-modal>
 
     <UiBatchHealingModal v-if="projectId" v-model:visible="healingVisible" :project="projectId" :ids="selectedRowKeys" :environments="envConfigs" :initial-env="selectedEnvConfig" @finished="fetchTestCases" />
     <a-table
@@ -239,8 +242,8 @@ import { useAuthStore } from '@/store/authStore'
 import FileAttachmentPicker from '@/features/file-management/components/FileAttachmentPicker.vue'
 import ExecutionScreenModal from '../components/ExecutionScreenModal.vue'
 import { ref, reactive, computed, onMounted, watch, onUnmounted } from 'vue'
-import { Message } from '@arco-design/web-vue'
-import { IconPlus, IconEdit, IconDelete, IconOrderedList, IconPlayArrow, IconThunderbolt, IconCopy } from '@arco-design/web-vue/es/icon'
+import { Message, Modal } from '@arco-design/web-vue'
+import { IconDown, IconPlus, IconEdit, IconDelete, IconOrderedList, IconPlayArrow, IconThunderbolt, IconCopy } from '@arco-design/web-vue/es/icon'
 import { useProjectStore } from '@/store/projectStore'
 import { useAppI18n } from '@/composables/useAppI18n'
 import { testCaseApi, moduleApi, actuatorApi, envConfigApi, type ActuatorInfo } from '../api'
@@ -408,6 +411,8 @@ const pageText = computed(() => (
       }
 ))
 
+const executionChoiceVisible=ref(false)
+const confirmBatchDelete=()=>Modal.confirm({title:'删除所选用例？',content:pageText.value.batchDeleteConfirm,onOk:batchDeleteTestCases})
 const healingVisible = ref(false)
 const hasHealingBatch = computed(() => { healingVisible.value; return !!localStorage.getItem(`ui-healing-run:${projectId.value}`) })
 const loading = ref(false)
@@ -964,6 +969,13 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.execution-intro { margin: 0 0 16px; color: var(--color-text-2); }
+.execution-option { display: block; width: 100%; padding: 18px; margin-bottom: 12px; text-align: left; background: var(--color-bg-2); border: 1px solid var(--color-border-2); border-radius: 6px; cursor: pointer; color: var(--color-text-1); transition: border-color .15s, background .15s; }
+.execution-option:hover, .execution-option:focus-visible { border-color: rgb(var(--primary-6)); background: var(--color-fill-1); }
+.execution-option strong { display: block; margin-bottom: 8px; font-size: 15px; }
+.execution-option strong span { margin-left: 8px; font-size: 12px; font-weight: normal; color: rgb(var(--primary-6)); }
+.execution-option small { display: block; font-size: 13px; line-height: 1.7; color: var(--color-text-3); }
+
 .testcase-list {
   padding: 16px;
 }

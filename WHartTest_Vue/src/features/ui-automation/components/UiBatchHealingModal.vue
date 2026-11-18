@@ -1,5 +1,5 @@
 <template>
-  <a-modal :visible="visible" title="UI 用例批量执行并自愈" :width="900" :footer="false" @cancel="close">
+  <a-modal :visible="visible" title="执行并自动修复" :width="900" :footer="false" @cancel="close">
     <a-alert style="margin-bottom:16px">先执行脚本，仅对失败项尝试一次 AI 修复，再重跑验证。保留业务断言；关闭窗口不停止后台任务。使用平台浏览器，登录态沿用各用例的页面步骤配置。</a-alert>
     <a-alert v-if="error" type="error" role="alert" style="margin-bottom:16px">{{ error }}</a-alert>
     <template v-if="!session">
