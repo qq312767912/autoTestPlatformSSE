@@ -2043,7 +2043,10 @@ async function cmdInput(params) {
 // ---------------------------------------------------------------------------
 
 /** 页面诊断挂钩：采集页面 JS 错误（执行日志展示，与执行器 _page_errors 对齐） */
+const diagnosticPages = new WeakSet();
 function attachPageDiagnostics(page) {
+  if (diagnosticPages.has(page)) return;
+  diagnosticPages.add(page);
   try {
     page.on('pageerror', (err) => {
       const msg = String((err && err.message) || err || 'undefined');
@@ -2264,6 +2267,49 @@ async function runOneStep(page, step) {
   if (opeKey === 'wait') {
     const ms = parseInt(inputValue, 10);
     await page.waitForTimeout(Number.isFinite(ms) ? ms : 1000);
+    return null;
+  }
+
+  // 页签与 URL 属于页面级操作，不能要求元素定位。
+  if (opeKey === 'switch_tab') {
+    const query = inputValue.trim();
+    if (!query) return '切换页签参数为空，请输入索引、URL或页签标题';
+    const index = /^\d+$/.test(query) ? Number(query) : null;
+    const deadline = Date.now() + 10000;
+    let target = null;
+    while (Date.now() < deadline) {
+      const pages = page.context().pages().filter(p => !p.isClosed());
+      if (index !== null) target = pages[index] || null;
+      else {
+        const matches = [];
+        for (const candidate of pages) {
+          let title = '';
+          try { title = await candidate.title(); } catch (_) {}
+          if (candidate.url().includes(query) || title.includes(query)) matches.push(candidate);
+        }
+        if (matches.length > 1) return '多个页签匹配 ' + query + '，请使用明确的URL、标题或索引';
+        target = matches[0] || null;
+      }
+      if (target) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    if (!target) return '未找到目标页签：' + query;
+    await target.bringToFront();
+    stopFrameLoop();
+    stopFrameStream();
+    state.page = target;
+    attachPageDiagnostics(target);
+    const streamed = await startFrameStream(target);
+    startFrameLoop(streamed ? 400 : 250, streamed ? 300 : 0);
+    return null;
+  }
+  if (opeKey === 'assert_url') {
+    if (!inputValue) return 'URL断言缺少预期地址';
+    try {
+      await page.waitForURL(inputValue, { timeout: 10000, waitUntil: 'domcontentloaded' });
+    } catch (_) {
+      return 'URL断言失败，预期：' + inputValue + '，实际：' + page.url();
+    }
     return null;
   }
 
