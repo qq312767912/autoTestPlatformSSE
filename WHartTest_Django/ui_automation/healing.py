@@ -232,6 +232,8 @@ def process_batch(pk):
             logger.exception('UI healing failed case=%s', snapshot['id'])
             item.update(status='failed', message=str(exc)[:500] if isinstance(exc, ValueError) else '执行异常，请查看批次会话及服务日志')
         finally:
+            # 先发布本项结果，再清理浏览器；关闭超时不能遮蔽失败反馈。
+            update_run(pk, items=items, heartbeat_at=timezone.now().isoformat())
             try: run_ui_browser(binding, 'close', [])
             except Exception: pass
         update_run(pk, items=items)

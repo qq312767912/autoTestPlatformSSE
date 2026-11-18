@@ -19,6 +19,33 @@ def update_run(pk, **changes):
         return run
 
 
+async def consume_stream_result(stream, parent_id=None):
+    # 消费 SSE 终态，不能把会话异常/停止当成一次正常修复。
+    buffer = ''
+    completed = False
+    async for chunk in stream:
+        buffer += chunk.decode('utf-8') if isinstance(chunk, bytes) else str(chunk)
+        while '\n\n' in buffer:
+            frame, buffer = buffer.split('\n\n', 1)
+            data = '\n'.join(line[5:].lstrip() for line in frame.splitlines() if line.startswith('data:'))
+            if not data or data == '[DONE]':
+                continue
+            try:
+                event = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if event.get('type') == 'error':
+                raise ValueError('AI 会话失败：' + str(event.get('message') or '未知执行错误')[:400])
+            if event.get('type') == 'complete':
+                if event.get('status') == 'stopped':
+                    if parent_id:
+                        await sync_to_async(update_run)(parent_id, cancel_requested=True)
+                    raise ValueError('AI 会话已停止，未完成本次修复')
+                completed = True
+    if not completed:
+        raise ValueError('AI 会话连接已结束，但未收到完成结果，请查看批次会话')
+
+
 async def consume(binding, message, parent_id=None):
     from django.test import RequestFactory
     from rest_framework_simplejwt.tokens import AccessToken
@@ -54,8 +81,7 @@ async def consume(binding, message, parent_id=None):
                 return
     monitor = asyncio.create_task(monitor_cancel()) if parent_id else None
     try:
-        async for _ in response.streaming_content:
-            pass
+        await consume_stream_result(response.streaming_content, parent_id)
     finally:
         if monitor:
             monitor.cancel()
