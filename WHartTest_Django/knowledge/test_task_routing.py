@@ -50,3 +50,12 @@ class TaskQueueIsolationTests(SimpleTestCase):
         config.read(Path(settings.BASE_DIR) / 'supervisord.conf')
         self.assertIn('--port 8000 --workers=1', config['program:django']['command'])
         self.assertIn('--port 8001 --workers=3', config['program:django_core']['command'])
+
+    def test_frontend_routes_only_safe_core_endpoints_to_pool(self):
+        import re
+        source = (Path(settings.BASE_DIR).parent / 'WHartTest_Vue/nginx.conf').read_text()
+        pattern = re.search(r'location ~ (.+) \{', source).group(1)
+        for path in ['/api/accounts/users/1/permissions/', '/api/auth/login-key/', '/api/token/', '/api/projects/', '/api/projects/31/', '/api/projects/31/statistics/']:
+            self.assertIsNotNone(re.search(pattern, path), path)
+        for path in ['/api/lg/chat/sessions/', '/api/orchestrator/agent-loop/', '/api/ui-automation/status/', '/api/projects/31/testcases/', '/ws/ui/actuator/']:
+            self.assertIsNone(re.search(pattern, path), path)
