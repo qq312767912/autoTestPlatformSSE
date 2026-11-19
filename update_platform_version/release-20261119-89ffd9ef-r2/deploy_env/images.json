@@ -1,0 +1,84 @@
+[
+  {
+    "component": "backend",
+    "tag": "wharttest-250-backend:update-20261119-89ffd9ef-r2-arm64",
+    "image_id": "sha256:6d094875b1c84254eefbde83cb90e75f534420bdb44cf31c9f11311ae13bcb83",
+    "platform": "linux/arm64",
+    "revision": "20261119-89ffd9ef-r2",
+    "dockerfile": "WHartTest_Django/Dockerfile.alpine",
+    "exported_parts": {
+      "backend-20261119-89ffd9ef-r2-arm64.tar.gz.part000": {
+        "bytes": 293601280,
+        "sha256": "2e583f164a190b3ad5652e4832df04f45904f92446efe7b2ca64a7b10a49758a"
+      },
+      "backend-20261119-89ffd9ef-r2-arm64.tar.gz.part001": {
+        "bytes": 293601280,
+        "sha256": "414727c271b16c240c6d24d1caf35f3669c2e0824d99f4b6675843fe0cdaa17a"
+      },
+      "backend-20261119-89ffd9ef-r2-arm64.tar.gz.part002": {
+        "bytes": 210819189,
+        "sha256": "208f128dd8f98fce9953d4b28712b2b2f100da26f00db80d646649a00c881e4d"
+      }
+    }
+  },
+  {
+    "component": "frontend",
+    "tag": "wharttest-250-frontend:update-20261119-89ffd9ef-r2-arm64",
+    "image_id": "sha256:0cc06c7ba995f9a4f663b7dcd46243e984819c6f1db9231c2befccf4d68b4c1b",
+    "platform": "linux/arm64",
+    "revision": "20261119-89ffd9ef-r2",
+    "dockerfile": "WHartTest_Vue/Dockerfile",
+    "exported_parts": {
+      "frontend-20261119-89ffd9ef-r2-arm64.tar.gz.part000": {
+        "bytes": 31046104,
+        "sha256": "0133256652452b4a758e57dfee1da20e2d59292741114606e2387f6c13cffd3c"
+      }
+    }
+  },
+  {
+    "component": "semgrep",
+    "tag": "wharttest-250-semgrep:update-20261119-89ffd9ef-r2-arm64",
+    "image_id": "sha256:c9620cf6f523eb38817f9666575da1caee8034bc83decd9c701772a737ae9b59",
+    "platform": "linux/arm64",
+    "revision": "20261119-89ffd9ef-r2",
+    "dockerfile": "WHartTest_Semgrep/Dockerfile",
+    "exported_parts": {
+      "semgrep-20261119-89ffd9ef-r2-arm64.tar.gz.part000": {
+        "bytes": 130147381,
+        "sha256": "8c0dad5f628c528c32a6c378ec04dcb64b5c83b4850f6bd74ed959c2e9d40323"
+      }
+    }
+  },
+  {
+    "component": "crg",
+    "tag": "wharttest-250-crg:update-20261119-89ffd9ef-r2-arm64",
+    "image_id": "sha256:9c4db5c0a62c6cb165ee3bda2563dc272d4f7b5889600e939758487f177f68bb",
+    "platform": "linux/arm64",
+    "revision": "20261119-89ffd9ef-r2",
+    "dockerfile": "WHartTest_CRG/Dockerfile",
+    "exported_parts": {
+      "crg-20261119-89ffd9ef-r2-arm64.tar.gz.part000": {
+        "bytes": 93422166,
+        "sha256": "961ec5686b91dcabb9e3434529b4835232c1ad3cdc29ebebd4a5bfe74acff435"
+      }
+    }
+  },
+  {
+    "component": "actuator",
+    "tag": "wharttest-250-actuator:update-20261119-89ffd9ef-r2-arm64",
+    "image_id": "sha256:d213c26774ccea7cdc46a76009b477df110e965bead0cf3f13fb330edd69ab50",
+    "platform": "linux/arm64",
+    "revision": "20261119-89ffd9ef-r2",
+    "dockerfile": "WHartTest_Actuator/Dockerfile.alpine-arm64",
+    "exported_parts": {
+      "actuator-20261119-89ffd9ef-r2-arm64.tar.gz.part000": {
+        "bytes": 293601280,
+        "sha256": "e510b975ea530de04872e533b75d62212866a988f3f37761ad3d41d1b6034b3e"
+      },
+      "actuator-20261119-89ffd9ef-r2-arm64.tar.gz.part001": {
+        "bytes": 216638260,
+        "sha256": "8780e6fb6a45b27846e41b2f93dd9c2783233ad2a082e035ba4f8cfd2fdd0238"
+      }
+    }
+  }
+]

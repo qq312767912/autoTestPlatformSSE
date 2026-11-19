@@ -1,0 +1,18 @@
+源码：dev / 89ffd9ef
+镜像版本：20261119-89ffd9ef-r2
+目标：麒麟 ARM64 64KB，目标验收由03-import-images.sh执行。
+
+本次完整源码构建：
+- wharttest-250-backend:update-20261119-89ffd9ef-r2-arm64 [linux/arm64]
+  Dockerfile: WHartTest_Django/Dockerfile.alpine
+- wharttest-250-frontend:update-20261119-89ffd9ef-r2-arm64 [linux/arm64]
+  Dockerfile: WHartTest_Vue/Dockerfile
+- wharttest-250-semgrep:update-20261119-89ffd9ef-r2-arm64 [linux/arm64]
+  Dockerfile: WHartTest_Semgrep/Dockerfile
+- wharttest-250-crg:update-20261119-89ffd9ef-r2-arm64 [linux/arm64]
+  Dockerfile: WHartTest_CRG/Dockerfile
+- wharttest-250-actuator:update-20261119-89ffd9ef-r2-arm64 [linux/arm64]
+  Dockerfile: WHartTest_Actuator/Dockerfile.alpine-arm64
+
+复用：内网现有 PostgreSQL、Redis、麒麟64KB专用Qdrant、MCP、Playwright MCP、Vision MCP、Host Sync。
+端口与挂载：从实际运行容器快照生成，保持现有80端口入口；不修改宿主机hosts。

@@ -1,0 +1,51 @@
+{
+  "source_head": "89ffd9ef",
+  "local_validation": [
+    "Semgrep ARM64/Alpine/musl CLI 1.178.0",
+    "Frontend full build and nginx -t",
+    "Compose snapshot preserves port80, external networks, data mounts and dollar-containing credentials; actual environment escape checked in disposable container",
+    "Semgrep native scan: exit0, one finding, zero errors",
+    "CRG2.3.9 health and exact app.py/worker.py source hashes verified",
+    "Backend Alpine/musl CLI: OpenCodeReview/ocr 1.13.13 installed",
+    "Backend Node Playwright launched system Chromium156.0.8078.79",
+    "Backend 8 runtime tests passed inside complete Alpine image",
+    "CRG native Python grammar parsed successfully",
+    "Critical Backend and CRG source hashes match git snapshot",
+    "Actuator Python3.12 + system Node24 + Playwright launched Chromium156.0.8078.79",
+    "Actuator critical source hashes match Git snapshot",
+    "All five images exported as linux/arm64 parts <=280MiB",
+    "All deployment shell scripts parsed; Compose snapshot/rollback configs validated"
+  ],
+  "reused_services": [
+    "postgres",
+    "redis",
+    "qdrant",
+    "mcp",
+    "playwright-mcp",
+    "vision-mcp",
+    "host-sync"
+  ],
+  "rebuilt_components": [
+    "backend",
+    "frontend",
+    "semgrep",
+    "crg",
+    "actuator"
+  ],
+  "target_kernel_validation": "Required by 03-import-images.sh on Kylin ARM64 64KB; not performed locally",
+  "local_isolation_test": {
+    "authenticated_concurrency": 35,
+    "success": 35,
+    "max_seconds": 6.622,
+    "stateful_process_suspended": true,
+    "baseline_status": 200,
+    "scope": "Authenticated basic HTTP requests, not 35 simultaneous model inferences"
+  },
+  "cli_versions": {
+    "open_code_review": "1.13.13",
+    "semgrep": "1.178.0",
+    "code_review_graph": "2.3.9",
+    "chromium": "156.0.8078.79",
+    "node": "24.22.3"
+  }
+}

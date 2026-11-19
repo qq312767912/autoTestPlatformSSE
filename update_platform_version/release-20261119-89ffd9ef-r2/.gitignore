@@ -1,0 +1,13 @@
+images/
+build-logs/
+backups/
+*.zip
+*.tar.gz
+__pycache__/
+deploy_env/.latest-backup
+deploy_env/.installed-backup
+deploy_env/*.log
+deploy_env/.images-validated
+*.log
+nginx.stage.conf
+release-integration.json
