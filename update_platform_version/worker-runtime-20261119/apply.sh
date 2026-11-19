@@ -6,6 +6,15 @@ command -v timeout >/dev/null
 [[ "$(docker inspect --format '{{.Config.Image}}' "$C")" == 'wharttest-250-backend:update-20261109-ai-coverage-r1-arm64' ]] || { echo '镜像与采集版本不符'; exit 1; }
 # 先在目标运行时检查控制响应及运行任务，不清理任何队列。
 timeout 40 docker exec -w /app "$C" python -c 'from wharttest_django.celery import app; r=app.control.inspect(timeout=15).active(); assert r and not any(r.values()), "消费者忙碌或无响应，请等待任务结束"'
+# 旧默认队列可能仍有审查消息；必须排空，避免新旧路由同时执行审查。
+timeout 30 docker exec -w /app "$C" python -c '
+from wharttest_django.celery import app
+with app.connection_for_read() as connection:
+ channel = connection.channel()
+ pending = {name: channel.queue_declare(queue=name, passive=True).message_count for name in ("celery", "task_center")}
+ assert not any(pending.values()), ("旧队列尚有积压，请暂停提交并等待排空", pending)
+ print("旧队列已排空")
+'
 B="$BASE/backup-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$B/wharttest_django"
 docker cp "$C:/app/supervisord.conf" "$B/supervisord.conf"
