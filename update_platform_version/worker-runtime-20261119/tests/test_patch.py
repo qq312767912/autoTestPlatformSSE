@@ -35,6 +35,10 @@ class LegacyPatchTests(unittest.TestCase):
         self.assertIn('--port 8000 --workers=1', config['program:django']['command'])
         self.assertIn('--port 8001 --workers=3', config['program:django_core']['command'])
         self.assertEqual(len([s for s in config.sections() if ' worker ' in config[s].get('command', '')]), 6)
+        for name in ('code_analysis', 'testcase_review'):
+            self.assertIn('--pool=solo --concurrency=1', config['program:celery_'+name]['command'])
+        for name in ('worker', 'knowledge', 'task_center', 'ui_execution'):
+            self.assertIn('--pool=threads', config['program:celery_'+name]['command'])
         self.assertIn('http://backend:8001', (self.root / 'frontend.conf').read_text())
         self.assertNotEqual(self.run_patch().returncode, 0)
 

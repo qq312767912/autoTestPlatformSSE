@@ -28,7 +28,12 @@ class TaskQueueIsolationTests(SimpleTestCase):
             command = config[section].get('command', '')
             if ' worker ' not in command:
                 continue
-            self.assertIn('--pool=solo --concurrency=1', command)
+            if section in ('program:celery_code_analysis', 'program:celery_testcase_review'):
+                self.assertIn('--pool=solo --concurrency=1', command)
+            else:
+                self.assertIn('--pool=threads', command)
+                import re
+                self.assertGreater(int(re.search(r'--concurrency=(\d+)', command).group(1)), 1)
             queue = command.split(' -Q ')[1].split()[0]
             self.assertNotIn(',', queue)
             self.assertNotIn(queue, consumers)

@@ -17,7 +17,8 @@ for p in Path("/proc").glob("[0-9]*/cmdline"):
  try: commands.append(p.read_bytes().replace(b"\x00",b" ").decode())
  except (OSError,UnicodeError): pass
 for name,queue in {"default":"celery","code_analysis":"code_analysis","testcase_review":"testcase_review","knowledge":"knowledge","ui_execution":"ui_execution","task_center":"task_center"}.items():
- assert any(" worker " in c and "-n "+name+"@" in c and "-Q "+queue+" " in c for c in commands), name
+ expected = "--pool=solo --concurrency=1" if name in {"code_analysis", "testcase_review"} else "--pool=threads --concurrency="+str(2 if name=="knowledge" else 4)
+ assert any(" worker " in c and "-n "+name+"@" in c and "-Q "+queue+" " in c and expected in c for c in commands), name
 print("六个独立消费者进程检查通过")
 '
 docker top "$C" -eo pid,ppid,pcpu,pmem,etime,args

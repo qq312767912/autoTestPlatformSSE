@@ -16,11 +16,12 @@ p.read_string(original)
 old = p['program:celery_worker']['command']
 if '-Q celery,task_center' not in old or '--pool=solo' not in old:
     raise SystemExit('消费者命令与预期不符')
-original = original.replace(old, old.replace('-Q celery,task_center', '-n default@%%h -Q celery --prefetch-multiplier=1'), 1)
+original = original.replace(old, old.replace('-Q celery,task_center', '-n default@%%h -Q celery --prefetch-multiplier=1').replace('--pool=solo --concurrency=1', '--pool=threads --concurrency=4'), 1)
 for queue in ['code_analysis', 'testcase_review', 'knowledge', 'ui_execution', 'task_center']:
+    pool, concurrency = ('solo', 1) if queue in {'code_analysis', 'testcase_review'} else ('threads', 2 if queue == 'knowledge' else 4)
     original += f'''
 [program:celery_{queue}]
-command=celery -A wharttest_django -b redis://redis:6379/0 worker -l info --pool=solo --concurrency=1 --prefetch-multiplier=1 -n {queue}@%%h -Q {queue}
+command=celery -A wharttest_django -b redis://redis:6379/0 worker -l info --pool={pool} --concurrency={concurrency} --prefetch-multiplier=1 -n {queue}@%%h -Q {queue}
 directory=/app
 autostart=true
 autorestart=true
