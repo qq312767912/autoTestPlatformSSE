@@ -74,3 +74,33 @@ asyncio.run(run())
             result = subprocess.run([sys.executable, '-c', script], timeout=5, capture_output=True)
             self.assertEqual(result.returncode, 70, result.stderr)
             self.assertIn('loop stalled', Path(dump).read_text())
+
+    def test_35_streams_wait_for_model_concurrently(self):
+        # 模拟模型等待，验证 ASGI 包装层不会将不同会话串行化；不代表真实模型容量。
+        async def exercise():
+            started = set()
+            ready = asyncio.Event()
+            release = asyncio.Event()
+            async def app(scope, receive, send):
+                await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+                started.add(scope['session'])
+                if len(started) == 35:
+                    ready.set()
+                await release.wait()
+                await send({'type': 'http.response.body', 'body': b'data: done\n\n'})
+            wrapped = WatchedApplication(app)
+            async def consume(session):
+                output = []
+                async def send(event):
+                    output.append(event)
+                await wrapped({'type': 'http', 'session': session}, None, send)
+                return output
+            tasks = [asyncio.create_task(consume(i)) for i in range(35)]
+            try:
+                await asyncio.wait_for(ready.wait(), timeout=2)
+            finally:
+                release.set()
+                results = await asyncio.gather(*tasks)
+            self.assertEqual(len(started), 35)
+            self.assertTrue(all(r[-1]['body'] == b'data: done\n\n' for r in results))
+        asyncio.run(exercise())
