@@ -80,6 +80,8 @@ services:
 
   # 后端 Django 服务（包含Celery Worker和Beat）
   backend:
+    # 给独立后台消费者留出正常退出时间。
+    stop_grace_period: 240s
     image: ${DOCKER_BACKEND_IMAGE:-ghcr.io/mgdaaslab/wharttest-backend:latest}
     # 如果需要本地构建，注释掉上面的image行，取消注释下面的build部分
     # build:
