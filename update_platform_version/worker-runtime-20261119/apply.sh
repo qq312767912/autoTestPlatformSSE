@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
 umask 077
+if [[ -f "$BASE/SHA256SUMS" ]]; then (cd "$BASE" && sha256sum -c SHA256SUMS); fi
 command -v timeout >/dev/null
 [[ "$(docker inspect --format '{{.Config.Image}}' "$C")" == 'wharttest-250-backend:update-20261109-ai-coverage-r1-arm64' ]] || { echo '镜像与采集版本不符'; exit 1; }
 # 先在目标运行时检查控制响应及运行任务，不清理任何队列。
