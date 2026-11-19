@@ -716,9 +716,13 @@ CELERY_TASK_SERIALIZER = "json"  # 任务消息序列化格式。
 CELERY_RESULT_SERIALIZER = "json"  # 任务结果序列化格式。
 CELERY_ACCEPT_CONTENT = ["json"]  # Worker 允许接收的消息内容类型。
 
+# 显式加载非标准 tasks.py 模块，避免冷启动遗漏任务注册。
+CELERY_IMPORTS = ('testcases.review_tasks',)
+
 # 耗时业务独立队列；必须同时部署 supervisord.conf 中的专用 worker。
 CELERY_TASK_ROUTES = {
     'ui_automation.run_ui_script_batch': {'queue':'ui_execution'},
+    'ui_automation.run_ui_healing': {'queue': 'ui_execution'},
     'knowledge.process_document': {'queue': 'knowledge'},
     'code_analysis.tasks.*': {'queue': 'code_analysis'},
     'testcases.review_tasks.*': {'queue': 'testcase_review'},

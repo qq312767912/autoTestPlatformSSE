@@ -12,6 +12,7 @@ class TaskQueueIsolationTests(SimpleTestCase):
         app.conf.task_routes = settings.CELERY_TASK_ROUTES
         expected = {
             'ui_automation.run_ui_script_batch': 'ui_execution',
+            'ui_automation.run_ui_healing': 'ui_execution',
             'knowledge.process_document': 'knowledge',
             'code_analysis.tasks.run_code_analysis': 'code_analysis',
             'code_analysis.tasks.retry_code_analysis_ocr': 'code_analysis',
@@ -37,3 +38,15 @@ class TaskQueueIsolationTests(SimpleTestCase):
             self.assertEqual(routed['queue'].name, queue, task)
             self.assertIn(queue, consumers, task)
         app.close()
+
+    def test_review_task_registered_without_loading_http_urls(self):
+        from wharttest_django.celery import app
+        app.loader.import_default_modules()
+        app.autodiscover_tasks(force=True)
+        self.assertIn('testcases.review_tasks.execute_testcase_review', app.tasks)
+
+    def test_core_http_pool_preserves_stateful_single_worker(self):
+        config = configparser.ConfigParser(interpolation=None)
+        config.read(Path(settings.BASE_DIR) / 'supervisord.conf')
+        self.assertIn('--port 8000 --workers=1', config['program:django']['command'])
+        self.assertIn('--port 8001 --workers=3', config['program:django_core']['command'])

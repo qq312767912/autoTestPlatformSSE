@@ -58,3 +58,7 @@ application = ProtocolTypeRouter(
         ),
     }
 )
+
+# 独立 Web 进程卡死时保存线程栈并恢复，不中断后台队列。
+from .web_runtime import WatchedApplication
+application = WatchedApplication(application)
