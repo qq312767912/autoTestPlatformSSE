@@ -62,6 +62,8 @@ services:
 
   # 后端 Django 服务（包含Celery Worker和Beat）
   backend:
+    # 给独立后台消费者留出正常退出时间。
+    stop_grace_period: 240s
     # 本地构建模式
     build:
       context: ./WHartTest_Django

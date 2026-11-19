@@ -60,6 +60,8 @@ services:
     restart: unless-stopped
 
   backend:
+    # 给独立后台消费者留出正常退出时间。
+    stop_grace_period: 240s
     build:
       context: ./WHartTest_Django
       dockerfile: Dockerfile

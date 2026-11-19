@@ -71,6 +71,8 @@ services:
 
   # 后端 Django 服务（含 Celery Worker 和 Beat）
   backend:
+    # 给独立后台消费者留出正常退出时间。
+    stop_grace_period: 240s
     image: wharttest-250-backend:latest
     container_name: wharttest-backend
     ports:
