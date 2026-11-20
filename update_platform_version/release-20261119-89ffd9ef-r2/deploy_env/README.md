@@ -62,3 +62,11 @@ sudo bash 06-rollback-app.sh
 保留当前 `.latest-backup`、`.images-validated` 和同级 backups/secrets/deploy_env.bak，不删除或重新执行02备份。将本完整ZIP解压到临时目录后，把文件覆盖复制到当前deploy_env（不要先删除当前目录），执行 `sudo bash 04-deploy.sh 2>&1 | tee /tmp/deploy-result.log`，然后执行05。
 
 正式流程已集成prepare_assets.py和07-start-actuators.sh：在停服务之前备份原秘密文件和回滚配置为独立挂载，缺失时从备份/旧部署目录/仍可读取的现有容器恢复；存在冲突则停止，不随机生成密码。后端就绪后实际换取Token验证三个执行器的原凭据，再逐个重建。回滚同样使用固化文件，不依赖被覆盖的旧deploy_env路径。
+
+## WebSocket鉴权与ONES临时修复
+
+正式部署会保留非空的后端UI_WS_ACTUATOR_TOKEN，并同步到三个执行器；原值为空时只为新版本生成并持久保存一个共享token，不更改平台账号密码，不关闭WS鉴权。重试发布复用同一个token。逐个执行器启动后，由05确认其真实注册。
+
+Playwright MCP复用原镜像，但启动前检查并补齐遗失的入口脚本/模板，异常目录保留，不覆盖已有有效文件。
+
+ONES临时修复已放入ones-url-hotfix子目录，发版并通过05后，在无运行任务窗口执行 `sudo bash ones-url-hotfix/apply.sh`；默认https://10.122.212.49:60000，包含TLS检测、精确源码校验、备份回滚。它会重启后端；不必重新传输镜像。后续新镜像将使用Git中已保存的全局地址配置功能。

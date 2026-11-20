@@ -5,6 +5,11 @@ python3 "$HERE/prepare_assets.py" "$B" "$HERE"
 python3 - "$B/compose.runtime.json" <<'PY'
 import json,subprocess,sys
 c=json.load(open(sys.argv[1]))
+# 确认运行中的后端已加载本次共享token，而不是只检查JSON文件。
+expected=c['services']['backend']['environment']['UI_WS_ACTUATOR_TOKEN'].replace('$$','$')
+check='import os,sys,hmac;os.environ.setdefault("DJANGO_SETTINGS_MODULE","wharttest_django.settings");import django;django.setup();from django.conf import settings;assert hmac.compare_digest(str(settings.UI_WS_ACTUATOR_TOKEN),sys.stdin.read()), "后端实际WS鉴权配置与发布配置不一致，请先执行04";print("后端WS鉴权配置验证通过")'
+subprocess.run(['docker','exec','-i','wharttest-backend','python','-c',check],input=expected,text=True,check=True)
+
 for key in ['actuator-01','actuator-02','actuator-03']:
  s=c['services'][key];env=s['environment'];target=env['WHARTTEST_ACTUATOR_API_PASSWORD_FILE'];m=next(m for m in s['volumes'] if m['target']==target)
  # Compose文件中的$$在真正启动时变为$，这里同样还原。

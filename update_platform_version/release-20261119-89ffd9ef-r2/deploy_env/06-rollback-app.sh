@@ -3,6 +3,7 @@ source "$(dirname "$0")/common.sh"
 B="${1:-$(python3 "$HERE/resolve_backup.py" "$HERE")}"
 [[ -f "$B/BACKUP_COMPLETE" ]]
 python3 "$HERE/prepare_assets.py" "$B" "$HERE"
+python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);from prepare_runtime import protect_mcp;protect_mcp(sys.argv[1])' "$HERE"
 project=$(cat "$B/project")
 docker compose -p "$project" -f "$B/compose.rollback.json" up -d --no-deps --pull never
 while IFS= read -r c; do [[ -z "$c" ]] || docker start "$c" >/dev/null; done < "$B/stopped-containers"

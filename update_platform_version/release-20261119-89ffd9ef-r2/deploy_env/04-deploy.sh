@@ -3,6 +3,7 @@ source "$(dirname "$0")/common.sh"
 B=$(python3 "$HERE/resolve_backup.py" "$HERE")
 [[ -f "$B/BACKUP_COMPLETE" ]]
 python3 "$HERE/prepare_assets.py" "$B" "$HERE"
+python3 "$HERE/prepare_runtime.py" "$B" "$HERE"
 project=$(cat "$B/project")
 compose=(docker compose -p "$project" -f "$B/compose.runtime.json")
 trap 'echo "部署失败，开始恢复原容器配置与镜像"; bash "$HERE/06-rollback-app.sh" "$B"' ERR

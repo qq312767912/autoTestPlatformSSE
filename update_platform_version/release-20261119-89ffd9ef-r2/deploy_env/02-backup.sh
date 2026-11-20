@@ -7,6 +7,7 @@ B="$HERE/../backups/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$B"
 python3 "$HERE/snapshot_runtime.py" "$B"
 python3 "$HERE/prepare_assets.py" "$B" "$HERE"
+python3 "$HERE/prepare_runtime.py" "$B" "$HERE"
 project=$(cat "$B/project")
 docker compose -p "$project" -f "$B/compose.runtime.json" config -q
 docker compose -p "$project" -f "$B/compose.rollback.json" config -q
