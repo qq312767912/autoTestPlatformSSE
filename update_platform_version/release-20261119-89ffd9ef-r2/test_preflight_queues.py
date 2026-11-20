@@ -10,9 +10,10 @@ spec.loader.exec_module(m)
 
 class QueueCheckTests(unittest.TestCase):
     def test_missing_queue_is_empty(self):
-        c=Mock(); c.channel.return_value.queue_declare.side_effect=ChannelError('missing', reply_code=404)
-        self.assertEqual(m.pending_count(c,'missing'),0)
-        c.channel.return_value.close.assert_called_once()
+        for code in (404, '404'):
+            c=Mock(); c.channel.return_value.queue_declare.side_effect=ChannelError('missing', reply_code=code)
+            self.assertEqual(m.pending_count(c,'missing'),0)
+            c.channel.return_value.close.assert_called_once()
     def test_counts_are_preserved(self):
         for count in (0,3):
             c=Mock();c.channel.return_value.queue_declare.return_value.message_count=count

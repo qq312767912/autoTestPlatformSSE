@@ -8,7 +8,7 @@ def pending_count(connection, name):
     try:
         return channel.queue_declare(queue=name, passive=True).message_count
     except ChannelError as exc:
-        if exc.reply_code != 404:
+        if str(exc.reply_code) != "404":
             raise
         return 0
     finally:
