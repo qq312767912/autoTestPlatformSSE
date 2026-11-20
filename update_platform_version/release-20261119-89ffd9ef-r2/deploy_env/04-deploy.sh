@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
-B=$(cat "$HERE/.latest-backup")
+B=$(python3 "$HERE/resolve_backup.py" "$HERE")
 [[ -f "$B/BACKUP_COMPLETE" ]]
 python3 "$HERE/prepare_assets.py" "$B" "$HERE"
 project=$(cat "$B/project")

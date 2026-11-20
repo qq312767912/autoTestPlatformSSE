@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
-B="${1:-$(cat "$HERE/.latest-backup")}"
+B="${1:-$(python3 "$HERE/resolve_backup.py" "$HERE")}"
 python3 "$HERE/prepare_assets.py" "$B" "$HERE"
 python3 - "$B/compose.runtime.json" <<'PY'
 import json,subprocess,sys
