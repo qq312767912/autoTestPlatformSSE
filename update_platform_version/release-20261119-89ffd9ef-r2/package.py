@@ -1,7 +1,9 @@
 import hashlib,json,pathlib,subprocess,zipfile
+from verify_release import verify
 ROOT=pathlib.Path(__file__).resolve().parent
 ENV=ROOT/'deploy_env'
 REV=(ENV/'VERSION').read_text().strip()
+verify()  # Fail before generating manifests or replacing the deliverable ZIP.
 components={'backend':'WHartTest_Django/Dockerfile.alpine','frontend':'WHartTest_Vue/Dockerfile','semgrep':'WHartTest_Semgrep/Dockerfile','crg':'WHartTest_CRG/Dockerfile','actuator':'WHartTest_Actuator/Dockerfile.alpine-arm64'}
 images=[]; checks=[]
 def digest(path):
