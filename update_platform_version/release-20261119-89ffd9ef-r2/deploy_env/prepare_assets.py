@@ -34,6 +34,10 @@ def prepare(backup,here):
                                 p=pathlib.Path(d)/'conf';subprocess.run(['docker','cp',container+':/app/supervisord.conf',str(p)],check=True,stdout=subprocess.DEVNULL);candidates=[p.read_bytes()]
                         finally:subprocess.run(['docker','rm',container],check=True,stdout=subprocess.DEVNULL)
                 unique={hashlib.sha256(v.strip()).hexdigest():v for v in candidates if v.strip()}
+                if len(unique)!=1 and target=='/run/secrets/actuator_api_password':
+                    from credential_check import select_password
+                    verified=select_password(configs['compose.runtime.json'],list(unique.values()))
+                    unique={hashlib.sha256(verified).hexdigest():verified}
                 if len(unique)!=1:raise RuntimeError('无法唯一确认原挂载文件，未生成或猜测密码：'+str(source))
                 fd,tmp=tempfile.mkstemp(dir=assets)
                 with os.fdopen(fd,'wb') as f:f.write(next(iter(unique.values())))

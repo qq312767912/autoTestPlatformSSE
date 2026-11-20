@@ -14,7 +14,10 @@ class AssetTests(unittest.TestCase):
    for name in ['compose.runtime.json','compose.rollback.json']:(b/name).write_text(json.dumps(c))
    with patch.object(m.subprocess,'run',return_value=Mock(returncode=1,stdout=b'')):
     if conflict:
-     with self.assertRaises(RuntimeError):m.prepare(b,here)
+     import sys,types
+     fake=types.SimpleNamespace(select_password=Mock(side_effect=RuntimeError('invalid credentials')))
+     with patch.dict(sys.modules,{'credential_check':fake}):
+      with self.assertRaises(RuntimeError):m.prepare(b,here)
      self.assertEqual(json.loads((b/'compose.runtime.json').read_text()),c);return
     m.prepare(b,here)
     actual=json.loads((b/'compose.runtime.json').read_text())['services']['actuator-01']['volumes'][0]['source']
