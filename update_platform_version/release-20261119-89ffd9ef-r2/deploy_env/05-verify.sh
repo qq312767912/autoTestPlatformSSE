@@ -31,19 +31,4 @@ for obj in objects:
 print(json.dumps(ids))
 PY
 )
-docker exec -i wharttest-backend python - "$expected" <<'PY'
-import json,sys,time,urllib.request
-expected=set(json.loads(sys.argv[1])); last=[]
-for attempt in range(36):
- try:
-  with urllib.request.urlopen('http://127.0.0.1:8000/api/ui-automation/actuators/list_actuators/',timeout=10) as r:
-   last=json.load(r)['data']['items']
-  online={str(a['id']) for a in last if a.get('is_open',True)}
-  if expected <= online:
-   print('三个执行器已通过WebSocket连接后端：',sorted(expected))
-   break
- except Exception as exc:
-  if attempt==35:raise
- time.sleep(5)
-else:raise AssertionError('执行器未全部连接后端，在线ID='+str([a.get('id') for a in last]))
-PY
+docker exec -i wharttest-backend python - "$expected" < "$HERE/check_actuators.py"

@@ -70,3 +70,5 @@ sudo bash 06-rollback-app.sh
 Playwright MCP复用原镜像，但启动前检查并补齐遗失的入口脚本/模板，异常目录保留，不覆盖已有有效文件。
 
 ONES临时修复已放入ones-url-hotfix子目录，发版并通过05后，在无运行任务窗口执行 `sudo bash ones-url-hotfix/apply.sh`；默认https://10.122.212.49:60000，包含TLS检测、精确源码校验、备份回滚。它会重启后端；不必重新传输镜像。后续新镜像将使用Git中已保存的全局地址配置功能。
+
+执行器最终在线验收通过check_actuators.py读取真实HTTP响应，兼容统一渲染器产生的data.data.items及单层data.items；仍要求所有预期ID明确is_open=true，接口错误、缺失ID或离线均不能通过。修复旧验收脚本KeyError: items导致的误回滚。
