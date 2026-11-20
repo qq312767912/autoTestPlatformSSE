@@ -25,6 +25,8 @@ class KnowledgeGlobalConfig(models.Model):
         ('custom', '自定义API'),
     ]
 
+    ones_base_url = models.CharField('ONES 服务地址', max_length=500, default='https://10.122.212.49:60000')
+
     # Embedding 配置
     embedding_service = models.CharField(
         _('嵌入服务'),

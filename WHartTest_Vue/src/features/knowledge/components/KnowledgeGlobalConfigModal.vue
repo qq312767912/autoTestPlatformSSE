@@ -19,6 +19,12 @@
           {{ text.globalConfigTip }}
         </a-alert>
 
+        <a-divider>ONES 导入连接</a-divider>
+        <a-form-item label="ONES 服务地址">
+          <a-input v-model="formData.ones_base_url" placeholder="https://10.122.212.49:60000" />
+        </a-form-item>
+        <a-button :loading="onesChecking" @click="checkOnes">检测连接</a-button>
+        <p>保存后全平台生效，导入时仅需填写个人邮箱和密码。</p>
         <a-divider>{{ text.embeddingServiceConfig }}</a-divider>
 
         <a-row :gutter="16">
@@ -208,6 +214,7 @@
 import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { IconRefresh, IconQuestionCircle } from '@arco-design/web-vue/es/icon';
+import { request } from '@/utils/request';
 import { KnowledgeService } from '../services/knowledgeService';
 import type {
   KnowledgeGlobalConfig,
@@ -370,6 +377,7 @@ const formData = reactive<KnowledgeGlobalConfig>({
   api_key: '',
   model_name: '',
   reranker_service: 'none',
+  ones_base_url: 'https://10.122.212.49:60000',
   reranker_api_url: '',
   reranker_api_key: '',
   reranker_model_name: 'Qwen3-VL-Reranker-2B',
@@ -623,6 +631,18 @@ const formatDate = (dateStr?: string) => {
   return new Date(dateStr).toLocaleString(isEnglish.value ? 'en-US' : 'zh-CN');
 };
 
+const onesChecking = ref(false);
+const checkOnes = async () => {
+  onesChecking.value = true;
+  try {
+    const response = await request<any>({ url: '/knowledge/global-config/', method: 'POST', data: { ones_base_url: formData.ones_base_url } });
+    if (!response.success) throw new Error(response.error || '连接检测失败');
+    const result = response.data;
+    if (result.connected) Message.success(result.message); else Message.error(result.message);
+  } catch (error: any) { Message.error(error.message || '连接检测失败'); }
+  finally { onesChecking.value = false; }
+};
+
 const handleSubmit = async () => {
   try {
     await formRef.value?.validate();
@@ -633,6 +653,7 @@ const handleSubmit = async () => {
       api_base_url: formData.api_base_url,
       model_name: formData.model_name,
       reranker_service: formData.reranker_service,
+      ones_base_url: formData.ones_base_url,
       reranker_api_url: formData.reranker_api_url,
       reranker_model_name: formData.reranker_model_name,
       chunk_size: formData.chunk_size,

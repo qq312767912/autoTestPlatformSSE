@@ -56,6 +56,7 @@ export const getRequiredFieldsForEmbeddingService = (embedding_service: string):
  * 知识库全局配置
  */
 export interface KnowledgeGlobalConfig {
+  ones_base_url?: string;
   embedding_service: EmbeddingServiceType;
   embedding_service_display?: string;
   api_base_url?: string;

@@ -4,6 +4,47 @@ import os
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from rest_framework import serializers
+from django.core.validators import URLValidator
+from django.core.exceptions import ValidationError as DjangoValidationError
+
+
+DEFAULT_ONES_URL = 'https://10.122.212.49:60000'
+
+
+def normalize_ones_url(value):
+    if not isinstance(value, str):
+        raise serializers.ValidationError('ONES 地址必须是字符串')
+    value = value.strip().rstrip('/')
+    try:
+        parsed = urlparse(value)
+        port = parsed.port
+    except ValueError:
+        raise serializers.ValidationError('ONES 地址端口无效')
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
+        raise serializers.ValidationError('请输入完整 HTTP/HTTPS 服务地址，不包含路径或账号密码')
+    try:
+        URLValidator(schemes=['http', 'https'])(value)
+    except DjangoValidationError:
+        raise serializers.ValidationError('ONES 地址格式无效')
+    if port is not None and port < 1:
+        raise serializers.ValidationError('ONES 地址端口无效')
+    return value
+
+
+def probe_ones(value):
+    base = normalize_ones_url(value)
+    try:
+        with requests.Session() as session:
+            with session.get(base + '/project/api/project/auth/login', timeout=(5, 8), allow_redirects=False, stream=True) as response:
+                code = response.status_code
+                connected = code in (200, 400, 401, 403, 405)
+                return {'connected': connected, 'status_code': code, 'message': ('服务接口可达，请使用邮箱密码登录验证' if connected else '接口返回异常状态 HTTP '+str(code))}
+    except requests.exceptions.SSLError:
+        return {'connected': False, 'message': 'HTTPS 证书校验失败，请核对证书域名及服务器信任链'}
+    except requests.exceptions.Timeout:
+        return {'connected': False, 'message': '连接或响应超时，请检查地址、端口和内网网络'}
+    except requests.RequestException:
+        return {'connected': False, 'message': '连接失败，请检查地址、端口和网络'}
 
 
 class OnesRequestSerializer(serializers.Serializer):
@@ -19,10 +60,11 @@ class OnesRequestSerializer(serializers.Serializer):
 
 
 class OnesClient:
-    base = 'https://ones.sseinfo.com:60000'
+    base = DEFAULT_ONES_URL
     team = 'BfkaEsWn'
 
-    def __init__(self, email, password):
+    def __init__(self, email, password, base_url=None):
+        self.base = normalize_ones_url(base_url or self.base)
         self.session = requests.Session()
         try:
             data = self.request('POST', '/project/api/project/auth/login',
@@ -43,10 +85,10 @@ class OnesClient:
             if response.status_code != 200:
                 raise ValueError(f'ONES 请求失败（HTTP {response.status_code}）')
             return response.json()
-        except requests.RequestException:
-            raise ValueError('无法连接 ONES，请检查服务器网络') from None
         except requests.exceptions.JSONDecodeError:
             raise ValueError('ONES 返回了无效数据') from None
+        except requests.RequestException:
+            raise ValueError('无法连接 ONES，请检查服务器网络') from None
 
     def spaces(self):
         return self.request('GET', f'/wiki/api/wiki/team/{self.team}/spaces',

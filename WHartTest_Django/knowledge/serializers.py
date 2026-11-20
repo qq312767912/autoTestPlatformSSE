@@ -10,9 +10,14 @@ class KnowledgeGlobalConfigSerializer(serializers.ModelSerializer):
     embedding_service_display = serializers.CharField(source='get_embedding_service_display', read_only=True)
     reranker_service_display = serializers.CharField(source='get_reranker_service_display', read_only=True)
 
+    def validate_ones_base_url(self, value):
+        from .ones_import import normalize_ones_url
+        return normalize_ones_url(value)
+
     class Meta:
         model = KnowledgeGlobalConfig
         fields = [
+            'ones_base_url',
             'embedding_service', 'embedding_service_display',
             'api_base_url', 'api_key', 'model_name',
             'reranker_service', 'reranker_service_display',

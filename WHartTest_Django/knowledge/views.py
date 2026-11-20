@@ -88,6 +88,13 @@ class KnowledgeGlobalConfigView(APIView):
             data["reranker_api_key"] = _mask_secret(data["reranker_api_key"])
         return Response(data)
 
+    def post(self, request):
+        """仅管理员可检测待保存地址，避免普通用户任意探测内网。"""
+        if not request.user.is_superuser:
+            return Response({'error': '只有管理员可以检测全局服务地址'}, status=403)
+        from .ones_import import probe_ones
+        return Response(probe_ones(request.data.get('ones_base_url') or KnowledgeGlobalConfig.get_config().ones_base_url))
+
     def put(self, request):
         """更新全局配置（仅管理员可操作）"""
         if not request.user.is_superuser:
@@ -146,7 +153,7 @@ class KnowledgeBaseViewSet(BaseModelViewSet):
         data = serializer.validated_data
         client = None
         try:
-            client = OnesClient(data['email'], data['password'])
+            client = OnesClient(data['email'], data['password'], base_url=KnowledgeGlobalConfig.get_config().ones_base_url)
             space = data.get('space_uuid')
             if not space:
                 return Response({'spaces': [{'uuid': s['uuid'], 'title': s.get('title') or s.get('name', '')} for s in client.spaces()]})
