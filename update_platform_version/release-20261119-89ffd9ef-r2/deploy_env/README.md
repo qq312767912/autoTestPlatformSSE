@@ -56,3 +56,9 @@ sudo bash 06-rollback-app.sh
 所有备份、inspect.json、compose配置可能包含密码，只保留在服务器，禁止上传Git或公开发送。
 
 本地ARM64容器CLI验证不替代目标麒麟64KB内核验收；03导入步骤必须在目标机通过后才能部署。当前离线包不表示已远程完成部署。
+
+## 已执行过02但发布失败：继续发布
+
+保留当前 `.latest-backup`、`.images-validated` 和同级 backups/secrets/deploy_env.bak，不删除或重新执行02备份。将本完整ZIP解压到临时目录后，把文件覆盖复制到当前deploy_env（不要先删除当前目录），执行 `sudo bash 04-deploy.sh 2>&1 | tee /tmp/deploy-result.log`，然后执行05。
+
+正式流程已集成prepare_assets.py和07-start-actuators.sh：在停服务之前备份原秘密文件和回滚配置为独立挂载，缺失时从备份/旧部署目录/仍可读取的现有容器恢复；存在冲突则停止，不随机生成密码。后端就绪后实际换取Token验证三个执行器的原凭据，再逐个重建。回滚同样使用固化文件，不依赖被覆盖的旧deploy_env路径。

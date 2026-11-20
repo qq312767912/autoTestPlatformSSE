@@ -30,9 +30,6 @@ for service,obj in objects.items():
    name=mount['Name'];configs['volumes'][name]={'external':True,'name':name};source=name
   elif mount['Type']=='bind':source=mount['Source']
   else:raise RuntimeError('不支持的挂载类型，停止：'+str(mount))
-  if mount['Type']=='bind' and (mount['Destination'].startswith('/run/secrets/') or mount['Destination']=='/app/supervisord.conf'):
-   if not pathlib.Path(source).is_file():
-    raise SystemExit('关键文件挂载的宿主机源已缺失或变成目录，停止且不停止服务：'+source)
   item['volumes'].append({'type':mount['Type'],'source':source,'target':mount['Destination'],'read_only':not mount['RW']})
  item['ports']=[]
  for port,bindings in (h.get('PortBindings') or {}).items():

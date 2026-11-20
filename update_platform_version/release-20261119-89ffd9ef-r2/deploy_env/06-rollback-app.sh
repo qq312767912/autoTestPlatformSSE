@@ -2,6 +2,7 @@
 source "$(dirname "$0")/common.sh"
 B="${1:-$(cat "$HERE/.latest-backup")}"
 [[ -f "$B/BACKUP_COMPLETE" ]]
+python3 "$HERE/prepare_assets.py" "$B" "$HERE"
 project=$(cat "$B/project")
 docker compose -p "$project" -f "$B/compose.rollback.json" up -d --no-deps --pull never
 while IFS= read -r c; do [[ -z "$c" ]] || docker start "$c" >/dev/null; done < "$B/stopped-containers"
