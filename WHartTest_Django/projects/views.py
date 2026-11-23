@@ -47,6 +47,11 @@ class ProjectViewSet(BaseModelViewSet):
         # 非超级用户仅可查看自己参与的项目，避免越权枚举其他项目。
         return Project.objects.filter(members__user=user).distinct()
 
+    def filter_queryset(self, queryset):
+        if self.action == 'member_candidates':
+            return queryset
+        return super().filter_queryset(queryset)
+
     def get_serializer_class(self):
         """
         根据操作类型返回不同的序列化器
@@ -62,7 +67,7 @@ class ProjectViewSet(BaseModelViewSet):
         根据操作类型设置不同的权限
         """
         # 成员管理操作：先过项目成员模型权限，再校验调用者属于该项目。
-        if self.action in ['members', 'add_member', 'remove_member', 'update_member_role']:
+        if self.action in ['members', 'add_member', 'remove_member', 'update_member_role', 'member_candidates']:
             return [IsAuthenticated(), (IsProjectAdmin | HasProjectMemberPermission)(), IsProjectMember()]
 
         # 统计接口只读，要求登录且属于项目即可。
@@ -146,6 +151,22 @@ class ProjectViewSet(BaseModelViewSet):
 
         serializer = ProjectMemberSerializer(members, many=True)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['get'])
+    def member_candidates(self, request, pk=None):
+        project = self.get_object()
+        users = User.objects.filter(is_active=True).exclude(
+            id__in=project.members.values_list('user_id', flat=True)
+        ).order_by('username', 'id')
+        search = request.query_params.get('search', '').strip()
+        if search:
+            users = users.filter(Q(username__icontains=search) | Q(email__icontains=search))
+        # Project member management needs identities, never global user permissions/details.
+        users = users.values('id', 'username', 'email')
+        page = self.paginate_queryset(users)
+        if page is not None:
+            return self.get_paginated_response(list(page))
+        return Response(list(users))
 
     @action(detail=True, methods=['post'])
     def add_member(self, request, pk=None):

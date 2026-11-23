@@ -810,3 +810,23 @@ export const getTokenUsageStats = async (params?: {
     };
   }
 };
+
+export const getProjectMemberCandidates = async (projectId: number) => {
+  const token = useAuthStore().getAccessToken;
+  try {
+    const data: UserDetail[] = [];
+    for (let page = 1; ; page++) {
+      const response = await axios.get(`${API_BASE_URL}/projects/${projectId}/member_candidates/`, {
+        headers: { Authorization: `Bearer ${token}` }, params: { page, page_size: 200 }
+      });
+      const body = response.data?.status === 'success' ? response.data.data : response.data;
+      const rows = Array.isArray(body) ? body : body?.results;
+      if (!Array.isArray(rows)) throw new Error('候选成员响应格式无效');
+      data.push(...rows);
+      if (Array.isArray(body) || !body.next) break;
+    }
+    return { success: true, data, error: '' };
+  } catch (error: any) {
+    return { success: false, data: [] as UserDetail[], error: error.response?.data?.message || '获取项目候选成员失败' };
+  }
+};

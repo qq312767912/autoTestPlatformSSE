@@ -26,7 +26,7 @@
           />
         </div>
         <div class="action-buttons">
-          <a-button type="primary" @click="showAddProjectModal">{{ pageText.addProject }}</a-button>
+          <a-button v-if="authStore.hasPermission('projects.add_project')" type="primary" @click="showAddProjectModal">{{ pageText.addProject }}</a-button>
         </div>
       </div>
 
@@ -281,6 +281,7 @@ import { ref, reactive, onMounted, watch, computed } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
 import {
   getProjectList,
+  getProjectMemberCandidates,
   createProject,
   deleteProject as deleteProjectService,
   updateProject,
@@ -294,7 +295,6 @@ import {
   type CreateProjectRequest,
   type UpdateProjectRequest
 } from '@/services/projectService';
-import { getUserList } from '@/services/userService';
 import { useAuthStore } from '@/store/authStore';
 import { useAppI18n } from '@/composables/useAppI18n';
 
@@ -772,10 +772,8 @@ const showAddMemberModal = () => {
 const fetchAvailableUsers = async () => {
   usersLoading.value = true;
   try {
-    const response = await getUserList({
-      page: 1,
-      pageSize: 100, // 获取较多用户
-    });
+    if (!selectedProject.value) return;
+    const response = await getProjectMemberCandidates(selectedProject.value.id);
 
     if (response.success && response.data) {
       // 过滤掉已经是项目成员的用户
