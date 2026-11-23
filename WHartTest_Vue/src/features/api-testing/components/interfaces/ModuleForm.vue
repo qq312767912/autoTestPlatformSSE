@@ -2,7 +2,6 @@
 import { computed, ref, watch } from 'vue'
 import type { FormInstance } from '@arco-design/web-vue'
 import type { ApiModule } from '../../services/interfaceService'
-import { IconClose } from '@arco-design/web-vue/es/icon'
 import { useThemeStore } from '@/store/themeStore'
 
 interface Props {
@@ -87,27 +86,7 @@ watch(() => props.visible, (newVal) => {
 </script>
 
 <template>
-  <div v-if="visible" class="fixed inset-0 z-50 flex items-center justify-center">
-    <div
-      class="fixed inset-0 backdrop-blur-sm"
-      :class="isDarkTheme ? 'bg-black/60' : 'bg-black/30'"
-      @click="handleClose"
-    ></div>
-    <a-card 
-      :bordered="false"
-      class="w-[500px] z-10"
-      :class="isDarkTheme ? '!bg-gray-800 !border-gray-700' : '!bg-white !border-gray-200 shadow-lg'"
-    >
-      <template #title>
-        <div class="flex justify-between items-center">
-          <span :class="isDarkTheme ? 'text-gray-100' : 'text-gray-800'">{{ type === 'create' ? '新建模块' : '编辑模块' }}</span>
-          <a-button type="text" @click="handleClose">
-            <template #icon>
-              <icon-close />
-            </template>
-          </a-button>
-        </div>
-      </template>
+  <a-modal :visible="visible" :title="type === 'create' ? '新建模块' : '编辑模块'" :width="500" :footer="false" :mask-closable="!loading" :closable="!loading" :esc-to-close="!loading" @cancel="handleClose">
       <a-form
         ref="formRef"
         :model="formData"
@@ -156,6 +135,5 @@ watch(() => props.visible, (newVal) => {
           </a-button>
         </div>
       </a-form>
-    </a-card>
-  </div>
+  </a-modal>
 </template>
