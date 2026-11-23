@@ -185,7 +185,7 @@ export const createProject = async (projectData: CreateProjectRequest): Promise<
     console.error('创建项目出错:', error);
     return {
       success: false,
-      error: error.response?.data?.message || error.message || '创建项目时发生错误',
+      error: error.response?.data?.errors?.name?.join?.('；') || error.response?.data?.name?.join?.('；') || error.response?.data?.message || error.message || '创建项目时发生错误',
       statusCode: error.response?.status,
     };
   }
