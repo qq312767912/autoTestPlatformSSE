@@ -23,7 +23,7 @@
       </a-space>
     </template>
 
-    <a-spin :loading="loading">
+    <a-spin :loading="loading" style="width:100%">
       <!-- 导入结果展示 -->
       <div v-if="importResult" class="import-result">
         <a-result
