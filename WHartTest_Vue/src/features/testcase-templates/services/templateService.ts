@@ -394,7 +394,8 @@ export const duplicateTemplate = async (id: number): Promise<OperationResponse<I
 export const importTestCases = async (
   projectId: number,
   file: File,
-  templateId: number
+  templateId: number,
+  targetModuleId?: number | null
 ): Promise<OperationResponse<ImportResult>> => {
   const authStore = useAuthStore();
   const accessToken = authStore.getAccessToken;
@@ -407,6 +408,7 @@ export const importTestCases = async (
     const formData = new FormData();
     formData.append('file', file);
     formData.append('template_id', String(templateId));
+    if (targetModuleId) formData.append('target_module_id', String(targetModuleId));
 
     const response = await axios.post(
       `${API_BASE_URL}/projects/${projectId}/testcases/import-excel/`,

@@ -29,3 +29,30 @@ class StepImportParsingTests(SimpleTestCase):
 
     def test_expected_only_not_discarded(self):
         self.assertEqual(self.parse('','检查A\n检查B')[0]['expected_result'],'检查A\n检查B')
+
+class ImportTargetModuleTests(SimpleTestCase):
+    def service(self, target=None):
+        from types import SimpleNamespace
+        return TestCaseImportService(SimpleNamespace(module_path_delimiter='/'),SimpleNamespace(pk=1),None,target_module=target)
+
+    def test_excel_hierarchy_belongs_to_chosen_target(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        target=SimpleNamespace(name='星企航',level=1)
+        child=SimpleNamespace(name='迭代用例库',level=2)
+        with patch('testcase_templates.import_service.TestCaseModule.objects.get_or_create',return_value=(child,True)) as create:
+            self.assertIs(self.service(target)._get_or_create_module('迭代用例库'),child)
+            self.assertIs(create.call_args.kwargs['parent'],target)
+            self.assertEqual(create.call_args.kwargs['defaults']['level'],2)
+
+    def test_empty_path_uses_chosen_target(self):
+        from types import SimpleNamespace
+        target=SimpleNamespace(name='星企航',level=1)
+        self.assertIs(self.service(target)._get_or_create_module(''),target)
+        self.assertIs(self.service(target)._get_or_create_module('星企航'),target)
+
+    def test_no_target_retains_root_import(self):
+        from unittest.mock import patch
+        with patch('testcase_templates.import_service.TestCaseModule.objects.get_or_create',return_value=(object(),True)) as create:
+            self.service()._get_or_create_module('迭代用例库')
+            self.assertIsNone(create.call_args.kwargs['parent'])

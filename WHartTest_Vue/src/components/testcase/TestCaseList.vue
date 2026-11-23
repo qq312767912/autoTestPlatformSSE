@@ -223,6 +223,8 @@
       v-if="currentProjectId"
       ref="importModalRef"
       :project-id="currentProjectId"
+      :target-module-id="localSelectedModuleId"
+      :target-module-name="importTargetName"
       @success="onImportSuccess"
     />
 
@@ -957,14 +959,24 @@ const handleImport = () => {
   importModalRef.value?.open();
 };
 
+const importTargetName = computed(() => {
+  const find = (nodes: TreeNodeData[]): string => {
+    for (const node of nodes) {
+      if (Number(node.key) === localSelectedModuleId.value) return String(node.title || '');
+      const name = find(node.children || []);
+      if (name) return name;
+    }
+    return '';
+  };
+  return find(props.moduleTree || []);
+});
+
 const onImportSuccess = () => {
   localSearchKeyword.value = '';
-  localSelectedModuleId.value = null;
   selectedLevel.value = '';
   selectedTestType.value = '';
   selectedReviewStatuses.value = [];
   paginationConfig.current = 1;
-  emit('module-filter-change', null);
   emit('testCasesImported');
   fetchTestCases();
 };

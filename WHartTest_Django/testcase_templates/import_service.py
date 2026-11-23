@@ -50,10 +50,11 @@ class TestCaseImportService:
         '兼容性测试': 'compatibility',
     }
 
-    def __init__(self, template: ImportExportTemplate, project: Project, user):
+    def __init__(self, template: ImportExportTemplate, project: Project, user, target_module=None):
         self.template = template
         self.project = project
         self.user = user
+        self.target_module = target_module
         self.result = ImportResult()
         self._module_cache: Dict[str, TestCaseModule] = {}
         self._existing_names: Dict[str, List[int]] = {}  # {(module_id, name): [testcase_ids]}
@@ -171,7 +172,7 @@ class TestCaseImportService:
     def _get_or_create_module(self, module_path: str) -> Optional[TestCaseModule]:
         """根据模块路径获取或创建模块"""
         if not module_path:
-            return None
+            return self.target_module
 
         # 检查缓存
         if module_path in self._module_cache:
@@ -184,8 +185,14 @@ class TestCaseImportService:
         if not parts:
             return None
 
-        parent = None
+        parent = self.target_module
+        # Avoid nesting a same-named Excel root inside the chosen target.
+        if parent and parts and parts[0] == parent.name:
+            parts = parts[1:]
+        if not parts:
+            return parent
         current_path = ''
+        base_level = parent.level if parent else 0
 
         for level, name in enumerate(parts, start=1):
             current_path = f"{current_path}{delimiter}{name}" if current_path else name
@@ -201,7 +208,7 @@ class TestCaseImportService:
                 parent=parent,
                 name=name,
                 defaults={
-                    'level': level,
+                    'level': base_level + level,
                     'creator': self.user,
                 }
             )

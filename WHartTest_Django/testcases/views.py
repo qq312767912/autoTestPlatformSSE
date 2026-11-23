@@ -575,7 +575,10 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         project = get_object_or_404(Project, pk=project_pk)
 
         # 执行导入
-        service = TestCaseImportService(template, project, request.user)
+        target_module = None
+        if request.data.get('target_module_id'):
+            target_module = get_object_or_404(TestCaseModule, pk=request.data['target_module_id'], project=project)
+        service = TestCaseImportService(template, project, request.user, target_module=target_module)
         result = service.import_from_file(file)
 
         return Response(

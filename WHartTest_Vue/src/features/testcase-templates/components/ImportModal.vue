@@ -8,6 +8,7 @@
     :footer-style="{ display: 'flex', justifyContent: 'flex-end' }"
     @cancel="handleClose"
   >
+    <a-alert v-if="!importResult" style="margin-bottom:16px">{{ targetModuleId ? `导入到「${targetModuleName || targetModuleId}」下，保留 Excel 中的模块层级。` : '未选择目标模块，将按 Excel 模块路径导入到项目根目录。' }}</a-alert>
     <template #footer>
       <a-space v-if="!importResult">
         <a-button @click="handleClose">取消</a-button>
@@ -237,6 +238,8 @@ import {
 
 const props = defineProps<{
   projectId: number;
+  targetModuleId?: number | null;
+  targetModuleName?: string;
 }>();
 
 const emit = defineEmits<{
@@ -315,7 +318,7 @@ const handleImport = async () => {
 
   importing.value = true;
   try {
-    const result = await importTestCases(props.projectId, file, form.value.templateId);
+    const result = await importTestCases(props.projectId, file, form.value.templateId, props.targetModuleId);
     if (result.data) {
       importResult.value = result.data;
       if (result.data.imported_count > 0) {
