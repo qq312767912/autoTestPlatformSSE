@@ -268,64 +268,47 @@ class TestCaseImportService:
         - 1. 步骤1\n2. 步骤2
         - 纯文本（作为单个步骤）
         """
-        steps = []
+        def numbered(text):
+            # Only line-leading markers are structure; numbers in URLs/data/references are content.
+            matches = list(re.finditer(r'^\s*(?:\[(\d+)\]|(\d+)\.(?!\d)[ \t]*)', text or '', re.MULTILINE))
+            if not matches:
+                return []
+            result = []
+            for index, match in enumerate(matches):
+                end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+                content = text[match.end():end].strip()
+                if index == 0 and text[:match.start()].strip():
+                    content = text[:match.start()].strip() + '\n' + content
+                result.append((int(match.group(1) or match.group(2)), content))
+            return result
 
-        if not steps_text and not expected_text:
+        actions = numbered(steps_text)
+        expectations = numbered(expected_text)
+        if actions:
+            expected_by_number = {}
+            for number, content in expectations:
+                expected_by_number.setdefault(number, []).append(content)
+            steps = []
+            for index, (number, content) in enumerate(actions):
+                values = expected_by_number.get(number, [])
+                expected = values.pop(0) if values else ''
+                if not expectations and index == len(actions) - 1:
+                    expected = (expected_text or '').strip()
+                steps.append({'step_number': index + 1, 'description': content, 'expected_result': expected})
+            # Preserve unmatched expectations rather than silently dropping source content.
+            remaining = [content for values in expected_by_number.values() for content in values]
+            if remaining:
+                steps[-1]['expected_result'] = '\n'.join(filter(None, [steps[-1]['expected_result'], *remaining]))
             return steps
-
-        # 尝试匹配 [n]内容 格式
-        step_pattern = r'\[(\d+)\]([^\[]*)'
-        step_matches = re.findall(step_pattern, steps_text or '')
-        expected_matches = re.findall(step_pattern, expected_text or '')
-
-        if step_matches:
-            expected_dict = {int(num): content.strip() for num, content in expected_matches}
-            # 预期结果无编号时，整段文本赋给最后一个步骤
-            fallback_expected = (expected_text or '').strip() if not expected_matches else ''
-
-            for idx, (num, content) in enumerate(step_matches):
-                step_num = int(num)
-                expected = expected_dict.get(step_num, '')
-                if not expected and fallback_expected and idx == len(step_matches) - 1:
-                    expected = fallback_expected
-                steps.append({
-                    'step_number': step_num,
-                    'description': content.strip(),
-                    'expected_result': expected,
-                })
-        else:
-            # 尝试匹配 n. 内容 格式
-            step_pattern2 = r'(\d+)\.\s*([^\d]+?)(?=\d+\.|$)'
-            step_matches2 = re.findall(step_pattern2, steps_text or '', re.DOTALL)
-            expected_matches2 = re.findall(step_pattern2, expected_text or '', re.DOTALL)
-
-            if step_matches2:
-                expected_dict = {int(num): content.strip() for num, content in expected_matches2}
-                # 预期结果无编号时，整段文本赋给最后一个步骤
-                fallback_expected = (expected_text or '').strip() if not expected_matches2 else ''
-
-                for idx, (num, content) in enumerate(step_matches2):
-                    step_num = int(num)
-                    expected = expected_dict.get(step_num, '')
-                    if not expected and fallback_expected and idx == len(step_matches2) - 1:
-                        expected = fallback_expected
-                    steps.append({
-                        'step_number': step_num,
-                        'description': content.strip(),
-                        'expected_result': expected,
-                    })
-            elif steps_text:
-                # 按换行分割，每行一个步骤
-                lines = [l.strip() for l in steps_text.split('\n') if l.strip()]
-                expected_lines = [l.strip() for l in (expected_text or '').split('\n') if l.strip()]
-
-                for i, line in enumerate(lines):
-                    steps.append({
-                        'step_number': i + 1,
-                        'description': line,
-                        'expected_result': expected_lines[i] if i < len(expected_lines) else '',
-                    })
-
+        lines = [line.strip() for line in (steps_text or '').splitlines() if line.strip()]
+        expected_lines = [line.strip() for line in (expected_text or '').splitlines() if line.strip()]
+        if not lines and expected_lines:
+            lines = ['待补充操作步骤']
+        steps = [{'step_number': index + 1, 'description': line,
+                  'expected_result': expected_lines[index] if index < len(expected_lines) else ''}
+                 for index, line in enumerate(lines)]
+        if steps and len(expected_lines) > len(lines):
+            steps[-1]['expected_result'] = '\n'.join(expected_lines[len(lines)-1:])
         return steps
 
     def _import_single_cell_mode(self, worksheet, headers: Dict[str, int]):
