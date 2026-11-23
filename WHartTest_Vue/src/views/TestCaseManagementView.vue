@@ -29,6 +29,7 @@
           @execute-test-case="handleExecuteTestCase"
           @test-case-deleted="handleTestCaseDeleted"
           @test-case-copied="handleTestCaseCopied"
+          @test-cases-imported="handleTestCaseCopied"
           @module-filter-change="handleModuleSelected"
           @request-optimization="handleRequestOptimization"
           ref="testCaseListRef"

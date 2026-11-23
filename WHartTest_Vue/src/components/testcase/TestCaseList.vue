@@ -276,6 +276,7 @@ const emit = defineEmits<{
   (e: 'viewTestCase', testCase: TestCase): void;
   (e: 'testCaseDeleted'): void;
   (e: 'testCaseCopied'): void;
+  (e: 'testCasesImported'): void;
   (e: 'executeTestCase', testCase: TestCase): void;
   (e: 'module-filter-change', moduleId: number | null): void;
   (e: 'requestOptimization', testCase: TestCase): void;
@@ -957,6 +958,14 @@ const handleImport = () => {
 };
 
 const onImportSuccess = () => {
+  localSearchKeyword.value = '';
+  localSelectedModuleId.value = null;
+  selectedLevel.value = '';
+  selectedTestType.value = '';
+  selectedReviewStatuses.value = [];
+  paginationConfig.current = 1;
+  emit('module-filter-change', null);
+  emit('testCasesImported');
   fetchTestCases();
 };
 
