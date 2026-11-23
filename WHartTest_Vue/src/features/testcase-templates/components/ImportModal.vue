@@ -8,7 +8,6 @@
     :footer-style="{ display: 'flex', justifyContent: 'flex-end' }"
     @cancel="handleClose"
   >
-    <a-alert v-if="!importResult" style="margin-bottom:16px">{{ targetModuleId ? `导入到「${targetModuleName || targetModuleId}」下，保留 Excel 中的模块层级。` : '未选择目标模块，将按 Excel 模块路径导入到项目根目录。' }}</a-alert>
     <template #footer>
       <a-space v-if="!importResult">
         <a-button @click="handleClose">取消</a-button>
@@ -98,6 +97,7 @@
 
       <!-- 导入表单 -->
       <div v-else class="import-form">
+    <a-alert style="margin-bottom:16px">{{ targetModuleId ? `导入到「${targetModuleName || targetModuleId}」下，保留 Excel 中的模块层级。` : '未选择目标模块，将按 Excel 模块路径导入到项目根目录。' }}</a-alert>
         <!-- 步骤指引 -->
         <div class="step-guide">
           <div class="step-item" :class="{ active: !form.templateId }">
