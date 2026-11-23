@@ -1,11 +1,19 @@
 <template>
   <a-modal :visible="visible" title="从 Excel 导入接口与接口用例" :width="900" :footer="false" @cancel="emit('update:visible',false)">
     <p>兼容旧平台多工作表导出（.xlsx / .xls），按旧平台原用例保留请求步骤与断言，建立接口定义和接口用例，同时导入环境与全部源数据。导入后不会自动执行。</p>
-    <input :key="String(project)+String(visible)" type="file" accept=".xlsx,.xls" :disabled="busy" @change="choose" />
-    <a-select v-model="group" allow-clear placeholder="目标分组（可选）" style="width:260px;margin:12px 0 12px 16px">
-      <a-option v-for="item in groups" :key="item.id" :value="item.id">{{item.name}}</a-option>
-    </a-select>
-    <a-button :disabled="!file" :loading="busy" @click="preview">解析并预览</a-button>
+    <div class="excel-import-upload">
+      <input ref="fileInput" :key="String(project)+String(visible)" class="excel-file-input" type="file" accept=".xlsx,.xls" :disabled="busy" aria-label="选择 Excel 文件" @change="choose" />
+      <a-button type="primary" size="large" :disabled="busy" @click="fileInput?.click()">
+        <template #icon><IconUpload /></template>{{file ? '重新选择文件' : '选择 Excel 文件'}}
+      </a-button>
+      <div class="excel-file-info"><span class="excel-file-name" :title="file?.name">{{file?.name || '尚未选择文件'}}</span><span class="excel-file-hint">支持 .xlsx、.xls 格式</span></div>
+    </div>
+    <div class="excel-import-actions">
+      <a-select v-model="group" allow-clear :disabled="busy" placeholder="目标分组（可选）" style="width:260px">
+        <a-option v-for="item in groups" :key="item.id" :value="item.id">{{item.name}}</a-option>
+      </a-select>
+      <a-button :disabled="!file" :loading="busy" @click="preview">解析并预览</a-button>
+    </div>
     <a-alert v-if="error" type="error" style="margin:12px 0">{{error}}</a-alert>
     <template v-if="plan">
       <a-alert style="margin:16px 0">识别 {{plan.case_count}} 条接口用例、{{plan.step_count}} 个接口定义/请求步骤、{{plan.environment_count}} 个环境；已恢复 {{plan.recovered_variable_count}} 个变量值，保留 {{plan.data_row_count}} 条历史数据。</a-alert>
@@ -37,6 +45,8 @@
 <script setup lang="ts">
 import {ref,watch} from 'vue'
 import {Message} from '@arco-design/web-vue'
+import {IconUpload} from '@arco-design/web-vue/es/icon'
+const fileInput=ref<HTMLInputElement>()
 import {testcaseService} from '../../services/testcaseService'
 import {testcaseGroupService} from '../../services/testcaseGroupService'
 import {toArray} from '../../services/responseHelpers'
@@ -55,3 +65,12 @@ async function preview(){if(!file.value||busy.value)return;const current=++versi
 async function confirm(){if(!plan.value||!file.value||busy.value)return;busy.value=true;error.value='';try{const data=payload();data.append('confirm','true');data.append('update_existing',String(updateExisting.value));data.append('sha256',plan.value.sha256);const result=await testcaseService.importExcel(props.project,data) as {converted_scenarios:number;consolidated_split_cases:number;created_interfaces:number;created_interface_cases:number;created_cases:number;updated_cases:number;created_environments:number;created_variables:number;imported_data_rows:number};Message.success(`导入完成：新增 ${result.created_interfaces} 个接口、${result.created_interface_cases} 条接口用例，补全 ${result.updated_cases} 条；迁移 ${result.converted_scenarios} 条旧场景、合并 ${result.consolidated_split_cases} 条拆分记录，创建 ${result.created_environments} 个环境、${result.created_variables} 个变量，保留 ${result.imported_data_rows} 条历史数据`);emit('imported');emit('update:visible',false);file.value=undefined;plan.value=undefined}catch(e){failure(e)}finally{busy.value=false}}
 watch(()=>[props.visible,props.project],async()=>{version++;busy.value=false;if(!props.visible)return;file.value=undefined;plan.value=undefined;group.value=undefined;error.value='';try{groups.value=toArray(await testcaseGroupService.list(props.project))}catch{groups.value=[]}})
 </script>
+
+<style scoped>
+.excel-file-input{display:none}
+.excel-import-upload{display:flex;align-items:center;gap:16px;padding:20px;margin:16px 0;background:var(--color-fill-1);border:1px dashed var(--color-border-3);border-radius:8px}
+.excel-file-info{display:flex;flex-direction:column;gap:5px;min-width:0}
+.excel-file-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text-1);font-weight:500}
+.excel-file-hint{font-size:12px;color:var(--color-text-3)}
+.excel-import-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+</style>
