@@ -523,11 +523,8 @@ const buildCurrentFilters = (): TestCaseNavigationFilters => ({
 
 // 复选框选择相关的计算属性和方法
 // 获取当前页实际显示的数据
-const getCurrentPageData = () => {
-  const startIndex = (paginationConfig.current - 1) * paginationConfig.pageSize;
-  const endIndex = startIndex + paginationConfig.pageSize;
-  return testCaseData.value.slice(startIndex, endIndex);
-};
+// 接口已按页返回数据，不能再按页码进行客户端切片。
+const getCurrentPageData = () => testCaseData.value;
 
 // 当前页是否全选
 const isCurrentPageAllSelected = computed(() => {
@@ -561,11 +558,7 @@ const handleCheckboxChange = (id: number, checked: boolean) => {
 
 // 处理当前页全选/取消全选
 const handleSelectCurrentPage = (checked: boolean) => {
-  // 获取当前表格实际显示的数据
-  // Arco Table 会根据 pagination 配置自动切分数据显示
-  const startIndex = (paginationConfig.current - 1) * paginationConfig.pageSize;
-  const endIndex = startIndex + paginationConfig.pageSize;
-  const currentPageData = testCaseData.value.slice(startIndex, endIndex);
+  const currentPageData = getCurrentPageData();
 
   if (checked) {
     // 选中当前页所有项目
