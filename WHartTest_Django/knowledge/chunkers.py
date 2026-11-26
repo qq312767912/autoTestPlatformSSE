@@ -37,7 +37,28 @@ class StructuredTextChunker:
         atoms = list(self._atomic_blocks(text, document_type=document_type))
         if not atoms:
             return []
-        return list(self._merge_atoms(atoms))
+        return list(self._enforce_chunk_limit(self._merge_atoms(atoms)))
+
+    def _enforce_chunk_limit(self, chunks):
+        """最终输出硬限长；偏移是源块内字符位置，原有源位置元数据保留。"""
+        overlap = min(self.chunk_overlap, self.chunk_size - 1)
+        for chunk in chunks:
+            text = chunk.page_content
+            if len(text) <= self.chunk_size:
+                yield chunk
+                continue
+            start = 0
+            part = 0
+            while start < len(text):
+                end = min(start + self.chunk_size, len(text))
+                meta = dict(chunk.metadata)
+                meta.update({"split_part": part, "source_chunk_char_start": start,
+                             "source_chunk_char_end": end})
+                yield StructuredChunk(page_content=text[start:end], metadata=meta)
+                if end == len(text):
+                    break
+                start = end - overlap
+                part += 1
 
     # ------------------------------------------------------------------ 原子块拆分
 

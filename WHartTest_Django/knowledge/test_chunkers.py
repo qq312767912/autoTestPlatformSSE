@@ -68,4 +68,4 @@ class StructuredChunkerTests(TestCase):
         chunks = chunker.split_text(text, document_type="txt")
         self.assertGreater(len(chunks), 1)
         for c in chunks:
-            self.assertLessEqual(len(c.page_content), 120)  # 允许标题等略超
+            self.assertLessEqual(len(c.page_content), 80)
