@@ -3,7 +3,7 @@
     :body-style="{ maxHeight: 'calc(100vh - 140px)', overflowY: 'auto' }"
     :mask-closable="false" :closable="!busy" @cancel="emit('close')">
     <a-space direction="vertical" fill size="large">
-      <p class="intro">上传修改前、修改后的两份 Word，核对差异后提取本次迭代内容。</p>
+      <p class="intro">上传修改前、修改后的两份同格式文档，核对差异后提取本次迭代内容。</p>
       <a-form :model="{ title }" layout="vertical">
         <div class="upload-grid">
           <div class="upload-panel">
