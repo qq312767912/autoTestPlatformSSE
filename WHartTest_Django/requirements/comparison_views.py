@@ -18,12 +18,15 @@ from rest_framework.exceptions import ValidationError
 from projects.models import Project
 from .models import RequirementComparison
 from .document_comparison import ComparisonError, compare_documents, export_selection, SCHEMA_VERSION
+from .markdown_comparison import markdown_as_docx
 from .pdf_comparison import pdf_as_docx
 
 
 def comparison_inputs(old, new, extension):
     if extension == '.pdf':
         return pdf_as_docx(old), pdf_as_docx(new)
+    if extension == '.md':
+        return markdown_as_docx(old), markdown_as_docx(new)
     return old, new
 
 
@@ -31,6 +34,8 @@ def compare_sources(old, new, extension):
     result = compare_documents(*comparison_inputs(old, new, extension))
     if extension == '.pdf':
         result['warnings'] = ['仅比较 PDF 可提取的文本。图片、扫描页和排版不参与对比；请核对复杂版式的阅读顺序。']
+    elif extension == '.md':
+        result['warnings'] = ['Markdown 按文本行对比，保留标题层级及原文。链接图片不读取。']
     return result
 
 
@@ -60,8 +65,8 @@ class RequirementComparisonViewSet(viewsets.GenericViewSet):
         if not old or not new:
             raise ValidationError('请同时上传旧版和新版文档。')
         extension = Path(old.name).suffix.lower()
-        if extension not in ('.docx', '.pdf') or Path(new.name).suffix.lower() != extension:
-            raise ValidationError('请上传两份同格式的 DOCX 或 PDF 文件。')
+        if extension not in ('.docx', '.pdf', '.md') or Path(new.name).suffix.lower() != extension:
+            raise ValidationError('请上传两份同格式的 DOCX、PDF 或 Markdown 文件。')
         try:
             result = compare_sources(old.read(), new.read(), extension)
         except ComparisonError as exc:

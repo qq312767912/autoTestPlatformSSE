@@ -9,30 +9,32 @@
           <div class="upload-panel">
             <label>旧版文档 · 修改前</label>
             <a-upload class="document-upload" :file-list="[]" :auto-upload="false" :show-file-list="false"
-              :multiple="false" :disabled="busy" accept=".docx,.pdf" draggable :on-before-upload="validateDocument"
+              :multiple="false" :disabled="busy" :accept="comparisonFormats.join(',')" draggable :on-before-upload="validateDocument"
               @change="(_files, file) => chooseUpload(file, 'old')">
               <template #upload-button>
                 <div class="upload-target">
                   <a-button type="primary" :disabled="busy">{{ oldFile || session ? '重新选择旧版文档' : '上传旧版文档' }}</a-button>
-                  <span>或将旧版 DOCX 或 PDF 文件拖到这里</span>
+                  <span>或拖入旧版文件</span>
                 </div>
               </template>
             </a-upload>
-            <span class="file-name" :title="oldFile?.name || session?.old_name">{{ oldFile?.name || session?.old_name || '请选择 DOCX 或 PDF 文件' }}</span>
+            <div class="muted">支持格式：{{ comparisonFormats.join(' / ') }}</div>
+            <span class="file-name" :title="oldFile?.name || session?.old_name">{{ oldFile?.name || session?.old_name || '请选择文件' }}</span>
           </div>
           <div class="upload-panel">
             <label>新版文档 · 修改后</label>
             <a-upload class="document-upload" :file-list="[]" :auto-upload="false" :show-file-list="false"
-              :multiple="false" :disabled="busy" accept=".docx,.pdf" draggable :on-before-upload="validateDocument"
+              :multiple="false" :disabled="busy" :accept="comparisonFormats.join(',')" draggable :on-before-upload="validateDocument"
               @change="(_files, file) => chooseUpload(file, 'new')">
               <template #upload-button>
                 <div class="upload-target">
                   <a-button type="primary" :disabled="busy">{{ newFile || session ? '重新选择新版文档' : '上传新版文档' }}</a-button>
-                  <span>或将新版 DOCX 或 PDF 文件拖到这里</span>
+                  <span>或拖入新版文件</span>
                 </div>
               </template>
             </a-upload>
-            <span class="file-name" :title="newFile?.name || session?.new_name">{{ newFile?.name || session?.new_name || '请选择 DOCX 或 PDF 文件' }}</span>
+            <div class="muted">支持格式：{{ comparisonFormats.join(' / ') }}</div>
+            <span class="file-name" :title="newFile?.name || session?.new_name">{{ newFile?.name || session?.new_name || '请选择文件' }}</span>
           </div>
         </div>
         <label class="iteration-label">本次迭代名称（必填）</label>
@@ -46,7 +48,7 @@
       <template v-if="session">
         <details class="comparison-rules">
           <summary>对比与提取规则</summary>
-          <p>请上传两份同格式的文件。PDF 仅比较可提取的文本，扫描页需先做 OCR。DOCX 按接受修订后的正文对比，手工删除线视为删除；域按文档已保存的显示结果处理。行号为内容块序号，不是 Word 页码。</p>
+          <p>请上传两份同格式的文件。PDF 仅比较可提取的文本，扫描页需先做 OCR。Markdown 按 UTF-8 文本行对比，保留标题层级。DOCX 按接受修订后的正文对比，手工删除线视为删除；域按文档已保存的显示结果处理。行号为内容块序号，不是 Word 页码。</p>
           <p v-for="warning in session.result.warnings" :key="warning">{{ warning }}</p>
           <p>直接下载一个 DOCX 文档。文档 按修订汇总报告格式生成：完整保留改动小节，新增绿色、删除灰色删除线；需求解析在原位置保留“变更记录｜新增 / 修改 / 删除”及变更文字。现行正文用于理解规则，变更记录用于分析测试范围；删除原文作为证据，用于分析功能取消、限制解除及关联回归，意图不明时待确认。历史修订所属迭代需人工确认。可将 DOCX 重新上传为普通需求文档。</p>
         </details>
@@ -152,9 +154,12 @@ watch(() => props.projectId, () => {
 watch(() => props.visible, (visible) => {
   if (visible) savedId.value = sessionStorage.getItem(storageKey.value) || '';
 }, { immediate: true });
+const comparisonFormats = ['.docx', '.pdf', '.md'];
+const extensionOf = (filename: string) => filename.match(/\.[^.]+$/)?.[0].toLowerCase() ?? '';
+
 function validateDocument(file: File): boolean {
-  if (!/\.(docx|pdf)$/i.test(file.name)) {
-    error.value = '版本对比支持 .docx 和 .pdf 文件。';
+  if (!comparisonFormats.includes(extensionOf(file.name))) {
+    error.value = '版本对比支持 .docx、.pdf 和 .md 文件。';
     return false;
   }
   return true;
@@ -177,8 +182,8 @@ function selectAll() { selected.value = session.value?.result.hunks.map(h => h.i
 function clearSelection() { selected.value = []; confirmed.value = false; }
 async function compare() {
   if (!oldFile.value || !newFile.value || !props.projectId) return;
-  if (/\.pdf$/i.test(oldFile.value.name) !== /\.pdf$/i.test(newFile.value.name)) {
-    error.value = '请上传两份同格式的 DOCX 或 PDF 文件。';
+  if (extensionOf(oldFile.value.name) !== extensionOf(newFile.value.name)) {
+    error.value = '请上传两份同格式的 DOCX、PDF 或 Markdown 文件。';
     return;
   }
   comparing.value = true;
@@ -197,10 +202,6 @@ async function compare() {
   finally { comparing.value = false; }
 }
 async function restore() {
-  if (/\.pdf$/i.test(oldFile.value.name) !== /\.pdf$/i.test(newFile.value.name)) {
-    error.value = '请上传两份同格式的 DOCX 或 PDF 文件。';
-    return;
-  }
   comparing.value = true;
   error.value = '';
   const project = props.projectId;

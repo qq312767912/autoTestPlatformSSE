@@ -1,10 +1,10 @@
 """Adapt PDF text to the existing document comparison and report pipeline."""
 from io import BytesIO
 import re
-from zipfile import ZipFile
 
 from docx import Document
 
+from .comparison_docx import comparison_docx_bytes
 from .document_comparison import ComparisonError
 
 
@@ -31,12 +31,4 @@ def pdf_as_docx(data):
     if not document.paragraphs:
         raise ComparisonError('PDF 未提取到文字。扫描件请先进行 OCR 后重新上传。')
 
-    raw, output = BytesIO(), BytesIO()
-    document.save(raw)
-    # Fixed ZIP timestamps keep the source hash stable across comparison and export.
-    with ZipFile(raw) as source, ZipFile(output, 'w') as target:
-        for entry in source.infolist():
-            content = source.read(entry)
-            entry.date_time = (1980, 1, 1, 0, 0, 0)
-            target.writestr(entry, content)
-    return output.getvalue()
+    return comparison_docx_bytes(document)
