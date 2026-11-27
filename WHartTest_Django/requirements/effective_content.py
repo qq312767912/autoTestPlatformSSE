@@ -42,10 +42,17 @@ def inline_change(record):
     marked = ''.join(('【新增：' + literal(value) + '】') if state == 'add' and value.strip()
                      else ('~~' + literal(value) + '~~') if state is True and value.strip() else literal(value)
                      for state, value in segments)
-    kind = '局部修改' if record['current'].strip() else '整段删除'
-    if record.get('added', '').strip():
-        kind = '局部修改' if record.get('deleted', '').strip() else '新增'
-    return ('> **变更记录｜' + kind + '**（划线部分为删除内容，需纳入需求变更分析；【新增：…】为新增内容）\n>\n> 原文：' + marked)
+    has_added = bool(record.get('added', '').strip())
+    has_deleted = bool(record.get('deleted', '').strip())
+    kind = '修改' if has_added and has_deleted else ('新增' if has_added else '删除')
+    guidance = {
+        '新增': '依据新增后的有效规则生成测试方案与用例，结合本节上下文检查关联影响。',
+        '修改': '依据修改后的有效规则生成用例，并验证被替换的旧规则不再生效。',
+        '删除': '删除原文仅为变更证据，不是现行规则。结合本节上下文分析功能取消、限制解除及关联回归；意图或替代规则不明确时列为待确认，不得推断整个功能取消。',
+    }[kind]
+    return ('> **变更记录｜' + kind + '**（划线部分为删除内容，需纳入需求变更分析；【新增：…】为新增内容。'
+            + guidance + '历史修订所属迭代需确认，不得自动全部纳入本次测试范围。）\n>\n> 原文：' + marked)
+
 
 
 def effective_docx(data):

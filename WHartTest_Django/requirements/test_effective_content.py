@@ -40,7 +40,7 @@ class EffectiveContentTests(unittest.TestCase):
         notes=word_change_requirements(out.getvalue())
         self.assertIn('30秒',notes);self.assertIn('超时60秒',notes);self.assertIn('修改原规则',notes)
         md=effective_markdown('~~取消短信登录~~')
-        self.assertIn('整段删除',md);self.assertIn('取消短信登录',md)
+        self.assertIn('变更记录｜删除',md);self.assertIn('取消短信登录',md)
         self.assertEqual(effective_markdown(md),md)
 
     def test_original_renderer_layout_and_manual_strike_fix(self):
@@ -141,7 +141,7 @@ class EffectiveContentTests(unittest.TestCase):
         out = Document(BytesIO(effective_docx(stream.getvalue())))
         text = '\n'.join(p.text for p in out.paragraphs)
         for expected in ['登录规则', '共同前提', '共同后置规则', '超时60秒',
-                         '变更记录｜局部修改', '~~30秒~~【新增：60秒】', '变更记录｜新增', '【新增：支持短信登录】']:
+                         '变更记录｜修改', '~~30秒~~【新增：60秒】', '变更记录｜新增', '【新增：支持短信登录】']:
             self.assertIn(expected, text)
         self.assertEqual(effective_markdown(text), text)
 
@@ -152,4 +152,14 @@ class EffectiveContentTests(unittest.TestCase):
         report = export_selection(new, comparison, ['h0'], '迭代', old, docx_only=True)
         text = '\n'.join(p.text for p in Document(BytesIO(effective_docx(report))).paragraphs)
         self.assertIn('【新增：60】', text)
-        self.assertIn('变更记录｜局部修改', text)
+        self.assertIn('变更记录｜修改', text)
+
+    def test_deletion_is_evidence_not_an_active_rule(self):
+        for source in ['~~取消短信登录~~', '保留代码查询，~~支持日期筛选~~']:
+            text = effective_markdown(source)
+            self.assertIn('变更记录｜删除', text)
+            self.assertIn('不是现行规则', text)
+            self.assertIn('限制解除及关联回归', text)
+            self.assertIn('不得推断整个功能取消', text)
+            self.assertIn('历史修订所属迭代需确认', text)
+            self.assertEqual(effective_markdown(text), text)
