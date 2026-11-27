@@ -156,3 +156,12 @@ class BrowserContextTests(unittest.TestCase):
   self.assertEqual(a,browser_context_signature(1,{'cookies':[{'value':'old'}]},[]))
   self.assertNotEqual(a,browser_context_signature(1,{'cookies':[{'value':'new'}]},[]))
   self.assertNotEqual(a,browser_context_signature(None,None,[]))
+
+class OutputDirectoryPlaceholderTests(unittest.TestCase):
+ def test_output_variables_are_expanded_without_shell(self):
+  source = "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('下载验证通过',encoding='utf-8')"
+  for variable in ('$SKILL_OUTPUT_DIR', '${SKILL_OUTPUT_DIR}', '$ARTIFACT_DIR', '${SCREENSHOT_DIR}'):
+   with self.subTest(variable=variable):
+    result=execute_job(JobRequest(package({'main.py':source}),f'python main.py "{variable}/下载验证.md"'))
+    self.assertEqual(result.returncode,0,result.stderr)
+    self.assertIn('下载验证.md',result.workspace_files)

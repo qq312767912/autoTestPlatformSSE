@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -154,6 +155,10 @@ def execute_job(request):
         except SkillCommandError as exc:raise SkillRunnerError(str(exc)) from exc
         env=build_skill_env(source_env={'PATH':os.environ.get('PATH','/usr/local/bin:/usr/bin:/bin')},runtime_env=request.runtime_env)
         env.update({'HOME':str(root),'TMPDIR':str(root),'PYTHONDONTWRITEBYTECODE':'1','NODE_PATH':'/usr/local/lib/node_modules','SCREENSHOT_DIR':str(workspace),'ARTIFACT_DIR':str(workspace),'SKILL_OUTPUT_DIR':str(workspace)})
+        # Expand only public output-directory placeholders, without a shell or
+        # exposing runtime credentials through generic environment expansion.
+        output_variable = re.compile(r'\$\{(SKILL_OUTPUT_DIR|ARTIFACT_DIR|SCREENSHOT_DIR)\}|\$(SKILL_OUTPUT_DIR|ARTIFACT_DIR|SCREENSHOT_DIR)\b')
+        argv = [output_variable.sub(lambda m: env[m.group(1) or m.group(2)], arg) for arg in argv]
         proc=None;timed_out=False
         try:
             with tempfile.TemporaryFile() as out,tempfile.TemporaryFile() as err:
