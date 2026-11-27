@@ -25,6 +25,7 @@
       v-for="(message, index) in messages"
       :key="index"
       :message="message"
+      :available-files="availableFiles"
       :floating-tool-image-src="floatingToolImageSrc"
       @toggle-expand="$emit('toggle-expand', $event)"
       @quote="$emit('quote', $event)"
@@ -43,6 +44,7 @@ import { ref, watch, nextTick, onMounted, onUnmounted, computed } from 'vue';
 import MessageItem from './MessageItem.vue';
 import { brandLogoUrl } from '@/utils/assetUrl';
 import type { ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
+import { parseToolResultDisplayPayload } from '../utils/toolResultParser';
 import type { FileAsset } from '@/features/file-management/types';
 import { useAppI18n } from '@/composables/useAppI18n';
 
@@ -84,6 +86,10 @@ const props = withDefaults(defineProps<Props>(), {
   hasMore: false,
   isLoadingMore: false,
 });
+const availableFiles = computed(() => props.messages.flatMap(message =>
+  message.fileAttachments?.length ? message.fileAttachments :
+    message.messageType === 'tool' ? parseToolResultDisplayPayload(message.content).fileAttachments : []
+));
 const { isEnglish } = useAppI18n();
 const text = computed(() => (
   isEnglish.value

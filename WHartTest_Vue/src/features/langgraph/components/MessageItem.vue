@@ -202,6 +202,7 @@ import { useAppI18n } from '@/composables/useAppI18n';
 import { brandLogoUrl } from '@/utils/assetUrl';
 import { extractDiagramToolPayload } from '../utils/diagramToolParser';
 import { extractHtmlPreviewContent } from '../utils/htmlPreviewParser';
+import { repairDownloadLinks } from '../utils/downloadLinks';
 import type { ToolFileAttachment } from '../utils/toolResultParser';
 import { parseToolResultDisplayPayload } from '../utils/toolResultParser';
 import type { FileAsset } from '@/features/file-management/types';
@@ -247,6 +248,7 @@ interface ChatMessage {
 
 interface Props {
   message: ChatMessage;
+  availableFiles?: ToolFileAttachment[];
   floatingToolImageSrc?: string | null;
 }
 
@@ -735,6 +737,7 @@ const formattedContent = computed(() => {
 
     // 使用marked解析Markdown (同步版本)
     let htmlContent = marked(processedContent) as string;
+    htmlContent = repairDownloadLinks(htmlContent, props.availableFiles || []);
     if (shouldWrapCodeBlocks.value) {
       htmlContent = wrapCodeBlocksAsCollapsible(htmlContent, Boolean(props.message.isStreaming));
     }
