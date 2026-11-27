@@ -18,6 +18,20 @@ from rest_framework.exceptions import ValidationError
 from projects.models import Project
 from .models import RequirementComparison
 from .document_comparison import ComparisonError, compare_documents, export_selection, SCHEMA_VERSION
+from .pdf_comparison import pdf_as_docx
+
+
+def comparison_inputs(old, new, extension):
+    if extension == '.pdf':
+        return pdf_as_docx(old), pdf_as_docx(new)
+    return old, new
+
+
+def compare_sources(old, new, extension):
+    result = compare_documents(*comparison_inputs(old, new, extension))
+    if extension == '.pdf':
+        result['warnings'] = ['仅比较 PDF 可提取的文本。图片、扫描页和排版不参与对比；请核对复杂版式的阅读顺序。']
+    return result
 
 
 class RequirementComparisonViewSet(viewsets.GenericViewSet):
@@ -45,10 +59,11 @@ class RequirementComparisonViewSet(viewsets.GenericViewSet):
         old, new = request.FILES.get('old_file'), request.FILES.get('new_file')
         if not old or not new:
             raise ValidationError('请同时上传旧版和新版文档。')
-        if any(Path(f.name).suffix.lower() != '.docx' for f in (old, new)):
-            raise ValidationError('版本对比仅支持 .docx 文件。')
+        extension = Path(old.name).suffix.lower()
+        if extension not in ('.docx', '.pdf') or Path(new.name).suffix.lower() != extension:
+            raise ValidationError('请上传两份同格式的 DOCX 或 PDF 文件。')
         try:
-            result = compare_documents(old.read(), new.read())
+            result = compare_sources(old.read(), new.read(), extension)
         except ComparisonError as exc:
             raise ValidationError(str(exc))
         old.seek(0)
@@ -56,8 +71,8 @@ class RequirementComparisonViewSet(viewsets.GenericViewSet):
         record = RequirementComparison(project=project, creator=request.user,
                                        old_name=old.name[:255], new_name=new.name[:255], result=result)
         try:
-            record.old_file.save(f'{uuid4().hex}.docx', old, save=False)
-            record.new_file.save(f'{uuid4().hex}.docx', new, save=False)
+            record.old_file.save(f'{uuid4().hex}{extension}', old, save=False)
+            record.new_file.save(f'{uuid4().hex}{extension}', new, save=False)
             record.save()
         except Exception:
             for field in (record.old_file, record.new_file):
@@ -74,8 +89,11 @@ class RequirementComparisonViewSet(viewsets.GenericViewSet):
     def retrieve(self, request, pk=None):
         record = self.get_object()
         if record.result.get('schema_version') != SCHEMA_VERSION:
-            with record.old_file.open('rb') as old, record.new_file.open('rb') as new:
-                record.result = compare_documents(old.read(), new.read())
+            try:
+                with record.old_file.open('rb') as old, record.new_file.open('rb') as new:
+                    record.result = compare_sources(old.read(), new.read(), Path(record.new_name).suffix.lower())
+            except ComparisonError as exc:
+                raise ValidationError(str(exc))
             record.confirmed_hunks = []
             record.confirmed_at = None
             record.save(update_fields=['result', 'confirmed_hunks', 'confirmed_at'])
@@ -116,7 +134,8 @@ class RequirementComparisonViewSet(viewsets.GenericViewSet):
         selected = request.data.get('hunk_ids')
         try:
             with record.new_file.open('rb') as source, record.old_file.open('rb') as baseline:
-                bundle = export_selection(source.read(), record.result, selected, title.strip(), baseline.read(), record.new_name, docx_only=True)
+                old_data, new_data = comparison_inputs(baseline.read(), source.read(), Path(record.new_name).suffix.lower())
+                bundle = export_selection(new_data, record.result, selected, title.strip(), old_data, record.new_name, docx_only=True)
         except ComparisonError as exc:
             raise ValidationError(str(exc))
         record.confirmed_hunks = selected
