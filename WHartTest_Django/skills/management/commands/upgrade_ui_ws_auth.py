@@ -23,11 +23,18 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         source = Path(options["tool_source"]).read_text()
-        helper_nodes = [n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name in {"_get_ws_token", "_ws_url_with_token"}]
-        if len(helper_nodes) != 2:
-            raise CommandError("升级模板缺少 WS 认证函数")
+        function_names = {
+            "_get_ws_token", "_ws_url_with_token", "_execute_ws_command",
+            "execute_testcase", "execute_page_steps",
+        }
         lines = source.splitlines(True)
-        helper = '\n_ws_token_cache = {"token": "", "expires_at": 0.0}\n\n' + '\n'.join(''.join(lines[n.lineno - 1:n.end_lineno]) for n in helper_nodes) + '\n'
+        template = {
+            node.name: ''.join(lines[node.lineno - 1:node.end_lineno]).rstrip()
+            for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef) and node.name in function_names
+        }
+        if template.keys() != function_names:
+            raise CommandError("升级模板缺少 WS 认证或执行函数")
         records = []
         for skill in Skill.objects.select_related("active_version", "project", "creator").filter(is_active=True):
             baseline = SkillRuntimeResolver.runnable_version(skill)
@@ -42,30 +49,37 @@ class Command(BaseCommand):
                 text = file.read_text()
                 legacy_key = 'return (os.environ.get("WHARTTEST_API_KEY") or API_KEY).strip()'
                 corrected_key = 'return os.environ.get("WHARTTEST_API_KEY", "PUT_YOUR_WHARTTEST_API_KEY_HERE").strip()'
-                if "def _get_ws_token(" in text:
-                    if legacy_key in text:
-                        replacements[file.relative_to(root)] = text.replace(legacy_key, corrected_key)
-                    continue
                 if "/ws/ui/web/" not in text:
                     continue
-                suffix = ".replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/ui/web/'"
-                forms = ["_base_url()" + suffix, "BASE_URL" + suffix]
-                if not any(form in text for form in forms) or "def execute_testcase(" not in text:
-                    raise CommandError(f"Skill {skill.pk} 脚本格式不同，请人工适配；未覆盖")
-                for form in forms:
-                    text = text.replace(form, "_ws_url_with_token()")
-                prefix = ""
+                nodes = {node.name: node for node in ast.parse(text).body
+                         if isinstance(node, ast.FunctionDef)}
+                if "execute_testcase" not in nodes:
+                    raise CommandError(f"Skill {skill.pk} 脚本缺少标准执行入口，请人工适配")
+                original = text
+                if legacy_key in text:
+                    text = text.replace(legacy_key, corrected_key)
+                script_lines = text.splitlines(True)
+                existing = [node for name, node in nodes.items() if name in template]
+                for node in sorted(existing, key=lambda n: n.lineno, reverse=True):
+                    script_lines[node.lineno - 1:node.end_lineno] = [template[node.name] + '\n']
+                missing = [body for name, body in template.items() if name not in nodes]
+                prefix = []
                 if "def _base_url(" not in text:
-                    prefix += '\ndef _base_url():\n    import os\n    return (os.environ.get("WHARTTEST_BACKEND_URL") or BASE_URL).rstrip("/")\n'
+                    prefix.append('def _base_url():\n    import os\n    return (os.environ.get("WHARTTEST_BACKEND_URL") or BASE_URL).rstrip("/")')
                 if "def _api_key(" not in text:
-                    prefix += '\ndef _api_key():\n    import os\n    return os.environ.get("WHARTTEST_API_KEY", "PUT_YOUR_WHARTTEST_API_KEY_HERE").strip()\n'
-                upgrade_helper = prefix + helper
-                text += upgrade_helper
-                # 函数查找发生在模块加载后；必须放在 CLI main 调用之前。
-                marker = "if __name__ == "
-                pos = text.find(marker)
-                if pos >= 0:
-                    text = text[:pos] + upgrade_helper + '\n' + text[pos:-len(upgrade_helper)]
+                    prefix.append('def _api_key():\n    import os\n    return os.environ.get("WHARTTEST_API_KEY", "").strip()')
+                if "_ws_token_cache =" not in text:
+                    prefix.append('_ws_token_cache = {"token": "", "expires_at": 0.0}')
+                text = ''.join(script_lines)
+                if prefix or missing:
+                    helper = '\n\n'.join(prefix + missing) + '\n\n'
+                    position = text.find('if __name__ == ')
+                    if position < 0:
+                        text += '\n\n' + helper
+                    else:
+                        text = text[:position] + helper + text[position:]
+                if text == original:
+                    continue
                 ast.parse(text)
                 replacements[file.relative_to(root)] = text
             if not replacements:

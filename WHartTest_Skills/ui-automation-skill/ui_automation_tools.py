@@ -73,7 +73,7 @@ def _get_ws_token(force_refresh: bool = False) -> str:
     )
     if resp.status_code != 200:
         raise RuntimeError(
-            f"兑换 WebSocket 连接凭据失败 HTTP {resp.status_code}: {resp.text[:200]}；"
+            f"兑换 WebSocket 连接凭据失败 HTTP {resp.status_code}；"
             "请检查 WHARTTEST_API_KEY 是否有效（未禁用/未过期）"
         )
     body = resp.json() or {}
@@ -83,7 +83,7 @@ def _get_ws_token(force_refresh: bool = False) -> str:
     token = data.get("access") or ""
     if not token:
         raise RuntimeError(
-            f"兑换 WebSocket 连接凭据失败：响应中无 access token（响应体: {str(body)[:200]}）"
+            "兑换 WebSocket 连接凭据失败：响应中无 access token"
         )
     _ws_token_cache["token"] = token
     _ws_token_cache["expires_at"] = now + int(data.get("expires_in") or 300)
@@ -92,11 +92,11 @@ def _get_ws_token(force_refresh: bool = False) -> str:
 
 def _ws_url_with_token() -> str:
     """构造带认证 token 的 /ws/ui/web/ 连接地址。"""
-    return (
-        _base_url().replace('http://', 'ws://').replace('https://', 'wss://')
-        + '/ws/ui/web/?background=1&token='
-        + _get_ws_token()
-    )
+    from urllib.parse import urlencode
+
+    query = urlencode({"background": "1", "token": _get_ws_token()})
+    base = _base_url().replace("https://", "wss://", 1).replace("http://", "ws://", 1)
+    return f"{base}/ws/ui/web/?{query}"
 
 
 
@@ -730,169 +730,88 @@ except ImportError:
     WEBSOCKET_AVAILABLE = False
 
 
-def execute_testcase(testcase_id: int, env_config_id: int = None, actuator_id: str = None, wait_result: bool = True, timeout: int = 120):
-    """
-    执行测试用例
-
-    Args:
-        testcase_id: 测试用例 ID
-        env_config_id: 环境配置 ID（可选，不传使用默认配置）
-        actuator_id: 执行器 ID（可选，不传自动选择可用执行器）
-        wait_result: 是否等待执行结果（默认 True）
-        timeout: 等待超时时间（秒，默认 120）
-
-    Returns:
-        执行结果或任务状态
-    """
-    if not WEBSOCKET_AVAILABLE:
-        return {"status": "error", "message": "执行功能需要 websocket-client 模块，请运行: pip install websocket-client"}
-
-    import threading
+def _execute_ws_command(action, args, result_names=(), timeout=120):
+    """Send only after authentication and report dispatch only after acknowledgement."""
     import time
 
-    # WebSocket 地址
-    ws_url = _ws_url_with_token()
+    if not WEBSOCKET_AVAILABLE:
+        return {"status": "error", "message": "执行功能需要安装 websocket-client"}
+    ws = None
+    phase = "连接认证"
+    try:
+        ws = websocket.create_connection(_ws_url_with_token(), timeout=15)
+        deadline = time.monotonic() + 15
+        sent = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {"status": "timeout", "message": f"等待 WebSocket {phase}超时"}
+            ws.settimeout(remaining)
+            opcode, payload = ws.recv_data()
+            if opcode == websocket.ABNF.OPCODE_CLOSE:
+                code = int.from_bytes(payload[:2], "big") if len(payload) >= 2 else None
+                return {"status": "error", "message": f"WebSocket {phase}期间关闭 (code {code})"}
+            if opcode != websocket.ABNF.OPCODE_TEXT:
+                continue
+            message = json.loads(payload)
+            if message.get("code") != 200:
+                return {"status": "error", "message": message.get("msg") or f"WebSocket {phase}失败"}
+            if not sent:
+                ws.send(json.dumps({"data": {"func_name": action, "func_args": args}}))
+                sent = True
+                phase = "下发确认"
+                deadline = time.monotonic() + 15
+                continue
+            data = message.get("data") or {}
+            name = data.get("func_name")
+            values = data.get("func_args") or {}
+            if name in ("effective_runtime", "u_test_case_ack"):
+                if not result_names:
+                    return {"status": "sent", "message": "服务端已确认执行命令下发"}
+                if phase == "下发确认":
+                    phase = "执行结果"
+                    deadline = time.monotonic() + timeout
+            elif name in result_names and str(values.get("case_id")) == str(args.get("case_id")):
+                return {
+                    "status": "success" if values.get("status") == "success" else "failed",
+                    "case_id": args["case_id"],
+                    "message": values.get("message", ""),
+                    **{key: values.get(key, 0) for key in ("total_steps", "passed_steps", "failed_steps", "duration")},
+                }
+    except websocket.WebSocketTimeoutException:
+        return {"status": "timeout", "message": f"等待 WebSocket {phase}超时"}
+    except Exception:
+        # Connection exceptions can contain the URL and its access token.
+        return {"status": "error", "message": f"WebSocket {phase}失败，请检查平台连接及认证配置"}
+    finally:
+        if ws is not None:
+            ws.close(timeout=1)
 
-    result = {"status": "pending", "message": "任务已发送"}
-    execution_done = threading.Event()
 
-    def on_message(ws, message):
-        nonlocal result
+def execute_testcase(testcase_id: int, env_config_id: int = None, actuator_id: str = None, wait_result: bool = True, timeout: int = 120):
+    args = {"case_id": testcase_id}
+    if WEBSOCKET_AVAILABLE:
         try:
-            data = json.loads(message)
-            # 检查是否是执行结果
-            if data.get("data", {}).get("func_name") in ("u_case_result", "case_result"):
-                func_args = data.get("data", {}).get("func_args", {})
-                if func_args.get("case_id") == testcase_id:
-                    result = {
-                        "status": "success" if func_args.get("status") == "success" else "failed",
-                        "case_id": testcase_id,
-                        "message": func_args.get("message", ""),
-                        "total_steps": func_args.get("total_steps", 0),
-                        "passed_steps": func_args.get("passed_steps", 0),
-                        "failed_steps": func_args.get("failed_steps", 0),
-                        "duration": func_args.get("duration", 0),
-                    }
-                    execution_done.set()
-            # 检查错误消息
-            elif data.get("code") != 200 and data.get("msg"):
-                if "执行器" in data.get("msg", "") or "失败" in data.get("msg", ""):
-                    result = {"status": "error", "message": data.get("msg")}
-                    execution_done.set()
+            user = get_current_user()
+            if user and user.get("id"):
+                args.update(executor_id=user["id"], executor_name=user.get("username", ""))
         except Exception:
             pass
-
-    def on_error(ws, error):
-        nonlocal result
-        result = {"status": "error", "message": str(error)}
-        execution_done.set()
-
-    def on_open(ws):
-        # 发送执行命令，包含执行人信息
-        cmd = {
-            "data": {
-                "func_name": "u_test_case",
-                "func_args": {
-                    "case_id": testcase_id,
-                }
-            }
-        }
-        if env_config_id:
-            cmd["data"]["func_args"]["env_config_id"] = env_config_id
-        if actuator_id:
-            cmd["data"]["func_args"]["actuator_id"] = actuator_id
-
-        # 从API Key获取用户信息（如果可用）
-        try:
-            # 尝试获取当前用户信息
-            user_info = get_current_user()
-            if user_info and user_info.get("id"):
-                cmd["data"]["func_args"]["executor_id"] = user_info["id"]
-                cmd["data"]["func_args"]["executor_name"] = user_info.get("username", "")
-                print(f"成功获取当前用户信息: ID={user_info['id']}, 用户名={user_info.get('username', '')}")
-            else:
-                print("获取当前用户信息失败: 返回数据无效")
-        except Exception as e:
-            # 如果获取用户信息失败，继续执行但不包含执行人信息
-            print(f"获取当前用户信息失败: {e}")
-            pass
-
-        ws.send(json.dumps(cmd))
-
-    # 连接 WebSocket
-    ws = websocket.WebSocketApp(
-        ws_url,
-        on_message=on_message,
-        on_error=on_error,
-        on_open=on_open,
-    )
-
-    # 在后台线程运行 WebSocket
-    ws_thread = threading.Thread(target=ws.run_forever)
-    ws_thread.daemon = True
-    ws_thread.start()
-
-    if wait_result:
-        # 等待执行结果
-        if execution_done.wait(timeout=timeout):
-            ws.close()
-            return result
-        else:
-            ws.close()
-            # 超时后查询最新执行记录
-            records = get_execution_records(testcase_id=testcase_id, limit=1)
-            if records and len(records) > 0:
-                latest = records[0]
-                return _filter_images({
-                    "status": "timeout",
-                    "message": f"等待超时，最新记录状态: {latest.get('status')}",
-                    "latest_record": latest
-                })
-            return {"status": "timeout", "message": f"等待执行结果超时 ({timeout}s)"}
-    else:
-        # 不等待，直接返回
-        time.sleep(1)  # 等待命令发送
-        ws.close()
-        return {"status": "sent", "message": "执行命令已发送，请稍后查询执行记录"}
+    if env_config_id:
+        args["env_config_id"] = env_config_id
+    if actuator_id:
+        args["actuator_id"] = actuator_id
+    result_names = ("u_case_result", "case_result") if wait_result else ()
+    return _execute_ws_command("u_test_case", args, result_names, timeout)
 
 
 def execute_page_steps(step_id: int, env_config_id: int = None, actuator_id: str = None):
-    """
-    执行页面步骤（调试用）
-
-    Args:
-        step_id: 页面步骤 ID
-        env_config_id: 环境配置 ID（可选）
-        actuator_id: 执行器 ID（可选）
-    """
-    if not WEBSOCKET_AVAILABLE:
-        return {"status": "error", "message": "执行功能需要 websocket-client 模块，请运行: pip install websocket-client"}
-
-    import time
-
-    ws_url = _ws_url_with_token()
-    result = {"status": "sent", "message": "执行命令已发送"}
-
-    def on_open(ws):
-        cmd = {
-            "data": {
-                "func_name": "u_page_steps",
-                "func_args": {
-                    "page_step_id": step_id,
-                }
-            }
-        }
-        if env_config_id:
-            cmd["data"]["func_args"]["env_config_id"] = env_config_id
-        if actuator_id:
-            cmd["data"]["func_args"]["actuator_id"] = actuator_id
-        ws.send(json.dumps(cmd))
-        time.sleep(1)
-        ws.close()
-
-    ws = websocket.WebSocketApp(ws_url, on_open=on_open)
-    ws.run_forever()
-    return result
+    args = {"page_step_id": step_id}
+    if env_config_id:
+        args["env_config_id"] = env_config_id
+    if actuator_id:
+        args["actuator_id"] = actuator_id
+    return _execute_ws_command("u_page_steps", args)
 
 
 # ==================== 命令行入口 ====================

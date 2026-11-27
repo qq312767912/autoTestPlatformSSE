@@ -23,8 +23,7 @@ class UiWsUpgradeTests(TestCase):
                 script = root / "ui_automation_tools.py"
                 text = script.read_text().replace("if __name__", 'def _get_ws_token():\n    return "test-token"\ndef _api_key():\n    import os\n    return (os.environ.get("WHARTTEST_API_KEY") or API_KEY).strip()\nif __name__')
                 script.write_text(text)
-            template = Path(temporary) / "template.py"
-            template.write_text("def _get_ws_token():\n    return 'test-token'\ndef _ws_url_with_token():\n    return '/ws/ui/web/?token=' + _get_ws_token()\n")
+            template = Path(__file__).resolve().parents[1] / "bundled_skills/excel-to-ui-case/ui_automation_tools.py"
             if getattr(self, "migrated_version", False):
                 manifest = root / "SKILL.md"
                 manifest.write_text(manifest.read_text().replace("version: 1.0.0", "version: 0.0.0-migrated"))
@@ -42,6 +41,7 @@ class UiWsUpgradeTests(TestCase):
             self.assertEqual(compute_package_sha256(Path(old.get_full_path())), old_hash)
             updated_script = (Path(skill.get_full_path()) / "ui_automation_tools.py").read_text()
             self.assertNotIn('return (os.environ.get("WHARTTEST_API_KEY") or API_KEY).strip()', updated_script)
+            self.assertIn("def _execute_ws_command(", updated_script)
             self.assertLess(updated_script.index("def _get_ws_token"), updated_script.index("if __name__"))
             call_command("upgrade_ui_ws_auth", tool_source=str(template), apply=True)
             self.assertEqual(SkillVersion.objects.filter(skill=skill).count(), 2)
