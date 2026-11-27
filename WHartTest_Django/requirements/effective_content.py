@@ -6,7 +6,7 @@ from .document_comparison import ParsedDocument
 
 def paragraph_change(parsed, paragraph, index):
     from docx.oxml.ns import qn
-    deleted, context, segments = [], [], []
+    deleted, added, context, segments = [], [], [], []
     for run in paragraph.iter(qn('w:r')):
         if next((p for p in run.iterancestors() if p.tag == qn('w:p')), None) is not paragraph:
             continue
@@ -15,15 +15,22 @@ def paragraph_change(parsed, paragraph, index):
         context.append(text)
         row_deleted = any(p.tag == qn('w:tr') and p.find('./'+qn('w:trPr')+'/'+qn('w:del')) is not None for p in ancestors)
         is_deleted = parsed.strike(run) or row_deleted or any(p.tag in (qn('w:del'), qn('w:moveFrom')) for p in ancestors)
-        if segments and segments[-1][0] == is_deleted:
-            segments[-1] = (is_deleted, segments[-1][1] + text)
+        shade = run.find('./'+qn('w:rPr')+'/'+qn('w:shd'))
+        row_added = any(p.tag == qn('w:tr') and p.find('./'+qn('w:trPr')+'/'+qn('w:ins')) is not None for p in ancestors)
+        is_added = not is_deleted and (row_added or any(p.tag in (qn('w:ins'), qn('w:moveTo')) for p in ancestors)
+            or (shade is not None and shade.get(qn('w:fill'), '').upper() == 'E9F5EC'))
+        state = True if is_deleted else ('add' if is_added else False)
+        if segments and segments[-1][0] == state:
+            segments[-1] = (state, segments[-1][1] + text)
         else:
-            segments.append((is_deleted, text))
+            segments.append((state, text))
         if is_deleted:
             deleted.append(text)
-    if not ''.join(deleted).strip(): return None
+        if is_added:
+            added.append(text)
+    if not ''.join(deleted + added).strip(): return None
     return {'source': f'Word原段落 {index}（含表格内段落）', 'before': ''.join(context),
-            'deleted': ''.join(deleted), 'segments': segments, 'current': parsed.text(parsed.clean(paragraph))}
+            'deleted': ''.join(deleted), 'added': ''.join(added), 'segments': segments, 'current': parsed.text(parsed.clean(paragraph))}
 
 
 def inline_change(record):
@@ -32,10 +39,13 @@ def inline_change(record):
         # Do not let source text introduce headings, HTML or Markdown formatting.
         return re.sub(r'([\\`*_~\[\]])', r'\\\1', value).replace('<', '&lt;').replace('>', '&gt;').replace('\n', ' / ')
     segments = record.get('segments', [(False, record['before'])])
-    marked = ''.join(('~~' + literal(value) + '~~') if deleted and value.strip() else literal(value)
-                     for deleted, value in segments)
+    marked = ''.join(('【新增：' + literal(value) + '】') if state == 'add' and value.strip()
+                     else ('~~' + literal(value) + '~~') if state is True and value.strip() else literal(value)
+                     for state, value in segments)
     kind = '局部修改' if record['current'].strip() else '整段删除'
-    return ('> **变更记录｜' + kind + '**（划线部分为删除内容，需纳入需求变更分析）\n>\n> 原文：' + marked)
+    if record.get('added', '').strip():
+        kind = '局部修改' if record.get('deleted', '').strip() else '新增'
+    return ('> **变更记录｜' + kind + '**（划线部分为删除内容，需纳入需求变更分析；【新增：…】为新增内容）\n>\n> 原文：' + marked)
 
 
 def effective_docx(data):

@@ -122,3 +122,34 @@ class EffectiveContentTests(unittest.TestCase):
         result=effective_markdown(md)
         self.assertIn('原文：检索：~~高级筛选~~证券代码~~旧规则~~简称',result)
         self.assertEqual(effective_markdown(result),result)
+
+    def test_tracked_addition_and_modification_keep_context(self):
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        d = Document(); d.add_heading('登录规则', 1)
+        d.add_paragraph('共同前提')
+        p = d.add_paragraph('超时')
+        for kind, text in [('del', '30秒'), ('ins', '60秒')]:
+            marker = OxmlElement('w:' + kind)
+            run = OxmlElement('w:r'); node = OxmlElement('w:delText' if kind == 'del' else 'w:t')
+            node.text = text; run.append(node); marker.append(run); p._p.append(marker)
+        p = d.add_paragraph()
+        marker = OxmlElement('w:ins'); run = OxmlElement('w:r'); node = OxmlElement('w:t')
+        node.text = '支持短信登录'; run.append(node); marker.append(run); p._p.append(marker)
+        d.add_paragraph('共同后置规则')
+        stream = BytesIO(); d.save(stream)
+        out = Document(BytesIO(effective_docx(stream.getvalue())))
+        text = '\n'.join(p.text for p in out.paragraphs)
+        for expected in ['登录规则', '共同前提', '共同后置规则', '超时60秒',
+                         '变更记录｜局部修改', '~~30秒~~【新增：60秒】', '变更记录｜新增', '【新增：支持短信登录】']:
+            self.assertIn(expected, text)
+        self.assertEqual(effective_markdown(text), text)
+
+    def test_comparison_report_addition_survives_extraction(self):
+        from .document_comparison import compare_documents, export_selection
+        old, new = document('超时30秒'), document('超时60秒')
+        comparison = compare_documents(old, new)
+        report = export_selection(new, comparison, ['h0'], '迭代', old, docx_only=True)
+        text = '\n'.join(p.text for p in Document(BytesIO(effective_docx(report))).paragraphs)
+        self.assertIn('【新增：60】', text)
+        self.assertIn('变更记录｜局部修改', text)
