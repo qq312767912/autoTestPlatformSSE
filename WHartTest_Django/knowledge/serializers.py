@@ -104,7 +104,7 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         content = data.get('content')
 
         # 需要上传文件的文档类型
-        file_required_types = ['pdf', 'docx', 'doc', 'xlsx', 'xls', 'pptx']
+        file_required_types = ['pdf', 'docx', 'doc', 'xlsx', 'xls', 'pptx', 'sql']
         # 可以直接输入内容的文档类型
         text_types = ['txt', 'md']
 

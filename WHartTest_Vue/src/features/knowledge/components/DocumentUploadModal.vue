@@ -37,7 +37,7 @@
               ref="fileInputRef"
               type="file"
               multiple
-              accept=".pdf,.docx,.doc,.xlsx,.xls,.pptx,.txt,.md,.html,.htm"
+              accept=".pdf,.docx,.doc,.xlsx,.xls,.pptx,.txt,.md,.sql,.html,.htm"
               style="display: none"
               @change="handleFileInputChange"
             />
@@ -127,7 +127,7 @@ const text = computed(() => (
         documentTitlePlaceholder: 'Enter document title',
         selectFile: 'Select file',
         clickToSelectFile: 'Click to select a file',
-        supportedFormats: 'Supports PDF, Word, Excel, PPT, Text, Markdown, and HTML',
+        supportedFormats: 'Supports PDF, Word, Excel, PPT, Text, Markdown, SQL, and HTML',
         textContentPlaceholder: 'Enter or paste text content...',
         webLinkPlaceholder: 'Enter URL, e.g. https://example.com',
         uploadingDocument: 'Uploading document...',
@@ -154,7 +154,7 @@ const text = computed(() => (
         documentTitlePlaceholder: '请输入文档标题',
         selectFile: '选择文件',
         clickToSelectFile: '点击选择文件',
-        supportedFormats: '支持 PDF、Word、Excel、PPT、文本、Markdown、HTML 格式',
+        supportedFormats: '支持 PDF、Word、Excel、PPT、文本、Markdown、SQL、HTML 格式',
         textContentPlaceholder: '请输入或粘贴文本内容...',
         webLinkPlaceholder: '请输入网页链接，如：https://example.com',
         uploadingDocument: '正在上传文档...',
@@ -275,7 +275,7 @@ const handleUploadTypeChange = () => {
 };
 
 // 支持的文件扩展名（与后端 DocumentLoader 支持的格式保持一致）
-const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'doc', 'xlsx', 'xls', 'pptx', 'txt', 'md', 'html', 'htm'];
+const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'doc', 'xlsx', 'xls', 'pptx', 'txt', 'md', 'sql', 'html', 'htm'];
 
 const validateFileExtension = (file: File): boolean => {
   const ext = file.name.split('.').pop()?.toLowerCase() || '';
@@ -343,6 +343,7 @@ const getDocumentType = (uploadType: string, file?: File): DocumentType => {
       'xlsx': 'xlsx',
       'xls': 'xls',
       'pptx': 'pptx',
+      'sql': 'sql',
       'txt': 'txt',
       'md': 'md',
       'html': 'html',

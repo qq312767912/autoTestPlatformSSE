@@ -184,6 +184,7 @@ class Document(models.Model):
         ('pptx', 'PowerPoint'),
         ('txt', '文本文件'),
         ('md', 'Markdown'),
+        ('sql', 'SQL'),
         ('html', 'HTML'),
         ('url', '网页链接'),
     ]

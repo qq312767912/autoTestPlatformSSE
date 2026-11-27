@@ -385,6 +385,7 @@ const getDocumentTypeText = (type: string) => {
     pdf: text.value.typePdf,
     docx: text.value.typeDocx,
     pptx: text.value.typePptx,
+    sql: 'SQL',
     txt: text.value.typeTxt,
     md: text.value.typeMd,
     html: text.value.typeHtml,

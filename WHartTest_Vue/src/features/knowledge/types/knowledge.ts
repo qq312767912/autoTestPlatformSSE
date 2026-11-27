@@ -116,7 +116,7 @@ export interface UpdateKnowledgeBaseRequest extends Partial<CreateKnowledgeBaseR
 /**
  * 文档类型
  */
-export type DocumentType = 'pdf' | 'docx' | 'doc' | 'xlsx' | 'xls' | 'pptx' | 'txt' | 'md' | 'html' | 'url';
+export type DocumentType = 'pdf' | 'docx' | 'doc' | 'xlsx' | 'xls' | 'pptx' | 'txt' | 'md' | 'sql' | 'html' | 'url';
 
 /**
  * 文档处理状态

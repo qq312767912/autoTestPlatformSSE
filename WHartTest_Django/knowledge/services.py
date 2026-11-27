@@ -299,6 +299,7 @@ class DocumentProcessor:
             # 同时避免 UnstructuredMarkdownLoader 对 NLTK punkt_tab 的依赖，
             # 保证内网离线镜像无需额外下载 NLTK 数据即可处理 .md 文件。
             "md": TextLoader,
+            "sql": TextLoader,
             "html": UnstructuredHTMLLoader,
         }
 
@@ -399,8 +400,8 @@ class DocumentProcessor:
             # 检查是否为自定义方法（docx/doc 结构化解析）
             if callable(loader) and hasattr(loader, "__self__"):
                 docs = loader(file_path, document)
-            elif document.document_type in {"txt", "md"}:
-                # 文本和 Markdown 文件统一按 UTF-8 读取，不依赖在线 NLP 资源。
+            elif document.document_type in {"txt", "md", "sql"}:
+                # 文本、Markdown 和 SQL 文件统一按 UTF-8 读取，不依赖在线 NLP 资源。
                 loader_instance = loader(file_path, encoding="utf-8")
                 docs = loader_instance.load()
             else:
