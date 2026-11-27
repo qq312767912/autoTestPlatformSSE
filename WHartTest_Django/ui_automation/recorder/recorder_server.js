@@ -1768,7 +1768,10 @@ async function captureSessionStorage(context) {
  * 快照中的自定义扩展字段 session_storage 不是 Playwright 合法参数，
  * 传入 newContext 前剥离，另以 init script 在页面加载前回放。 */
 function buildContextOptions(viewport, storageState) {
-  const opts = { viewport };
+  // ignoreHTTPSErrors 与执行器（executor.py ignore_https_errors=True）对齐：
+  // 测试环境普遍使用自签/过期/域名不匹配证书，http base_url 也常被 nginx
+  // 301 到 https；不忽略证书错误会导致录制画布白屏（页面停在 about:blank）。
+  const opts = { viewport, ignoreHTTPSErrors: true };
   if (storageState) {
     let pure = storageState;
     if (typeof pure === 'string') {
